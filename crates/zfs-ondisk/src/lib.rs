@@ -10,8 +10,10 @@
 //! `include/sys/spa.h`).
 
 pub mod blkptr;
+pub mod checksum;
 pub mod error;
 pub mod label;
+pub mod nvlist;
 pub mod uberblock;
 
 pub use error::ParseError;

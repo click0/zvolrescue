@@ -9,7 +9,7 @@
 Також формує forensic-звіти: історію міток та uberblock-ів, часову шкалу
 створення/знищення dataset-ів і хеш-верифіковані логи витягання.
 
-**Мова:** Rust | **Ліцензія:** BSD 3-Clause | **Статус:** етап проєктування (pre-alpha) — див. [ТЗ](docs/SPEC.uk.md)
+**Мова:** Rust | **Ліцензія:** BSD 3-Clause | **Статус:** етап 0 (pre-alpha) — `scan` уже працює з мітками, uberblock-ами та топологією пулу; далі `list`/`dump`. Див. [ТЗ](docs/SPEC.uk.md).
 
 [English version](README.md) | [ТЗ українською](docs/SPEC.uk.md) | [Technical specification](docs/SPEC.md) | [ТЗ супутніх інструментів](docs/COMPANIONS.uk.md)
 

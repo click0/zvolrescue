@@ -9,6 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+sha2 = { workspace = true }
 
 [lints]
 workspace = true

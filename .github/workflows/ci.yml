@@ -22,6 +22,11 @@ jobs:
       - run: cargo test --all-targets
       - run: cargo build --release
       - run: ./target/release/zvolrescue --version
+      - name: Smoke-test scan on fixture members
+        run: |
+          cargo run -p zfs-read --example mkfixture -- /tmp/fx mirror 12
+          ./target/release/zvolrescue scan /tmp/fx/member0.img /tmp/fx/member1.img
+          ./target/release/zvolrescue -f json -vv scan /tmp/fx/member0.img | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["pools"][0]["readable"]; assert d["devices"][0]["config"]["ashift"] == 12'
 
   freebsd:
     name: FreeBSD 14 (ports rust)

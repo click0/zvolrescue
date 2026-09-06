@@ -10,7 +10,7 @@ still present on disk. It also produces forensic reports: label and
 uberblock history, dataset creation/destruction timeline, and
 hash-verified extraction logs.
 
-**Language:** Rust | **License:** BSD 3-Clause | **Status:** Design stage (pre-alpha) — see the [specification](docs/SPEC.md)
+**Language:** Rust | **License:** BSD 3-Clause | **Status:** Phase 0 (pre-alpha) — `scan` works on labels, uberblocks and pool topology; `list`/`dump` are next. See the [specification](docs/SPEC.md).
 
 [Українська версія](README_UK.md) | [Technical specification (ТЗ)](docs/SPEC.md) | [ТЗ українською](docs/SPEC.uk.md) | [Companion tools spec](docs/COMPANIONS.md)
 
