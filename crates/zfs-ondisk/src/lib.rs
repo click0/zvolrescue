@@ -17,6 +17,7 @@ pub mod error;
 pub mod label;
 pub mod nvlist;
 pub mod uberblock;
+pub mod zap;
 
 pub use error::ParseError;
 
