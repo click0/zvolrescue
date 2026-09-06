@@ -68,6 +68,9 @@ pub struct Pool {
     /// Root block pointer to record in every uberblock (128 bytes); when
     /// `None` only the logical birth is filled in.
     pub rootbp: Option<[u8; blkptr::SIZE]>,
+    /// Per-TXG root block pointers that override `rootbp` for that TXG,
+    /// so different TXGs can describe different dataset trees.
+    pub rootbp_by_txg: Vec<(u64, [u8; blkptr::SIZE])>,
 }
 
 impl Pool {
@@ -91,6 +94,7 @@ impl Pool {
             hostid: 0x1234_5678,
             state: 0,
             rootbp: None,
+            rootbp_by_txg: Vec::new(),
         }
     }
 
@@ -220,7 +224,12 @@ impl Pool {
                         .fold(self.guid ^ 0xf0f0, u64::wrapping_add),
                 );
                 w(ub, 32, *ts);
-                match &self.rootbp {
+                let per_txg = self
+                    .rootbp_by_txg
+                    .iter()
+                    .find(|(t, _)| t == txg)
+                    .map(|(_, bp)| bp);
+                match per_txg.or(self.rootbp.as_ref()) {
                     Some(bp) => ub[40..40 + blkptr::SIZE].copy_from_slice(bp),
                     None => w(ub, 40 + 80, *txg), // rootbp logical birth only
                 }
@@ -331,6 +340,18 @@ pub fn zvol_pattern(blkid: u64) -> Vec<u8> {
 /// with snapshot `@before`, plus a `$MOS` bookkeeping directory, and
 /// point `pool.rootbp` at it. Call `pool.write_labels()` afterwards.
 pub fn build_sample_mos(pool: &mut Pool, members: &mut [Vec<u8>], a: &mut Alloc) {
+    pool.rootbp = Some(build_sample_mos_variant(members, a, true));
+}
+
+/// Like [`build_sample_mos`] but returns the root pointer instead of
+/// setting it, and with `with_disk0 = false` describes the tree *after*
+/// `zfs destroy tank/vm/disk0`: the `vm` children ZAP is empty and the
+/// volume's objects are gone.
+pub fn build_sample_mos_variant(
+    members: &mut [Vec<u8>],
+    a: &mut Alloc,
+    with_disk0: bool,
+) -> [u8; blkptr::SIZE] {
     let m = members;
     let empty_meta = DnodeSpec {
         object_type: ot::DNODE,
@@ -340,10 +361,12 @@ pub fn build_sample_mos(pool: &mut Pool, members: &mut [Vec<u8>], a: &mut Alloc)
     let os_fs = a.put(m, &objset(&empty_meta, 2), ot::OBJSET, 0, 100);
     let mut zvol_dnodes = vec![0u8; 4096];
     // Data blocks 0 and 2 of the volume; 1 and 3 are holes.
-    assert_eq!(
-        a.next, SAMPLE_ZVOL_BLOCK0_OFFSET,
-        "sample layout changed: update SAMPLE_ZVOL_BLOCK0_OFFSET"
-    );
+    if with_disk0 {
+        assert_eq!(
+            a.next, SAMPLE_ZVOL_BLOCK0_OFFSET,
+            "sample layout changed: update SAMPLE_ZVOL_BLOCK0_OFFSET"
+        );
+    }
     let blk0 = a.put(m, &zvol_pattern(0), ot::ZVOL, 0, 100);
     let blk2 = a.put(m, &zvol_pattern(2), ot::ZVOL, 0, 100);
     let data_obj = DnodeSpec {
@@ -424,12 +447,16 @@ pub fn build_sample_mos(pool: &mut Pool, members: &mut [Vec<u8>], a: &mut Alloc)
     put(4, zap_obj(a, m, &[("vm", 5), ("$MOS", 9)]));
     put(5, dir_obj(6, 7, 2));
     put(6, ds_obj(&dataset_phys(5, 0, &os_fs, 20, 0xa2, 0)));
-    put(7, zap_obj(a, m, &[("disk0", 12)]));
     put(9, dir_obj(0, 0, 2));
-    put(12, dir_obj(13, 0, 5));
-    put(13, ds_obj(&dataset_phys(12, 0, &os_zvol, 30, 0xa3, 8)));
-    put(8, zap_obj(a, m, &[("before", 10)]));
-    put(10, ds_obj(&dataset_phys(12, 13, &os_zvol, 25, 0xa4, 0)));
+    if with_disk0 {
+        put(7, zap_obj(a, m, &[("disk0", 12)]));
+        put(12, dir_obj(13, 0, 5));
+        put(13, ds_obj(&dataset_phys(12, 0, &os_zvol, 30, 0xa3, 8)));
+        put(8, zap_obj(a, m, &[("before", 10)]));
+        put(10, ds_obj(&dataset_phys(12, 13, &os_zvol, 25, 0xa4, 0)));
+    } else {
+        put(7, zap_obj(a, m, &[]));
+    }
 
     let dnode_blk = a.put(m, &dnodes, ot::DNODE, 0, 100);
     let meta = DnodeSpec {
@@ -439,5 +466,26 @@ pub fn build_sample_mos(pool: &mut Pool, members: &mut [Vec<u8>], a: &mut Alloc)
         ..DnodeSpec::default()
     }
     .build();
-    pool.rootbp = Some(a.put(m, &objset(&meta, 1), ot::OBJSET, 0, 100));
+    a.put(m, &objset(&meta, 1), ot::OBJSET, 0, 100)
+}
+
+/// A mirror whose newest TXG no longer has `tank/vm/disk0` while the
+/// older ones still do — the SPEC UC-1 scenario. Returns the member
+/// images and the TXGs `(destroyed_at, last_with_disk0)`.
+pub fn destroyed_zvol_members(pool: &mut Pool, size: u64) -> (Vec<Vec<u8>>, u64, u64) {
+    let txgs: Vec<u64> = pool.uberblocks.iter().map(|(t, _)| *t).collect();
+    assert!(txgs.len() >= 2, "need at least two uberblocks");
+    let newest = *txgs.last().expect("non-empty");
+    let previous = txgs[txgs.len() - 2];
+    let n = pool.members.len();
+    let mut members: Vec<Vec<u8>> = (0..n).map(|_| vec![0u8; size as usize]).collect();
+    let mut alloc = Alloc::new(0x20_0000);
+    let with = build_sample_mos_variant(&mut members, &mut alloc, true);
+    let without = build_sample_mos_variant(&mut members, &mut alloc, false);
+    pool.rootbp = Some(with);
+    pool.rootbp_by_txg = vec![(newest, without)];
+    for (i, img) in members.iter_mut().enumerate() {
+        pool.write_labels(i, img);
+    }
+    (members, newest, previous)
 }

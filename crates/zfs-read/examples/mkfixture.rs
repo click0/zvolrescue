@@ -2,11 +2,12 @@
 //!
 //! `cargo run -p zfs-read --example mkfixture -- DIR [mirror|raidz2] [ashift]`
 //! writes `DIR/member0.img`, `DIR/member1.img`, … with sealed labels,
-//! three uberblocks each and, for mirrors, a small MOS with four datasets.
+//! three uberblocks each and, for mirrors, a small MOS with four datasets
+//! at the older TXGs and the volume destroyed at the newest one.
 
 use std::path::PathBuf;
 
-use zfs_read::fixture::{build_sample_mos, Alloc, Pool};
+use zfs_read::fixture::{destroyed_zvol_members, Pool};
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -31,15 +32,22 @@ fn main() {
     ]);
     std::fs::create_dir_all(&dir).expect("mkdir");
     let n = pool.members.len();
-    let mut members: Vec<Vec<u8>> = (0..n).map(|_| vec![0u8; 64 * 1024 * 1024]).collect();
-    if kind == "mirror" {
-        // Stripe/mirror members carry the same blocks; give them a MOS so
-        // `list` has something to walk. RAIDZ data layout is phase 2.
-        let mut alloc = Alloc::new(0x20_0000);
-        build_sample_mos(&mut pool, &mut members, &mut alloc);
-    }
-    for (i, img) in members.iter_mut().enumerate() {
-        pool.write_labels(i, img);
+    let size = 64 * 1024 * 1024u64;
+    let members: Vec<Vec<u8>> = if kind == "mirror" {
+        // Mirror members carry the same blocks; give them a MOS in which
+        // tank/vm/disk0 exists at the older TXGs and is destroyed at the
+        // newest. RAIDZ data layout is phase 2.
+        let (m, destroyed_at, last_with) = destroyed_zvol_members(&mut pool, size);
+        println!("tank/vm/disk0 destroyed at txg {destroyed_at}, last present at txg {last_with}");
+        m
+    } else {
+        let mut m: Vec<Vec<u8>> = (0..n).map(|_| vec![0u8; size as usize]).collect();
+        for (i, img) in m.iter_mut().enumerate() {
+            pool.write_labels(i, img);
+        }
+        m
+    };
+    for (i, img) in members.iter().enumerate() {
         let p = dir.join(format!("member{i}.img"));
         std::fs::write(&p, img).expect("write");
         println!("{}", p.display());

@@ -379,7 +379,7 @@ pub fn mos_endian(mos: &DnodeArray<'_, '_>) -> Endian {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fixture::{build_sample_mos, Alloc, Pool};
+    use crate::fixture::{build_sample_mos, destroyed_zvol_members, Alloc, Pool};
     use crate::pool::assemble;
     use crate::vdev::scan_device;
     use zfs_ondisk::blkptr;
@@ -485,5 +485,39 @@ mod tests {
         let reader = reader_for(&img, &a);
         let mos = open_mos(&reader, &ub).unwrap();
         assert_eq!(walk(&mos, "tank").unwrap_err(), ReadError::AllCopiesBad);
+    }
+
+    #[test]
+    fn destroyed_volume_is_gone_at_newest_txg_but_present_before() {
+        let mut pool = Pool::mirror("tank", 0x4343, 12).txgs(&[(100, 1), (101, 2), (102, 3)]);
+        let (members, destroyed_at, last_with) = destroyed_zvol_members(&mut pool, SIZE);
+        assert_eq!((destroyed_at, last_with), (102, 101));
+        let sources: Vec<MemSource> = members.into_iter().map(MemSource::new).collect();
+        let scans: Vec<_> = sources.iter().map(|s| scan_device(s).ok()).collect();
+        let assembly = assemble(&scans).into_iter().next().unwrap();
+        let candidates = crate::pool::uberblock_candidates(&scans, &assembly);
+        assert_eq!(
+            candidates.iter().map(|c| c.ub.txg).collect::<Vec<_>>(),
+            vec![102, 101, 100]
+        );
+        let reader = PoolReader::new(
+            &assembly,
+            vec![
+                Some(&sources[0] as &dyn BlockSource),
+                Some(&sources[1] as &dyn BlockSource),
+            ],
+        );
+        let at = |txg: u64| {
+            let c = crate::pool::select_uberblock(&candidates, crate::pool::TxgSelect::Exact(txg))
+                .unwrap();
+            walk(&open_mos(&reader, &c.ub).unwrap(), "tank").unwrap()
+        };
+        let newest = at(102);
+        assert!(newest.get("tank/vm/disk0").is_none());
+        assert_eq!(newest.datasets.len(), 2);
+        let older = at(101);
+        assert!(older.get("tank/vm/disk0").is_some());
+        assert!(older.get("tank/vm/disk0@before").is_some());
+        assert_eq!(at(100).datasets.len(), 4);
     }
 }
