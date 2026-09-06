@@ -126,3 +126,176 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
+
+// ---------------------------------------------------------------------------
+// Output: sparse writing and the "never onto evidence" check
+// ---------------------------------------------------------------------------
+
+use std::io::Write;
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+/// Where extracted bytes go. Implementations must tolerate writes in any
+/// order and leave unwritten ranges as zeros.
+pub trait BlockSink {
+    /// Write `buf` at `offset`. All-zero buffers may be skipped to keep the
+    /// output sparse; the final length is fixed by [`BlockSink::finish`].
+    fn write_at(&mut self, offset: u64, buf: &[u8]) -> io::Result<()>;
+
+    /// Set the final length and flush.
+    fn finish(&mut self, len: u64) -> io::Result<()>;
+}
+
+/// A file written sparsely: zero-filled blocks are skipped, so holes in
+/// the source stay holes on disk.
+#[derive(Debug)]
+pub struct SparseFile {
+    file: File,
+    written: u64,
+}
+
+impl SparseFile {
+    /// Create or truncate `path`.
+    pub fn create(path: impl AsRef<Path>) -> io::Result<SparseFile> {
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)?;
+        Ok(SparseFile { file, written: 0 })
+    }
+
+    /// Open `path` for resuming: existing contents are kept.
+    pub fn open_existing(path: impl AsRef<Path>) -> io::Result<SparseFile> {
+        let file = OpenOptions::new().write(true).open(path)?;
+        Ok(SparseFile { file, written: 0 })
+    }
+
+    /// Bytes actually written (holes excluded).
+    pub fn bytes_written(&self) -> u64 {
+        self.written
+    }
+}
+
+impl BlockSink for SparseFile {
+    fn write_at(&mut self, offset: u64, buf: &[u8]) -> io::Result<()> {
+        if buf.iter().all(|&b| b == 0) {
+            return Ok(());
+        }
+        self.file.write_all_at(buf, offset)?;
+        self.written += buf.len() as u64;
+        Ok(())
+    }
+
+    fn finish(&mut self, len: u64) -> io::Result<()> {
+        self.file.set_len(len)?;
+        self.file.flush()?;
+        self.file.sync_all()
+    }
+}
+
+/// An in-memory sink for tests.
+#[derive(Debug, Default)]
+pub struct MemSink {
+    /// Contents so far.
+    pub data: Vec<u8>,
+    /// Ranges written, in call order.
+    pub writes: Vec<(u64, usize)>,
+}
+
+impl BlockSink for MemSink {
+    fn write_at(&mut self, offset: u64, buf: &[u8]) -> io::Result<()> {
+        let end = offset as usize + buf.len();
+        if self.data.len() < end {
+            self.data.resize(end, 0);
+        }
+        self.data[offset as usize..end].copy_from_slice(buf);
+        self.writes.push((offset, buf.len()));
+        Ok(())
+    }
+
+    fn finish(&mut self, len: u64) -> io::Result<()> {
+        self.data.resize(len as usize, 0);
+        Ok(())
+    }
+}
+
+/// Refuse an output path that is one of the inputs, or the device an
+/// input lives on (SPEC §8.3, invariant 2). Compares `st_dev`/`st_ino` of
+/// the canonicalised paths; a not-yet-existing output is checked through
+/// its parent directory's device against block-device inputs.
+pub fn refuse_if_evidence(output: &Path, inputs: &[PathBuf]) -> io::Result<()> {
+    let out_meta = match std::fs::metadata(output) {
+        Ok(m) => Some(m),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e),
+    };
+    let parent = output
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let parent_meta = std::fs::metadata(parent)?;
+    for input in inputs {
+        let Ok(in_meta) = std::fs::metadata(input) else {
+            continue;
+        };
+        if let Some(o) = &out_meta {
+            if o.dev() == in_meta.dev() && o.ino() == in_meta.ino() {
+                return Err(io::Error::other(format!(
+                    "output {} is the same file as input {}",
+                    output.display(),
+                    input.display()
+                )));
+            }
+        }
+        // Writing a file onto a filesystem that lives on an input block
+        // device would overwrite evidence through the filesystem.
+        let ft = in_meta.file_type();
+        if ft.is_block_device() && parent_meta.dev() == in_meta.rdev() {
+            return Err(io::Error::other(format!(
+                "output directory {} is on input device {}",
+                parent.display(),
+                input.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod sink_tests {
+    use super::*;
+
+    #[test]
+    fn sparse_file_skips_zero_blocks() {
+        let dir = std::env::temp_dir().join(format!("zvolrescue-sink-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("out.img");
+        let mut f = SparseFile::create(&p).unwrap();
+        f.write_at(0, &[1u8; 4096]).unwrap();
+        f.write_at(4096, &[0u8; 4096]).unwrap();
+        f.write_at(8192, &[2u8; 4096]).unwrap();
+        f.finish(1 << 20).unwrap();
+        assert_eq!(f.bytes_written(), 8192);
+        let data = std::fs::read(&p).unwrap();
+        assert_eq!(data.len(), 1 << 20);
+        assert_eq!(data[0], 1);
+        assert_eq!(data[4096], 0);
+        assert_eq!(data[8192], 2);
+        assert_eq!(data[(1 << 20) - 1], 0);
+        // Same-file refusal.
+        assert!(refuse_if_evidence(&p, std::slice::from_ref(&p)).is_err());
+        assert!(refuse_if_evidence(&p, &[dir.join("other")]).is_ok());
+        assert!(refuse_if_evidence(&dir.join("new.img"), std::slice::from_ref(&p)).is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn mem_sink() {
+        let mut m = MemSink::default();
+        m.write_at(10, &[7, 7]).unwrap();
+        m.finish(16).unwrap();
+        assert_eq!(m.data.len(), 16);
+        assert_eq!(&m.data[10..12], &[7, 7]);
+        assert_eq!(m.writes, vec![(10, 2)]);
+    }
+}

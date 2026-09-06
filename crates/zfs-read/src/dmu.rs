@@ -29,6 +29,11 @@ impl<'r, 'a> ObjectReader<'r, 'a> {
         &self.dnode
     }
 
+    /// The pool reader this object reads through.
+    pub fn reader(&self) -> &'r PoolReader<'a> {
+        self.reader
+    }
+
     /// log2 of block pointers per indirect block.
     fn epbs(&self) -> u32 {
         u32::from(self.dnode.indblkshift).saturating_sub(7)

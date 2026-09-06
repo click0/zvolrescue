@@ -393,6 +393,7 @@ name = "zfs-read"
 version = "0.0.1"
 dependencies = [
  "lz4_flex",
+ "sha2",
  "zfs-ondisk",
  "zvolrescue-io",
 ]

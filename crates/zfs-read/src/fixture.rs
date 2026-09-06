@@ -314,6 +314,18 @@ pub fn dataset_phys(
     }
 }
 
+/// DVA offset of the sample volume's block 0 when `build_sample_mos` runs
+/// on an allocator started at `0x20_0000`: the filesystem objset block
+/// (4 KiB) comes first.
+pub const SAMPLE_ZVOL_BLOCK0_OFFSET: u64 = 0x20_0000 + 4096;
+
+/// Contents of block `blkid` of the sample volume (8 KiB).
+pub fn zvol_pattern(blkid: u64) -> Vec<u8> {
+    (0..8192u64)
+        .map(|i| ((blkid * 97 + i * 7) % 251) as u8)
+        .collect()
+}
+
 /// Write a small MOS onto `members` describing `tank` (filesystem),
 /// `tank/vm` (filesystem), `tank/vm/disk0` (32 MiB volume, 8 KiB blocks)
 /// with snapshot `@before`, plus a `$MOS` bookkeeping directory, and
@@ -327,10 +339,18 @@ pub fn build_sample_mos(pool: &mut Pool, members: &mut [Vec<u8>], a: &mut Alloc)
     .build();
     let os_fs = a.put(m, &objset(&empty_meta, 2), ot::OBJSET, 0, 100);
     let mut zvol_dnodes = vec![0u8; 4096];
+    // Data blocks 0 and 2 of the volume; 1 and 3 are holes.
+    assert_eq!(
+        a.next, SAMPLE_ZVOL_BLOCK0_OFFSET,
+        "sample layout changed: update SAMPLE_ZVOL_BLOCK0_OFFSET"
+    );
+    let blk0 = a.put(m, &zvol_pattern(0), ot::ZVOL, 0, 100);
+    let blk2 = a.put(m, &zvol_pattern(2), ot::ZVOL, 0, 100);
     let data_obj = DnodeSpec {
         object_type: ot::ZVOL,
         datablksz: 8192,
         maxblkid: 3,
+        blkptrs: vec![blk0, [0u8; blkptr::SIZE], blk2],
         ..DnodeSpec::default()
     }
     .build();
