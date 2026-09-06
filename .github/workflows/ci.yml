@@ -22,11 +22,23 @@ jobs:
       - run: cargo test --all-targets
       - run: cargo build --release
       - run: ./target/release/zvolrescue --version
-      - name: Smoke-test scan on fixture members
+      - name: End-to-end on fixture members (scan, list, dump)
         run: |
           cargo run -p zfs-read --example mkfixture -- /tmp/fx mirror 12
           ./target/release/zvolrescue scan /tmp/fx/member0.img /tmp/fx/member1.img
           ./target/release/zvolrescue -f json -vv scan /tmp/fx/member0.img | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["pools"][0]["readable"]; assert d["devices"][0]["config"]["ashift"] == 12'
+          ./target/release/zvolrescue list -r /tmp/fx/member0.img /tmp/fx/member1.img
+          ./target/release/zvolrescue -f json list -r /tmp/fx/member0.img | python3 -c 'import json,sys; d=json.load(sys.stdin); names=[x["name"] for x in d["datasets"]]; assert names == ["tank","tank/vm","tank/vm/disk0","tank/vm/disk0@before"], names; assert d["datasets"][2]["volsize"] == 33554432'
+          ./target/release/zvolrescue dump tank/vm/disk0 /tmp/fx/member0.img /tmp/fx/member1.img -o /tmp/disk0.img --evidence-log /tmp/ev.jsonl
+          echo "d6d58af862ec2761bf43158f7ee2b2b0f4628fa6ca8095544493f9d698d7b80d  /tmp/disk0.img" | sha256sum -c -
+          test "$(stat -c %s /tmp/disk0.img)" = 33554432
+          # Damage block 0 on one member: the mirror copy must heal it, a lone damaged member must not.
+          cp /tmp/fx/member0.img /tmp/bad.img
+          printf '\xff' | dd of=/tmp/bad.img bs=1 seek=$((4*1024*1024 + 0x200000 + 4096 + 5)) conv=notrunc status=none
+          ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/bad.img /tmp/fx/member1.img -o /tmp/healed.img
+          cmp /tmp/disk0.img /tmp/healed.img
+          if ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/bad.img -o /tmp/partial.img --strict; then echo "strict must fail"; exit 1; else test $? = 4; fi
+          if ./target/release/zvolrescue dump tank/vm/disk0 /tmp/fx/member0.img -o /tmp/fx/member0.img; then echo "must refuse"; exit 1; else test $? = 5; fi
 
   freebsd:
     name: FreeBSD 14 (ports rust)

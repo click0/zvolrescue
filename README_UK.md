@@ -9,7 +9,7 @@
 Також формує forensic-звіти: історію міток та uberblock-ів, часову шкалу
 створення/знищення dataset-ів і хеш-верифіковані логи витягання.
 
-**Мова:** Rust | **Ліцензія:** BSD 3-Clause | **Статус:** етап 0 (pre-alpha) — `scan` уже працює з мітками, uberblock-ами та топологією пулу; далі `list`/`dump`. Див. [ТЗ](docs/SPEC.uk.md).
+**Мова:** Rust | **Ліцензія:** BSD 3-Clause | **Статус:** етап 1 MVP (pre-alpha) — `scan`, `list` і `dump` працюють на stripe/mirror пулах із checksum-ами fletcher/sha256 та стисненням lz4/zstd/gzip/lzjb/zle; поки перевірено лише на синтетичних fixture, не на справжньому пулі. Див. [ТЗ](docs/SPEC.uk.md).
 
 [English version](README.md) | [ТЗ українською](docs/SPEC.uk.md) | [Technical specification](docs/SPEC.md) | [ТЗ супутніх інструментів](docs/COMPANIONS.uk.md)
 

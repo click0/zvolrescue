@@ -10,7 +10,7 @@ still present on disk. It also produces forensic reports: label and
 uberblock history, dataset creation/destruction timeline, and
 hash-verified extraction logs.
 
-**Language:** Rust | **License:** BSD 3-Clause | **Status:** Phase 0 (pre-alpha) — `scan` works on labels, uberblocks and pool topology; `list`/`dump` are next. See the [specification](docs/SPEC.md).
+**Language:** Rust | **License:** BSD 3-Clause | **Status:** Phase 1 MVP (pre-alpha) — `scan`, `list` and `dump` work on stripe and mirror pools with fletcher/sha256 checksums and lz4/zstd/gzip/lzjb/zle; verified so far on synthetic fixtures only, not yet on a real pool. See the [specification](docs/SPEC.md).
 
 [Українська версія](README_UK.md) | [Technical specification (ТЗ)](docs/SPEC.md) | [ТЗ українською](docs/SPEC.uk.md) | [Companion tools spec](docs/COMPANIONS.md)
 
