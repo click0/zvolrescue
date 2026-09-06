@@ -73,15 +73,27 @@ impl<'r, 'a> ObjectReader<'r, 'a> {
 
     /// Read data block `blkid`: exactly `datablksz` bytes, zeros for a hole.
     pub fn read_blkid(&self, blkid: u64) -> Result<Vec<u8>, ReadError> {
+        self.read_blkid_ext(blkid).map(|(d, _)| d)
+    }
+
+    /// Like [`read_blkid`](Self::read_blkid) but also returns the byte
+    /// order the block was written in (the dnode's for holes), which
+    /// structured blocks such as ZAPs need for their own fields.
+    pub fn read_blkid_ext(&self, blkid: u64) -> Result<(Vec<u8>, Endian), ReadError> {
         let size = self.dnode.datablksz() as usize;
         match self.locate(blkid)? {
-            None => Ok(vec![0; size]),
+            None => Ok((vec![0; size], self.endian)),
             Some(bp) => {
                 let mut data = self.reader.read_block(&bp, false)?.data;
                 data.resize(size, 0);
-                Ok(data)
+                Ok((data, bp.endian))
             }
         }
+    }
+
+    /// Byte order the dnode was parsed with.
+    pub fn endian(&self) -> Endian {
+        self.endian
     }
 
     /// Read `len` bytes starting at byte `offset` of the object, crossing
