@@ -11,6 +11,7 @@
 
 pub mod blkptr;
 pub mod checksum;
+pub mod compress;
 pub mod error;
 pub mod label;
 pub mod nvlist;
