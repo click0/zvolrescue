@@ -5,6 +5,7 @@
 //! and exit with [`exit::NOT_IMPLEMENTED`].
 
 mod evidence;
+mod list;
 mod scan;
 mod timefmt;
 
@@ -92,7 +93,7 @@ enum Cmd {
         /// Also show what was created or destroyed relative to this TXG.
         #[arg(long, value_name = "TXG2")]
         diff: Option<u64>,
-        /// Recurse into children of the named datasets (all when none given).
+        /// Also list snapshots.
         #[arg(short, long)]
         recursive: bool,
     },
@@ -153,7 +154,23 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let code = match cli.cmd {
         Cmd::Scan { devices } => scan::run(&cli.global, &devices),
-        Cmd::List { pool, .. } | Cmd::Dump { pool, .. } => {
+        Cmd::List {
+            pool,
+            txg,
+            before,
+            diff,
+            recursive,
+        } => list::run(
+            &cli.global,
+            &pool,
+            &list::Options {
+                txg,
+                before,
+                diff,
+                recursive,
+            },
+        ),
+        Cmd::Dump { pool, .. } => {
             if let Err(e) = pool.members() {
                 eprintln!("zvolrescue: {e}");
                 return ExitCode::from(exit::USAGE);
