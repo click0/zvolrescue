@@ -1,0 +1,16 @@
+[package]
+name = "zfs-read"
+description = "Walks a ZFS pool through a read-only BlockSource: vdev reconstruction, zio, dmu, dsl, zvol extraction, carving."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+zfs-ondisk.workspace = true
+zvolrescue-io.workspace = true
+
+[lints]
+workspace = true

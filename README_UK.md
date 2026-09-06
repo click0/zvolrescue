@@ -9,7 +9,7 @@
 Також формує forensic-звіти: історію міток та uberblock-ів, часову шкалу
 створення/знищення dataset-ів і хеш-верифіковані логи витягання.
 
-**Мова:** C++17 | **Ліцензія:** BSD 3-Clause | **Статус:** етап проєктування (pre-alpha) — див. [ТЗ](docs/SPEC.uk.md)
+**Мова:** Rust | **Ліцензія:** BSD 3-Clause | **Статус:** етап проєктування (pre-alpha) — див. [ТЗ](docs/SPEC.uk.md)
 
 [English version](README.md) | [ТЗ українською](docs/SPEC.uk.md) | [Technical specification](docs/SPEC.md)
 
@@ -91,9 +91,26 @@ README.md, README_UK.md     цей файл (EN / UK)
 docs/SPEC.md                технічне завдання (ТЗ), англійською — джерело істини
 docs/SPEC.uk.md             те саме українською
 docs/research/              аналізи схожих інструментів, нотатки про on-disk формат
-cli/  lib/  tests/          (створюються на етапі 0)
-third_party/                вендорений CDDL-код (checksum-и), ізольований від ядра під BSD-3
+Cargo.toml                  cargo workspace
+crates/zvolrescue/          бінарник CLI
+crates/zvolrescue-io/       read-only доступ до пристроїв/образів (єдиний crate з `unsafe`)
+crates/zfs-ondisk/          чисті парсери on-disk структур (мітки, nvlist, uberblock-и, blkptr, dnode, ZAP)
+crates/zfs-read/            обхід пулу: реконструкція vdev, zio, dmu, dsl, витягання zvol, carving
+crates/edonr/               порт checksum Edon-R з OpenZFS (CDDL), ізольований
+fuzz/                       cargo-fuzz target-и
+tests/                      інтеграційні тести на fixture-пулах
 ```
+
+## Збірка
+
+```sh
+cargo build --release          # бінарник у target/release/zvolrescue
+cargo test
+cargo clippy --all-targets -- -D warnings
+```
+
+Rust stable (`lang/rust` з портів FreeBSD або `rustup`). C-toolchain і
+системні бібліотеки не потрібні: увесь стек декодування — чистий Rust.
 
 ## Платформи
 
@@ -109,12 +126,12 @@ fixture-пулах.
 
 ## Пов'язане
 
-* [crate](https://github.com/click0/crate) — контейнеризатор для FreeBSD того ж автора; `zvolrescue` поділяє з ним toolchain, CI-конвенції та двомовний стиль документації.
+* [crate](https://github.com/click0/crate) — контейнеризатор для FreeBSD того ж автора; `zvolrescue` наслідує його CI-конвенції та двомовний стиль документації.
 
 ## Ліцензія
 
 BSD 3-Clause. Див. [LICENSE](LICENSE).
-Вендорений сторонній код (якщо буде) зберігає власну ліцензію в `third_party/`.
+Порт Edon-R у `crates/edonr/` зберігає свою оригінальну ліцензію CDDL.
 
 ## Автор
 

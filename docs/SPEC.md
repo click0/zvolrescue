@@ -206,41 +206,53 @@ zvolrescue dump /dev/ada0p3 /dev/ada1p3 pool/vm/disk0 --txg 4816230 \
 
 ### 8.1 Language and dependencies
 
-* **C++17**, same toolchain and CI conventions as [`crate`](https://github.com/click0/crate) (clang on FreeBSD base, GCC/clang on Linux). Rationale: performance for multi-TB streaming, direct use of C ZFS headers, no runtime to ship on a rescue system.
-* Compression: `liblz4`, `libzstd`, `zlib`; `lzjb` and `zle` are reimplemented (trivial).
-* Checksums: `fletcher2/4` reimplemented; `sha256/512` via OpenSSL/LibreSSL; `skein`, `edonr`, `blake3` vendored from OpenZFS (CDDL) under `third_party/`, kept isolated so the BSD-3 core stays clean.
-* Encryption: OpenSSL `EVP` (AES-CCM/GCM), OpenZFS key derivation (PBKDF2) reimplemented.
-* CLI: no framework beyond `getopt_long(3)`; JSON via a single-header library.
-* Optional build flag `--with-libzpool` to cross-check results against OpenZFS userland (`zdb`) in tests. Not a runtime dependency.
+* **Rust** (stable, edition 2021; MSRV = the stable release current at the start of phase 0, bumped deliberately). Rationale: the input is hostile by definition — corrupted metadata must never crash the tool or read out of bounds (N-04), and bounds-checked slice parsing with `Result`-based error propagation gives that by default. `cargo fuzz` covers the §9 fuzzing requirement with one target per parser. A single static binary (`-C target-feature=+crt-static`, or a musl target on Linux) is trivial to drop onto a rescue medium. `rayon` gives data-race-free parallel checksum/decompression (N-08).
+* **Pure-Rust decode stack**, so building needs no C toolchain or system libraries: `lz4_flex` (lz4), `ruzstd` (zstd, decode-only), `flate2` with the `miniz_oxide` backend (gzip); `lzjb` and `zle` are reimplemented (trivial).
+* Checksums: `fletcher2/4` reimplemented; `sha2`, `blake3`, `skein` from the RustCrypto family; `edonr` has no Rust implementation and is ported from OpenZFS (~300 lines, CDDL) into its own isolated crate.
+* Encryption: `aes-gcm`, `ccm`, `pbkdf2` (RustCrypto); OpenZFS key-wrapping and IV/MAC layout reimplemented.
+* On-disk structures: `zerocopy` views over `#[repr(C)]` definitions of `blkptr_t`, `dnode_phys_t`, `uberblock_t` etc. — no copying and no `unsafe` in project code; the nvlist (XDR) parser is hand-written.
+* CLI: `clap` (derive); JSON: `serde` / `serde_json`; diagnostics: `tracing`.
+* Toolchain: `lang/rust` from ports on FreeBSD, `rustup` elsewhere. `#![forbid(unsafe_code)]` in every crate except `zvolrescue-io`, where the few `libc` calls needed for device access are individually reviewed and commented.
+* Cross-checking against OpenZFS userland (`zdb`) is done by the integration-test harness running the `zdb` binary and diffing output. There is no FFI to `libzpool`.
 
-### 8.2 Layers
+### 8.2 Layers (cargo workspace)
 
 ```
-cli/            command parsing, output formatting, evidence logging
-lib/
-  io/           read-only device & image access, sparse output writer, partition tables
-  vdev/         label parsing, vdev tree, mirror/RAIDZ/dRAID reconstruction
-  zio/          blkptr, DVA resolution, checksums, decompression, decryption
-  dmu/          objsets, dnodes, indirect block walking
-  dsl/          MOS, DSL dirs/datasets, snapshots, TXG selection, dataset diff
-  zvol/         zvol extraction, hole detection, resume
-  zpl/          (later) ZPL file-level recovery
-  carve/        raw scanning and candidate scoring
-  report/       JSON/text report model
-third_party/    vendored CDDL code (skein, edonr, blake3), isolated
-tests/          unit tests + fixture-pool integration tests
-docs/           SPEC.md, SPEC.uk.md, research/, design notes
+Cargo.toml              workspace
+crates/
+  zvolrescue/           binary: CLI parsing, output formatting, evidence log, report model
+  zvolrescue-io/        read-only device & image access (`BlockSource` trait), partition
+                        tables, sparse output writer — the only crate allowed `unsafe`
+  zfs-ondisk/           pure parsers: labels, nvlist, uberblocks, blkptr, dnode, ZAP —
+                        no I/O, fuzzable in isolation
+  zfs-read/             everything that walks a pool through a `BlockSource`:
+                          vdev/   vdev tree, mirror/RAIDZ/dRAID reconstruction
+                          zio/    DVA resolution, checksums, decompression, decryption
+                          dmu/    object sets, dnodes, indirect block walking
+                          dsl/    MOS, DSL dirs/datasets, snapshots, TXG selection, diff
+                          zvol/   zvol extraction, hole detection, resume
+                          zpl/    (later) ZPL file-level recovery
+                          carve/  raw scanning and candidate scoring
+  edonr/                Edon-R port from OpenZFS (CDDL), isolated with its own LICENSE
+fuzz/                   cargo-fuzz targets for every parser in zfs-ondisk
+tests/                  fixture-pool integration tests (shell + Rust)
+docs/                   SPEC.md, SPEC.uk.md, research/, design notes
 ```
 
-Every layer above `io/` is pure: it takes a `BlockSource` interface and
-never touches the OS, which makes the reader trivially testable on
-fixtures and portable.
+Phase 0 creates `zvolrescue`, `zvolrescue-io`, `zfs-ondisk` and an empty
+`zfs-read`; modules split into further crates only when compile times or
+ownership make it worthwhile.
+
+Every crate above `zvolrescue-io` is pure: it takes a `BlockSource` trait
+object and never touches the OS, which makes the reader trivially testable
+on in-memory fixtures and portable.
 
 ### 8.3 Safety invariants
 
-1. There is exactly one function that opens evidence, and it hard-codes `O_RDONLY` (plus `O_EXCL` on platforms that honour it for block devices).
+1. The `BlockSource` trait has read methods only. Its single on-disk implementation lives in `zvolrescue-io`, opens with `O_RDONLY` (plus `O_EXCL` on platforms that honour it for block devices), and is the only place where an input path becomes a file descriptor.
 2. Output paths are canonicalised and compared against every input's `st_dev/st_ino`; a match aborts with exit code 5.
-3. No `system()`, no shelling out, no network sockets (enforced by a test that greps the binary's imports).
+3. No `std::process::Command`, no shelling out, no network: `cargo deny` bans networking crates, and a test inspects the release binary's imports for `socket`/`connect`/`execve`.
+4. `#![forbid(unsafe_code)]` in every crate except `zvolrescue-io`; each `unsafe` block there carries a `// SAFETY:` comment and is covered by a test.
 
 ## 9. Testing strategy
 
@@ -251,8 +263,8 @@ fixtures and portable.
   * scenarios: `zfs destroy` then recover at older TXG; `zpool destroy` then recover; one member missing; one member zeroed at the labels; random 1 MiB corruption in data; random corruption in metadata.
   * assertion: SHA-256 of extracted image equals the SHA-256 recorded before destruction.
 * **Cross-check**: on hosts with OpenZFS userland, compare `zvolrescue list`/`uberblocks` output with `zdb -l`/`zdb -u`/`zdb -d`.
-* **Fuzzing**: libFuzzer harnesses for nvlist, blkptr, dnode and ZAP parsers.
-* **Static analysis**: `-Wall -Wextra -Werror`, clang-tidy, ASan/UBSan job.
+* **Fuzzing**: `cargo fuzz` targets for the nvlist, blkptr, dnode and ZAP parsers, run for a bounded time in CI on every push.
+* **Static analysis**: `cargo clippy -D warnings`, `cargo fmt --check`, `cargo deny` (licences, advisories, banned crates); Miri on the `zfs-ondisk` unit tests.
 
 ## 10. Delivery phases
 
@@ -274,7 +286,7 @@ been used on at least three real-world incidents with documented outcomes.
 |---|---|
 | On-disk format details are under-documented; only source of truth is OpenZFS source. | Keep a `docs/research/ondisk-notes.md` with references to OpenZFS source lines per structure; cross-check with `zdb` in CI. |
 | Feature flags evolve (e.g. new compression, `raidz_expansion`, `blake3`). | Feature-flag matrix in `list`/`pool` output; refuse gracefully on unknown *read-incompatible* features, warn on unknown read-compatible ones. |
-| CDDL code vendoring vs BSD-3 licence. | Isolate under `third_party/` with its own licence file; keep the core free of it; document in `LICENSE.third_party`. |
+| Edon-R has no Rust implementation; porting it brings CDDL code into a BSD-3 repository. | Isolate the port in `crates/edonr/` with its own LICENSE file, expose it behind a cargo feature, document it in `LICENSE.third_party`. |
 | Recovery window is short (freed blocks get reused). | Documentation front-page instruction: *stop writing to the pool now, export it, image the disks*. `scan` prints the age of the oldest usable uberblock immediately. |
 | Users expect in-place repair. | The tool name, README and `--help` state clearly that it never writes to the pool; point to `zpool import -F/-T` for that use case. |
 
@@ -282,8 +294,8 @@ been used on at least three real-world incidents with documented outcomes.
 
 1. Should phase 1 target FreeBSD *only* to move faster, with Linux CI added in phase 2? (Proposal: Linux CI from phase 0 — fixture generation is easier there and it keeps the code portable from day one.)
 2. RAIDZ expansion (`raidz_expansion` feature) reflowed layouts — support in phase 2 or defer?
-3. Vendoring `skein/edonr/blake3` vs. depending on an external library — decide when phase 2 starts.
-4. Name of the library target: `libzvolrescue` or `libzfsread`? The latter is more honest about its scope if file-level recovery lands.
+3. `ruzstd` (pure Rust, decode-only) vs. `zstd` (bindings to libzstd): pure Rust keeps the static build trivial but is slower. Benchmark on phase 1 fixtures; a cargo feature can offer both.
+4. Crate naming and publication: keep `zfs-ondisk` / `zfs-read` as internal workspace members, or publish them to crates.io as reusable libraries once the API settles?
 
 ## 13. References
 
