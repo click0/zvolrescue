@@ -10,7 +10,7 @@ still present on disk. It also produces forensic reports: label and
 uberblock history, dataset creation/destruction timeline, and
 hash-verified extraction logs.
 
-**Language:** Rust | **License:** BSD 3-Clause | **Status:** Phase 1 MVP (pre-alpha) — `scan`, `list` and `dump` work on stripe, mirror and RAIDZ1/2/3 pools (parity reconstruction of missing and silently corrupted columns) with fletcher/sha256 checksums and lz4/zstd/gzip/lzjb/zle; verified so far on synthetic fixtures only, not yet on a real pool. See the [specification](docs/SPEC.md).
+**Language:** Rust | **License:** BSD 3-Clause | **Status:** Phase 1 MVP (pre-alpha) — `scan`, `list` and `dump` work on stripe, mirror and RAIDZ1/2/3 pools (parity reconstruction of missing and silently corrupted columns), gang blocks, fletcher/sha256/sha512/blake3 checksums, lz4/zstd/gzip/lzjb/zle, with `--resume` and bulk `-r`; verified so far on synthetic fixtures only, not yet on a real pool. See the [specification](docs/SPEC.md).
 
 [Українська версія](README_UK.md) | [Technical specification (ТЗ)](docs/SPEC.md) | [ТЗ українською](docs/SPEC.uk.md) | [Companion tools spec](docs/COMPANIONS.md) | [Debugging on a test pool](docs/DEBUGGING.md)
 
@@ -60,8 +60,8 @@ the libraries — they never become modes of the main binary.
 zvolrescue scan  DEV...                                    what is here: labels, pool, TXG window, topology
 zvolrescue list  POOLSPEC [--txg N|--before TS] [--diff TXG2] [-r]
                                                            datasets / zvols / snapshots at a TXG
-zvolrescue dump  DATASET POOLSPEC -o OUT.img [--txg N] [--strict] [--key KEYSPEC] [--resume]
-                                                           extract, verify every block, print SHA-256
+zvolrescue dump  DATASET POOLSPEC -o OUT.img [--txg N] [--strict] [--key KEYSPEC] [--resume] [-r]
+                                                           extract, verify every block, print SHA-256; -r: every volume under DATASET into a directory
 ```
 
 ```sh

@@ -193,7 +193,7 @@ Commands:
   list  POOLSPEC [--txg N|--before TS] [--diff TXG2] [-r]
                                         datasets/zvols/snapshots at a TXG; for each
                                         destroyed one, the last TXG that still had it
-  dump  DATASET POOLSPEC -o OUT.img [--txg N] [--strict] [--key KEYSPEC] [--resume]
+  dump  DATASET POOLSPEC -o OUT.img [--txg N] [--strict] [--key KEYSPEC] [--resume] [-r]
                                         extract a zvol (or object dump of a fs) to a raw
                                         sparse image, verifying every block; prints the
                                         SHA-256 of the output

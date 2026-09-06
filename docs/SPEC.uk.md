@@ -196,7 +196,7 @@ zvolrescue [глобальні опції] <команда> [опції] [арг
   list  POOLSPEC [--txg N|--before TS] [--diff TXG2] [-r]
                                         dataset-и/zvol/знімки на TXG; для кожного
                                         знищеного — останній TXG, де він ще був
-  dump  DATASET POOLSPEC -o OUT.img [--txg N] [--strict] [--key KEYSPEC] [--resume]
+  dump  DATASET POOLSPEC -o OUT.img [--txg N] [--strict] [--key KEYSPEC] [--resume] [-r]
                                         витягти zvol (або дамп об'єктів ФС) у сирий
                                         sparse-образ із перевіркою кожного блоку;
                                         друкує SHA-256 виходу

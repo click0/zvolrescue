@@ -9,7 +9,7 @@
 Також формує forensic-звіти: історію міток та uberblock-ів, часову шкалу
 створення/знищення dataset-ів і хеш-верифіковані логи витягання.
 
-**Мова:** Rust | **Ліцензія:** BSD 3-Clause | **Статус:** етап 1 MVP (pre-alpha) — `scan`, `list` і `dump` працюють на stripe, mirror і RAIDZ1/2/3 пулах (відновлення за парністю відсутніх і тихо зіпсованих колонок) із checksum-ами fletcher/sha256 та стисненням lz4/zstd/gzip/lzjb/zle; поки перевірено лише на синтетичних fixture, не на справжньому пулі. Див. [ТЗ](docs/SPEC.uk.md).
+**Мова:** Rust | **Ліцензія:** BSD 3-Clause | **Статус:** етап 1 MVP (pre-alpha) — `scan`, `list` і `dump` працюють на stripe, mirror і RAIDZ1/2/3 пулах (відновлення за парністю відсутніх і тихо зіпсованих колонок), gang-блоках, з checksum-ами fletcher/sha256/sha512/blake3, стисненням lz4/zstd/gzip/lzjb/zle, `--resume` і масовим `-r`; поки перевірено лише на синтетичних fixture, не на справжньому пулі. Див. [ТЗ](docs/SPEC.uk.md).
 
 [English version](README.md) | [ТЗ українською](docs/SPEC.uk.md) | [Technical specification](docs/SPEC.md) | [ТЗ супутніх інструментів](docs/COMPANIONS.uk.md) | [Налагодження на тестовому пулі](docs/DEBUGGING.uk.md)
 
@@ -61,8 +61,8 @@ carving, звіти та файлове відновлення — *супутн
 zvolrescue scan  DEV...                                    що тут є: мітки, пул, вікно TXG, топологія
 zvolrescue list  POOLSPEC [--txg N|--before TS] [--diff TXG2] [-r]
                                                            dataset-и / zvol / знімки на TXG
-zvolrescue dump  DATASET POOLSPEC -o OUT.img [--txg N] [--strict] [--key KEYSPEC] [--resume]
-                                                           витягти, перевірити кожен блок, надрукувати SHA-256
+zvolrescue dump  DATASET POOLSPEC -o OUT.img [--txg N] [--strict] [--key KEYSPEC] [--resume] [-r]
+                                                           витягти, перевірити кожен блок, надрукувати SHA-256; -r: усі томи під DATASET у каталог
 ```
 
 ```sh
