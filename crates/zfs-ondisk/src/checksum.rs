@@ -116,3 +116,171 @@ mod tests {
         assert_eq!(verify_label(&[0u8; 8], 0), ChecksumStatus::Missing);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Data block checksums (the algorithms named in blkptr_t)
+// ---------------------------------------------------------------------------
+
+use sha2::Sha512_256;
+
+use crate::blkptr::Checksum;
+
+/// `fletcher2` over 64-bit words, read in the writer's byte order.
+///
+/// Defined only for lengths that are a multiple of 16 bytes; a trailing
+/// partial pair is ignored, as in OpenZFS.
+pub fn fletcher2(data: &[u8], endian: Endian) -> [u64; 4] {
+    let (mut a0, mut a1, mut b0, mut b1) = (0u64, 0u64, 0u64, 0u64);
+    for pair in data.chunks_exact(16) {
+        let w0 = endian.u64_at(pair, 0).expect("16-byte chunk");
+        let w1 = endian.u64_at(pair, 8).expect("16-byte chunk");
+        a0 = a0.wrapping_add(w0);
+        a1 = a1.wrapping_add(w1);
+        b0 = b0.wrapping_add(a0);
+        b1 = b1.wrapping_add(a1);
+    }
+    [a0, a1, b0, b1]
+}
+
+/// `fletcher4` over 32-bit words, read in the writer's byte order.
+///
+/// Defined only for lengths that are a multiple of 4 bytes; a trailing
+/// partial word is ignored, as in OpenZFS.
+pub fn fletcher4(data: &[u8], endian: Endian) -> [u64; 4] {
+    let (mut a, mut b, mut c, mut d) = (0u64, 0u64, 0u64, 0u64);
+    for word in data.chunks_exact(4) {
+        let bytes: [u8; 4] = word.try_into().expect("4-byte chunk");
+        let w = match endian {
+            Endian::Little => u32::from_le_bytes(bytes),
+            Endian::Big => u32::from_be_bytes(bytes),
+        } as u64;
+        a = a.wrapping_add(w);
+        b = b.wrapping_add(a);
+        c = c.wrapping_add(b);
+        d = d.wrapping_add(c);
+    }
+    [a, b, c, d]
+}
+
+fn digest_words(digest: &[u8]) -> [u64; 4] {
+    let mut out = [0u64; 4];
+    for (i, w) in out.iter_mut().enumerate() {
+        *w = u64::from_be_bytes(digest[i * 8..i * 8 + 8].try_into().expect("32 bytes"));
+    }
+    out
+}
+
+/// `sha256` as four big-endian words.
+pub fn sha256(data: &[u8]) -> [u64; 4] {
+    digest_words(&Sha256::digest(data))
+}
+
+/// `sha512`: OpenZFS uses SHA-512/256 (distinct IV, 256-bit output).
+pub fn sha512_256(data: &[u8]) -> [u64; 4] {
+    digest_words(&Sha512_256::digest(data))
+}
+
+/// Result of checking a data block against its block pointer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verify {
+    /// Recomputed checksum matches.
+    Ok,
+    /// Recomputed checksum differs: the block is damaged or stale.
+    Mismatch,
+    /// The block pointer says `off`: nothing to check.
+    NotChecked,
+    /// Algorithm not implemented in this build (skein, edonr, blake3, …).
+    Unsupported,
+}
+
+/// Compute the checksum `kind` over `data` written in `endian` order, or
+/// `None` when the algorithm is not implemented.
+pub fn compute(kind: Checksum, data: &[u8], endian: Endian) -> Option<[u64; 4]> {
+    match kind {
+        Checksum::Fletcher2 => Some(fletcher2(data, endian)),
+        Checksum::Fletcher4 => Some(fletcher4(data, endian)),
+        Checksum::Sha256 => Some(sha256(data)),
+        Checksum::Sha512 => Some(sha512_256(data)),
+        _ => None,
+    }
+}
+
+/// Verify `data` against the checksum words stored in its block pointer.
+pub fn verify(kind: Checksum, data: &[u8], endian: Endian, expected: &[u64; 4]) -> Verify {
+    match kind {
+        Checksum::Off => Verify::NotChecked,
+        _ => match compute(kind, data, endian) {
+            Some(c) if c == *expected => Verify::Ok,
+            Some(_) => Verify::Mismatch,
+            None => Verify::Unsupported,
+        },
+    }
+}
+
+#[cfg(test)]
+mod data_tests {
+    use super::*;
+
+    #[test]
+    fn fletcher4_small_vectors() {
+        assert_eq!(fletcher4(&[], Endian::Little), [0; 4]);
+        assert_eq!(fletcher4(&1u32.to_le_bytes(), Endian::Little), [1, 1, 1, 1]);
+        let mut d = Vec::new();
+        d.extend(1u32.to_le_bytes());
+        d.extend(2u32.to_le_bytes());
+        assert_eq!(fletcher4(&d, Endian::Little), [3, 4, 5, 6]);
+        // The same bytes seen as big-endian words give a different sum.
+        assert_ne!(fletcher4(&d, Endian::Big), [3, 4, 5, 6]);
+        // Sums wrap instead of overflowing.
+        let big = vec![0xffu8; 1 << 20];
+        let _ = fletcher4(&big, Endian::Little);
+    }
+
+    #[test]
+    fn fletcher2_small_vectors() {
+        let mut d = Vec::new();
+        d.extend(1u64.to_le_bytes());
+        d.extend(2u64.to_le_bytes());
+        d.extend(3u64.to_le_bytes());
+        d.extend(4u64.to_le_bytes());
+        // a0 = 1+3, a1 = 2+4, b0 = 1 + 4, b1 = 2 + 6
+        assert_eq!(fletcher2(&d, Endian::Little), [4, 6, 5, 8]);
+    }
+
+    #[test]
+    fn sha_vectors() {
+        let abc = sha256(b"abc");
+        assert_eq!(abc[0], 0xba78_16bf_8f01_cfea);
+        assert_eq!(abc[3], 0xb410_ff61_f200_15ad);
+        let abc = sha512_256(b"abc");
+        assert_eq!(abc[0], 0x5304_8e26_8194_1ef9);
+        assert_eq!(abc[3], 0xe0e2_f131_07e7_af23);
+    }
+
+    #[test]
+    fn verify_dispatch() {
+        let data = b"hello zfs block".to_vec();
+        let ok = sha256(&data);
+        assert_eq!(
+            verify(Checksum::Sha256, &data, Endian::Little, &ok),
+            Verify::Ok
+        );
+        assert_eq!(
+            verify(Checksum::Sha256, &data, Endian::Little, &[0; 4]),
+            Verify::Mismatch
+        );
+        assert_eq!(
+            verify(Checksum::Off, &data, Endian::Little, &[0; 4]),
+            Verify::NotChecked
+        );
+        assert_eq!(
+            verify(Checksum::Blake3, &data, Endian::Little, &[0; 4]),
+            Verify::Unsupported
+        );
+        let f = fletcher4(&data[..12], Endian::Big);
+        assert_eq!(
+            verify(Checksum::Fletcher4, &data[..12], Endian::Big, &f),
+            Verify::Ok
+        );
+    }
+}
