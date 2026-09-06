@@ -341,11 +341,15 @@ pub fn logical_birth(bp: &[u8], endian: Endian) -> Option<u64> {
     endian.u64_at(bp, 80).map(|w| bits(w, 0, 63))
 }
 
-/// Test-only encoder mirroring the `BP_SET_*` macros.
-#[cfg(test)]
-pub(crate) mod encode {
+/// Encoder mirroring the `BP_SET_*` macros, for building test fixtures.
+///
+/// The tool never writes evidence; this exists so readers can be tested
+/// against pointers assembled independently of the parser.
+pub mod encode {
     use super::*;
 
+    /// Sixteen little-endian words of a block pointer under construction.
+    #[derive(Debug, Clone, Default)]
     pub struct Builder(pub [u64; 16]);
 
     fn set(word: &mut u64, low: u32, len: u32, v: u64) {
@@ -354,11 +358,13 @@ pub(crate) mod encode {
     }
 
     impl Builder {
+        /// Empty pointer flagged as written by a little-endian host.
         pub fn new() -> Self {
             let mut b = Builder([0; 16]);
             set(&mut b.0[6], 63, 1, 1); // little-endian writer
             b
         }
+        /// Set DVA `i`.
         pub fn dva(mut self, i: usize, vdev: u32, offset: u64, asize: u64, gang: bool) -> Self {
             set(&mut self.0[i * 2], 0, 24, asize >> MINBLOCKSHIFT);
             set(&mut self.0[i * 2], 32, 32, vdev as u64);
@@ -366,11 +372,13 @@ pub(crate) mod encode {
             set(&mut self.0[i * 2 + 1], 63, 1, gang as u64);
             self
         }
+        /// Set logical and physical sizes in bytes (multiples of 512).
         pub fn sizes(mut self, lsize: u64, psize: u64) -> Self {
             set(&mut self.0[6], 0, 16, (lsize >> MINBLOCKSHIFT) - 1);
             set(&mut self.0[6], 16, 16, (psize >> MINBLOCKSHIFT) - 1);
             self
         }
+        /// Set compression, checksum, object type and level codes.
         pub fn props(mut self, comp: u8, cksum: u8, otype: u8, level: u8) -> Self {
             set(&mut self.0[6], 32, 7, comp as u64);
             set(&mut self.0[6], 40, 8, cksum as u64);
@@ -378,21 +386,25 @@ pub(crate) mod encode {
             set(&mut self.0[6], 56, 5, level as u64);
             self
         }
+        /// Set the encrypted and dedup bits.
         pub fn flags(mut self, encrypted: bool, dedup: bool) -> Self {
             set(&mut self.0[6], 61, 1, encrypted as u64);
             set(&mut self.0[6], 62, 1, dedup as u64);
             self
         }
+        /// Set physical birth, logical birth and fill.
         pub fn births(mut self, phys: u64, logical: u64, fill: u64) -> Self {
             self.0[9] = phys;
             self.0[10] = logical;
             self.0[11] = fill;
             self
         }
+        /// Set the checksum words.
         pub fn cksum(mut self, c: [u64; 4]) -> Self {
             self.0[12..16].copy_from_slice(&c);
             self
         }
+        /// Turn into an embedded pointer carrying `payload` (≤ 112 bytes).
         pub fn embedded(mut self, payload: &[u8], lsize: u64, comp: u8, otype: u8) -> Self {
             self.0[6] = 0;
             set(&mut self.0[6], 63, 1, 1);
@@ -405,10 +417,12 @@ pub(crate) mod encode {
             let mut padded = payload.to_vec();
             padded.resize(EMBEDDED_PAYLOAD, 0);
             for (n, w) in words.iter().enumerate() {
-                self.0[*w] = u64::from_le_bytes(padded[n * 8..n * 8 + 8].try_into().unwrap());
+                self.0[*w] =
+                    u64::from_le_bytes(padded[n * 8..n * 8 + 8].try_into().expect("8 bytes"));
             }
             self
         }
+        /// Serialise in the given byte order.
         pub fn bytes(&self, endian: Endian) -> [u8; SIZE] {
             let mut out = [0u8; SIZE];
             for (i, w) in self.0.iter().enumerate() {

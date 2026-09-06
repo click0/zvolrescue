@@ -12,5 +12,8 @@ authors.workspace = true
 zfs-ondisk.workspace = true
 zvolrescue-io.workspace = true
 
+[dev-dependencies]
+lz4_flex = { workspace = true }
+
 [lints]
 workspace = true

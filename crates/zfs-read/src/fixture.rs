@@ -6,6 +6,7 @@
 //! writes evidence, so nothing here is reachable from the binaries except
 //! through explicit fixture generation.
 
+use zfs_ondisk::blkptr::LABEL_START_SIZE;
 use zfs_ondisk::checksum::seal_label;
 use zfs_ondisk::label::{
     label_offsets, LABEL_SIZE, UBERBLOCK_RING_OFFSET, VDEV_PHYS_OFFSET, VDEV_PHYS_SIZE,
@@ -208,4 +209,11 @@ impl Pool {
         assert!(size >= 4 * LABEL_SIZE);
         img
     }
+}
+
+/// Place `bytes` at DVA offset `offset` (relative to the allocatable
+/// area) inside a member image, as a stripe/mirror leaf would store them.
+pub fn write_at_dva(img: &mut [u8], offset: u64, bytes: &[u8]) {
+    let start = (LABEL_START_SIZE + offset) as usize;
+    img[start..start + bytes.len()].copy_from_slice(bytes);
 }
