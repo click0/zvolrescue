@@ -43,6 +43,23 @@ jobs:
           cmp /tmp/disk0.img /tmp/healed.img
           if ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/bad.img -o /tmp/partial.img --strict; then echo "strict must fail"; exit 1; else test $? = 4; fi
           if ./target/release/zvolrescue dump tank/vm/disk0 /tmp/fx/member0.img -o /tmp/fx/member0.img; then echo "must refuse"; exit 1; else test $? = 5; fi
+      - name: End-to-end on a raidz2 fixture (missing and corrupted members)
+        run: |
+          cargo run -p zfs-read --example mkfixture -- /tmp/rz raidz2 12
+          ./target/release/zvolrescue scan /tmp/rz/member0.img /tmp/rz/member1.img /tmp/rz/member2.img /tmp/rz/member3.img
+          # All four members: same image as the mirror fixture.
+          ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/rz/member0.img /tmp/rz/member1.img /tmp/rz/member2.img /tmp/rz/member3.img -o /tmp/rz-all.img
+          cmp /tmp/disk0.img /tmp/rz-all.img
+          # Two members missing: rebuilt from parity.
+          ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/rz/member1.img /tmp/rz/member3.img -o /tmp/rz-2miss.img
+          cmp /tmp/disk0.img /tmp/rz-2miss.img
+          # One missing and one silently corrupted across the stripe area: found by checksum.
+          cp /tmp/rz/member0.img /tmp/rz-bad0.img
+          python3 -c 'p="/tmp/rz-bad0.img"; b=bytearray(open(p,"rb").read()); s=4*1024*1024+0x200000//4; b[s:s+(1<<20)]=bytes(x^0xa5 for x in b[s:s+(1<<20)]); open(p,"wb").write(b)'
+          ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/rz-bad0.img /tmp/rz/member1.img /tmp/rz/member3.img -o /tmp/rz-mix.img
+          cmp /tmp/disk0.img /tmp/rz-mix.img
+          # Three missing: beyond raidz2, exit 3.
+          if ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/rz/member2.img -o /tmp/rz-3miss.img; then echo "must fail"; exit 1; else test $? = 3; fi
 
   freebsd:
     name: FreeBSD 14 (ports rust)
