@@ -1,7 +1,7 @@
 # zvolrescue — Технічне завдання (ТЗ)
 
 **Статус:** чернетка v0.1 · **Дата:** 2026-09-06 · **Власник:** Владислав В. Продан
-**English version:** [SPEC.md](SPEC.md)
+**English version:** [SPEC.md](SPEC.md) · **Супутні інструменти:** [COMPANIONS.uk.md](COMPANIONS.uk.md)
 
 Це базове ТЗ на `zvolrescue` — відкриту утиліту для forensic-аналізу та
 відновлення даних ZFS. Документ визначає проблему, межі проєкту,
@@ -239,7 +239,9 @@ zvolrescue dump /dev/ada0p3 /dev/ada1p3 pool/vm/disk0 --txg 4816230 \
 
 Основний бінарник ніколи не отримує їх як режими. Спільна поведінка
 (лог evidence, JSON-вивід, коди виходу, read-only інваріанти) живе в
-бібліотеках, тож супутні інструменти успадковують її задарма.
+бібліотеці `zvol-common`, тож супутні інструменти успадковують її
+задарма. Кожен інструмент описано в [COMPANIONS.uk.md](COMPANIONS.uk.md);
+усі вони живуть у цьому репозиторії та workspace (рішення D-3, §13).
 
 ## 8. Архітектура
 
@@ -259,7 +261,13 @@ zvolrescue dump /dev/ada0p3 /dev/ada1p3 pool/vm/disk0 --txg 4816230 \
 ```
 Cargo.toml              workspace
 crates/
-  zvolrescue/           бінарник: розбір CLI, форматування виводу, лог evidence, модель звіту
+  zvolrescue/           основний бінарник: scan / list / dump
+  zvoltimeline/         супутні бінарники (COMPANIONS.uk.md), по одному crate,
+  zvolcarve/            додаються на етапах 3–4
+  zvolreport/
+  zvolfiles/
+  zvol-common/          спільна CLI-обв'язка: розбір POOLSPEC, -f/-v/-q, записи
+                        evidence-log, коди виходу, перевірка «вихід не на evidence»
   zvolrescue-io/        read-only доступ до пристроїв/образів (трейт `BlockSource`), таблиці
                         розділів, sparse-запис — єдиний crate, якому дозволено `unsafe`
   zfs-ondisk/           чисті парсери: мітки, nvlist, uberblock-и, blkptr, dnode, ZAP —
@@ -274,13 +282,14 @@ crates/
                           carve/  сире сканування та оцінка кандидатів
   edonr/                порт Edon-R з OpenZFS (CDDL), ізольований, зі своїм LICENSE
 fuzz/                   cargo-fuzz target-и для кожного парсера zfs-ondisk
-tests/                  інтеграційні тести на fixture-пулах (shell + Rust)
-docs/                   SPEC.md, SPEC.uk.md, research/, нотатки дизайну
+tests/                  інтеграційні тести на fixture-пулах (shell + Rust), підкаталог на бінарник
+docs/                   SPEC.md, SPEC.uk.md, COMPANIONS.md, COMPANIONS.uk.md, research/
 ```
 
 Етап 0 створює `zvolrescue`, `zvolrescue-io`, `zfs-ondisk` і порожній
-`zfs-read`; модулі виносяться в окремі crate-и лише коли цього вимагають
-час компіляції або розподіл відповідальності.
+`zfs-read`; `zvol-common` виділяється з основного бінарника з появою
+першого супутнього інструмента; модулі виносяться в окремі crate-и лише
+коли цього вимагають час компіляції або розподіл відповідальності.
 
 Кожен crate вище `zvolrescue-io` — чистий: приймає trait object
 `BlockSource` і ніколи не торкається ОС, тому reader тривіально тестується
@@ -337,9 +346,19 @@ docs/                   SPEC.md, SPEC.uk.md, research/, нотатки диза�
 2. Розширення RAIDZ (`raidz_expansion`) — reflowed-розкладки: підтримати на етапі 2 чи відкласти?
 3. `ruzstd` (чистий Rust, лише декодування) чи `zstd` (біндинги до libzstd): чистий Rust зберігає тривіальну статичну збірку, але повільніший. Заміряти на fixture-ах етапу 1; cargo feature може давати обидва.
 4. Іменування та публікація crate-ів: тримати `zfs-ondisk` / `zfs-read` внутрішніми членами workspace чи опублікувати на crates.io як бібліотеки для повторного використання, коли API устаканиться?
-5. Супутні інструменти: той самий репозиторій і workspace (один реліз, один CI) чи окремі репозиторії на кожен інструмент?
 
-## 13. Посилання
+## 13. Журнал рішень
+
+Рішення, ухвалені на етапі чернетки, щоб не переспорювати відкриті
+питання §12.
+
+| ID | Дата | Рішення | Чому |
+|---|---|---|---|
+| D-1 | 2026-09-06 | Мова реалізації — **Rust**. | Ворожий вхід (N-04), fuzzing, статичний один бінарник, чистий Rust-стек декодування; див. §8.1. |
+| D-2 | 2026-09-06 | Основний бінарник **атомарний**: лише `scan` / `list` / `dump` (§3.0). | Одна робота, компонується; все інше — супутній інструмент. |
+| D-3 | 2026-09-06 | Супутні інструменти живуть у **тому самому репозиторії та cargo workspace**, по одному crate на бінарник. | Одна версія, один реліз, один CI, один порт; спільний `zvol-common`; описано в [COMPANIONS.uk.md](COMPANIONS.uk.md). |
+
+## 14. Посилання
 
 * Код OpenZFS: `module/zfs/`, `include/sys/{spa,vdev,zio,dmu,dsl_*,zap}*.h`
 * *ZFS On-Disk Specification* (Sun, 2006) — застарілий, але досі єдиний прозовий опис міток, uberblock-ів, DMU та DSL.

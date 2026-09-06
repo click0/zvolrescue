@@ -1,7 +1,7 @@
 # zvolrescue — Technical Specification (ТЗ)
 
 **Status:** Draft v0.1 · **Date:** 2026-09-06 · **Owner:** Vladyslav V. Prodan
-**Ukrainian version:** [SPEC.uk.md](SPEC.uk.md)
+**Ukrainian version:** [SPEC.uk.md](SPEC.uk.md) · **Companion tools:** [COMPANIONS.md](COMPANIONS.md)
 
 This document is the founding requirements specification for `zvolrescue`,
 an open-source ZFS forensic and recovery utility. It defines the problem,
@@ -235,8 +235,10 @@ main tool:
 | `zvolfiles` | object dump and ZPL file-level recovery from filesystem datasets | F-29, F-30 |
 
 The main binary never gains these as modes. Shared behaviour (evidence
-log, JSON output, exit codes, read-only invariants) lives in the libraries
-so the companions inherit it for free.
+log, JSON output, exit codes, read-only invariants) lives in the
+`zvol-common` library so the companions inherit it for free. Each tool is
+specified in [COMPANIONS.md](COMPANIONS.md); all of them live in this
+repository and workspace (decision D-3, §13).
 
 ## 8. Architecture
 
@@ -256,7 +258,13 @@ so the companions inherit it for free.
 ```
 Cargo.toml              workspace
 crates/
-  zvolrescue/           binary: CLI parsing, output formatting, evidence log, report model
+  zvolrescue/           the main binary: scan / list / dump
+  zvoltimeline/         companion binaries (COMPANIONS.md), one crate each,
+  zvolcarve/            added in phases 3–4
+  zvolreport/
+  zvolfiles/
+  zvol-common/          shared CLI plumbing: POOLSPEC parsing, -f/-v/-q, evidence-log
+                        records, exit codes, output-path-vs-evidence check
   zvolrescue-io/        read-only device & image access (`BlockSource` trait), partition
                         tables, sparse output writer — the only crate allowed `unsafe`
   zfs-ondisk/           pure parsers: labels, nvlist, uberblocks, blkptr, dnode, ZAP —
@@ -271,13 +279,14 @@ crates/
                           carve/  raw scanning and candidate scoring
   edonr/                Edon-R port from OpenZFS (CDDL), isolated with its own LICENSE
 fuzz/                   cargo-fuzz targets for every parser in zfs-ondisk
-tests/                  fixture-pool integration tests (shell + Rust)
-docs/                   SPEC.md, SPEC.uk.md, research/, design notes
+tests/                  fixture-pool integration tests (shell + Rust), one subdirectory per binary
+docs/                   SPEC.md, SPEC.uk.md, COMPANIONS.md, COMPANIONS.uk.md, research/
 ```
 
 Phase 0 creates `zvolrescue`, `zvolrescue-io`, `zfs-ondisk` and an empty
-`zfs-read`; modules split into further crates only when compile times or
-ownership make it worthwhile.
+`zfs-read`; `zvol-common` is split out of the main binary when the first
+companion tool arrives; modules split into further crates only when
+compile times or ownership make it worthwhile.
 
 Every crate above `zvolrescue-io` is pure: it takes a `BlockSource` trait
 object and never touches the OS, which makes the reader trivially testable
@@ -333,9 +342,19 @@ been used on at least three real-world incidents with documented outcomes.
 2. RAIDZ expansion (`raidz_expansion` feature) reflowed layouts — support in phase 2 or defer?
 3. `ruzstd` (pure Rust, decode-only) vs. `zstd` (bindings to libzstd): pure Rust keeps the static build trivial but is slower. Benchmark on phase 1 fixtures; a cargo feature can offer both.
 4. Crate naming and publication: keep `zfs-ondisk` / `zfs-read` as internal workspace members, or publish them to crates.io as reusable libraries once the API settles?
-5. Companion tools: same repository and workspace (one release, one CI) or separate repositories per tool?
 
-## 13. References
+## 13. Decision log
+
+Decisions taken during the draft phase, so the open questions in §12 do
+not have to be re-argued.
+
+| ID | Date | Decision | Why |
+|---|---|---|---|
+| D-1 | 2026-09-06 | Implementation language is **Rust**. | Hostile input (N-04), fuzzing, static single binary, pure-Rust decode stack; see §8.1. |
+| D-2 | 2026-09-06 | The main binary is **atomic**: `scan` / `list` / `dump` only (§3.0). | One job, composable; everything else is a companion tool. |
+| D-3 | 2026-09-06 | Companion tools live in the **same repository and cargo workspace**, one crate per binary. | One version, one release, one CI, one port; shared `zvol-common`; specified in [COMPANIONS.md](COMPANIONS.md). |
+
+## 14. References
 
 * OpenZFS source: `module/zfs/`, `include/sys/{spa,vdev,zio,dmu,dsl_*,zap}*.h`
 * *ZFS On-Disk Specification* (Sun, 2006) — outdated but still the only prose description of labels, uberblocks, DMU and DSL.

@@ -12,7 +12,7 @@ hash-verified extraction logs.
 
 **Language:** Rust | **License:** BSD 3-Clause | **Status:** Design stage (pre-alpha) — see the [specification](docs/SPEC.md)
 
-[Українська версія](README_UK.md) | [Technical specification (ТЗ)](docs/SPEC.md) | [ТЗ українською](docs/SPEC.uk.md)
+[Українська версія](README_UK.md) | [Technical specification (ТЗ)](docs/SPEC.md) | [ТЗ українською](docs/SPEC.uk.md) | [Companion tools spec](docs/COMPANIONS.md)
 
 > **Lost a zvol just now?** Stop all writes to the pool *immediately*
 > (`zpool export`, or power the host down), then image the disks. ZFS
@@ -75,7 +75,9 @@ zvolrescue dump /dev/ada0p3 /dev/ada1p3 pool/vm/disk0 --txg 4816230 \
     --strict -o /mnt/rescue/disk0.img --evidence-log case42.jsonl
 ```
 
-### Companion tools (later, separate binaries)
+### Companion tools (later, separate binaries in the same workspace)
+
+Specified in [docs/COMPANIONS.md](docs/COMPANIONS.md).
 
 | Tool | Job |
 |---|---|
@@ -102,9 +104,12 @@ Details, requirements and acceptance criteria: [docs/SPEC.md](docs/SPEC.md).
 README.md, README_UK.md     this file (EN / UK)
 docs/SPEC.md                technical specification (ТЗ), English — the source of truth
 docs/SPEC.uk.md             the same in Ukrainian
+docs/COMPANIONS.md          companion tools specification (EN); COMPANIONS.uk.md in Ukrainian
 docs/research/              analyses of related tools, on-disk format notes
 Cargo.toml                  cargo workspace
 crates/zvolrescue/          the main binary (scan / list / dump)
+crates/zvol*/               companion binaries, one crate each (phases 3–4)
+crates/zvol-common/         shared CLI plumbing (evidence log, exit codes, POOLSPEC)
 crates/zvolrescue-io/       read-only device/image access (the only crate allowed `unsafe`)
 crates/zfs-ondisk/          pure on-disk structure parsers (labels, nvlist, uberblocks, blkptr, dnode, ZAP)
 crates/zfs-read/            pool walking: vdev reconstruction, zio, dmu, dsl, zvol extraction, carving

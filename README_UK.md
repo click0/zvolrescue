@@ -11,7 +11,7 @@
 
 **Мова:** Rust | **Ліцензія:** BSD 3-Clause | **Статус:** етап проєктування (pre-alpha) — див. [ТЗ](docs/SPEC.uk.md)
 
-[English version](README.md) | [ТЗ українською](docs/SPEC.uk.md) | [Technical specification](docs/SPEC.md)
+[English version](README.md) | [ТЗ українською](docs/SPEC.uk.md) | [Technical specification](docs/SPEC.md) | [ТЗ супутніх інструментів](docs/COMPANIONS.uk.md)
 
 > **Щойно втратили zvol?** *Негайно* припиніть будь-який запис у пул
 > (`zpool export` або вимкніть хост), потім зніміть образи дисків. ZFS
@@ -76,7 +76,9 @@ zvolrescue dump /dev/ada0p3 /dev/ada1p3 pool/vm/disk0 --txg 4816230 \
     --strict -o /mnt/rescue/disk0.img --evidence-log case42.jsonl
 ```
 
-### Супутні інструменти (пізніше, окремі бінарники)
+### Супутні інструменти (пізніше, окремі бінарники в тому ж workspace)
+
+Описані в [docs/COMPANIONS.uk.md](docs/COMPANIONS.uk.md).
 
 | Інструмент | Робота |
 |---|---|
@@ -103,9 +105,12 @@ zvolrescue dump /dev/ada0p3 /dev/ada1p3 pool/vm/disk0 --txg 4816230 \
 README.md, README_UK.md     цей файл (EN / UK)
 docs/SPEC.md                технічне завдання (ТЗ), англійською — джерело істини
 docs/SPEC.uk.md             те саме українською
+docs/COMPANIONS.uk.md       ТЗ супутніх інструментів (UK); COMPANIONS.md — англійською
 docs/research/              аналізи схожих інструментів, нотатки про on-disk формат
 Cargo.toml                  cargo workspace
 crates/zvolrescue/          основний бінарник (scan / list / dump)
+crates/zvol*/               супутні бінарники, по одному crate (етапи 3–4)
+crates/zvol-common/         спільна CLI-обв'язка (лог evidence, коди виходу, POOLSPEC)
 crates/zvolrescue-io/       read-only доступ до пристроїв/образів (єдиний crate з `unsafe`)
 crates/zfs-ondisk/          чисті парсери on-disk структур (мітки, nvlist, uberblock-и, blkptr, dnode, ZAP)
 crates/zfs-read/            обхід пулу: реконструкція vdev, zio, dmu, dsl, витягання zvol, carving
