@@ -206,6 +206,11 @@ impl<'r, 'a> DnodeArray<'r, 'a> {
         self.meta.endian
     }
 
+    /// The meta-dnode as an object (the raw dnode array).
+    pub fn meta_object(&self) -> &ObjectReader<'r, 'a> {
+        &self.meta
+    }
+
     /// The pool reader behind this array.
     pub(crate) fn meta_reader(&self) -> &'r PoolReader<'a> {
         self.meta.reader

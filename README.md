@@ -12,7 +12,7 @@ hash-verified extraction logs.
 
 **Language:** Rust | **License:** BSD 3-Clause | **Status:** Phase 1 MVP (pre-alpha) — `scan`, `list` and `dump` work on stripe, mirror and RAIDZ1/2/3 pools (parity reconstruction of missing and silently corrupted columns), gang blocks, fletcher/sha256/sha512/blake3 checksums, lz4/zstd/gzip/lzjb/zle, with `--resume` and bulk `-r`; verified so far on synthetic fixtures only, not yet on a real pool. See the [specification](docs/SPEC.md).
 
-[Українська версія](README_UK.md) | [Technical specification (ТЗ)](docs/SPEC.md) | [ТЗ українською](docs/SPEC.uk.md) | [Companion tools spec](docs/COMPANIONS.md) | [Debugging on a test pool](docs/DEBUGGING.md)
+[Українська версія](README_UK.md) | [Technical specification (ТЗ)](docs/SPEC.md) | [ТЗ українською](docs/SPEC.uk.md) | [Companion tools spec](docs/COMPANIONS.md) | [Debugging on a test pool](docs/DEBUGGING.md) | [Real-world test matrix](docs/REALWORLD-TESTS.md)
 
 > **Lost a zvol just now?** Stop all writes to the pool *immediately*
 > (`zpool export`, or power the host down), then image the disks. ZFS

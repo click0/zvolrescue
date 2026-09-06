@@ -11,7 +11,7 @@
 
 **Мова:** Rust | **Ліцензія:** BSD 3-Clause | **Статус:** етап 1 MVP (pre-alpha) — `scan`, `list` і `dump` працюють на stripe, mirror і RAIDZ1/2/3 пулах (відновлення за парністю відсутніх і тихо зіпсованих колонок), gang-блоках, з checksum-ами fletcher/sha256/sha512/blake3, стисненням lz4/zstd/gzip/lzjb/zle, `--resume` і масовим `-r`; поки перевірено лише на синтетичних fixture, не на справжньому пулі. Див. [ТЗ](docs/SPEC.uk.md).
 
-[English version](README.md) | [ТЗ українською](docs/SPEC.uk.md) | [Technical specification](docs/SPEC.md) | [ТЗ супутніх інструментів](docs/COMPANIONS.uk.md) | [Налагодження на тестовому пулі](docs/DEBUGGING.uk.md)
+[English version](README.md) | [ТЗ українською](docs/SPEC.uk.md) | [Technical specification](docs/SPEC.md) | [ТЗ супутніх інструментів](docs/COMPANIONS.uk.md) | [Налагодження на тестовому пулі](docs/DEBUGGING.uk.md) | [Матриця тестів на реальних системах](docs/REALWORLD-TESTS.uk.md)
 
 > **Щойно втратили zvol?** *Негайно* припиніть будь-який запис у пул
 > (`zpool export` або вимкніть хост), потім зніміть образи дисків. ZFS
