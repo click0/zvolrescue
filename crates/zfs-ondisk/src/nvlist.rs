@@ -465,11 +465,40 @@ pub mod encode {
             }
             let encoded = (body.len() + 8) as i32;
             v.extend(encoded.to_be_bytes());
-            v.extend(encoded.to_be_bytes()); // decoded size: any non-zero value
+            v.extend(decoded_size(name, value).to_be_bytes());
             v.extend(body);
         }
         v.extend(0i32.to_be_bytes());
         v.extend(0i32.to_be_bytes());
+    }
+
+    /// `NV_ALIGN`: 8-byte rounding used for in-memory nvpair sizes.
+    fn align8(n: usize) -> usize {
+        n.div_ceil(8) * 8
+    }
+
+    /// The in-memory size libnvpair records as the pair's *decoded* size
+    /// (`NVP_SIZE_CALC`): a 16-byte `nvpair_t` header plus the NUL-terminated
+    /// name, aligned, plus the aligned value size from `i_get_value_size()`.
+    /// libnvpair rejects a packed list whose decoded sizes are wrong, so
+    /// fixtures must get this right for `zdb -l` to accept them.
+    fn decoded_size(name: &str, value: &Value) -> i32 {
+        const NVLIST_T: usize = 24;
+        let value_sz = match value {
+            Value::Boolean | Value::Unknown { .. } => 0,
+            Value::Bool(_) | Value::Int(_) => 4, // encoded as INT32 / BOOLEAN_VALUE
+            Value::Uint64(_) | Value::Int64(_) | Value::Double(_) => 8,
+            Value::String(s) => s.len() + 1,
+            Value::Bytes(b) => b.len(),
+            Value::IntArray(a) => a.len() * 4,
+            Value::Uint64Array(a) => a.len() * 8,
+            Value::Int64Array(a) => a.len() * 8,
+            Value::BoolArray(a) => a.len() * 4,
+            Value::StringArray(a) => a.len() * 8 + a.iter().map(|s| s.len() + 1).sum::<usize>(),
+            Value::List(_) => NVLIST_T,
+            Value::ListArray(a) => a.len() * 8 + a.len() * NVLIST_T,
+        };
+        (align8(16 + name.len() + 1) + align8(value_sz)) as i32
     }
 
     /// Pack `list` with the 4-byte XDR header, as `nvlist_pack` would.
@@ -535,6 +564,19 @@ mod tests {
         assert_eq!(tree.u64("ashift"), Some(12));
         assert_eq!(tree.list_array("children").unwrap().len(), 2);
         assert_eq!(parsed.u64_array("hole_array"), Some(&[1u64, 5][..]));
+    }
+
+    #[test]
+    fn decoded_sizes_match_libnvpair() {
+        // Observed in a real label: "version"=u64 -> 0x20, "name"="ztest" -> 0x20.
+        let packed = pack(&list(vec![
+            ("version", Value::Uint64(5000)),
+            ("name", Value::String("ztest".into())),
+        ]));
+        // header(4) + version(4) + flags(4), then pair: enc(4) dec(4)
+        assert_eq!(&packed[12..20], &[0, 0, 0, 0x24, 0, 0, 0, 0x20]);
+        let second = 12 + 0x24;
+        assert_eq!(&packed[second..second + 8], &[0, 0, 0, 0x24, 0, 0, 0, 0x20]);
     }
 
     #[test]
