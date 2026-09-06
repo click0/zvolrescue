@@ -11,7 +11,7 @@
 
 **Мова:** Rust | **Ліцензія:** BSD 3-Clause | **Статус:** етап 1 MVP (pre-alpha) — `scan`, `list` і `dump` працюють на stripe/mirror пулах із checksum-ами fletcher/sha256 та стисненням lz4/zstd/gzip/lzjb/zle; поки перевірено лише на синтетичних fixture, не на справжньому пулі. Див. [ТЗ](docs/SPEC.uk.md).
 
-[English version](README.md) | [ТЗ українською](docs/SPEC.uk.md) | [Technical specification](docs/SPEC.md) | [ТЗ супутніх інструментів](docs/COMPANIONS.uk.md)
+[English version](README.md) | [ТЗ українською](docs/SPEC.uk.md) | [Technical specification](docs/SPEC.md) | [ТЗ супутніх інструментів](docs/COMPANIONS.uk.md) | [Налагодження на тестовому пулі](docs/DEBUGGING.uk.md)
 
 > **Щойно втратили zvol?** *Негайно* припиніть будь-який запис у пул
 > (`zpool export` або вимкніть хост), потім зніміть образи дисків. ZFS
@@ -53,6 +53,7 @@ carving, звіти та файлове відновлення — *супутн
 * **Повне покриття on-disk можливостей** — реконструкція stripe/mirror/RAIDZ1-3/dRAID; `lz4`, `zstd`, `gzip`, `lzjb`, `zle`; `fletcher`, `sha256/512`, `skein`, `edonr`, `blake3`; embedded та gang-блоки; шифровані dataset-и з наданим ключем.
 * **Sparse-aware витягання** zvol у сирі образи з поблочною перевіркою checksum, продовженням та режимом `--strict`.
 * **Машиночитний вивід** — `-f json` усюди, append-only лог evidence, SHA-256 кожного входу й виходу.
+* **`--debug`** — траса кожного рішення читання з hex-дампами того, що пішло не так, для [звірки зі справжнім пулом](docs/DEBUGGING.uk.md).
 
 ## Запланований CLI
 
@@ -106,6 +107,7 @@ README.md, README_UK.md     цей файл (EN / UK)
 docs/SPEC.md                технічне завдання (ТЗ), англійською — джерело істини
 docs/SPEC.uk.md             те саме українською
 docs/COMPANIONS.uk.md       ТЗ супутніх інструментів (UK); COMPANIONS.md — англійською
+docs/DEBUGGING.uk.md        як звіряти з тестовим пулом у VM через zdb і --debug
 docs/research/              аналізи схожих інструментів, нотатки про on-disk формат
 Cargo.toml                  cargo workspace
 crates/zvolrescue/          основний бінарник (scan / list / dump)

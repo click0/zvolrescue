@@ -183,6 +183,8 @@ Global:
   -q, --quiet
       --evidence-log FILE     append JSON Lines evidence log
       --no-color
+      --debug                 trace every read decision to stderr (docs/DEBUGGING.md)
+      --debug-log FILE        the same trace to FILE
 
 Commands:
   scan  DEV...                          what is on these devices/images: labels, pool

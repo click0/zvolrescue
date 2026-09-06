@@ -12,7 +12,7 @@ hash-verified extraction logs.
 
 **Language:** Rust | **License:** BSD 3-Clause | **Status:** Phase 1 MVP (pre-alpha) — `scan`, `list` and `dump` work on stripe and mirror pools with fletcher/sha256 checksums and lz4/zstd/gzip/lzjb/zle; verified so far on synthetic fixtures only, not yet on a real pool. See the [specification](docs/SPEC.md).
 
-[Українська версія](README_UK.md) | [Technical specification (ТЗ)](docs/SPEC.md) | [ТЗ українською](docs/SPEC.uk.md) | [Companion tools spec](docs/COMPANIONS.md)
+[Українська версія](README_UK.md) | [Technical specification (ТЗ)](docs/SPEC.md) | [ТЗ українською](docs/SPEC.uk.md) | [Companion tools spec](docs/COMPANIONS.md) | [Debugging on a test pool](docs/DEBUGGING.md)
 
 > **Lost a zvol just now?** Stop all writes to the pool *immediately*
 > (`zpool export`, or power the host down), then image the disks. ZFS
@@ -52,6 +52,7 @@ the libraries — they never become modes of the main binary.
 * **Full on-disk feature coverage** — stripe/mirror/RAIDZ1-3/dRAID reconstruction; `lz4`, `zstd`, `gzip`, `lzjb`, `zle`; `fletcher`, `sha256/512`, `skein`, `edonr`, `blake3`; embedded and gang blocks; encrypted datasets with a supplied key.
 * **Sparse-aware extraction** of zvols to raw images, with per-block checksum verification, resume, and `--strict` mode.
 * **Machine-readable output** — `-f json` everywhere, append-only evidence log, SHA-256 of every input and output.
+* **`--debug`** — a trace of every read decision with hex dumps of what went wrong, for [verifying against a real pool](docs/DEBUGGING.md).
 
 ## Planned CLI
 
@@ -105,6 +106,7 @@ README.md, README_UK.md     this file (EN / UK)
 docs/SPEC.md                technical specification (ТЗ), English — the source of truth
 docs/SPEC.uk.md             the same in Ukrainian
 docs/COMPANIONS.md          companion tools specification (EN); COMPANIONS.uk.md in Ukrainian
+docs/DEBUGGING.md           how to verify against a test pool in a VM with zdb and --debug
 docs/research/              analyses of related tools, on-disk format notes
 Cargo.toml                  cargo workspace
 crates/zvolrescue/          the main binary (scan / list / dump)

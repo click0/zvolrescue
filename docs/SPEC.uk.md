@@ -186,6 +186,8 @@ zvolrescue [глобальні опції] <команда> [опції] [арг
   -q, --quiet
       --evidence-log FILE     дописувати JSON Lines лог evidence
       --no-color
+      --debug                 трасувати кожне рішення читання у stderr (docs/DEBUGGING.uk.md)
+      --debug-log FILE        та сама траса у FILE
 
 Команди:
   scan  DEV...                          що на цих пристроях/образах: мітки, ім'я/GUID
