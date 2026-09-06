@@ -6,7 +6,8 @@
 //! writes evidence, so nothing here is reachable from the binaries except
 //! through explicit fixture generation.
 
-use zfs_ondisk::blkptr::LABEL_START_SIZE;
+use zfs_ondisk::blkptr::{self, encode::Builder, LABEL_START_SIZE};
+use zfs_ondisk::checksum::fletcher4;
 use zfs_ondisk::checksum::seal_label;
 use zfs_ondisk::label::{
     label_offsets, LABEL_SIZE, UBERBLOCK_RING_OFFSET, VDEV_PHYS_OFFSET, VDEV_PHYS_SIZE,
@@ -14,6 +15,7 @@ use zfs_ondisk::label::{
 use zfs_ondisk::nvlist::encode::{list, pack};
 use zfs_ondisk::nvlist::{NvList, Value};
 use zfs_ondisk::uberblock::{MAGIC, MAX_UBERBLOCK_SHIFT, UBERBLOCK_SHIFT};
+use zfs_ondisk::Endian;
 
 /// A leaf member of the fixture pool.
 #[derive(Debug, Clone)]
@@ -216,4 +218,46 @@ impl Pool {
 pub fn write_at_dva(img: &mut [u8], offset: u64, bytes: &[u8]) {
     let start = (LABEL_START_SIZE + offset) as usize;
     img[start..start + bytes.len()].copy_from_slice(bytes);
+}
+
+/// A bump allocator that stores uncompressed, fletcher4-checksummed
+/// blocks on every member image of a stripe/mirror top-level vdev 0 and
+/// hands back the block pointers.
+#[derive(Debug)]
+pub struct Alloc {
+    next: u64,
+}
+
+impl Alloc {
+    /// Start allocating at DVA offset `start`.
+    pub fn new(start: u64) -> Alloc {
+        Alloc { next: start }
+    }
+
+    /// Store `data` (padded to 512) on all `members`; return a block pointer
+    /// with the given object type and level, born in `txg`.
+    pub fn put(
+        &mut self,
+        members: &mut [Vec<u8>],
+        data: &[u8],
+        otype: u8,
+        level: u8,
+        txg: u64,
+    ) -> [u8; blkptr::SIZE] {
+        let size = data.len().div_ceil(512) * 512;
+        let mut padded = data.to_vec();
+        padded.resize(size, 0);
+        let offset = self.next;
+        self.next += size as u64;
+        for m in members.iter_mut() {
+            write_at_dva(m, offset, &padded);
+        }
+        Builder::new()
+            .dva(0, 0, offset, size as u64, false)
+            .sizes(size as u64, size as u64)
+            .props(2, 7, otype, level)
+            .births(0, txg, 1)
+            .cksum(fletcher4(&padded, Endian::Little))
+            .bytes(Endian::Little)
+    }
 }
