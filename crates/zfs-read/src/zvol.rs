@@ -92,6 +92,21 @@ pub fn extract(
     volsize: u64,
     sink: &mut dyn BlockSink,
     on_error: OnError,
+    progress: impl FnMut(u64, u64),
+) -> Result<Report, ReadError> {
+    extract_from(obj, volsize, sink, on_error, 0, Sha256::new(), progress)
+}
+
+/// Like [`extract`], resuming at block `start_block` with `hasher` already
+/// fed the first `start_block * blocksize` bytes of the image (read back
+/// from the partial output). Counters cover only the blocks visited now.
+pub fn extract_from(
+    obj: &ObjectReader<'_, '_>,
+    volsize: u64,
+    sink: &mut dyn BlockSink,
+    on_error: OnError,
+    start_block: u64,
+    mut hasher: Sha256,
     mut progress: impl FnMut(u64, u64),
 ) -> Result<Report, ReadError> {
     let bs = obj.dnode().datablksz();
@@ -115,15 +130,14 @@ pub fn extract(
         aborted: false,
         sha256: String::new(),
     };
-    let mut hasher = Sha256::new();
     let zeros = vec![0u8; bs as usize];
-    let mut hashed_to = 0u64;
+    let mut hashed_to = (start_block * bs).min(volsize);
     trace!(
         "zvol",
-        "extract: volsize {volsize} blocksize {bs} maxblkid {} -> {blocks_total} blocks",
+        "extract: volsize {volsize} blocksize {bs} maxblkid {} -> {blocks_total} blocks, starting at {start_block}",
         obj.dnode().maxblkid
     );
-    for blkid in 0..blocks_total {
+    for blkid in start_block..blocks_total {
         let offset = blkid * bs;
         let take = (volsize - offset).min(bs) as usize;
         let result = match obj.locate(blkid) {
@@ -304,5 +318,31 @@ mod tests {
         assert!(r.aborted);
         assert_eq!(r.blocks_read, 0);
         assert!(sink.data.is_empty());
+    }
+
+    #[test]
+    fn resuming_mid_way_yields_the_same_image_and_hash() {
+        let (s, a, ub, _) = build();
+        let reader = PoolReader::new(&a, vec![Some(&s[0] as &dyn BlockSource)]);
+        let mos = open_mos(&reader, &ub).unwrap();
+        let tree = walk(&mos, "tank").unwrap();
+        let ds = tree.get("tank/vm/disk0").unwrap();
+        let (obj, _) = open_volume(&reader, ds).unwrap();
+        let volsize = ds.volsize.unwrap();
+        let mut full = MemSink::default();
+        let whole = extract(&obj, volsize, &mut full, OnError::Zero, |_, _| {}).unwrap();
+        // Simulate a run that stopped after 2 blocks: keep its prefix,
+        // hash it back, continue from block 2.
+        let mut partial = MemSink {
+            data: full.data[..2 * 8192].to_vec(),
+            ..Default::default()
+        };
+        let mut h = Sha256::new();
+        h.update(&partial.data);
+        let rest =
+            extract_from(&obj, volsize, &mut partial, OnError::Zero, 2, h, |_, _| {}).unwrap();
+        assert_eq!(partial.data, full.data);
+        assert_eq!(rest.sha256, whole.sha256);
+        assert_eq!((rest.blocks_read, rest.blocks_holes), (1, 1)); // blocks 2 and 3 only
     }
 }

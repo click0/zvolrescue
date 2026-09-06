@@ -115,7 +115,7 @@ enum Cmd {
         dataset: String,
         #[command(flatten)]
         pool: PoolSpec,
-        /// Output image file. Refused if it resolves onto an input device.
+        /// Output image file (a directory with -r). Refused if it resolves onto an input device.
         #[arg(short, long, value_name = "OUT.img")]
         output: PathBuf,
         /// Transaction group to read (default: newest that still has DATASET).
@@ -127,9 +127,14 @@ enum Cmd {
         /// Encryption key: raw:FILE | hex:HEX | passphrase:FILE | prompt.
         #[arg(long, value_name = "KEYSPEC")]
         key: Option<String>,
-        /// Continue an interrupted extraction of the same dataset and TXG.
+        /// Continue an interrupted extraction of the same dataset and TXG
+        /// (state is kept in OUT.img.resume.json while a run is in progress).
         #[arg(long)]
         resume: bool,
+        /// Extract every volume under DATASET into the directory OUT, one
+        /// image per volume plus manifest.json.
+        #[arg(short, long)]
+        recursive: bool,
     },
 }
 
@@ -205,6 +210,7 @@ fn main() -> ExitCode {
             strict,
             key,
             resume,
+            recursive,
         } => dump::run(
             &cli.global,
             &pool,
@@ -215,6 +221,7 @@ fn main() -> ExitCode {
                 strict,
                 key,
                 resume,
+                recursive,
             },
         ),
     };

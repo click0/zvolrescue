@@ -43,6 +43,17 @@ jobs:
           cmp /tmp/disk0.img /tmp/healed.img
           if ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/bad.img -o /tmp/partial.img --strict; then echo "strict must fail"; exit 1; else test $? = 4; fi
           if ./target/release/zvolrescue dump tank/vm/disk0 /tmp/fx/member0.img -o /tmp/fx/member0.img; then echo "must refuse"; exit 1; else test $? = 5; fi
+      - name: Bulk extraction and resume
+        run: |
+          ./target/release/zvolrescue -q dump -r tank /tmp/fx/member0.img /tmp/fx/member1.img -o /tmp/bulk --txg 4816229
+          python3 -c 'import json; m=json.load(open("/tmp/bulk/manifest.json")); assert [v["dataset"] for v in m["volumes"]] == ["tank/vm/disk0"], m; assert m["volumes"][0]["sha256"] == "d6d58af862ec2761bf43158f7ee2b2b0f4628fa6ca8095544493f9d698d7b80d"'
+          cmp /tmp/disk0.img /tmp/bulk/tank_vm_disk0.img
+          # Resume: pretend a run stopped after block 2 (16 KiB written), continue, same hash.
+          head -c 16384 /tmp/disk0.img > /tmp/resume.img
+          printf '{"version":1,"dataset":"tank/vm/disk0","dataset_guid":"0x00000000000000a3","txg":4816229,"volsize":33554432,"blocksize":8192,"blocks_done":2}' > /tmp/resume.img.resume.json
+          ./target/release/zvolrescue -f json dump tank/vm/disk0 /tmp/fx/member0.img /tmp/fx/member1.img -o /tmp/resume.img --resume | python3 -c 'import json,sys; d=json.load(sys.stdin)["volumes"][0]; assert d["resumed_from_block"] == 2, d; assert d["blocks_read"] == 1, d; assert d["sha256"] == "d6d58af862ec2761bf43158f7ee2b2b0f4628fa6ca8095544493f9d698d7b80d"'
+          cmp /tmp/disk0.img /tmp/resume.img
+          test ! -e /tmp/resume.img.resume.json
       - name: End-to-end on a raidz2 fixture (missing and corrupted members)
         run: |
           cargo run -p zfs-read --example mkfixture -- /tmp/rz raidz2 12

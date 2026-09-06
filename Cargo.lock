@@ -468,6 +468,7 @@ dependencies = [
  "clap",
  "serde",
  "serde_json",
+ "sha2",
  "zfs-ondisk",
  "zfs-read",
  "zvolrescue-io",
