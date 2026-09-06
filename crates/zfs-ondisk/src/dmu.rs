@@ -519,18 +519,19 @@ mod tests {
     #[test]
     fn dnode_roundtrip_with_spill() {
         let bonus: Vec<u8> = (0..100u8).collect();
-        let raw = dnode(
-            ot::ZVOL,
-            17,
-            2,
-            8192,
-            1000,
-            &[bp(0x1000)],
-            ot::ZVOL_PROP,
-            &bonus,
-            Some(&bp(0x2000)),
-            0,
-        );
+        let raw = DnodeSpec {
+            object_type: ot::ZVOL,
+            indblkshift: 17,
+            nlevels: 2,
+            datablksz: 8192,
+            maxblkid: 1000,
+            blkptrs: vec![bp(0x1000)],
+            bonus_type: ot::ZVOL_PROP,
+            bonus: bonus.clone(),
+            spill: Some(bp(0x2000)),
+            extra_slots: 0,
+        }
+        .build();
         let d = DnodePhys::parse(&raw, Endian::Little).unwrap();
         assert_eq!(d.object_type, ot::ZVOL);
         assert_eq!(d.type_name(), "zvol object");
@@ -548,19 +549,16 @@ mod tests {
 
     #[test]
     fn large_dnode_and_three_pointers() {
-        let bonus = vec![7u8; 700];
-        let raw = dnode(
-            ot::DSL_DATASET,
-            14,
-            1,
-            512,
-            0,
-            &[bp(1), bp(2), bp(3)],
-            0,
-            &bonus,
-            None,
-            1,
-        );
+        // 64 core + 3 * 128 pointers + 500 bonus = 948 <= 1024 (two slots).
+        let raw = DnodeSpec {
+            object_type: ot::DSL_DATASET,
+            indblkshift: 14,
+            blkptrs: vec![bp(1), bp(2), bp(3)],
+            bonus: vec![7u8; 500],
+            extra_slots: 1,
+            ..DnodeSpec::default()
+        }
+        .build();
         assert_eq!(raw.len(), 1024);
         let d = DnodePhys::parse(&raw, Endian::Little).unwrap();
         assert_eq!(d.blkptr.len(), 3);
@@ -604,18 +602,15 @@ mod tests {
 
     #[test]
     fn objset_roundtrip() {
-        let meta = dnode(
-            ot::DNODE,
-            17,
-            3,
-            16384,
-            5,
-            &[bp(0x100), bp(0x200), bp(0x300)],
-            0,
-            &[],
-            None,
-            0,
-        );
+        let meta = DnodeSpec {
+            object_type: ot::DNODE,
+            nlevels: 3,
+            datablksz: 16384,
+            maxblkid: 5,
+            blkptrs: vec![bp(0x100), bp(0x200), bp(0x300)],
+            ..DnodeSpec::default()
+        }
+        .build();
         let raw = objset(&meta, 3);
         let os = ObjsetPhys::parse(&raw, Endian::Little).unwrap();
         assert_eq!(os.os_type, ObjsetType::Zvol);
