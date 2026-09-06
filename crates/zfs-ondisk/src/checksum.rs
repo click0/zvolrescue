@@ -195,6 +195,29 @@ pub fn sha512_256(data: &[u8]) -> [u64; 4] {
     digest_words(&Sha512_256::digest(data))
 }
 
+/// Pool checksum salt (`DMU_POOL_CHECKSUM_SALT`), 32 bytes, used as the key
+/// of the salted algorithms (blake3, skein, edonr).
+pub type Salt = [u8; 32];
+
+/// Checksum words as OpenZFS stores them for algorithms that write the
+/// digest straight into `zio_cksum_t` memory: native byte order of the
+/// writer (unlike sha256/sha512, which store big-endian words).
+fn native_words(digest: &[u8], endian: Endian) -> [u64; 4] {
+    let mut out = [0u64; 4];
+    for (i, w) in out.iter_mut().enumerate() {
+        *w = endian.u64_at(digest, i * 8).expect("32-byte digest");
+    }
+    out
+}
+
+/// `blake3`: keyed BLAKE3 with the pool salt as the key, 32-byte digest in
+/// the writer's native word order.
+pub fn blake3_salted(data: &[u8], salt: &Salt, endian: Endian) -> [u64; 4] {
+    let mut h = blake3::Hasher::new_keyed(salt);
+    h.update(data);
+    native_words(h.finalize().as_bytes(), endian)
+}
+
 /// Result of checking a data block against its block pointer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verify {
@@ -211,20 +234,43 @@ pub enum Verify {
 /// Compute the checksum `kind` over `data` written in `endian` order, or
 /// `None` when the algorithm is not implemented.
 pub fn compute(kind: Checksum, data: &[u8], endian: Endian) -> Option<[u64; 4]> {
+    compute_salted(kind, data, endian, None)
+}
+
+/// Like [`compute`], with the pool salt for the salted algorithms; those
+/// return `None` when no salt is available.
+pub fn compute_salted(
+    kind: Checksum,
+    data: &[u8],
+    endian: Endian,
+    salt: Option<&Salt>,
+) -> Option<[u64; 4]> {
     match kind {
         Checksum::Fletcher2 => Some(fletcher2(data, endian)),
         Checksum::Fletcher4 => Some(fletcher4(data, endian)),
         Checksum::Sha256 => Some(sha256(data)),
         Checksum::Sha512 => Some(sha512_256(data)),
+        Checksum::Blake3 => salt.map(|s| blake3_salted(data, s, endian)),
         _ => None,
     }
 }
 
 /// Verify `data` against the checksum words stored in its block pointer.
 pub fn verify(kind: Checksum, data: &[u8], endian: Endian, expected: &[u64; 4]) -> Verify {
+    verify_salted(kind, data, endian, expected, None)
+}
+
+/// Like [`verify`], with the pool salt for the salted algorithms.
+pub fn verify_salted(
+    kind: Checksum,
+    data: &[u8],
+    endian: Endian,
+    expected: &[u64; 4],
+    salt: Option<&Salt>,
+) -> Verify {
     match kind {
         Checksum::Off => Verify::NotChecked,
-        _ => match compute(kind, data, endian) {
+        _ => match compute_salted(kind, data, endian, salt) {
             Some(c) if c == *expected => Verify::Ok,
             Some(_) => Verify::Mismatch,
             None => Verify::Unsupported,
@@ -270,6 +316,36 @@ mod data_tests {
         let abc = sha512_256(b"abc");
         assert_eq!(abc[0], 0x5304_8e26_8194_1ef9);
         assert_eq!(abc[3], 0xe0e2_f131_07e7_af23);
+    }
+
+    #[test]
+    fn blake3_is_keyed_and_native_order() {
+        let salt: Salt = [7u8; 32];
+        let data = b"salted block";
+        let words = blake3_salted(data, &salt, Endian::Little);
+        let mut h = blake3::Hasher::new_keyed(&salt);
+        h.update(data);
+        let digest = *h.finalize().as_bytes();
+        assert_eq!(
+            words[0],
+            u64::from_le_bytes(digest[..8].try_into().unwrap())
+        );
+        assert_ne!(words, blake3_salted(data, &[8u8; 32], Endian::Little));
+        assert_eq!(
+            verify_salted(Checksum::Blake3, data, Endian::Little, &words, Some(&salt)),
+            Verify::Ok
+        );
+        assert_eq!(
+            verify_salted(Checksum::Blake3, data, Endian::Little, &words, None),
+            Verify::Unsupported
+        );
+        assert_eq!(
+            verify(Checksum::Blake3, data, Endian::Little, &words),
+            Verify::Unsupported
+        );
+        // A big-endian writer stores the same digest as big-endian words.
+        let be = blake3_salted(data, &salt, Endian::Big);
+        assert_eq!(be[0], u64::from_be_bytes(digest[..8].try_into().unwrap()));
     }
 
     #[test]

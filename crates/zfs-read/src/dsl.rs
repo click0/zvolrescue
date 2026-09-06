@@ -21,6 +21,8 @@ use zvolrescue_io::trace;
 
 /// MOS object number of the object directory.
 pub const OBJECT_DIRECTORY: u64 = 1;
+/// Object-directory entry holding the pool checksum salt (`DMU_POOL_CHECKSUM_SALT`).
+pub const CHECKSUM_SALT: &str = "org.illumos:checksum_salt";
 /// Object number of the data object inside a zvol objset (`ZVOL_OBJ`).
 pub const ZVOL_OBJ: u64 = 1;
 /// Object number of the properties ZAP inside a zvol objset (`ZVOL_ZAP_OBJ`).
@@ -118,7 +120,35 @@ pub fn open_mos<'r, 'a>(
             os.os_type.name()
         )));
     }
-    Ok(DnodeArray::new(reader, os.meta_dnode, rootbp.endian))
+    let mos = DnodeArray::new(reader, os.meta_dnode, rootbp.endian);
+    // The salt lives in the object directory, which is never itself
+    // salted-checksummed; load it before anything else is read.
+    match mos.object(OBJECT_DIRECTORY).and_then(|o| read_zap(&o)) {
+        Ok(entries) => {
+            let salt = entries
+                .iter()
+                .find(|e| e.name == CHECKSUM_SALT)
+                .and_then(|e| match &e.value {
+                    Value::Bytes(b) if b.len() == 32 => {
+                        let mut s = [0u8; 32];
+                        s.copy_from_slice(b);
+                        Some(s)
+                    }
+                    _ => None,
+                });
+            trace!(
+                "dsl",
+                "checksum salt: {}",
+                if salt.is_some() { "present" } else { "absent" }
+            );
+            reader.set_salt(salt);
+        }
+        Err(e) => trace!(
+            "dsl",
+            "object directory unreadable while looking for the checksum salt: {e}"
+        ),
+    }
+    Ok(mos)
 }
 
 /// Read the object directory of the MOS as `(name, object)` pairs.
@@ -519,5 +549,58 @@ mod tests {
         assert!(older.get("tank/vm/disk0").is_some());
         assert!(older.get("tank/vm/disk0@before").is_some());
         assert_eq!(at(100).datasets.len(), 4);
+    }
+
+    #[test]
+    fn salted_pool_reads_blake3_volume_after_salt_lookup() {
+        use crate::zvol::{extract, open_volume, OnError};
+        use zvolrescue_io::MemSink;
+        let mut pool = Pool::mirror("tank", 0x5a17, 12).txgs(&[(100, 1)]);
+        let mut members = vec![vec![0u8; SIZE as usize]];
+        let mut a = Alloc::new(0x20_0000);
+        a.salt = Some([0x42u8; 32]);
+        build_sample_mos(&mut pool, &mut members, &mut a);
+        pool.write_labels(0, &mut members[0]);
+        let src = MemSource::new(members.remove(0));
+        let scans = vec![scan_device(&src).ok()];
+        let ub = scans[0].as_ref().unwrap().labels[0]
+            .best()
+            .unwrap()
+            .ub
+            .clone();
+        let assembly = assemble(&scans).into_iter().next().unwrap();
+        let reader = PoolReader::new(&assembly, vec![Some(&src as &dyn BlockSource)]);
+        assert!(reader.salt().is_none());
+        let mos = open_mos(&reader, &ub).unwrap();
+        assert_eq!(reader.salt(), Some([0x42u8; 32]));
+        let tree = walk(&mos, "tank").unwrap();
+        let ds = tree.get("tank/vm/disk0").unwrap();
+        let (obj, _) = open_volume(&reader, ds).unwrap();
+        let mut sink = MemSink::default();
+        let r = extract(
+            &obj,
+            ds.volsize.unwrap(),
+            &mut sink,
+            OnError::Abort,
+            |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(
+            r.sha256,
+            "d6d58af862ec2761bf43158f7ee2b2b0f4628fa6ca8095544493f9d698d7b80d"
+        );
+        // Without the salt the same blocks cannot be verified.
+        reader.set_salt(None);
+        let mut sink = MemSink::default();
+        let r = extract(
+            &obj,
+            ds.volsize.unwrap(),
+            &mut sink,
+            OnError::Abort,
+            |_, _| {},
+        )
+        .unwrap();
+        assert!(r.aborted);
+        assert!(r.bad[0].reason.contains("checksum algorithm not supported"));
     }
 }

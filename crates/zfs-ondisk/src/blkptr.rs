@@ -156,6 +156,25 @@ impl Checksum {
         }
     }
 
+    /// The `ZIO_CHECKSUM_*` code (for fixtures and reports).
+    pub fn code(&self) -> u8 {
+        match self {
+            Checksum::Off => 2,
+            Checksum::Label => 3,
+            Checksum::GangHeader => 4,
+            Checksum::Zilog => 5,
+            Checksum::Fletcher2 => 6,
+            Checksum::Fletcher4 => 7,
+            Checksum::Sha256 => 8,
+            Checksum::NoParity => 10,
+            Checksum::Sha512 => 11,
+            Checksum::Skein => 12,
+            Checksum::Edonr => 13,
+            Checksum::Blake3 => 14,
+            Checksum::Unknown(c) => *c,
+        }
+    }
+
     /// Name as `zfs get checksum` would print it.
     pub fn name(&self) -> String {
         match self {

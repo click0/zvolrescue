@@ -8,8 +8,10 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use std::cell::Cell;
 use zfs_ondisk::blkptr::{self, BlkPtr, Dva, LABEL_START_SIZE};
-use zfs_ondisk::checksum::{verify, Verify};
+
+use zfs_ondisk::checksum::{verify_salted, Salt, Verify};
 use zfs_ondisk::compress::{decompress, DecompressError};
 use zfs_ondisk::raidz;
 use zvolrescue_io::trace::hexdump;
@@ -36,6 +38,8 @@ struct Top {
 pub struct PoolReader<'a> {
     devices: Vec<Option<&'a dyn BlockSource>>,
     tops: BTreeMap<u32, Top>,
+    /// Pool checksum salt once the MOS object directory has been read.
+    salt: Cell<Option<Salt>>,
 }
 
 /// Why a block could not be produced.
@@ -126,7 +130,28 @@ impl<'a> PoolReader<'a> {
                 )
             })
             .collect();
-        PoolReader { devices, tops }
+        PoolReader {
+            devices,
+            tops,
+            salt: Cell::new(None),
+        }
+    }
+
+    /// Record the pool checksum salt (from `org.illumos:checksum_salt` in
+    /// the MOS object directory); needed by blake3/skein/edonr blocks.
+    pub fn set_salt(&self, salt: Option<Salt>) {
+        self.salt.set(salt);
+    }
+
+    /// The pool checksum salt, if known.
+    pub fn salt(&self) -> Option<Salt> {
+        self.salt.get()
+    }
+
+    /// Verify `raw` against `bp` with the pool salt when one is known.
+    fn verify(&self, bp: &BlkPtr, raw: &[u8]) -> Verify {
+        let salt = self.salt.get();
+        verify_salted(bp.checksum, raw, bp.endian, &bp.cksum, salt.as_ref())
     }
 
     /// Read the raw `psize` bytes behind one DVA, trying each present
@@ -321,7 +346,7 @@ impl<'a> PoolReader<'a> {
             };
             for (_, raw) in candidates {
                 match raw {
-                    Ok(raw) => match verify(bp.checksum, &raw, bp.endian, &bp.cksum) {
+                    Ok(raw) => match self.verify(bp, &raw) {
                         Verify::Ok | Verify::NotChecked => return Ok(raw),
                         Verify::Mismatch => last = ReadError::AllCopiesBad,
                         Verify::Unsupported => last = ReadError::ChecksumUnsupported,
@@ -446,7 +471,7 @@ impl<'a> PoolReader<'a> {
             );
         }
         let raw = assemble(&data);
-        let v = verify(bp.checksum, &raw, bp.endian, &bp.cksum);
+        let v = self.verify(bp, &raw);
         trace!(
             "raidz",
             "    checksum after direct read{}: {v:?}",
@@ -504,7 +529,7 @@ impl<'a> PoolReader<'a> {
                     continue;
                 }
                 let raw = assemble(&work);
-                let v = verify(bp.checksum, &raw, bp.endian, &bp.cksum);
+                let v = self.verify(bp, &raw);
                 if v != Verify::Mismatch {
                     trace!(
                         "raidz",
@@ -584,7 +609,7 @@ impl<'a> PoolReader<'a> {
             };
             if dva.gang {
                 let result = self.read_gang(top, dva, bp, 0).and_then(|raw| {
-                    let v = verify(bp.checksum, &raw, bp.endian, &bp.cksum);
+                    let v = self.verify(bp, &raw);
                     match v {
                         Verify::Ok | Verify::NotChecked => Ok((raw, v)),
                         Verify::Mismatch => Err(ReadError::AllCopiesBad),
@@ -667,7 +692,7 @@ impl<'a> PoolReader<'a> {
                         });
                     }
                     Ok((raw, device)) => {
-                        let v = verify(bp.checksum, &raw, bp.endian, &bp.cksum);
+                        let v = self.verify(bp, &raw);
                         trace!(
                             "zio",
                             "  dva {i} device #{device} @ {:#x}: checksum {v:?}",

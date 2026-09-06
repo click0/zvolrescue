@@ -13,6 +13,7 @@ sha2 = { workspace = true }
 lz4_flex = { workspace = true }
 flate2 = { workspace = true }
 ruzstd = { workspace = true }
+blake3 = { workspace = true }
 
 [lints]
 workspace = true

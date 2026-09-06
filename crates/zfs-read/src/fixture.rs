@@ -7,7 +7,6 @@
 //! through explicit fixture generation.
 
 use zfs_ondisk::blkptr::{self, encode::Builder, LABEL_START_SIZE};
-use zfs_ondisk::checksum::fletcher4;
 use zfs_ondisk::checksum::seal_label;
 use zfs_ondisk::dmu::encode::{objset, DnodeSpec};
 use zfs_ondisk::dmu::{ot, DNODE_SIZE};
@@ -269,15 +268,17 @@ pub enum Layout {
 pub struct Alloc {
     next: u64,
     layout: Layout,
+    /// Checksum algorithm recorded in the pointers written from now on.
+    pub checksum: zfs_ondisk::blkptr::Checksum,
+    /// Pool salt for salted algorithms; also written into the sample
+    /// object directory when set.
+    pub salt: Option<zfs_ondisk::checksum::Salt>,
 }
 
 impl Alloc {
     /// Start allocating at DVA offset `start` on a mirror.
     pub fn new(start: u64) -> Alloc {
-        Alloc {
-            next: start,
-            layout: Layout::Mirror,
-        }
+        Alloc::with_layout(start, Layout::Mirror)
     }
 
     /// Start allocating at DVA offset `start` with `layout`.
@@ -285,7 +286,20 @@ impl Alloc {
         Alloc {
             next: start,
             layout,
+            checksum: zfs_ondisk::blkptr::Checksum::Fletcher4,
+            salt: None,
         }
+    }
+
+    /// Checksum words for `padded` under the current algorithm and salt.
+    fn cksum(&self, padded: &[u8]) -> [u64; 4] {
+        zfs_ondisk::checksum::compute_salted(
+            self.checksum,
+            padded,
+            Endian::Little,
+            self.salt.as_ref(),
+        )
+        .expect("fixture checksum algorithm implemented")
     }
 
     /// Store `data` on `members`; return a block pointer with the given
@@ -386,9 +400,9 @@ impl Alloc {
         Builder::new()
             .dva(0, 0, offset, blkptr::GANG_HEADER_SIZE as u64, true)
             .sizes(size as u64, size as u64)
-            .props(2, 7, otype, 0)
+            .props(2, self.checksum.code(), otype, 0)
             .births(0, txg, 1)
-            .cksum(fletcher4(&padded, Endian::Little))
+            .cksum(self.cksum(&padded))
             .bytes(Endian::Little)
     }
 
@@ -406,9 +420,9 @@ impl Alloc {
         Builder::new()
             .dva(0, 0, offset, asize, false)
             .sizes(size, size)
-            .props(2, 7, otype, level)
+            .props(2, self.checksum.code(), otype, level)
             .births(0, txg, 1)
-            .cksum(fletcher4(padded, Endian::Little))
+            .cksum(self.cksum(padded))
             .bytes(Endian::Little)
     }
 }
@@ -490,8 +504,15 @@ pub fn build_sample_mos_variant(
             "sample layout changed: update SAMPLE_ZVOL_BLOCK0_OFFSET"
         );
     }
+    // With a salt, the volume's own blocks use blake3 like a dataset with
+    // checksum=blake3 would; MOS metadata stays fletcher4.
+    let plain = a.checksum;
+    if a.salt.is_some() {
+        a.checksum = zfs_ondisk::blkptr::Checksum::Blake3;
+    }
     let blk0 = a.put(m, &zvol_pattern(0), ot::ZVOL, 0, 100);
     let blk2 = a.put(m, &zvol_pattern(2), ot::ZVOL, 0, 100);
+    a.checksum = plain;
     let data_obj = DnodeSpec {
         object_type: ot::ZVOL,
         datablksz: 8192,
@@ -564,7 +585,33 @@ pub fn build_sample_mos_variant(
         }
         .build()
     };
-    put(1, zap_obj(a, m, &[("root_dataset", 2), ("config", 11)]));
+    if let Some(salt) = a.salt {
+        // A byte-array entry forces a fatzap: header block + one leaf.
+        let hdr = zfs_ondisk::zap::encode::fat_header(4096, 1, 3);
+        let lf = zfs_ondisk::zap::encode::leaf(
+            4096,
+            &[
+                ("root_dataset", 8, 2u64.to_be_bytes().to_vec()),
+                ("config", 8, 11u64.to_be_bytes().to_vec()),
+                (crate::dsl::CHECKSUM_SALT, 1, salt.to_vec()),
+            ],
+        );
+        let b0 = a.put(m, &hdr, ot::OBJECT_DIRECTORY, 0, 100);
+        let b1 = a.put(m, &lf, ot::OBJECT_DIRECTORY, 0, 100);
+        put(
+            1,
+            DnodeSpec {
+                object_type: ot::OBJECT_DIRECTORY,
+                datablksz: 4096,
+                maxblkid: 1,
+                blkptrs: vec![b0, b1],
+                ..DnodeSpec::default()
+            }
+            .build(),
+        );
+    } else {
+        put(1, zap_obj(a, m, &[("root_dataset", 2), ("config", 11)]));
+    }
     put(2, dir_obj(3, 4, 0));
     put(3, ds_obj(&dataset_phys(2, 0, &os_fs, 4, 0xa1, 0)));
     put(4, zap_obj(a, m, &[("vm", 5), ("$MOS", 9)]));
