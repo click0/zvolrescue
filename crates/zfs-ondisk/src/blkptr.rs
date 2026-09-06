@@ -333,6 +333,26 @@ impl BlkPtr {
     }
 }
 
+/// Size of a gang block header (`SPA_GANGBLOCKSIZE`).
+pub const GANG_HEADER_SIZE: usize = 512;
+/// Block pointers in a gang header (`SPA_GBH_NBLKPTRS`).
+pub const GANG_NBLKPTRS: usize = 3;
+
+/// Parse the child pointers of a gang block header (`zio_gbh_phys_t`):
+/// three block pointers, filler, and an embedded checksum tail that the
+/// caller verifies with `checksum::verify_gang_header`.
+pub fn parse_gang_header(buf: &[u8], endian: Endian) -> Result<Vec<BlkPtr>, ParseError> {
+    if buf.len() < GANG_HEADER_SIZE {
+        return Err(ParseError::Truncated {
+            needed: GANG_HEADER_SIZE,
+            got: buf.len(),
+        });
+    }
+    (0..GANG_NBLKPTRS)
+        .map(|i| BlkPtr::parse(&buf[i * SIZE..(i + 1) * SIZE], endian))
+        .collect()
+}
+
 /// Logical birth TXG of the block, or `None` if the slice is too short.
 pub fn logical_birth(bp: &[u8], endian: Endian) -> Option<u64> {
     if bp.len() < SIZE {

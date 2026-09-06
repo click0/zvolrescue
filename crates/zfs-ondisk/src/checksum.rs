@@ -40,6 +40,18 @@ impl ChecksumStatus {
 /// Verify the embedded checksum of `buf`, which was stored at byte offset
 /// `vdev_offset` on its vdev.
 pub fn verify_label(buf: &[u8], vdev_offset: u64) -> ChecksumStatus {
+    verify_embedded(buf, [vdev_offset, 0, 0, 0])
+}
+
+/// Verify the embedded checksum of a gang block header: the verifier is
+/// the gang pointer's first DVA (vdev, byte offset) and its birth TXG
+/// (`zio_checksum_gang_verifier`).
+pub fn verify_gang_header(buf: &[u8], vdev: u64, offset: u64, birth: u64) -> ChecksumStatus {
+    verify_embedded(buf, [vdev, offset, birth, 0])
+}
+
+/// Verify an embedded SHA-256 checksum with an explicit verifier.
+pub fn verify_embedded(buf: &[u8], verifier: [u64; 4]) -> ChecksumStatus {
     if buf.len() < ECK_SIZE {
         return ChecksumStatus::Missing;
     }
@@ -56,7 +68,6 @@ pub fn verify_label(buf: &[u8], vdev_offset: u64) -> ChecksumStatus {
     let stored = [word(0), word(1), word(2), word(3)];
 
     let mut tmp = buf.to_vec();
-    let verifier = [vdev_offset, 0, 0, 0];
     for (i, v) in verifier.iter().enumerate() {
         let bytes = match endian {
             Endian::Little => v.to_le_bytes(),
@@ -80,10 +91,14 @@ pub fn verify_label(buf: &[u8], vdev_offset: u64) -> ChecksumStatus {
 ///
 /// Only for building test fixtures; the tool itself never writes evidence.
 pub fn seal_label(buf: &mut [u8], vdev_offset: u64) {
+    seal_embedded(buf, [vdev_offset, 0, 0, 0]);
+}
+
+/// Write a valid embedded checksum with an explicit verifier (fixtures).
+pub fn seal_embedded(buf: &mut [u8], verifier: [u64; 4]) {
     assert!(buf.len() >= ECK_SIZE);
     let eck = buf.len() - ECK_SIZE;
     buf[eck..eck + 8].copy_from_slice(&ZEC_MAGIC.to_le_bytes());
-    let verifier = [vdev_offset, 0, 0, 0];
     for (i, v) in verifier.iter().enumerate() {
         buf[eck + 8 + i * 8..eck + 16 + i * 8].copy_from_slice(&v.to_le_bytes());
     }

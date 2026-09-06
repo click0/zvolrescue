@@ -347,6 +347,51 @@ impl Alloc {
         }
     }
 
+    /// Store `data` as a gang block on a mirror layout: the pieces become
+    /// ordinary blocks, and a sealed 512-byte gang header at the returned
+    /// pointer's DVA (gang bit set) lists them. `pieces` gives the byte
+    /// length of each of up to three children (they must sum to
+    /// `data.len()`).
+    pub fn put_gang(
+        &mut self,
+        members: &mut [Vec<u8>],
+        data: &[u8],
+        pieces: &[usize],
+        otype: u8,
+        txg: u64,
+    ) -> [u8; blkptr::SIZE] {
+        assert_eq!(self.layout, Layout::Mirror, "gang fixtures are mirror-only");
+        assert!(
+            pieces.len() <= blkptr::GANG_NBLKPTRS && pieces.iter().sum::<usize>() == data.len()
+        );
+        let mut children = Vec::new();
+        let mut at = 0usize;
+        for &n in pieces {
+            children.push(self.put(members, &data[at..at + n], otype, 0, txg));
+            at += n;
+        }
+        let offset = self.next;
+        self.next += blkptr::GANG_HEADER_SIZE as u64;
+        let mut header = vec![0u8; blkptr::GANG_HEADER_SIZE];
+        for (i, c) in children.iter().enumerate() {
+            header[i * blkptr::SIZE..(i + 1) * blkptr::SIZE].copy_from_slice(c);
+        }
+        zfs_ondisk::checksum::seal_embedded(&mut header, [0, offset, txg, 0]);
+        for m in members.iter_mut() {
+            write_at_dva(m, offset, &header);
+        }
+        let size = data.len().div_ceil(512) * 512;
+        let mut padded = data.to_vec();
+        padded.resize(size, 0);
+        Builder::new()
+            .dva(0, 0, offset, blkptr::GANG_HEADER_SIZE as u64, true)
+            .sizes(size as u64, size as u64)
+            .props(2, 7, otype, 0)
+            .births(0, txg, 1)
+            .cksum(fletcher4(&padded, Endian::Little))
+            .bytes(Endian::Little)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn bp(
         &self,
