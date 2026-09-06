@@ -1,9 +1,10 @@
 //! `zvolrescue` command-line interface.
 //!
 //! Exactly three commands — `scan`, `list`, `dump` — as fixed by
-//! `docs/SPEC.md` §3.0 and §7. Commands that are not implemented yet say so
-//! and exit with [`exit::NOT_IMPLEMENTED`].
+//! `docs/SPEC.md` §3.0 and §7. Options whose phase has not arrived yet say
+//! so and exit with [`exit::NOT_IMPLEMENTED`].
 
+mod dump;
 mod evidence;
 mod list;
 mod scan;
@@ -170,17 +171,26 @@ fn main() -> ExitCode {
                 recursive,
             },
         ),
-        Cmd::Dump { pool, .. } => {
-            if let Err(e) = pool.members() {
-                eprintln!("zvolrescue: {e}");
-                return ExitCode::from(exit::USAGE);
-            }
-            eprintln!(
-                "zvolrescue: this command is specified (docs/SPEC.md §7) but not implemented yet; \
-                 it arrives with phase 1 (§10)"
-            );
-            exit::NOT_IMPLEMENTED
-        }
+        Cmd::Dump {
+            dataset,
+            pool,
+            output,
+            txg,
+            strict,
+            key,
+            resume,
+        } => dump::run(
+            &cli.global,
+            &pool,
+            &dump::Options {
+                dataset,
+                output,
+                txg,
+                strict,
+                key,
+                resume,
+            },
+        ),
     };
     ExitCode::from(code)
 }
