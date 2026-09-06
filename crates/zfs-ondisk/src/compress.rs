@@ -73,12 +73,13 @@ pub fn lzjb(src: &[u8], lsize: usize) -> Result<Vec<u8>, DecompressError> {
             if offset == 0 || offset > dst.len() {
                 return Err(DecompressError::Corrupt("lzjb: match before start"));
             }
-            let mut cpy = dst.len() - offset;
+            let start = dst.len() - offset;
             mlen = mlen.min(lsize - dst.len());
-            for _ in 0..mlen {
-                let b = dst[cpy];
+            // Byte-by-byte because the match may overlap the bytes being
+            // produced (offset < mlen is the classic run encoding).
+            for k in 0..mlen {
+                let b = dst[start + k];
                 dst.push(b);
-                cpy += 1;
             }
         } else {
             dst.push(
