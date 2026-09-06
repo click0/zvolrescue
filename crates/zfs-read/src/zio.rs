@@ -17,27 +17,101 @@ use zfs_ondisk::raidz;
 use zvolrescue_io::trace::hexdump;
 use zvolrescue_io::{trace, BlockSource};
 
-use crate::pool::PoolAssembly;
+use crate::pool::{Member, PoolAssembly};
+use zfs_ondisk::label::VdevNode;
 
 /// One way to obtain a block's raw bytes: the device it came from (if a
 /// single device) and the bytes or the error.
 type RawCandidate = (Option<usize>, Result<Vec<u8>, ReadError>);
 
-/// One top-level vdev as the reader sees it.
+/// The columns of one raidz stripe: parity (`None` when unreadable), data
+/// (zero-filled where lost), lost data column indices, and the stripe map.
+type Columns = (Vec<Option<Vec<u8>>>, Vec<Vec<u8>>, Vec<usize>, raidz::Map);
+
+/// A vdev as the reader sees it: the tree under one top-level vdev.
 #[derive(Debug, Clone)]
-struct Top {
-    kind: String,
-    nparity: u64,
-    ashift: u32,
-    /// For each leaf in configuration order, the index of its scanned
-    /// device, or `None` if that member is missing.
-    leaves: Vec<Option<usize>>,
+enum Node {
+    /// A disk or file; `None` when the member was not scanned.
+    Leaf { device: Option<usize>, guid: u64 },
+    /// Any child holds a full copy.
+    Mirror { children: Vec<Node> },
+    /// Data striped with parity over the children.
+    Raidz {
+        nparity: u64,
+        ashift: u32,
+        children: Vec<Node>,
+    },
+    /// A vdev type this build cannot read.
+    Unsupported { kind: String },
+}
+
+impl Node {
+    fn from_tree(tree: &VdevNode, members: &[Member], ashift: u32) -> Node {
+        if tree.children.is_empty() {
+            return Node::Leaf {
+                device: members
+                    .iter()
+                    .find(|m| m.guid == tree.guid)
+                    .and_then(|m| m.present),
+                guid: tree.guid,
+            };
+        }
+        let children = tree
+            .children
+            .iter()
+            .map(|c| Node::from_tree(c, members, ashift))
+            .collect();
+        match tree.kind.as_str() {
+            "mirror" => Node::Mirror { children },
+            "raidz" => Node::Raidz {
+                nparity: tree.nparity.unwrap_or(1),
+                ashift: tree
+                    .ashift
+                    .and_then(|a| u32::try_from(a).ok())
+                    .unwrap_or(ashift),
+                children,
+            },
+            other => Node::Unsupported {
+                kind: other.to_string(),
+            },
+        }
+    }
+
+    fn describe(&self) -> String {
+        match self {
+            Node::Leaf { device, guid } => match device {
+                Some(d) => format!("dev{d}"),
+                None => format!("MISSING({guid:#x})"),
+            },
+            Node::Mirror { children } => format!(
+                "mirror({})",
+                children
+                    .iter()
+                    .map(Node::describe)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            Node::Raidz {
+                nparity, children, ..
+            } => {
+                format!(
+                    "raidz{nparity}({})",
+                    children
+                        .iter()
+                        .map(Node::describe)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            }
+            Node::Unsupported { kind } => format!("{kind}?"),
+        }
+    }
 }
 
 /// Reads blocks from the members of one pool.
 pub struct PoolReader<'a> {
     devices: Vec<Option<&'a dyn BlockSource>>,
-    tops: BTreeMap<u32, Top>,
+    tops: BTreeMap<u32, Node>,
     /// Pool checksum salt once the MOS object directory has been read.
     salt: Cell<Option<Salt>>,
 }
@@ -94,7 +168,7 @@ pub struct Attempt {
     pub dva: usize,
     /// Top-level vdev id.
     pub vdev: u32,
-    /// Scanned device index the bytes came from, if a read happened.
+    /// Scanned device index the bytes came from, if a single device.
     pub device: Option<usize>,
     /// Outcome.
     pub result: Result<Verify, ReadError>,
@@ -119,15 +193,10 @@ impl<'a> PoolReader<'a> {
             .tops
             .iter()
             .map(|t| {
-                (
-                    t.id as u32,
-                    Top {
-                        kind: t.kind.clone(),
-                        nparity: t.nparity.unwrap_or(0),
-                        ashift: t.ashift.and_then(|a| u32::try_from(a).ok()).unwrap_or(9),
-                        leaves: t.members.iter().map(|m| m.present).collect(),
-                    },
-                )
+                let ashift = t.ashift.and_then(|a| u32::try_from(a).ok()).unwrap_or(9);
+                let node = Node::from_tree(&t.tree, &t.members, ashift);
+                trace!("zio", "top-level vdev {}: {}", t.id, node.describe());
+                (t.id as u32, node)
             })
             .collect();
         PoolReader {
@@ -154,67 +223,40 @@ impl<'a> PoolReader<'a> {
         verify_salted(bp.checksum, raw, bp.endian, &bp.cksum, salt.as_ref())
     }
 
-    /// Read the raw `psize` bytes behind one DVA, trying each present
-    /// leaf of a mirror until one read succeeds. No verification.
-    pub fn read_dva(&self, dva: &Dva, psize: usize) -> Result<(Vec<u8>, usize), ReadError> {
-        let top = self
-            .tops
-            .get(&dva.vdev)
-            .ok_or(ReadError::UnknownVdev(dva.vdev))?;
-        match top.kind.as_str() {
-            "mirror" | "disk" | "file" => {
-                let mut last = ReadError::NoMember;
-                for leaf in top.leaves.iter().flatten() {
-                    let Some(dev) = self.devices.get(*leaf).copied().flatten() else {
-                        continue;
-                    };
-                    let mut buf = vec![0u8; psize];
-                    match dev.read_at(LABEL_START_SIZE + dva.offset, &mut buf) {
-                        Ok(()) => return Ok((buf, *leaf)),
-                        Err(e) => last = ReadError::Io(e.to_string()),
-                    }
-                }
-                Err(last)
-            }
-            "raidz" => Err(ReadError::Unsupported(
-                "raidz raw DVA reads go through read_block".into(),
-            )),
-            "draid" => Err(ReadError::Unsupported(format!("draid{}", top.nparity))),
-            other => Err(ReadError::Unsupported(other.to_string())),
-        }
+    /// Read `size` bytes at vdev-relative `offset` from a leaf device.
+    fn read_leaf(
+        &self,
+        device: Option<usize>,
+        offset: u64,
+        size: usize,
+    ) -> Result<Vec<u8>, ReadError> {
+        let dev = device
+            .and_then(|d| self.devices.get(d).copied().flatten())
+            .ok_or(ReadError::NoMember)?;
+        let mut buf = vec![0u8; size];
+        dev.read_at(LABEL_START_SIZE + offset, &mut buf)
+            .map(|()| buf)
+            .map_err(|e| ReadError::Io(e.to_string()))
     }
 
-    /// Every independent way to obtain the raw `psize` bytes behind a
-    /// non-gang DVA: one entry per present mirror child, or a single
-    /// parity-reconstructed entry for raidz. Errors are kept so callers
-    /// can report them.
-    fn raw_candidates(&self, top: &Top, dva: &Dva, psize: usize) -> Vec<RawCandidate> {
-        match top.kind.as_str() {
-            "raidz" => {
-                let unit = 1u64 << top.ashift;
-                let padded = (psize as u64).div_ceil(unit) * unit;
-                let m = raidz::map(
-                    dva.offset,
-                    padded,
-                    top.ashift,
-                    top.leaves.len() as u64,
-                    top.nparity,
-                );
-                let mut parity = Vec::new();
-                for c in m.parity() {
-                    parity.push(self.read_column(top, c).ok());
-                }
-                let mut data = Vec::new();
-                let mut lost = Vec::new();
-                for (i, c) in m.data().iter().enumerate() {
-                    match self.read_column(top, c) {
-                        Ok(b) => data.push(b),
-                        Err(_) => {
-                            lost.push(i);
-                            data.push(vec![0u8; c.size as usize]);
-                        }
-                    }
-                }
+    /// Every independent, *unverified* way to obtain `size` bytes at
+    /// `offset` under `node`: one per leaf of a mirror (recursively), a
+    /// single parity-reconstructed entry for raidz.
+    fn read_candidates(&self, node: &Node, offset: u64, size: usize) -> Vec<RawCandidate> {
+        match node {
+            Node::Leaf { device, .. } => vec![(*device, self.read_leaf(*device, offset, size))],
+            Node::Mirror { children } => children
+                .iter()
+                .flat_map(|c| self.read_candidates(c, offset, size))
+                .collect(),
+            Node::Raidz {
+                nparity,
+                ashift,
+                children,
+            } => {
+                let (parity, data, lost, _) =
+                    self.read_columns(*nparity, *ashift, children, offset, size);
+                let mut data = data;
                 let result = if lost.is_empty() {
                     Ok(())
                 } else {
@@ -225,187 +267,111 @@ impl<'a> PoolReader<'a> {
                     None,
                     result.map(|()| {
                         let mut out: Vec<u8> = data.iter().flatten().copied().collect();
-                        out.truncate(psize);
+                        out.truncate(size);
                         out
                     }),
                 )]
             }
-            "draid" => vec![(
-                None,
-                Err(ReadError::Unsupported(format!("draid{}", top.nparity))),
-            )],
-            _ => top
-                .leaves
-                .iter()
-                .map(|leaf| {
-                    let read = leaf
-                        .and_then(|l| self.devices.get(l).copied().flatten().map(|d| (l, d)))
-                        .ok_or(ReadError::NoMember)
-                        .and_then(|(_, dev)| {
-                            let mut buf = vec![0u8; psize];
-                            dev.read_at(LABEL_START_SIZE + dva.offset, &mut buf)
-                                .map(|()| buf)
-                                .map_err(|e| ReadError::Io(e.to_string()))
-                        });
-                    (*leaf, read)
-                })
-                .collect(),
+            Node::Unsupported { kind } => vec![(None, Err(ReadError::Unsupported(kind.clone())))],
         }
     }
 
-    /// Read the raw bytes behind a gang pointer: the 512-byte header at
-    /// the DVA (verified against the pointer's identity and birth, trying
-    /// every copy), then each child pointer in order, concatenated;
-    /// children may be gang blocks themselves.
-    fn read_gang(
-        &self,
-        top: &Top,
-        dva: &Dva,
-        bp: &BlkPtr,
-        depth: usize,
-    ) -> Result<Vec<u8>, ReadError> {
-        if depth > 8 {
-            return Err(ReadError::Gang("nesting deeper than 8".into()));
-        }
-        let plain = Dva {
-            gang: false,
-            ..*dva
-        };
-        let mut header = None;
+    /// First successful unverified read under `node`.
+    fn read_first(&self, node: &Node, offset: u64, size: usize) -> Result<Vec<u8>, ReadError> {
         let mut last = ReadError::NoMember;
-        for (device, candidate) in self.raw_candidates(top, &plain, blkptr::GANG_HEADER_SIZE) {
-            match candidate {
-                Ok(buf) => {
-                    let status = zfs_ondisk::checksum::verify_gang_header(
-                        &buf,
-                        u64::from(bp.dva[0].vdev),
-                        bp.dva[0].offset,
-                        bp.birth,
-                    );
-                    trace!(
-                        "gang",
-                        "header @ vdev {} off {:#x} device {device:?} (depth {depth}): checksum {}",
-                        dva.vdev,
-                        dva.offset,
-                        status.as_str()
-                    );
-                    if status == zfs_ondisk::checksum::ChecksumStatus::Ok {
-                        header = Some(buf);
-                        break;
-                    }
-                    last = ReadError::Gang(format!("header checksum {}", status.as_str()));
-                }
+        for (_, c) in self.read_candidates(node, offset, size) {
+            match c {
+                Ok(b) => return Ok(b),
                 Err(e) => last = e,
-            }
-        }
-        let Some(header) = header else {
-            return Err(last);
-        };
-        let children = blkptr::parse_gang_header(&header, bp.endian)?;
-        let mut out = Vec::with_capacity(bp.psize as usize);
-        for (i, child) in children.iter().enumerate() {
-            if child.is_hole() {
-                continue;
-            }
-            trace!(
-                "gang",
-                "  child {i}: psize {} {} birth {} dvas [{}]",
-                child.psize,
-                child.checksum.name(),
-                child.birth,
-                child
-                    .dvas()
-                    .map(|d| format!(
-                        "vdev {} off {:#x}{}",
-                        d.vdev,
-                        d.offset,
-                        if d.gang { " GANG" } else { "" }
-                    ))
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            );
-            out.extend_from_slice(&self.read_raw_verified(child, depth + 1)?);
-        }
-        out.truncate(bp.psize as usize);
-        Ok(out)
-    }
-
-    /// Read the psize bytes of `bp` from any copy that verifies, resolving
-    /// gang pointers; no decompression.
-    fn read_raw_verified(&self, bp: &BlkPtr, depth: usize) -> Result<Vec<u8>, ReadError> {
-        let mut last = ReadError::NoMember;
-        for dva in bp.dvas() {
-            let Some(top) = self.tops.get(&dva.vdev) else {
-                last = ReadError::UnknownVdev(dva.vdev);
-                continue;
-            };
-            let candidates = if dva.gang {
-                vec![(None, self.read_gang(top, dva, bp, depth))]
-            } else {
-                self.raw_candidates(top, dva, bp.psize as usize)
-            };
-            for (_, raw) in candidates {
-                match raw {
-                    Ok(raw) => match self.verify(bp, &raw) {
-                        Verify::Ok | Verify::NotChecked => return Ok(raw),
-                        Verify::Mismatch => last = ReadError::AllCopiesBad,
-                        Verify::Unsupported => last = ReadError::ChecksumUnsupported,
-                    },
-                    Err(e) => last = e,
-                }
             }
         }
         Err(last)
     }
 
-    /// Read one column of a RAIDZ stripe from its leaf.
-    fn read_column(&self, top: &Top, col: &raidz::Column) -> Result<Vec<u8>, ReadError> {
-        let leaf = top
-            .leaves
-            .get(col.devidx as usize)
-            .copied()
-            .flatten()
-            .ok_or(ReadError::NoMember)?;
-        let dev = self
-            .devices
-            .get(leaf)
-            .copied()
-            .flatten()
-            .ok_or(ReadError::NoMember)?;
-        let mut buf = vec![0u8; col.size as usize];
-        dev.read_at(LABEL_START_SIZE + col.offset, &mut buf)
-            .map_err(|e| ReadError::Io(e.to_string()))?;
-        Ok(buf)
+    /// Read the raw `psize` bytes behind one DVA without verification
+    /// (first copy that reads). Gang pointers are followed.
+    pub fn read_dva(&self, dva: &Dva, psize: usize) -> Result<(Vec<u8>, usize), ReadError> {
+        let top = self
+            .tops
+            .get(&dva.vdev)
+            .ok_or(ReadError::UnknownVdev(dva.vdev))?;
+        if dva.gang {
+            return Err(ReadError::Gang("use read_block for gang pointers".into()));
+        }
+        for (device, c) in self.read_candidates(top, dva.offset, psize) {
+            if let Ok(b) = c {
+                return Ok((b, device.unwrap_or(usize::MAX)));
+            }
+        }
+        Err(ReadError::NoMember)
     }
 
-    /// Read the `psize` bytes behind a DVA on a RAIDZ top-level vdev,
-    /// reconstructing from parity when columns are missing or, if the
-    /// checksum still fails, trying every combination of up to `nparity`
-    /// data columns as silently corrupted (`vdev_raidz_combrec`).
+    /// Read the columns of one raidz stripe: parity (None when unreadable),
+    /// data (zero-filled where lost), lost data column indices, and the map.
+    fn read_columns(
+        &self,
+        nparity: u64,
+        ashift: u32,
+        children: &[Node],
+        offset: u64,
+        size: usize,
+    ) -> Columns {
+        let unit = 1u64 << ashift;
+        let padded = (size as u64).div_ceil(unit) * unit;
+        let m = raidz::map(offset, padded, ashift, children.len() as u64, nparity);
+        let column = |c: &raidz::Column| -> Result<Vec<u8>, ReadError> {
+            let child = children
+                .get(c.devidx as usize)
+                .ok_or(ReadError::UnknownVdev(c.devidx as u32))?;
+            self.read_first(child, c.offset, c.size as usize)
+        };
+        let mut parity = Vec::with_capacity(m.nparity);
+        for c in m.parity() {
+            parity.push(match column(c) {
+                Ok(b) => Some(b),
+                Err(e) => {
+                    trace!("raidz", "    parity column dev{}: {e}", c.devidx);
+                    None
+                }
+            });
+        }
+        let mut data = Vec::with_capacity(m.acols - m.nparity);
+        let mut lost = Vec::new();
+        for (i, c) in m.data().iter().enumerate() {
+            match column(c) {
+                Ok(b) => data.push(b),
+                Err(e) => {
+                    trace!("raidz", "    data column {i} dev{}: {e}", c.devidx);
+                    lost.push(i);
+                    data.push(vec![0u8; c.size as usize]);
+                }
+            }
+        }
+        (parity, data, lost, m)
+    }
+
+    /// Read and verify the `psize` bytes behind a DVA on a raidz node,
+    /// reconstructing missing columns from parity and, if the checksum
+    /// still fails, distrusting every combination of up to `nparity`
+    /// readable columns — parity rows and data columns alike — as
+    /// `vdev_raidz_combrec` does.
+    #[allow(clippy::too_many_arguments)]
     fn read_raidz(
         &self,
-        top: &Top,
+        nparity: u64,
+        ashift: u32,
+        children: &[Node],
         dva: &Dva,
         bp: &BlkPtr,
         attempts: &mut Vec<Attempt>,
         dva_index: usize,
     ) -> Result<(Vec<u8>, Verify), ReadError> {
-        let unit = 1u64 << top.ashift;
         let psize = bp.psize as usize;
-        let padded = bp.psize.div_ceil(unit) * unit;
-        let m = raidz::map(
-            dva.offset,
-            padded,
-            top.ashift,
-            top.leaves.len() as u64,
-            top.nparity,
-        );
+        let (parity, mut data, lost, m) =
+            self.read_columns(nparity, ashift, children, dva.offset, psize);
         trace!(
             "raidz",
-            "  dva {dva_index}: {}{} ashift {} -> {} cols ({} parity, {} big, nskip {}): {}",
-            top.kind,
-            top.nparity,
-            top.ashift,
+            "  dva {dva_index}: raidz{nparity} ashift {ashift} -> {} cols ({} parity, {} big, nskip {}): {}",
             m.acols,
             m.nparity,
             m.bigcols,
@@ -416,28 +382,6 @@ impl<'a> PoolReader<'a> {
                 .collect::<Vec<_>>()
                 .join(" ")
         );
-        let mut parity: Vec<Option<Vec<u8>>> = Vec::with_capacity(m.nparity);
-        for c in m.parity() {
-            parity.push(match self.read_column(top, c) {
-                Ok(b) => Some(b),
-                Err(e) => {
-                    trace!("raidz", "    parity column dev{}: {e}", c.devidx);
-                    None
-                }
-            });
-        }
-        let mut data: Vec<Vec<u8>> = Vec::with_capacity(m.acols - m.nparity);
-        let mut lost: Vec<usize> = Vec::new();
-        for (i, c) in m.data().iter().enumerate() {
-            match self.read_column(top, c) {
-                Ok(b) => data.push(b),
-                Err(e) => {
-                    trace!("raidz", "    data column {i} dev{}: {e}", c.devidx);
-                    lost.push(i);
-                    data.push(vec![0u8; c.size as usize]);
-                }
-            }
-        }
         let available = parity.iter().filter(|p| p.is_some()).count();
         let assemble = |data: &[Vec<u8>]| -> Vec<u8> {
             let mut out: Vec<u8> = data.iter().flatten().copied().collect();
@@ -452,7 +396,6 @@ impl<'a> PoolReader<'a> {
                 result,
             });
         };
-        // 1. Known losses first.
         if lost.len() > available {
             let e = ReadError::Unrecoverable(format!(
                 "{} data column(s) missing, only {} parity column(s) readable",
@@ -464,7 +407,7 @@ impl<'a> PoolReader<'a> {
         }
         if !lost.is_empty() {
             raidz::reconstruct(&mut data, &parity, &lost)
-                .map_err(|e| ReadError::Io(format!("raidz reconstruct: {e:?}")))?;
+                .map_err(|e| ReadError::Unrecoverable(format!("raidz reconstruct: {e:?}")))?;
             trace!(
                 "raidz",
                 "    reconstructed missing data column(s) {lost:?} from parity"
@@ -485,10 +428,6 @@ impl<'a> PoolReader<'a> {
         if v != Verify::Mismatch {
             return Ok((raw, v));
         }
-        // 2. Silent corruption: assume every combination of up to `budget`
-        //    readable columns — parity or data — is bad, rebuild the data
-        //    among them from the parity that is not suspected, and keep
-        //    the first result that verifies (vdev_raidz_combrec).
         let budget = available - lost.len();
         let readable_parity: Vec<usize> =
             (0..parity.len()).filter(|&r| parity[r].is_some()).collect();
@@ -547,12 +486,236 @@ impl<'a> PoolReader<'a> {
         Err(ReadError::AllCopiesBad)
     }
 
+    /// Read and verify the psize bytes of `bp` behind a non-gang `dva`
+    /// under `node`: leaves verify their copy, mirrors try each child,
+    /// raidz reconstructs.
+    fn read_verified(
+        &self,
+        node: &Node,
+        dva: &Dva,
+        bp: &BlkPtr,
+        attempts: &mut Vec<Attempt>,
+        i: usize,
+    ) -> Result<(Vec<u8>, Verify), ReadError> {
+        match node {
+            Node::Leaf { device, .. } => {
+                let read = self.read_leaf(*device, dva.offset, bp.psize as usize);
+                match read {
+                    Err(e) => {
+                        trace!("zio", "  dva {i} leaf {device:?}: {e}");
+                        attempts.push(Attempt {
+                            dva: i,
+                            vdev: dva.vdev,
+                            device: *device,
+                            result: Err(e.clone()),
+                        });
+                        Err(e)
+                    }
+                    Ok(raw) => {
+                        let v = self.verify(bp, &raw);
+                        trace!(
+                            "zio",
+                            "  dva {i} device {device:?} @ {:#x}: checksum {v:?}",
+                            LABEL_START_SIZE + dva.offset
+                        );
+                        if v == Verify::Mismatch {
+                            trace!(
+                                "zio",
+                                "    expected {:x?} computed {:x?}; first bytes:\n{}",
+                                bp.cksum,
+                                zfs_ondisk::checksum::compute_salted(
+                                    bp.checksum,
+                                    &raw,
+                                    bp.endian,
+                                    self.salt.get().as_ref()
+                                )
+                                .unwrap_or([0; 4]),
+                                hexdump(&raw, LABEL_START_SIZE + dva.offset, 64)
+                            );
+                        }
+                        attempts.push(Attempt {
+                            dva: i,
+                            vdev: dva.vdev,
+                            device: *device,
+                            result: Ok(v),
+                        });
+                        match v {
+                            Verify::Ok | Verify::NotChecked => Ok((raw, v)),
+                            Verify::Unsupported => Err(ReadError::ChecksumUnsupported),
+                            Verify::Mismatch => Err(ReadError::AllCopiesBad),
+                        }
+                    }
+                }
+            }
+            Node::Mirror { children } => {
+                let mut last = ReadError::NoMember;
+                for child in children {
+                    match self.read_verified(child, dva, bp, attempts, i) {
+                        Ok(x) => return Ok(x),
+                        Err(e) => last = e,
+                    }
+                }
+                Err(last)
+            }
+            Node::Raidz {
+                nparity,
+                ashift,
+                children,
+            } => self.read_raidz(*nparity, *ashift, children, dva, bp, attempts, i),
+            Node::Unsupported { kind } => {
+                let e = ReadError::Unsupported(kind.clone());
+                attempts.push(Attempt {
+                    dva: i,
+                    vdev: dva.vdev,
+                    device: None,
+                    result: Err(e.clone()),
+                });
+                Err(e)
+            }
+        }
+    }
+
+    /// Read the raw bytes behind a gang pointer: the 512-byte header at
+    /// the DVA (verified against the pointer's identity and birth, trying
+    /// every copy), then each child pointer in order, concatenated;
+    /// children may be gang blocks themselves.
+    fn read_gang(
+        &self,
+        node: &Node,
+        dva: &Dva,
+        bp: &BlkPtr,
+        depth: usize,
+    ) -> Result<Vec<u8>, ReadError> {
+        if depth > 8 {
+            return Err(ReadError::Gang("nesting deeper than 8".into()));
+        }
+        let mut header = None;
+        let mut last = ReadError::NoMember;
+        for (device, candidate) in self.read_candidates(node, dva.offset, blkptr::GANG_HEADER_SIZE)
+        {
+            match candidate {
+                Ok(buf) => {
+                    let status = zfs_ondisk::checksum::verify_gang_header(
+                        &buf,
+                        u64::from(bp.dva[0].vdev),
+                        bp.dva[0].offset,
+                        bp.birth,
+                    );
+                    trace!(
+                        "gang",
+                        "header @ vdev {} off {:#x} device {device:?} (depth {depth}): checksum {}",
+                        dva.vdev,
+                        dva.offset,
+                        status.as_str()
+                    );
+                    if status == zfs_ondisk::checksum::ChecksumStatus::Ok {
+                        header = Some(buf);
+                        break;
+                    }
+                    last = ReadError::Gang(format!("header checksum {}", status.as_str()));
+                }
+                Err(e) => last = e,
+            }
+        }
+        let Some(header) = header else {
+            return Err(last);
+        };
+        let children = blkptr::parse_gang_header(&header, bp.endian)?;
+        let mut out = Vec::with_capacity(bp.psize as usize);
+        for (i, child) in children.iter().enumerate() {
+            if child.is_hole() {
+                continue;
+            }
+            trace!(
+                "gang",
+                "  child {i}: psize {} {} birth {} dvas [{}]",
+                child.psize,
+                child.checksum.name(),
+                child.birth,
+                child
+                    .dvas()
+                    .map(|d| format!(
+                        "vdev {} off {:#x}{}",
+                        d.vdev,
+                        d.offset,
+                        if d.gang { " GANG" } else { "" }
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            );
+            let mut attempts = Vec::new();
+            out.extend_from_slice(&self.read_raw_verified(child, depth + 1, &mut attempts)?);
+        }
+        out.truncate(bp.psize as usize);
+        Ok(out)
+    }
+
+    /// Read the psize bytes of `bp` from any copy that verifies, resolving
+    /// gang pointers; no decompression.
+    fn read_raw_verified(
+        &self,
+        bp: &BlkPtr,
+        depth: usize,
+        attempts: &mut Vec<Attempt>,
+    ) -> Result<Vec<u8>, ReadError> {
+        let mut last = ReadError::NoMember;
+        for (i, dva) in bp.dva.iter().enumerate() {
+            if dva.is_empty() {
+                continue;
+            }
+            let Some(top) = self.tops.get(&dva.vdev) else {
+                last = ReadError::UnknownVdev(dva.vdev);
+                attempts.push(Attempt {
+                    dva: i,
+                    vdev: dva.vdev,
+                    device: None,
+                    result: Err(last.clone()),
+                });
+                continue;
+            };
+            if dva.gang {
+                match self.read_gang(top, dva, bp, depth) {
+                    Ok(raw) => {
+                        let v = self.verify(bp, &raw);
+                        attempts.push(Attempt {
+                            dva: i,
+                            vdev: dva.vdev,
+                            device: None,
+                            result: Ok(v),
+                        });
+                        match v {
+                            Verify::Ok | Verify::NotChecked => return Ok(raw),
+                            Verify::Mismatch => last = ReadError::AllCopiesBad,
+                            Verify::Unsupported => last = ReadError::ChecksumUnsupported,
+                        }
+                    }
+                    Err(e) => {
+                        trace!("gang", "  dva {i}: {e}");
+                        attempts.push(Attempt {
+                            dva: i,
+                            vdev: dva.vdev,
+                            device: None,
+                            result: Err(e.clone()),
+                        });
+                        last = e;
+                    }
+                }
+                continue;
+            }
+            match self.read_verified(top, dva, bp, attempts, i) {
+                Ok((raw, _)) => return Ok(raw),
+                Err(e) => last = e,
+            }
+        }
+        Err(last)
+    }
+
     /// Read, verify and decompress the block behind `bp`.
     ///
     /// Copies are tried in DVA order and, within a mirror, in child order.
     /// The first copy whose checksum verifies (or that cannot be checked
-    /// because the algorithm is `off`) is decompressed. A copy whose
-    /// checksum algorithm is unsupported is used only if `allow_unverified`.
+    /// because the algorithm is `off`) is decompressed. `allow_unverified`
+    /// is reserved for algorithms this build cannot verify.
     pub fn read_block(&self, bp: &BlkPtr, allow_unverified: bool) -> Result<Block, ReadError> {
         if bp.is_hole() {
             return Err(ReadError::Hole);
@@ -567,7 +730,6 @@ impl<'a> PoolReader<'a> {
                 attempts: Vec::new(),
             });
         }
-        let psize = bp.psize as usize;
         trace!(
             "zio",
             "read bp: level {} type {} lsize {} psize {} {} {} birth {} dvas [{}]",
@@ -590,186 +752,49 @@ impl<'a> PoolReader<'a> {
                 .join("; ")
         );
         let mut attempts = Vec::new();
-        let mut unverified: Option<(Vec<u8>, Verify)> = None;
-        for (i, dva) in bp.dva.iter().enumerate() {
-            if dva.is_empty() {
-                continue;
-            }
-            let top = match self.tops.get(&dva.vdev) {
-                Some(t) => t,
-                None => {
-                    attempts.push(Attempt {
-                        dva: i,
-                        vdev: dva.vdev,
-                        device: None,
-                        result: Err(ReadError::UnknownVdev(dva.vdev)),
-                    });
-                    continue;
-                }
-            };
-            if dva.gang {
-                let result = self.read_gang(top, dva, bp, 0).and_then(|raw| {
-                    let v = self.verify(bp, &raw);
-                    match v {
-                        Verify::Ok | Verify::NotChecked => Ok((raw, v)),
-                        Verify::Mismatch => Err(ReadError::AllCopiesBad),
-                        Verify::Unsupported => Err(ReadError::ChecksumUnsupported),
-                    }
-                });
-                match result {
-                    Ok((raw, v)) => {
-                        attempts.push(Attempt {
-                            dva: i,
-                            vdev: dva.vdev,
-                            device: None,
-                            result: Ok(v),
-                        });
-                        let data = decompress(bp.compression, &raw, lsize)
-                            .map_err(ReadError::Decompress)?;
-                        return Ok(Block {
-                            data,
-                            verify: v,
-                            attempts,
-                        });
-                    }
+        let raw = self.read_raw_verified(bp, 0, &mut attempts);
+        let _ = allow_unverified;
+        match raw {
+            Ok(raw) => {
+                let verify = attempts
+                    .iter()
+                    .rev()
+                    .find_map(|a| a.result.as_ref().ok().copied())
+                    .unwrap_or(Verify::NotChecked);
+                let data = match decompress(bp.compression, &raw, lsize) {
+                    Ok(d) => d,
                     Err(e) => {
-                        trace!("gang", "  dva {i}: {e}");
-                        attempts.push(Attempt {
-                            dva: i,
-                            vdev: dva.vdev,
-                            device: None,
-                            result: Err(e),
-                        });
-                        continue;
-                    }
-                }
-            }
-            if top.kind == "raidz" {
-                match self.read_raidz(top, dva, bp, &mut attempts, i) {
-                    Ok((raw, v)) => {
-                        let data = decompress(bp.compression, &raw, lsize)
-                            .map_err(ReadError::Decompress)?;
-                        return Ok(Block {
-                            data,
-                            verify: v,
-                            attempts,
-                        });
-                    }
-                    Err(_) => continue,
-                }
-            }
-            // Mirror children are distinct copies: try each one. A missing
-            // child is recorded as such, never silently substituted.
-            let candidates: Vec<Option<Option<usize>>> = match top.kind.as_str() {
-                "mirror" | "disk" | "file" => top.leaves.iter().map(|l| Some(*l)).collect(),
-                _ => vec![None],
-            };
-            for candidate in candidates {
-                let read = match candidate {
-                    Some(None) => Err(ReadError::NoMember),
-                    Some(Some(l)) => self
-                        .devices
-                        .get(l)
-                        .copied()
-                        .flatten()
-                        .ok_or(ReadError::NoMember)
-                        .and_then(|dev| {
-                            let mut buf = vec![0u8; psize];
-                            dev.read_at(LABEL_START_SIZE + dva.offset, &mut buf)
-                                .map(|()| (buf, l))
-                                .map_err(|e| ReadError::Io(e.to_string()))
-                        }),
-                    None => self.read_dva(dva, psize),
-                };
-                match read {
-                    Err(e) => {
-                        trace!("zio", "  dva {i} candidate {candidate:?}: {e}");
-                        attempts.push(Attempt {
-                            dva: i,
-                            vdev: dva.vdev,
-                            device: candidate.flatten(),
-                            result: Err(e),
-                        });
-                    }
-                    Ok((raw, device)) => {
-                        let v = self.verify(bp, &raw);
                         trace!(
                             "zio",
-                            "  dva {i} device #{device} @ {:#x}: checksum {v:?}",
-                            LABEL_START_SIZE + dva.offset
+                            "    decompress {} failed: {e}; first bytes:\n{}",
+                            bp.compression.name(),
+                            hexdump(&raw, 0, 64)
                         );
-                        if v == Verify::Mismatch {
-                            trace!(
-                                "zio",
-                                "    expected {:x?} computed {:x?}; first bytes:\n{}",
-                                bp.cksum,
-                                zfs_ondisk::checksum::compute(bp.checksum, &raw, bp.endian)
-                                    .unwrap_or([0; 4]),
-                                hexdump(&raw, LABEL_START_SIZE + dva.offset, 64)
-                            );
-                        }
-                        attempts.push(Attempt {
-                            dva: i,
-                            vdev: dva.vdev,
-                            device: Some(device),
-                            result: Ok(v),
-                        });
-                        match v {
-                            Verify::Ok | Verify::NotChecked => {
-                                let data = match decompress(bp.compression, &raw, lsize) {
-                                    Ok(d) => d,
-                                    Err(e) => {
-                                        trace!(
-                                            "zio",
-                                            "    decompress {} failed: {e}; first bytes:\n{}",
-                                            bp.compression.name(),
-                                            hexdump(&raw, LABEL_START_SIZE + dva.offset, 64)
-                                        );
-                                        return Err(ReadError::Decompress(e));
-                                    }
-                                };
-                                return Ok(Block {
-                                    data,
-                                    verify: v,
-                                    attempts,
-                                });
-                            }
-                            Verify::Unsupported => {
-                                if unverified.is_none() {
-                                    unverified = Some((raw, v));
-                                }
-                            }
-                            Verify::Mismatch => {}
-                        }
+                        return Err(ReadError::Decompress(e));
                     }
+                };
+                Ok(Block {
+                    data,
+                    verify,
+                    attempts,
+                })
+            }
+            Err(e) => {
+                if attempts
+                    .iter()
+                    .any(|a| matches!(a.result, Ok(Verify::Unsupported)))
+                {
+                    return Err(ReadError::ChecksumUnsupported);
                 }
+                if attempts
+                    .iter()
+                    .any(|a| matches!(a.result, Ok(Verify::Mismatch)))
+                {
+                    return Err(ReadError::AllCopiesBad);
+                }
+                Err(e)
             }
         }
-        if let (true, Some((raw, v))) = (allow_unverified, unverified) {
-            let data = decompress(bp.compression, &raw, lsize).map_err(ReadError::Decompress)?;
-            return Ok(Block {
-                data,
-                verify: v,
-                attempts,
-            });
-        }
-        if attempts
-            .iter()
-            .any(|a| matches!(a.result, Ok(Verify::Unsupported)))
-        {
-            return Err(ReadError::ChecksumUnsupported);
-        }
-        if attempts
-            .iter()
-            .any(|a| matches!(a.result, Ok(Verify::Mismatch)))
-        {
-            return Err(ReadError::AllCopiesBad);
-        }
-        Err(attempts
-            .into_iter()
-            .filter_map(|a| a.result.err())
-            .next_back()
-            .unwrap_or(ReadError::NoMember))
     }
 }
 

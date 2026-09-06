@@ -37,18 +37,35 @@ pub struct TopVdev {
     pub ashift: Option<u64>,
     /// Leaves in configuration order.
     pub members: Vec<Member>,
+    /// The full vdev subtree (mirrors and raidz may nest, as ztest pools do).
+    pub tree: VdevNode,
 }
 
 impl TopVdev {
     /// Whether enough leaves are present to read this vdev.
     pub fn readable(&self) -> bool {
-        let present = self.members.iter().filter(|m| m.present.is_some()).count();
-        let missing = self.members.len() - present;
-        match self.kind.as_str() {
-            "mirror" => present >= 1,
-            "raidz" | "draid" => missing as u64 <= self.nparity.unwrap_or(0),
-            _ => missing == 0,
-        }
+        node_readable(&self.tree, &self.members)
+    }
+}
+
+/// Recursive readability: a leaf must be present, a mirror needs one
+/// readable child, raidz/draid tolerate up to `nparity` unreadable ones.
+pub fn node_readable(node: &VdevNode, members: &[Member]) -> bool {
+    if node.children.is_empty() {
+        return members
+            .iter()
+            .any(|m| m.guid == node.guid && m.present.is_some());
+    }
+    let readable = node
+        .children
+        .iter()
+        .filter(|c| node_readable(c, members))
+        .count();
+    let missing = node.children.len() - readable;
+    match node.kind.as_str() {
+        "mirror" => readable >= 1,
+        "raidz" | "draid" => missing as u64 <= node.nparity.unwrap_or(0),
+        _ => missing == 0,
     }
 }
 
@@ -155,6 +172,7 @@ pub fn assemble(scans: &[Option<DeviceScan>]) -> Vec<PoolAssembly> {
                         present: leaf_owner(leaf.guid),
                     })
                     .collect(),
+                tree: tree.clone(),
             })
             .collect();
         tops.sort_by_key(|t| t.id);
