@@ -12,7 +12,7 @@
 use crate::{Endian, ParseError};
 
 /// `ZBT_LEAF`.
-pub const ZBT_LEAF: u64 = (1u64 << 63) | 0;
+pub const ZBT_LEAF: u64 = 1u64 << 63;
 /// `ZBT_HEADER`.
 pub const ZBT_HEADER: u64 = (1u64 << 63) | 1;
 /// `ZBT_MICRO`.
