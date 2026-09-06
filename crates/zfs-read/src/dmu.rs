@@ -5,6 +5,7 @@ use zfs_ondisk::dmu::{DnodePhys, DNODE_SIZE};
 use zfs_ondisk::Endian;
 
 use crate::zio::{PoolReader, ReadError};
+use zvolrescue_io::trace;
 
 /// Reads the data of one object through a [`PoolReader`].
 pub struct ObjectReader<'r, 'a> {
@@ -59,6 +60,11 @@ impl<'r, 'a> ObjectReader<'r, 'a> {
         }
         let mut bp = self.dnode.blkptr[top_index as usize].clone();
         let mut level = levels - 1;
+        trace!(
+            "dmu",
+            "locate blkid {blkid}: nlevels {levels} epbs {epbs} top index {top_index} ({} dnode ptrs)",
+            self.dnode.blkptr.len()
+        );
         while level > 0 {
             if bp.is_hole() {
                 return Ok(None);
@@ -71,6 +77,16 @@ impl<'r, 'a> ObjectReader<'r, 'a> {
                 ReadError::Io(format!("indirect block too small for index {index}"))
             })?;
             bp = BlkPtr::parse(child, bp.endian)?;
+            trace!(
+                "dmu",
+                "  level {level} index {index}: child {} birth {}",
+                if bp.is_hole() {
+                    "HOLE".to_string()
+                } else {
+                    format!("dva0 vdev {} off {:#x}", bp.dva[0].vdev, bp.dva[0].offset)
+                },
+                bp.birth
+            );
             level -= 1;
         }
         Ok(if bp.is_hole() { None } else { Some(bp) })
@@ -159,7 +175,24 @@ impl<'r, 'a> DnodeArray<'r, 'a> {
         }
         let block = self.meta.read_blkid(objnum / per)?;
         let at = ((objnum % per) * DNODE_SIZE as u64) as usize;
-        Ok(DnodePhys::parse(&block[at..], self.meta.endian)?)
+        let d = DnodePhys::parse(&block[at..], self.meta.endian)?;
+        trace!(
+            "dnode",
+            "object {objnum} (block {} slot {}): type {} ({}) nlevels {} nblkptr {} indblkshift {} datablksz {} maxblkid {} bonustype {} bonuslen {}{}",
+            objnum / per,
+            objnum % per,
+            d.object_type,
+            d.type_name(),
+            d.nlevels,
+            d.nblkptr,
+            d.indblkshift,
+            d.datablksz(),
+            d.maxblkid,
+            d.bonus_type,
+            d.bonuslen,
+            if d.spill.is_some() { " spill" } else { "" }
+        );
+        Ok(d)
     }
 
     /// An [`ObjectReader`] for object `objnum`.

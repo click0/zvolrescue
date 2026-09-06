@@ -7,6 +7,7 @@ use zfs_ondisk::label::{LabelConfig, VdevNode};
 use zfs_ondisk::uberblock::Uberblock;
 
 use crate::vdev::DeviceScan;
+use zvolrescue_io::trace;
 
 /// A leaf vdev of a top-level vdev and whether it was among the scanned devices.
 #[derive(Debug, Clone)]
@@ -166,6 +167,29 @@ pub fn assemble(scans: &[Option<DeviceScan>]) -> Vec<PoolAssembly> {
             }
         }
 
+        trace!(
+            "pool",
+            "pool {:?} guid {guid:#x}: {} member(s) scanned, {} top-level vdev(s) described of {:?}",
+            newest.name.as_deref().unwrap_or("?"),
+            entries.len(),
+            tops.len(),
+            newest.vdev_children
+        );
+        for t in &tops {
+            for m in &t.members {
+                trace!(
+                    "pool",
+                    "  {} leaf {:#x} {:?}: {}",
+                    t.name,
+                    m.guid,
+                    m.path,
+                    match m.present {
+                        Some(i) => format!("device #{i}"),
+                        None => "MISSING".to_string(),
+                    }
+                );
+            }
+        }
         pools.push(PoolAssembly {
             name: newest.name.clone().unwrap_or_default(),
             guid,
@@ -277,6 +301,14 @@ pub fn uberblock_candidates(scans: &[Option<DeviceScan>], pool: &PoolAssembly) -
         }
     }
     out.sort_by_key(|c| std::cmp::Reverse(c.ub.txg));
+    trace!(
+        "txg",
+        "verified uberblocks: {}",
+        out.iter()
+            .map(|c| format!("{}@dev{}/L{}", c.ub.txg, c.device, c.label))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
     out
 }
 

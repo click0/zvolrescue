@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 use sha2::{Digest, Sha256};
 use zfs_ondisk::dmu::{ObjsetPhys, ObjsetType};
 use zfs_ondisk::Endian;
-use zvolrescue_io::BlockSink;
+use zvolrescue_io::{trace, BlockSink};
 
 use crate::dmu::{DnodeArray, ObjectReader};
 use crate::dsl::{Dataset, ZVOL_OBJ};
@@ -118,6 +118,11 @@ pub fn extract(
     let mut hasher = Sha256::new();
     let zeros = vec![0u8; bs as usize];
     let mut hashed_to = 0u64;
+    trace!(
+        "zvol",
+        "extract: volsize {volsize} blocksize {bs} maxblkid {} -> {blocks_total} blocks",
+        obj.dnode().maxblkid
+    );
     for blkid in 0..blocks_total {
         let offset = blkid * bs;
         let take = (volsize - offset).min(bs) as usize;
@@ -140,6 +145,7 @@ pub fn extract(
                 hasher.update(&data[..take]);
             }
             Err(e) => {
+                trace!("zvol", "blkid {blkid} @ {offset}: UNREADABLE: {e}");
                 report.bad.push(BadRange {
                     offset,
                     len: take as u64,

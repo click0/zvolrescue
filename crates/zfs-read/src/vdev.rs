@@ -10,7 +10,8 @@ use zfs_ondisk::label::{
 use zfs_ondisk::nvlist::NvList;
 use zfs_ondisk::uberblock::{self, Uberblock, MAX_UBERBLOCK_SHIFT, UBERBLOCK_SHIFT};
 use zfs_ondisk::ParseError;
-use zvolrescue_io::BlockSource;
+use zvolrescue_io::trace::hexdump;
+use zvolrescue_io::{trace, BlockSource};
 
 /// One slot of an uberblock ring that carried a valid magic.
 #[derive(Debug, Clone)]
@@ -148,14 +149,37 @@ pub fn scan_device(dev: &dyn BlockSource) -> io::Result<DeviceScan> {
             offset,
         );
         let (config, config_error) = match phys.config {
-            Ok(c) => (Some(c), None),
-            Err(e) => (None, Some(e)),
+            Ok(c) => {
+                trace!(
+                    "label",
+                    "L{index} @ {offset}: config checksum {}, nvlist ok: pool {:?} guid {:#x} txg {:?} vdev guid {:#x}",
+                    phys.checksum.as_str(),
+                    c.str("name").unwrap_or("?"),
+                    c.u64("pool_guid").unwrap_or(0),
+                    c.u64("txg"),
+                    c.u64("guid").unwrap_or(0)
+                );
+                (Some(c), None)
+            }
+            Err(e) => {
+                trace!(
+                    "label",
+                    "L{index} @ {offset}: config checksum {}, nvlist error: {e}; first bytes of vdev_phys:\n{}",
+                    phys.checksum.as_str(),
+                    hexdump(&label[phys_start..phys_start + 64], offset + VDEV_PHYS_OFFSET, 64)
+                );
+                (None, Some(e))
+            }
         };
         let ashift = config
             .as_ref()
             .and_then(|c| c.list("vdev_tree"))
             .and_then(|t| t.u64("ashift"));
         let slot_shift = slot_shift_for(ashift);
+        trace!(
+            "label",
+            "L{index}: ashift {ashift:?} -> uberblock slot shift {slot_shift}"
+        );
         let ring_start = UBERBLOCK_RING_OFFSET as usize;
         let ring = &label[ring_start..ring_start + UBERBLOCK_RING_SIZE as usize];
         let mut uberblocks = Vec::new();
@@ -168,13 +192,24 @@ pub fn scan_device(dev: &dyn BlockSource) -> io::Result<DeviceScan> {
                     let size = 1usize << slot_shift;
                     let slot_buf = &ring[slot * size..(slot + 1) * size];
                     let vdev_offset = offset + UBERBLOCK_RING_OFFSET + (slot * size) as u64;
-                    uberblocks.push(UberblockSlot {
-                        slot,
-                        ub,
-                        checksum: verify_label(slot_buf, vdev_offset),
-                    });
+                    let checksum = verify_label(slot_buf, vdev_offset);
+                    trace!(
+                        "uberblock",
+                        "L{index} slot {slot} @ {vdev_offset}: txg {} ts {} version {} checksum {} rootbp birth {}",
+                        ub.txg,
+                        ub.timestamp,
+                        ub.version,
+                        checksum.as_str(),
+                        ub.rootbp_birth()
+                    );
+                    uberblocks.push(UberblockSlot { slot, ub, checksum });
                 }
-                Err(e) => invalid.push((slot, e)),
+                Err(e) => {
+                    if e != ParseError::BadMagic(0) {
+                        trace!("uberblock", "L{index} slot {slot}: {e}");
+                    }
+                    invalid.push((slot, e));
+                }
             }
         }
         labels.push(LabelScan {
@@ -190,6 +225,7 @@ pub fn scan_device(dev: &dyn BlockSource) -> io::Result<DeviceScan> {
         });
     }
     let best_label = pick_best_label(&labels);
+    trace!("label", "best label: {best_label:?}");
     Ok(DeviceScan {
         size: dev.size(),
         labels,

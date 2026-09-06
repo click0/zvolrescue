@@ -9,6 +9,8 @@
 //! now and will relax it to `deny` with per-block `// SAFETY:` comments only
 //! if raw `libc` calls become necessary (e.g. `O_EXCL` on block devices).
 
+pub mod trace;
+
 use std::fs::{File, OpenOptions};
 use std::io::{self, Seek, SeekFrom};
 use std::os::unix::fs::FileExt;

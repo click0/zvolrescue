@@ -17,6 +17,7 @@ use zfs_ondisk::Endian;
 use crate::dmu::{DnodeArray, ObjectReader};
 use crate::zap::read_zap;
 use crate::zio::{PoolReader, ReadError};
+use zvolrescue_io::trace;
 
 /// MOS object number of the object directory.
 pub const OBJECT_DIRECTORY: u64 = 1;
@@ -89,8 +90,28 @@ pub fn open_mos<'r, 'a>(
     ub: &Uberblock,
 ) -> Result<DnodeArray<'r, 'a>, ReadError> {
     let rootbp = zfs_ondisk::blkptr::BlkPtr::parse(&ub.rootbp, ub.endian)?;
+    trace!(
+        "dsl",
+        "open MOS at txg {}: rootbp lsize {} psize {} {} {} birth {} dva0 vdev {} off {:#x}",
+        ub.txg,
+        rootbp.lsize,
+        rootbp.psize,
+        rootbp.compression.name(),
+        rootbp.checksum.name(),
+        rootbp.birth,
+        rootbp.dva[0].vdev,
+        rootbp.dva[0].offset
+    );
     let block = reader.read_block(&rootbp, false)?;
     let os = ObjsetPhys::parse(&block.data, rootbp.endian)?;
+    trace!(
+        "dsl",
+        "MOS objset: type {} meta-dnode datablksz {} nlevels {} maxblkid {}",
+        os.os_type.name(),
+        os.meta_dnode.datablksz(),
+        os.meta_dnode.nlevels,
+        os.meta_dnode.maxblkid
+    );
     if os.os_type != ObjsetType::Meta {
         return Err(ReadError::Io(format!(
             "root objset is {} not meta",
@@ -112,6 +133,14 @@ pub fn object_directory(mos: &DnodeArray<'_, '_>) -> Result<Vec<(String, u64)>, 
 /// Walk the whole dataset tree of the pool named `pool_name` from its MOS.
 pub fn walk(mos: &DnodeArray<'_, '_>, pool_name: &str) -> Result<DatasetTree, ReadError> {
     let dir = object_directory(mos)?;
+    trace!(
+        "dsl",
+        "object directory: {}",
+        dir.iter()
+            .map(|(n, v)| format!("{n}={v}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
     let root = dir
         .iter()
         .find(|(n, _)| n == "root_dataset")
@@ -142,11 +171,21 @@ fn walk_dir(
     let dir = match read_dir(mos, dir_obj) {
         Ok(d) => d,
         Err(e) => {
+            trace!("dsl", "dir {dir_obj} ({name}): unreadable: {e}");
             tree.errors
                 .push(format!("{name}: DSL directory {dir_obj}: {e}"));
             return;
         }
     };
+    trace!(
+        "dsl",
+        "dir {dir_obj} ({name}): head {} children zap {} props zap {} origin {} parent {}",
+        dir.head_dataset_obj,
+        dir.child_dir_zapobj,
+        dir.props_zapobj,
+        dir.origin_obj,
+        dir.parent_obj
+    );
     if dir.head_dataset_obj != 0 {
         match describe(mos, dir.head_dataset_obj, name, &dir) {
             Ok(mut head) => {
@@ -207,6 +246,23 @@ fn describe(
     dir: &DslDirPhys,
 ) -> Result<Dataset, ReadError> {
     let phys = read_dataset(mos, obj)?;
+    trace!(
+        "dsl",
+        "dataset {obj} ({name}): guid {:#x} creation txg {} snapnames {} prev {} next {} bp {}",
+        phys.guid,
+        phys.creation_txg,
+        phys.snapnames_zapobj,
+        phys.prev_snap_obj,
+        phys.next_snap_obj,
+        if phys.bp.is_hole() {
+            "HOLE".to_string()
+        } else {
+            format!(
+                "vdev {} off {:#x} birth {}",
+                phys.bp.dva[0].vdev, phys.bp.dva[0].offset, phys.bp.birth
+            )
+        }
+    );
     let mut warnings = Vec::new();
     let mut volsize = None;
     let mut volblocksize = None;

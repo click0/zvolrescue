@@ -10,6 +10,8 @@ use zfs_ondisk::zap::{
 
 use crate::dmu::ObjectReader;
 use crate::zio::ReadError;
+use zvolrescue_io::trace;
+use zvolrescue_io::trace::hexdump;
 
 /// Upper bound on leaf blocks read from one ZAP, against hostile pointer
 /// tables (a real MOS ZAP has at most thousands).
@@ -18,10 +20,35 @@ pub const MAX_LEAVES: usize = 1 << 20;
 /// Read every entry of the ZAP object `obj`, in on-disk order.
 pub fn read_zap(obj: &ObjectReader<'_, '_>) -> Result<Vec<Entry>, ReadError> {
     let (block0, endian) = obj.read_blkid_ext(0)?;
-    match block_type(&block0, endian) {
-        Some(BlockType::Micro) => Ok(parse_micro(&block0, endian)?),
+    let kind = block_type(&block0, endian);
+    trace!(
+        "zap",
+        "block 0: {kind:?} ({} bytes, {endian:?})",
+        block0.len()
+    );
+    match kind {
+        Some(BlockType::Micro) => {
+            let entries = parse_micro(&block0, endian)?;
+            trace!(
+                "zap",
+                "microzap: {} entries: {}",
+                entries.len(),
+                names(&entries)
+            );
+            Ok(entries)
+        }
         Some(BlockType::Header) => {
             let hdr = parse_fat_header(&block0, endian)?;
+            trace!(
+                "zap",
+                "fatzap: ptrtbl blk {} numblks {} shift {}, {} leafs, {} entries, flags {:#x}",
+                hdr.ptrtbl_blk,
+                hdr.ptrtbl_numblks,
+                hdr.ptrtbl_shift,
+                hdr.num_leafs,
+                hdr.num_entries,
+                hdr.flags
+            );
             let mut leaves: BTreeSet<u64> = BTreeSet::new();
             if hdr.ptrtbl_numblks == 0 {
                 leaves.extend(embedded_ptrtbl(&block0, endian));
@@ -37,6 +64,7 @@ pub fn read_zap(obj: &ObjectReader<'_, '_>) -> Result<Vec<Entry>, ReadError> {
                 }
             }
             leaves.remove(&0);
+            trace!("zap", "leaf blocks: {:?}", leaves);
             if leaves.len() > MAX_LEAVES {
                 return Err(ReadError::Io(
                     "ZAP pointer table names too many leaves".into(),
@@ -46,17 +74,45 @@ pub fn read_zap(obj: &ObjectReader<'_, '_>) -> Result<Vec<Entry>, ReadError> {
             for blkid in leaves {
                 let (leaf, e) = obj.read_blkid_ext(blkid)?;
                 match block_type(&leaf, e) {
-                    Some(BlockType::Leaf) => out.extend(parse_leaf(&leaf, e)?),
+                    Some(BlockType::Leaf) => {
+                        let entries = parse_leaf(&leaf, e)?;
+                        trace!(
+                            "zap",
+                            "leaf {blkid}: {} entries: {}",
+                            entries.len(),
+                            names(&entries)
+                        );
+                        out.extend(entries);
+                    }
                     // A pointer into a hole or a non-leaf block: skip, the
                     // table can be stale during a split.
-                    _ => continue,
+                    other => {
+                        trace!("zap", "leaf {blkid}: not a leaf ({other:?}), skipped");
+                        continue;
+                    }
                 }
             }
             Ok(out)
         }
         Some(BlockType::Leaf) => Err(ReadError::Io("ZAP object starts with a leaf block".into())),
-        None => Err(ReadError::Io("object is not a ZAP".into())),
+        None => {
+            trace!(
+                "zap",
+                "not a ZAP; first bytes:\n{}",
+                hexdump(&block0, 0, 64)
+            );
+            Err(ReadError::Io("object is not a ZAP".into()))
+        }
     }
+}
+
+fn names(entries: &[Entry]) -> String {
+    const MAX: usize = 12;
+    let mut s: Vec<String> = entries.iter().take(MAX).map(|e| e.name.clone()).collect();
+    if entries.len() > MAX {
+        s.push(format!("… +{}", entries.len() - MAX));
+    }
+    s.join(", ")
 }
 
 /// Look up one name.

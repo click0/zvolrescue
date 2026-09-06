@@ -11,7 +11,8 @@ use std::fmt;
 use zfs_ondisk::blkptr::{BlkPtr, Dva, LABEL_START_SIZE};
 use zfs_ondisk::checksum::{verify, Verify};
 use zfs_ondisk::compress::{decompress, DecompressError};
-use zvolrescue_io::BlockSource;
+use zvolrescue_io::trace::hexdump;
+use zvolrescue_io::{trace, BlockSource};
 
 use crate::pool::PoolAssembly;
 
@@ -172,6 +173,27 @@ impl<'a> PoolReader<'a> {
             });
         }
         let psize = bp.psize as usize;
+        trace!(
+            "zio",
+            "read bp: level {} type {} lsize {} psize {} {} {} birth {} dvas [{}]",
+            bp.level,
+            bp.object_type,
+            bp.lsize,
+            bp.psize,
+            bp.compression.name(),
+            bp.checksum.name(),
+            bp.birth,
+            bp.dvas()
+                .map(|d| format!(
+                    "vdev {} off {:#x} asize {}{}",
+                    d.vdev,
+                    d.offset,
+                    d.asize,
+                    if d.gang { " GANG" } else { "" }
+                ))
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
         let mut attempts = Vec::new();
         let mut unverified: Option<(Vec<u8>, Verify)> = None;
         for (i, dva) in bp.dva.iter().enumerate() {
@@ -214,14 +236,32 @@ impl<'a> PoolReader<'a> {
                     None => self.read_dva(dva, psize),
                 };
                 match read {
-                    Err(e) => attempts.push(Attempt {
-                        dva: i,
-                        vdev: dva.vdev,
-                        device: candidate.flatten(),
-                        result: Err(e),
-                    }),
+                    Err(e) => {
+                        trace!("zio", "  dva {i} candidate {candidate:?}: {e}");
+                        attempts.push(Attempt {
+                            dva: i,
+                            vdev: dva.vdev,
+                            device: candidate.flatten(),
+                            result: Err(e),
+                        });
+                    }
                     Ok((raw, device)) => {
                         let v = verify(bp.checksum, &raw, bp.endian, &bp.cksum);
+                        trace!(
+                            "zio",
+                            "  dva {i} device #{device} @ {:#x}: checksum {v:?}",
+                            LABEL_START_SIZE + dva.offset
+                        );
+                        if v == Verify::Mismatch {
+                            trace!(
+                                "zio",
+                                "    expected {:x?} computed {:x?}; first bytes:\n{}",
+                                bp.cksum,
+                                zfs_ondisk::checksum::compute(bp.checksum, &raw, bp.endian)
+                                    .unwrap_or([0; 4]),
+                                hexdump(&raw, LABEL_START_SIZE + dva.offset, 64)
+                            );
+                        }
                         attempts.push(Attempt {
                             dva: i,
                             vdev: dva.vdev,
@@ -230,8 +270,18 @@ impl<'a> PoolReader<'a> {
                         });
                         match v {
                             Verify::Ok | Verify::NotChecked => {
-                                let data = decompress(bp.compression, &raw, lsize)
-                                    .map_err(ReadError::Decompress)?;
+                                let data = match decompress(bp.compression, &raw, lsize) {
+                                    Ok(d) => d,
+                                    Err(e) => {
+                                        trace!(
+                                            "zio",
+                                            "    decompress {} failed: {e}; first bytes:\n{}",
+                                            bp.compression.name(),
+                                            hexdump(&raw, LABEL_START_SIZE + dva.offset, 64)
+                                        );
+                                        return Err(ReadError::Decompress(e));
+                                    }
+                                };
                                 return Ok(Block {
                                     data,
                                     verify: v,

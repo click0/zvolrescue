@@ -58,6 +58,13 @@ pub struct Global {
     /// Disable colour in text output.
     #[arg(long, global = true)]
     pub no_color: bool,
+    /// Trace every read decision (labels, uberblocks, blocks, dnodes, ZAPs,
+    /// DSL walk) with hex dumps on failures, to stderr.
+    #[arg(long, global = true)]
+    pub debug: bool,
+    /// Write the --debug trace to FILE instead of stderr (implies --debug).
+    #[arg(long, global = true, value_name = "FILE")]
+    pub debug_log: Option<PathBuf>,
 }
 
 /// Open-source ZFS forensic & recovery utility. Never writes to evidence.
@@ -153,6 +160,25 @@ impl PoolSpec {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if cli.global.debug || cli.global.debug_log.is_some() {
+        let file = match &cli.global.debug_log {
+            Some(p) => match std::fs::File::create(p) {
+                Ok(f) => Some(f),
+                Err(e) => {
+                    eprintln!("zvolrescue: cannot create debug log {}: {e}", p.display());
+                    return ExitCode::from(exit::USAGE);
+                }
+            },
+            None => None,
+        };
+        zvolrescue_io::trace::enable(file);
+        zvolrescue_io::trace!(
+            "cli",
+            "zvolrescue {} argv {:?}",
+            env!("CARGO_PKG_VERSION"),
+            std::env::args().collect::<Vec<_>>()
+        );
+    }
     let code = match cli.cmd {
         Cmd::Scan { devices } => scan::run(&cli.global, &devices),
         Cmd::List {
