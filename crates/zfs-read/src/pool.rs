@@ -2,7 +2,9 @@
 
 use std::collections::BTreeMap;
 
+use zfs_ondisk::checksum::ChecksumStatus;
 use zfs_ondisk::label::{LabelConfig, VdevNode};
+use zfs_ondisk::uberblock::Uberblock;
 
 use crate::vdev::DeviceScan;
 
@@ -225,5 +227,64 @@ mod tests {
         assert_eq!(pools[1].name, "b");
         assert_eq!(pools[1].missing_tops(), vec![1]);
         assert!(!pools[1].readable());
+    }
+}
+
+/// How to pick the TXG to read a pool at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TxgSelect {
+    /// Highest verified TXG.
+    Newest,
+    /// Exactly this TXG.
+    Exact(u64),
+    /// Highest TXG whose uberblock timestamp is at or before this Unix time.
+    Before(u64),
+}
+
+/// A verified uberblock available for a pool, with where it was found.
+#[derive(Debug, Clone)]
+pub struct Candidate {
+    /// The uberblock.
+    pub ub: Uberblock,
+    /// Scanned device index.
+    pub device: usize,
+    /// Label index on that device.
+    pub label: usize,
+}
+
+/// Every checksum-verified uberblock of `pool` across its scanned members,
+/// one per TXG (first occurrence kept), newest first.
+pub fn uberblock_candidates(scans: &[Option<DeviceScan>], pool: &PoolAssembly) -> Vec<Candidate> {
+    let mut out: Vec<Candidate> = Vec::new();
+    for &dev in &pool.devices {
+        let Some(scan) = scans.get(dev).and_then(|s| s.as_ref()) else {
+            continue;
+        };
+        for label in &scan.labels {
+            for slot in &label.uberblocks {
+                if slot.checksum != ChecksumStatus::Ok || slot.ub.txg == 0 {
+                    continue;
+                }
+                if out.iter().any(|c| c.ub.txg == slot.ub.txg) {
+                    continue;
+                }
+                out.push(Candidate {
+                    ub: slot.ub.clone(),
+                    device: dev,
+                    label: label.index,
+                });
+            }
+        }
+    }
+    out.sort_by_key(|c| std::cmp::Reverse(c.ub.txg));
+    out
+}
+
+/// Choose among `candidates` (newest first) per `sel`.
+pub fn select_uberblock(candidates: &[Candidate], sel: TxgSelect) -> Option<&Candidate> {
+    match sel {
+        TxgSelect::Newest => candidates.first(),
+        TxgSelect::Exact(txg) => candidates.iter().find(|c| c.ub.txg == txg),
+        TxgSelect::Before(ts) => candidates.iter().find(|c| c.ub.timestamp <= ts),
     }
 }

@@ -323,50 +323,14 @@ pub fn mos_endian(mos: &DnodeArray<'_, '_>) -> Endian {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fixture::{Alloc, Pool};
+    use crate::fixture::{build_sample_mos, Alloc, Pool};
     use crate::pool::assemble;
     use crate::vdev::scan_device;
     use zfs_ondisk::blkptr;
-    use zfs_ondisk::dmu::encode::{objset, DnodeSpec};
-    use zfs_ondisk::dmu::{ot, DNODE_SIZE};
-    use zfs_ondisk::dsl::encode::{dsl_dataset, dsl_dir};
     use zfs_ondisk::label::LABEL_SIZE;
-    use zfs_ondisk::zap::encode::micro;
     use zvolrescue_io::{BlockSource, MemSource};
 
     const SIZE: u64 = 64 * LABEL_SIZE;
-
-    fn dataset_phys(
-        dir: u64,
-        next_snap: u64,
-        bp: &[u8; 128],
-        txg: u64,
-        guid: u64,
-        snapnames: u64,
-    ) -> DslDatasetPhys {
-        DslDatasetPhys {
-            dir_obj: dir,
-            prev_snap_obj: 0,
-            prev_snap_txg: 0,
-            next_snap_obj: next_snap,
-            snapnames_zapobj: snapnames,
-            num_children: 1,
-            creation_time: 1_700_000_000 + txg,
-            creation_txg: txg,
-            deadlist_obj: 0,
-            referenced_bytes: 1 << 20,
-            compressed_bytes: 0,
-            uncompressed_bytes: 0,
-            unique_bytes: 0,
-            fsid_guid: 0,
-            guid,
-            flags: 0,
-            bp: blkptr::BlkPtr::parse(bp, Endian::Little).unwrap(),
-            next_clones_obj: 0,
-            props_obj: 0,
-            userrefs_obj: 0,
-        }
-    }
 
     /// A pool whose MOS describes: tank (fs), tank/vm (fs), tank/vm/disk0
     /// (zvol) with snapshot @before, and a $MOS bookkeeping dir.
@@ -374,119 +338,8 @@ mod tests {
         let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1)]);
         let mut members = vec![vec![0u8; SIZE as usize]];
         let mut a = Alloc::new(0x20_0000);
-        let m = &mut members;
-
-        // Objset blocks for the datasets (empty meta-dnode is fine here).
-        // The filesystem gets an empty meta-dnode; the zvol gets a real dnode
-        // array with object 1 (data, 8 KiB blocks) and object 2 (properties
-        // ZAP with size).
-        let empty_meta = DnodeSpec {
-            object_type: ot::DNODE,
-            ..DnodeSpec::default()
-        }
-        .build();
-        let os_fs = a.put(m, &objset(&empty_meta, 2), ot::OBJSET, 0, 100);
-        let mut zvol_dnodes = vec![0u8; 4096];
-        let data_obj = DnodeSpec {
-            object_type: ot::ZVOL,
-            datablksz: 8192,
-            maxblkid: 3,
-            ..DnodeSpec::default()
-        }
-        .build();
-        zvol_dnodes[DNODE_SIZE..2 * DNODE_SIZE].copy_from_slice(&data_obj);
-        let props_blk = a.put(
-            m,
-            &micro(4096, &[("size", 32 << 20)]),
-            ot::ZVOL_PROP,
-            0,
-            100,
-        );
-        let props_obj = DnodeSpec {
-            object_type: ot::ZVOL_PROP,
-            datablksz: 4096,
-            blkptrs: vec![props_blk],
-            ..DnodeSpec::default()
-        }
-        .build();
-        zvol_dnodes[2 * DNODE_SIZE..3 * DNODE_SIZE].copy_from_slice(&props_obj);
-        let zvol_dnode_blk = a.put(m, &zvol_dnodes, ot::DNODE, 0, 100);
-        let zvol_meta = DnodeSpec {
-            object_type: ot::DNODE,
-            datablksz: 4096,
-            blkptrs: vec![zvol_dnode_blk],
-            ..DnodeSpec::default()
-        }
-        .build();
-        let os_zvol = a.put(m, &objset(&zvol_meta, 3), ot::OBJSET, 0, 100);
-
-        // MOS objects, one 16 KiB dnode block (32 slots).
-        let mut dnodes = vec![0u8; 16384];
-        let mut put = |obj: u64, bytes: Vec<u8>| {
-            let at = obj as usize * DNODE_SIZE;
-            dnodes[at..at + bytes.len()].copy_from_slice(&bytes);
-        };
-        let zap_obj = |a: &mut Alloc, m: &mut [Vec<u8>], entries: &[(&str, u64)]| {
-            let blk = a.put(m, &micro(4096, entries), ot::DSL_DIR_CHILD_MAP, 0, 100);
-            DnodeSpec {
-                object_type: ot::DSL_DIR_CHILD_MAP,
-                datablksz: 4096,
-                blkptrs: vec![blk],
-                ..DnodeSpec::default()
-            }
-            .build()
-        };
-        let dir_obj = |head: u64, children: u64, parent: u64| {
-            DnodeSpec {
-                object_type: ot::DSL_DIR,
-                bonus_type: ot::DSL_DIR,
-                bonus: dsl_dir(&DslDirPhys {
-                    head_dataset_obj: head,
-                    child_dir_zapobj: children,
-                    parent_obj: parent,
-                    ..Default::default()
-                }),
-                ..DnodeSpec::default()
-            }
-            .build()
-        };
-        let ds_obj = |d: &DslDatasetPhys| {
-            DnodeSpec {
-                object_type: ot::DSL_DATASET,
-                bonus_type: ot::DSL_DATASET,
-                bonus: dsl_dataset(d),
-                ..DnodeSpec::default()
-            }
-            .build()
-        };
-        put(
-            1,
-            zap_obj(&mut a, m, &[("root_dataset", 2), ("config", 11)]),
-        );
-        put(2, dir_obj(3, 4, 0));
-        put(3, ds_obj(&dataset_phys(2, 0, &os_fs, 4, 0xa1, 0)));
-        put(4, zap_obj(&mut a, m, &[("vm", 5), ("$MOS", 9)]));
-        put(5, dir_obj(6, 7, 2));
-        put(6, ds_obj(&dataset_phys(5, 0, &os_fs, 20, 0xa2, 0)));
-        put(7, zap_obj(&mut a, m, &[("disk0", 12)]));
-        put(9, dir_obj(0, 0, 2));
-        put(12, dir_obj(13, 0, 5));
-        put(13, ds_obj(&dataset_phys(12, 0, &os_zvol, 30, 0xa3, 8)));
-        put(8, zap_obj(&mut a, m, &[("before", 10)]));
-        put(10, ds_obj(&dataset_phys(12, 13, &os_zvol, 25, 0xa4, 0)));
-
-        let dnode_blk = a.put(m, &dnodes, ot::DNODE, 0, 100);
-        let meta = DnodeSpec {
-            object_type: ot::DNODE,
-            datablksz: 16384,
-            blkptrs: vec![dnode_blk],
-            ..DnodeSpec::default()
-        }
-        .build();
-        let mos = a.put(m, &objset(&meta, 1), ot::OBJSET, 0, 100);
-        pool.rootbp = Some(mos);
+        build_sample_mos(&mut pool, &mut members, &mut a);
         pool.write_labels(0, &mut members[0]);
-
         let sources: Vec<MemSource> = members.into_iter().map(MemSource::new).collect();
         let scans: Vec<_> = sources.iter().map(|s| scan_device(s).ok()).collect();
         let ub = scans[0].as_ref().unwrap().labels[0]
