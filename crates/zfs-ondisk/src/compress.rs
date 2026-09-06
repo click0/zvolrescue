@@ -139,8 +139,12 @@ pub fn gzip(src: &[u8], lsize: usize) -> Result<Vec<u8>, DecompressError> {
     check_size(out, lsize)
 }
 
-/// `zstd`: OpenZFS prefixes the frame with an 8-byte header — big-endian
-/// compressed length, then big-endian `version << 8 | level`.
+/// `zstd`: OpenZFS prefixes the frame with an 8-byte header (`zfs_zstdhdr_t`):
+/// big-endian compressed length, then one big-endian word carrying the
+/// level in its top byte and the library version in the low 24 bits.
+/// The frame itself is written in zstd's *magicless* format (no
+/// `28 b5 2f fd` prefix), which is restored before decoding; a frame that
+/// still carries the magic (early OpenZFS 2.0 builds) is accepted as is.
 pub fn zstd(src: &[u8], lsize: usize) -> Result<Vec<u8>, DecompressError> {
     if src.len() < 8 {
         return Err(DecompressError::Corrupt("zstd: missing header"));
@@ -149,7 +153,12 @@ pub fn zstd(src: &[u8], lsize: usize) -> Result<Vec<u8>, DecompressError> {
     let frame = src
         .get(8..8 + clen)
         .ok_or(DecompressError::Corrupt("zstd: length beyond input"))?;
-    let mut dec = ruzstd::decoding::StreamingDecoder::new(frame)
+    let mut framed = Vec::with_capacity(frame.len() + 4);
+    if !frame.starts_with(&ZSTD_MAGIC) {
+        framed.extend_from_slice(&ZSTD_MAGIC);
+    }
+    framed.extend_from_slice(frame);
+    let mut dec = ruzstd::decoding::StreamingDecoder::new(framed.as_slice())
         .map_err(|_| DecompressError::Corrupt("zstd: invalid frame header"))?;
     let mut out = Vec::with_capacity(lsize);
     dec.by_ref()
@@ -159,10 +168,14 @@ pub fn zstd(src: &[u8], lsize: usize) -> Result<Vec<u8>, DecompressError> {
     check_size(out, lsize)
 }
 
-/// Level and library version recorded in a ZFS zstd header.
+/// zstd frame magic (`ZSTD_MAGICNUMBER`, little-endian on disk).
+const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
+
+/// Level and library version (`ZSTD_VERSION_NUMBER`, e.g. 10405 for
+/// 1.4.5) recorded in a ZFS zstd header.
 pub fn zstd_header(src: &[u8]) -> Option<(u8, u32)> {
     let raw = u32::from_be_bytes(src.get(4..8)?.try_into().ok()?);
-    Some(((raw & 0xff) as u8, raw >> 8))
+    Some(((raw >> 24) as u8, raw & 0x00ff_ffff))
 }
 
 fn check_size(out: Vec<u8>, lsize: usize) -> Result<Vec<u8>, DecompressError> {
@@ -267,10 +280,10 @@ mod tests {
             0x28u8, 0xb5, 0x2f, 0xfd, 0x20, 0x05, 0x29, 0x00, 0x00, b'h', b'e', b'l', b'l', b'o',
         ];
         let mut src = (frame.len() as u32).to_be_bytes().to_vec();
-        src.extend(((10_500u32 << 8) | 3).to_be_bytes()); // version 1.4.5-ish, level 3
+        src.extend(((3u32 << 24) | 10_405).to_be_bytes()); // level 3, zstd 1.4.5
         src.extend(frame);
         assert_eq!(zstd(&src, 5).unwrap(), b"hello");
-        assert_eq!(zstd_header(&src), Some((3, 10_500)));
+        assert_eq!(zstd_header(&src), Some((3, 10_405)));
         // RLE block: 'a' x 100.
         let frame = [0x28u8, 0xb5, 0x2f, 0xfd, 0x20, 100, 0x23, 0x03, 0x00, b'a'];
         let mut src = (frame.len() as u32).to_be_bytes().to_vec();
@@ -279,6 +292,21 @@ mod tests {
         assert_eq!(zstd(&src, 100).unwrap(), vec![b'a'; 100]);
         assert!(zstd(&src, 99).is_err());
         assert!(zstd(&src[..6], 100).is_err());
+    }
+
+    #[test]
+    fn zstd_magicless_frame_from_openzfs() {
+        // An embedded block written by OpenZFS 2.2 (ztest, level 14,
+        // zstd 1.4.5): 16 KiB whose first word is 0x185, the rest zero.
+        let src = [
+            0x00u8, 0x00, 0x00, 0x0f, 0x0e, 0x00, 0x28, 0xa5, 0x00, 0x20, 0x55, 0x00, 0x00, 0x18,
+            0x85, 0x01, 0x00, 0x01, 0x00, 0xfa, 0x9f, 0x07, 0x43,
+        ];
+        assert_eq!(zstd_header(&src), Some((14, 10_405)));
+        let out = zstd(&src, 16384).unwrap();
+        assert_eq!(&out[..8], &[0x85, 0x01, 0, 0, 0, 0, 0, 0]);
+        assert!(out[8..].iter().all(|&b| b == 0));
+        assert!(zstd(&src, 8192).is_err());
     }
 
     #[test]

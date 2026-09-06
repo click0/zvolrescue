@@ -137,7 +137,12 @@ fn main() {
                                 bump(&mut outcomes, format!("{key}: ERROR {e}"));
                                 if detail {
                                     eprintln!("dataset {name} object {this} ({}) blkid {blkid} level {} type {} {} psize {} lsize {} encrypted {}: {e}", dn.type_name(), bp.level, bp.object_type, bp.compression.name(), bp.psize, bp.lsize, bp.encrypted);
-                                    if let Ok((raw, _)) =
+                                    if let Some(payload) = bp.embedded_payload() {
+                                        eprintln!(
+                                            "{}",
+                                            zvolrescue_io::trace::hexdump(&payload, 0, 128)
+                                        );
+                                    } else if let Ok((raw, _)) =
                                         reader.read_dva(&bp.dva[0], bp.psize as usize)
                                     {
                                         eprintln!("{}", zvolrescue_io::trace::hexdump(&raw, 0, 48));
