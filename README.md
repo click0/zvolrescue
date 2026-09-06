@@ -59,7 +59,7 @@ the libraries — they never become modes of the main binary.
 zvolrescue scan  DEV...                                    what is here: labels, pool, TXG window, topology
 zvolrescue list  POOLSPEC [--txg N|--before TS] [--diff TXG2] [-r]
                                                            datasets / zvols / snapshots at a TXG
-zvolrescue dump  POOLSPEC DATASET -o OUT.img [--txg N] [--strict] [--key KEYSPEC] [--resume]
+zvolrescue dump  DATASET POOLSPEC -o OUT.img [--txg N] [--strict] [--key KEYSPEC] [--resume]
                                                            extract, verify every block, print SHA-256
 ```
 
@@ -71,7 +71,7 @@ zvolrescue scan -v /dev/ada0p3 /dev/ada1p3
 zvolrescue list /dev/ada0p3 /dev/ada1p3 -r | grep disk0
 
 # Extract it from that TXG, verifying every block.
-zvolrescue dump /dev/ada0p3 /dev/ada1p3 pool/vm/disk0 --txg 4816230 \
+zvolrescue dump pool/vm/disk0 /dev/ada0p3 /dev/ada1p3 --txg 4816230 \
     --strict -o /mnt/rescue/disk0.img --evidence-log case42.jsonl
 ```
 

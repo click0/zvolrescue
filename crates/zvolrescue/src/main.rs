@@ -1,7 +1,8 @@
 //! `zvolrescue` command-line interface.
 //!
-//! Command surface and exit codes follow `docs/SPEC.md` §7. Commands that
-//! are not implemented yet say so and exit with [`exit::NOT_IMPLEMENTED`].
+//! Exactly three commands — `scan`, `list`, `dump` — as fixed by
+//! `docs/SPEC.md` §3.0 and §7. Commands that are not implemented yet say so
+//! and exit with [`exit::NOT_IMPLEMENTED`].
 
 mod evidence;
 mod scan;
@@ -69,42 +70,58 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Cmd {
-    /// Detect ZFS labels and uberblocks on devices or image files.
+    /// What is on these devices or images: labels, uberblocks, TXG window.
+    ///
+    /// `-v` adds the uberblock ring of every label (including corrupt
+    /// slots), `-vv` will add the label nvlists once the parser lands.
     Scan {
         /// Devices, partitions or image files.
         #[arg(required = true, value_name = "DEV")]
         devices: Vec<PathBuf>,
     },
-    /// Dump label nvlists (best copy, or all four).
-    Labels {
-        /// Device or image file.
-        device: PathBuf,
-        /// Show all four labels instead of the best one.
-        #[arg(long)]
-        all: bool,
-    },
-    /// Show the uberblock ring of every label.
-    Uberblocks {
-        /// Device or image file.
-        device: PathBuf,
-        /// Also list corrupt ring slots (bad magic).
-        #[arg(long)]
-        all: bool,
-    },
-    /// Assembled pool summary and health.
-    Pool(PoolSpec),
     /// List datasets, zvols and snapshots at a TXG.
-    List(PoolSpec),
-    /// TXG ↔ time ↔ dataset events.
-    Timeline(PoolSpec),
-    /// Extract a zvol (or an object dump of a filesystem) to a file.
-    Dump(PoolSpec),
-    /// Find and reconstruct unlinked datasets.
-    Carve(PoolSpec),
-    /// Check every block pointer checksum of a dataset.
-    Verify(PoolSpec),
-    /// Consolidated forensic report.
-    Report(PoolSpec),
+    List {
+        #[command(flatten)]
+        pool: PoolSpec,
+        /// Transaction group to read (default: newest valid).
+        #[arg(long, value_name = "N", conflicts_with = "before")]
+        txg: Option<u64>,
+        /// Newest TXG synced at or before this time (RFC 3339 or unix seconds).
+        #[arg(long, value_name = "TS")]
+        before: Option<String>,
+        /// Also show what was created or destroyed relative to this TXG.
+        #[arg(long, value_name = "TXG2")]
+        diff: Option<u64>,
+        /// Recurse into children of the named datasets (all when none given).
+        #[arg(short, long)]
+        recursive: bool,
+    },
+    /// Extract a zvol (or an object dump of a filesystem) to a raw sparse image.
+    ///
+    /// The dataset comes first so that the variable-length list of pool
+    /// members can follow it: `dump DATASET DEV... [--image FILE]...`.
+    Dump {
+        /// Dataset to extract, e.g. pool/vm/disk0.
+        #[arg(value_name = "DATASET")]
+        dataset: String,
+        #[command(flatten)]
+        pool: PoolSpec,
+        /// Output image file. Refused if it resolves onto an input device.
+        #[arg(short, long, value_name = "OUT.img")]
+        output: PathBuf,
+        /// Transaction group to read (default: newest that still has DATASET).
+        #[arg(long, value_name = "N")]
+        txg: Option<u64>,
+        /// Abort on the first unreadable block instead of writing zeros.
+        #[arg(long)]
+        strict: bool,
+        /// Encryption key: raw:FILE | hex:HEX | passphrase:FILE | prompt.
+        #[arg(long, value_name = "KEYSPEC")]
+        key: Option<String>,
+        /// Continue an interrupted extraction of the same dataset and TXG.
+        #[arg(long)]
+        resume: bool,
+    },
 }
 
 /// Members of a pool, given as devices and/or images (SPEC §7 `POOLSPEC`).
@@ -121,22 +138,29 @@ pub struct PoolSpec {
     pub pool_guid: Option<String>,
 }
 
+impl PoolSpec {
+    /// All members in command-line order, or a usage error when none were given.
+    pub fn members(&self) -> Result<Vec<PathBuf>, String> {
+        let all: Vec<PathBuf> = self.devices.iter().chain(&self.image).cloned().collect();
+        if all.is_empty() {
+            return Err("no pool members given: name devices and/or --image FILE".into());
+        }
+        Ok(all)
+    }
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let code = match cli.cmd {
-        Cmd::Scan { devices } => scan::run(&cli.global, &devices, false, false),
-        Cmd::Uberblocks { device, all } => scan::run(&cli.global, &[device], true, all),
-        Cmd::Labels { .. }
-        | Cmd::Pool(_)
-        | Cmd::List(_)
-        | Cmd::Timeline(_)
-        | Cmd::Dump(_)
-        | Cmd::Carve(_)
-        | Cmd::Verify(_)
-        | Cmd::Report(_) => {
+        Cmd::Scan { devices } => scan::run(&cli.global, &devices),
+        Cmd::List { pool, .. } | Cmd::Dump { pool, .. } => {
+            if let Err(e) = pool.members() {
+                eprintln!("zvolrescue: {e}");
+                return ExitCode::from(exit::USAGE);
+            }
             eprintln!(
                 "zvolrescue: this command is specified (docs/SPEC.md §7) but not implemented yet; \
-                 see the delivery phases in §10"
+                 it arrives with phase 1 (§10)"
             );
             exit::NOT_IMPLEMENTED
         }

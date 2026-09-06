@@ -191,7 +191,7 @@ Commands:
   list  POOLSPEC [--txg N|--before TS] [--diff TXG2] [-r]
                                         datasets/zvols/snapshots at a TXG; for each
                                         destroyed one, the last TXG that still had it
-  dump  POOLSPEC DATASET -o OUT.img [--txg N] [--strict] [--key KEYSPEC] [--resume]
+  dump  DATASET POOLSPEC -o OUT.img [--txg N] [--strict] [--key KEYSPEC] [--resume]
                                         extract a zvol (or object dump of a fs) to a raw
                                         sparse image, verifying every block; prints the
                                         SHA-256 of the output
@@ -217,7 +217,7 @@ zvolrescue scan -v /dev/ada0p3 /dev/ada1p3
 zvolrescue list /dev/ada0p3 /dev/ada1p3 -r | grep disk0
 
 # 3. Extract it from that TXG, verifying checksums.
-zvolrescue dump /dev/ada0p3 /dev/ada1p3 pool/vm/disk0 --txg 4816230 \
+zvolrescue dump pool/vm/disk0 /dev/ada0p3 /dev/ada1p3 --txg 4816230 \
     --strict -o /mnt/rescue/disk0.img --evidence-log case42.jsonl
 ```
 

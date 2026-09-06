@@ -194,7 +194,7 @@ zvolrescue [глобальні опції] <команда> [опції] [арг
   list  POOLSPEC [--txg N|--before TS] [--diff TXG2] [-r]
                                         dataset-и/zvol/знімки на TXG; для кожного
                                         знищеного — останній TXG, де він ще був
-  dump  POOLSPEC DATASET -o OUT.img [--txg N] [--strict] [--key KEYSPEC] [--resume]
+  dump  DATASET POOLSPEC -o OUT.img [--txg N] [--strict] [--key KEYSPEC] [--resume]
                                         витягти zvol (або дамп об'єктів ФС) у сирий
                                         sparse-образ із перевіркою кожного блоку;
                                         друкує SHA-256 виходу
@@ -220,7 +220,7 @@ zvolrescue scan -v /dev/ada0p3 /dev/ada1p3
 zvolrescue list /dev/ada0p3 /dev/ada1p3 -r | grep disk0
 
 # 3. Витягти його з того TXG з перевіркою checksum.
-zvolrescue dump /dev/ada0p3 /dev/ada1p3 pool/vm/disk0 --txg 4816230 \
+zvolrescue dump pool/vm/disk0 /dev/ada0p3 /dev/ada1p3 --txg 4816230 \
     --strict -o /mnt/rescue/disk0.img --evidence-log case42.jsonl
 ```
 

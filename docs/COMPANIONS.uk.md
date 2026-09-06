@@ -25,7 +25,7 @@ evidence, чисті запуски. Вони ніколи не викликаю
 
 | Конвенція | Значення |
 |---|---|
-| `POOLSPEC` | як у ТЗ §7: пристрої, `--image FILE` (повторюваний), `--pool-guid GUID` |
+| `POOLSPEC` | як у ТЗ §7: пристрої, `--image FILE` (повторюваний), `--pool-guid GUID`. Обов'язковий `DATASET` завжди йде перед ним, бо перелік членів має змінну довжину. |
 | `-f, --format text\|json` | текст для людей (типово), один JSON-документ на stdout для машин |
 | `-v` / `-q` | більше / менше деталей, повторювані |
 | `--evidence-log FILE` | дописати один JSON Lines запис на запуск (§1.3) |
@@ -223,10 +223,10 @@ zvolreport verify  report.json [--evidence-root DIR] [--outputs-root DIR]
 ### 5.2 CLI
 
 ```
-zvolfiles list     POOLSPEC DATASET [--txg N] [--key KEYSPEC] [PATH] [-R]
-zvolfiles extract  POOLSPEC DATASET [--txg N] [--key KEYSPEC] [PATH...] -o DIR
+zvolfiles list     DATASET POOLSPEC [--txg N] [--key KEYSPEC] [PATH] [-R]
+zvolfiles extract  DATASET POOLSPEC [--txg N] [--key KEYSPEC] [PATH...] -o DIR
                                     [--strict] [--preserve owner,times,xattr]
-zvolfiles objects  POOLSPEC DATASET [--txg N] [--key KEYSPEC] -o DIR
+zvolfiles objects  DATASET POOLSPEC [--txg N] [--key KEYSPEC] -o DIR
 ```
 
 ### 5.3 Вимоги

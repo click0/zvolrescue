@@ -1,4 +1,7 @@
-//! `scan` and `uberblocks`: label geometry and uberblock rings of single devices.
+//! `scan`: label geometry and uberblock rings of single devices.
+//!
+//! Verbosity drives the detail: `-v` lists every uberblock and corrupt ring
+//! slot; `-vv` is reserved for the label nvlists (not decoded yet).
 
 use std::path::{Path, PathBuf};
 
@@ -35,7 +38,7 @@ struct LabelOut {
     corrupt_slots: usize,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     uberblocks: Vec<UberblockOut>,
-    /// Slots that are neither valid nor empty (only with `--all`).
+    /// Slots that are neither valid nor empty (only with `-v`).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     corrupt: Vec<CorruptSlot>,
 }
@@ -198,13 +201,19 @@ fn print_text(devs: &[DeviceOut], detail: bool) {
     }
 }
 
-/// Run `scan` (summary) or `uberblocks` (`detail = true`); `all` also lists
-/// corrupt ring slots.
-pub fn run(g: &Global, devices: &[PathBuf], detail: bool, all: bool) -> u8 {
+/// Run `scan`. With `-v` every label's uberblocks and corrupt slots are
+/// listed; `-vv` will add nvlists once `zfs-ondisk` can decode them.
+pub fn run(g: &Global, devices: &[PathBuf]) -> u8 {
+    let detail = g.verbose >= 1;
     let devs: Vec<DeviceOut> = devices
         .iter()
-        .map(|p| scan_device(p, detail, all))
+        .map(|p| scan_device(p, detail, detail))
         .collect();
+    if g.verbose >= 2 && !g.quiet {
+        eprintln!(
+            "zvolrescue: label nvlists are not decoded yet (-vv has no extra output in this build)"
+        );
+    }
     let json = serde_json::to_value(&devs).expect("serialisable");
     match g.format {
         Format::Json => println!(

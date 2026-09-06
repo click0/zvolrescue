@@ -60,7 +60,7 @@ carving, звіти та файлове відновлення — *супутн
 zvolrescue scan  DEV...                                    що тут є: мітки, пул, вікно TXG, топологія
 zvolrescue list  POOLSPEC [--txg N|--before TS] [--diff TXG2] [-r]
                                                            dataset-и / zvol / знімки на TXG
-zvolrescue dump  POOLSPEC DATASET -o OUT.img [--txg N] [--strict] [--key KEYSPEC] [--resume]
+zvolrescue dump  DATASET POOLSPEC -o OUT.img [--txg N] [--strict] [--key KEYSPEC] [--resume]
                                                            витягти, перевірити кожен блок, надрукувати SHA-256
 ```
 
@@ -72,7 +72,7 @@ zvolrescue scan -v /dev/ada0p3 /dev/ada1p3
 zvolrescue list /dev/ada0p3 /dev/ada1p3 -r | grep disk0
 
 # Витягти його з того TXG з перевіркою кожного блоку.
-zvolrescue dump /dev/ada0p3 /dev/ada1p3 pool/vm/disk0 --txg 4816230 \
+zvolrescue dump pool/vm/disk0 /dev/ada0p3 /dev/ada1p3 --txg 4816230 \
     --strict -o /mnt/rescue/disk0.img --evidence-log case42.jsonl
 ```
 

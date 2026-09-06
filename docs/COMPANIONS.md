@@ -25,7 +25,7 @@ library crate and inherited by all five binaries.
 
 | Convention | Meaning |
 |---|---|
-| `POOLSPEC` | as in SPEC §7: devices, `--image FILE` (repeatable), `--pool-guid GUID` |
+| `POOLSPEC` | as in SPEC §7: devices, `--image FILE` (repeatable), `--pool-guid GUID`. A required `DATASET` always precedes it, because the member list is variable-length. |
 | `-f, --format text\|json` | text for humans (default), one JSON document on stdout for machines |
 | `-v` / `-q` | verbosity up / down, repeatable |
 | `--evidence-log FILE` | append one JSON Lines record per run (§1.3) |
@@ -224,10 +224,10 @@ tree, or a raw object dump when the ZPL metadata is too damaged.
 ### 5.2 CLI
 
 ```
-zvolfiles list     POOLSPEC DATASET [--txg N] [--key KEYSPEC] [PATH] [-R]
-zvolfiles extract  POOLSPEC DATASET [--txg N] [--key KEYSPEC] [PATH...] -o DIR
+zvolfiles list     DATASET POOLSPEC [--txg N] [--key KEYSPEC] [PATH] [-R]
+zvolfiles extract  DATASET POOLSPEC [--txg N] [--key KEYSPEC] [PATH...] -o DIR
                                     [--strict] [--preserve owner,times,xattr]
-zvolfiles objects  POOLSPEC DATASET [--txg N] [--key KEYSPEC] -o DIR
+zvolfiles objects  DATASET POOLSPEC [--txg N] [--key KEYSPEC] -o DIR
 ```
 
 ### 5.3 Requirements
