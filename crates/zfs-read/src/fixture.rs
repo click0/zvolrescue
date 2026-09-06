@@ -60,6 +60,9 @@ pub struct Pool {
     pub hostid: u64,
     /// `state`.
     pub state: u64,
+    /// Root block pointer to record in every uberblock (128 bytes); when
+    /// `None` only the logical birth is filled in.
+    pub rootbp: Option<[u8; blkptr::SIZE]>,
 }
 
 impl Pool {
@@ -82,6 +85,7 @@ impl Pool {
             hostname: "fixture-host".into(),
             hostid: 0x1234_5678,
             state: 0,
+            rootbp: None,
         }
     }
 
@@ -175,6 +179,14 @@ impl Pool {
     /// nothing else.
     pub fn member_image(&self, i: usize, size: u64) -> Vec<u8> {
         let mut img = vec![0u8; size as usize];
+        self.write_labels(i, &mut img);
+        img
+    }
+
+    /// (Re)write the four labels of member `i` into an existing image,
+    /// leaving everything else untouched.
+    pub fn write_labels(&self, i: usize, img: &mut [u8]) {
+        let size = img.len() as u64;
         let packed = pack(&self.config(i));
         assert!(packed.len() + 40 <= VDEV_PHYS_SIZE as usize);
         let shift = (self.ashift).clamp(UBERBLOCK_SHIFT, MAX_UBERBLOCK_SHIFT);
@@ -203,13 +215,15 @@ impl Pool {
                         .fold(self.guid ^ 0xf0f0, u64::wrapping_add),
                 );
                 w(ub, 32, *ts);
-                w(ub, 40 + 80, *txg); // rootbp logical birth
+                match &self.rootbp {
+                    Some(bp) => ub[40..40 + blkptr::SIZE].copy_from_slice(bp),
+                    None => w(ub, 40 + 80, *txg), // rootbp logical birth only
+                }
                 w(ub, 40 + 128, 5000); // software version
                 seal_label(ub, ring_off);
             }
         }
         assert!(size >= 4 * LABEL_SIZE);
-        img
     }
 }
 

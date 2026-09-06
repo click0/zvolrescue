@@ -162,6 +162,16 @@ impl<'r, 'a> DnodeArray<'r, 'a> {
         let dnode = self.get(objnum)?;
         Ok(ObjectReader::new(self.meta.reader, dnode, self.meta.endian))
     }
+
+    /// Byte order the array's dnodes were written in.
+    pub fn endian(&self) -> Endian {
+        self.meta.endian
+    }
+
+    /// The pool reader behind this array.
+    pub(crate) fn meta_reader(&self) -> &'r PoolReader<'a> {
+        self.meta.reader
+    }
 }
 
 impl From<zfs_ondisk::ParseError> for ReadError {

@@ -72,6 +72,11 @@ impl MemSource {
     pub fn new(bytes: Vec<u8>) -> Self {
         MemSource(bytes)
     }
+
+    /// Mutable access, for tests that damage a fixture after building it.
+    pub fn bytes_mut(&mut self) -> &mut [u8] {
+        &mut self.0
+    }
 }
 
 impl BlockSource for MemSource {

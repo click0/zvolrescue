@@ -5,9 +5,11 @@
 //! members ([`vdev`]) and assembly of the scanned members into pools
 //! ([`pool`]); [`zio`] reads and verifies blocks through them; [`dmu`]
 //! walks object block trees and dnode arrays; [`zap`] reads whole ZAP
-//! objects. [`fixture`] builds synthetic members for tests.
+//! objects; [`dsl`] walks the MOS into a dataset tree. [`fixture`] builds
+//! synthetic members for tests.
 
 pub mod dmu;
+pub mod dsl;
 pub mod fixture;
 pub mod pool;
 pub mod vdev;
