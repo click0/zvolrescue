@@ -20,6 +20,10 @@ use crate::zio::{PoolReader, ReadError};
 
 /// MOS object number of the object directory.
 pub const OBJECT_DIRECTORY: u64 = 1;
+/// Object number of the data object inside a zvol objset (`ZVOL_OBJ`).
+pub const ZVOL_OBJ: u64 = 1;
+/// Object number of the properties ZAP inside a zvol objset (`ZVOL_ZAP_OBJ`).
+pub const ZVOL_ZAP_OBJ: u64 = 2;
 /// Recursion bound on DSL directory depth.
 pub const MAX_DEPTH: usize = 64;
 
@@ -50,6 +54,10 @@ pub struct Dataset {
     pub origin_obj: u64,
     /// MOS object of the directory's properties ZAP.
     pub props_zapobj: u64,
+    /// `volsize` for volumes, from the zvol objset's properties ZAP.
+    pub volsize: Option<u64>,
+    /// `volblocksize` for volumes: the data object's block size.
+    pub volblocksize: Option<u64>,
     /// The dataset's own `dsl_dataset_phys_t`.
     pub phys: DslDatasetPhys,
     /// Problems met while describing this dataset (never fatal).
@@ -200,12 +208,37 @@ fn describe(
 ) -> Result<Dataset, ReadError> {
     let phys = read_dataset(mos, obj)?;
     let mut warnings = Vec::new();
+    let mut volsize = None;
+    let mut volblocksize = None;
     let kind = if phys.bp.is_hole() {
         None
     } else {
         match mos.reader().read_block(&phys.bp, false) {
             Ok(b) => match ObjsetPhys::parse(&b.data, phys.bp.endian) {
-                Ok(os) => Some(os.os_type),
+                Ok(os) => {
+                    if os.os_type == ObjsetType::Zvol {
+                        let objs =
+                            DnodeArray::new(mos.reader(), os.meta_dnode.clone(), phys.bp.endian);
+                        match objs.get(ZVOL_OBJ) {
+                            Ok(d) if !d.is_free() => volblocksize = Some(d.datablksz()),
+                            Ok(_) => warnings.push("zvol data object is free".into()),
+                            Err(e) => warnings.push(format!("zvol data object: {e}")),
+                        }
+                        match objs.object(ZVOL_ZAP_OBJ).and_then(|o| read_zap(&o)) {
+                            Ok(entries) => {
+                                volsize = entries
+                                    .iter()
+                                    .find(|e| e.name == "size")
+                                    .and_then(|e| e.value.as_u64());
+                                if volsize.is_none() {
+                                    warnings.push("zvol properties have no size".into());
+                                }
+                            }
+                            Err(e) => warnings.push(format!("zvol properties: {e}")),
+                        }
+                    }
+                    Some(os.os_type)
+                }
                 Err(e) => {
                     warnings.push(format!("objset header: {e}"));
                     None
@@ -230,6 +263,8 @@ fn describe(
         prev_snap_obj: phys.prev_snap_obj,
         origin_obj: dir.origin_obj,
         props_zapobj: dir.props_zapobj,
+        volsize,
+        volblocksize,
         phys,
         warnings,
     })
@@ -342,13 +377,48 @@ mod tests {
         let m = &mut members;
 
         // Objset blocks for the datasets (empty meta-dnode is fine here).
+        // The filesystem gets an empty meta-dnode; the zvol gets a real dnode
+        // array with object 1 (data, 8 KiB blocks) and object 2 (properties
+        // ZAP with size).
         let empty_meta = DnodeSpec {
             object_type: ot::DNODE,
             ..DnodeSpec::default()
         }
         .build();
         let os_fs = a.put(m, &objset(&empty_meta, 2), ot::OBJSET, 0, 100);
-        let os_zvol = a.put(m, &objset(&empty_meta, 3), ot::OBJSET, 0, 100);
+        let mut zvol_dnodes = vec![0u8; 4096];
+        let data_obj = DnodeSpec {
+            object_type: ot::ZVOL,
+            datablksz: 8192,
+            maxblkid: 3,
+            ..DnodeSpec::default()
+        }
+        .build();
+        zvol_dnodes[DNODE_SIZE..2 * DNODE_SIZE].copy_from_slice(&data_obj);
+        let props_blk = a.put(
+            m,
+            &micro(4096, &[("size", 32 << 20)]),
+            ot::ZVOL_PROP,
+            0,
+            100,
+        );
+        let props_obj = DnodeSpec {
+            object_type: ot::ZVOL_PROP,
+            datablksz: 4096,
+            blkptrs: vec![props_blk],
+            ..DnodeSpec::default()
+        }
+        .build();
+        zvol_dnodes[2 * DNODE_SIZE..3 * DNODE_SIZE].copy_from_slice(&props_obj);
+        let zvol_dnode_blk = a.put(m, &zvol_dnodes, ot::DNODE, 0, 100);
+        let zvol_meta = DnodeSpec {
+            object_type: ot::DNODE,
+            datablksz: 4096,
+            blkptrs: vec![zvol_dnode_blk],
+            ..DnodeSpec::default()
+        }
+        .build();
+        let os_zvol = a.put(m, &objset(&zvol_meta, 3), ot::OBJSET, 0, 100);
 
         // MOS objects, one 16 KiB dnode block (32 slots).
         let mut dnodes = vec![0u8; 16384];
@@ -449,6 +519,9 @@ mod tests {
         assert_eq!(disk0.creation_txg, 30);
         assert_eq!(disk0.guid, 0xa3);
         assert!(!disk0.snapshot);
+        assert_eq!(disk0.volsize, Some(32 << 20));
+        assert_eq!(disk0.volblocksize, Some(8192));
+        assert_eq!(tree.get("tank/vm").unwrap().volsize, None);
         let snap = tree.get("tank/vm/disk0@before").unwrap();
         assert!(snap.snapshot);
         assert_eq!(snap.creation_txg, 25);
@@ -463,21 +536,26 @@ mod tests {
     #[test]
     fn damaged_objset_blocks_leave_datasets_untyped() {
         let (s, a, ub) = build();
-        // The first two allocations are the datasets' objset blocks.
+        // The first allocation is the filesystem objset block shared by
+        // tank and tank/vm; the zvol's objset comes later and stays intact.
         let mut img = s[0].clone();
         let off = (blkptr::LABEL_START_SIZE + 0x20_0000) as usize;
-        for b in img.bytes_mut()[off..off + 8192].iter_mut() {
+        for b in img.bytes_mut()[off..off + 4096].iter_mut() {
             *b ^= 0x55;
         }
         let reader = reader_for(&img, &a);
         let mos = open_mos(&reader, &ub).unwrap();
         let tree = walk(&mos, "tank").unwrap();
         assert_eq!(tree.datasets.len(), 4);
-        assert!(tree.datasets.iter().all(|d| d.kind.is_none()));
-        assert!(tree
-            .datasets
-            .iter()
-            .all(|d| d.warnings.iter().any(|w| w.contains("objset block"))));
+        for name in ["tank", "tank/vm"] {
+            let d = tree.get(name).unwrap();
+            assert!(d.kind.is_none());
+            assert!(d.warnings.iter().any(|w| w.contains("objset block")));
+        }
+        assert_eq!(
+            tree.get("tank/vm/disk0").unwrap().kind,
+            Some(ObjsetType::Zvol)
+        );
     }
 
     #[test]
