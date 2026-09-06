@@ -34,6 +34,15 @@ unsatisfying:
 `zvolrescue` is meant to be the tool you can run on a rescue system, on
 read-only evidence, and defend the result of in a report.
 
+## One atomic utility
+
+`zvolrescue` does one job: turn ZFS on-disk structures into a plain image
+of one dataset. It is a single static binary with three commands, no
+configuration, no daemon, no plugins, no network. The same arguments over
+the same evidence always produce the same bytes. Forensic timelines,
+carving, reports and file-level recovery are *companion tools* that share
+the libraries — they never become modes of the main binary.
+
 ## Planned features
 
 * **Read-only by construction** — evidence is opened `O_RDONLY`; output can never land on an input device.
@@ -42,45 +51,48 @@ read-only evidence, and defend the result of in a report.
 * **Any TXG** — pick a transaction group explicitly, by timestamp, or "last one that still had this dataset".
 * **Full on-disk feature coverage** — stripe/mirror/RAIDZ1-3/dRAID reconstruction; `lz4`, `zstd`, `gzip`, `lzjb`, `zle`; `fletcher`, `sha256/512`, `skein`, `edonr`, `blake3`; embedded and gang blocks; encrypted datasets with a supplied key.
 * **Sparse-aware extraction** of zvols to raw images, with per-block checksum verification, resume, and `--strict` mode.
-* **Carving** of unlinked zvols whose uberblocks are already gone.
-* **Forensic output** — `-f json` everywhere, TXG timeline, append-only evidence log, consolidated report with SHA-256 chain of custody.
+* **Machine-readable output** — `-f json` everywhere, append-only evidence log, SHA-256 of every input and output.
 
 ## Planned CLI
 
 ```
-zvolrescue scan       DEV...                         detect ZFS labels
-zvolrescue labels     DEV [--all]                    dump label nvlists
-zvolrescue uberblocks DEV|POOL [--all]               uberblock ring
-zvolrescue pool       POOLSPEC                       assembled pool summary
-zvolrescue list       POOLSPEC [--txg N|--before TS] [--diff TXG2] [-r]
-zvolrescue timeline   POOLSPEC                       TXG ↔ time ↔ dataset events
-zvolrescue dump       POOLSPEC DATASET -o OUT.img [--txg N] [--strict] [--key KEYSPEC]
-zvolrescue carve      POOLSPEC [--type zvol] [-o DIR]
-zvolrescue verify     POOLSPEC DATASET [--txg N]
-zvolrescue report     POOLSPEC -o report.json
+zvolrescue scan  DEV...                                    what is here: labels, pool, TXG window, topology
+zvolrescue list  POOLSPEC [--txg N|--before TS] [--diff TXG2] [-r]
+                                                           datasets / zvols / snapshots at a TXG
+zvolrescue dump  POOLSPEC DATASET -o OUT.img [--txg N] [--strict] [--key KEYSPEC] [--resume]
+                                                           extract, verify every block, print SHA-256
 ```
 
 ```sh
 # Which TXGs are still available on these disks?
-zvolrescue uberblocks /dev/ada0p3
+zvolrescue scan -v /dev/ada0p3 /dev/ada1p3
 
-# When did pool/vm/disk0 disappear?
-zvolrescue timeline /dev/ada0p3 /dev/ada1p3 | grep disk0
+# When did pool/vm/disk0 disappear, and which TXG still had it?
+zvolrescue list /dev/ada0p3 /dev/ada1p3 -r | grep disk0
 
-# Extract it from the last TXG that still had it, verifying every block.
+# Extract it from that TXG, verifying every block.
 zvolrescue dump /dev/ada0p3 /dev/ada1p3 pool/vm/disk0 --txg 4816230 \
     --strict -o /mnt/rescue/disk0.img --evidence-log case42.jsonl
 ```
+
+### Companion tools (later, separate binaries)
+
+| Tool | Job |
+|---|---|
+| `zvoltimeline` | TXG ↔ time ↔ dataset created/destroyed, pending deletions |
+| `zvolcarve` | find unlinked zvols whose uberblocks are gone, hand them to `dump` |
+| `zvolreport` | consolidated forensic report with a SHA-256 chain of custody |
+| `zvolfiles` | file-level recovery from filesystem datasets |
 
 ## Roadmap
 
 | Phase | Scope |
 |---|---|
-| 0 — Bootstrap | Repo skeleton, spec, CI (FreeBSD + Linux), fixture-pool generator, `scan`/`labels`/`uberblocks` |
-| 1 — MVP | `list`, `timeline`, `dump` on single/mirror pools; common compression & checksums; JSON output |
-| 2 — Redundancy & integrity | RAIDZ/dRAID reconstruction, all checksums, `verify`, `--strict`, resume, bulk extraction |
-| 3 — Forensics | Encrypted datasets, carving of unlinked zvols, `report`, hash chain |
-| 4 — Filesystems | Object dumps, then ZPL file-level recovery |
+| 0 — Bootstrap | Repo skeleton, spec, CI (FreeBSD + Linux), fixture-pool generator, `scan` |
+| 1 — MVP | `list`, `dump` on single/mirror pools; common compression & checksums; JSON output |
+| 2 — Redundancy & integrity | RAIDZ/dRAID reconstruction, all checksums, `--strict`, `--resume`, bulk extraction |
+| 3 — Forensics | Encrypted datasets; companion tools `zvoltimeline`, `zvolcarve`, `zvolreport` |
+| 4 — Filesystems | Companion tool `zvolfiles`: object dumps, then ZPL file-level recovery |
 
 Details, requirements and acceptance criteria: [docs/SPEC.md](docs/SPEC.md).
 
@@ -92,7 +104,7 @@ docs/SPEC.md                technical specification (ТЗ), English — the sour
 docs/SPEC.uk.md             the same in Ukrainian
 docs/research/              analyses of related tools, on-disk format notes
 Cargo.toml                  cargo workspace
-crates/zvolrescue/          the CLI binary
+crates/zvolrescue/          the main binary (scan / list / dump)
 crates/zvolrescue-io/       read-only device/image access (the only crate allowed `unsafe`)
 crates/zfs-ondisk/          pure on-disk structure parsers (labels, nvlist, uberblocks, blkptr, dnode, ZAP)
 crates/zfs-read/            pool walking: vdev reconstruction, zio, dmu, dsl, zvol extraction, carving
@@ -124,9 +136,6 @@ right now are reviews of [docs/SPEC.md](docs/SPEC.md) — especially the
 open questions in §12 — and real-world recovery scenarios that the
 fixture-pool test suite should cover.
 
-## Related
-
-* [crate](https://github.com/click0/crate) — FreeBSD containerizer by the same author; `zvolrescue` follows its CI conventions and bilingual documentation style.
 
 ## License
 
