@@ -34,6 +34,16 @@ zpool export tpool
 далі пише uberblock-и, і мітки «їдуть» під час перегляду. Після
 експорту образи `/tmp/m0.img`, `/tmp/m1.img` — це evidence.
 
+## 1b. Нема ядра під рукою? `ztest`
+
+`ztest` з OpenZFS створює і ганяє справжній пул цілком у userland (файли
+в каталозі, без `zfs.ko`), а `zdb -e -p DIR` так само його читає.
+`tests/crosscheck-ztest.sh` робить саме це для mirror, raidz2 і
+raidz1-of-mirrors пулів і порівнює `zvolrescue list -r` / `scan` із
+`zdb -d` / `zdb -l`; CI ганяє його на кожен push. Dataset-и від ztest
+мають тип *other* (томів нема), тож це валідує мітки, uberblock-и, MOS,
+dnode-и, ZAP-и, DSL і читання RAIDZ — але не витягання тома.
+
 ## 2. Звірити `scan` із `zdb`
 
 ```sh

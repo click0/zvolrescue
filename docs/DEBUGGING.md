@@ -35,6 +35,17 @@ keeps writing uberblocks, and the labels you look at will move under
 you. After export the images `/tmp/m0.img`, `/tmp/m1.img` are the
 evidence.
 
+## 1b. No kernel at hand? Use `ztest`
+
+OpenZFS's `ztest` creates and exercises a real pool entirely in userland
+(files under a directory, no `zfs.ko`), and `zdb -e -p DIR` reads it the
+same way. `tests/crosscheck-ztest.sh` does exactly that for a mirror, a
+raidz2 and a raidz1-of-mirrors pool and diffs `zvolrescue list -r` /
+`scan` against `zdb -d` / `zdb -l`; CI runs it on every push. The
+datasets ztest makes are of type *other* (no zvols), so it validates
+labels, uberblocks, MOS, dnodes, ZAPs, DSL and RAIDZ reads — not volume
+extraction.
+
 ## 2. Compare `scan` with `zdb`
 
 ```sh

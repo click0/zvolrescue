@@ -72,6 +72,16 @@ jobs:
           # Three missing: beyond raidz2, exit 3.
           if ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/rz/member2.img -o /tmp/rz-3miss.img; then echo "must fail"; exit 1; else test $? = 3; fi
 
+  crosscheck:
+    name: Cross-check against OpenZFS userland (ztest + zdb)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends zfsutils-linux zfs-test
+      - run: cargo build --release
+      - run: tests/crosscheck-ztest.sh ./target/release/zvolrescue /tmp/crosscheck
+
   freebsd:
     name: FreeBSD 14 (ports rust)
     runs-on: ubuntu-latest
