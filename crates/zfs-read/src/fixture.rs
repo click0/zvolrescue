@@ -248,22 +248,48 @@ pub fn write_at_dva(img: &mut [u8], offset: u64, bytes: &[u8]) {
     img[start..start + bytes.len()].copy_from_slice(bytes);
 }
 
+/// How the fixture allocator lays blocks onto the members.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layout {
+    /// Every member holds the same bytes (stripe of one, or mirror).
+    Mirror,
+    /// RAIDZ with `nparity` parity columns over all members.
+    Raidz {
+        /// `ashift` of the top-level vdev.
+        ashift: u32,
+        /// Parity columns.
+        nparity: u64,
+    },
+}
+
 /// A bump allocator that stores uncompressed, fletcher4-checksummed
-/// blocks on every member image of a stripe/mirror top-level vdev 0 and
-/// hands back the block pointers.
+/// blocks on the member images of top-level vdev 0 and hands back the
+/// block pointers.
 #[derive(Debug)]
 pub struct Alloc {
     next: u64,
+    layout: Layout,
 }
 
 impl Alloc {
-    /// Start allocating at DVA offset `start`.
+    /// Start allocating at DVA offset `start` on a mirror.
     pub fn new(start: u64) -> Alloc {
-        Alloc { next: start }
+        Alloc {
+            next: start,
+            layout: Layout::Mirror,
+        }
     }
 
-    /// Store `data` (padded to 512) on all `members`; return a block pointer
-    /// with the given object type and level, born in `txg`.
+    /// Start allocating at DVA offset `start` with `layout`.
+    pub fn with_layout(start: u64, layout: Layout) -> Alloc {
+        Alloc {
+            next: start,
+            layout,
+        }
+    }
+
+    /// Store `data` on `members`; return a block pointer with the given
+    /// object type and level, born in `txg`.
     pub fn put(
         &mut self,
         members: &mut [Vec<u8>],
@@ -272,20 +298,72 @@ impl Alloc {
         level: u8,
         txg: u64,
     ) -> [u8; blkptr::SIZE] {
-        let size = data.len().div_ceil(512) * 512;
-        let mut padded = data.to_vec();
-        padded.resize(size, 0);
-        let offset = self.next;
-        self.next += size as u64;
-        for m in members.iter_mut() {
-            write_at_dva(m, offset, &padded);
+        match self.layout {
+            Layout::Mirror => {
+                let size = data.len().div_ceil(512) * 512;
+                let mut padded = data.to_vec();
+                padded.resize(size, 0);
+                let offset = self.next;
+                self.next += size as u64;
+                for m in members.iter_mut() {
+                    write_at_dva(m, offset, &padded);
+                }
+                self.bp(offset, size as u64, size as u64, &padded, otype, level, txg)
+            }
+            Layout::Raidz { ashift, nparity } => {
+                let unit = 1usize << ashift;
+                let size = data.len().div_ceil(unit) * unit;
+                let mut padded = data.to_vec();
+                padded.resize(size, 0);
+                let offset = self.next;
+                let m = zfs_ondisk::raidz::map(
+                    offset,
+                    size as u64,
+                    ashift,
+                    members.len() as u64,
+                    nparity,
+                );
+                let mut cols: Vec<Vec<u8>> = Vec::new();
+                let mut at = 0usize;
+                for c in m.data() {
+                    let n = c.size as usize;
+                    cols.push(padded[at..at + n].to_vec());
+                    at += n;
+                }
+                let parity = zfs_ondisk::raidz::generate_parity(&cols, nparity as usize);
+                for (c, bytes) in m.parity().iter().zip(parity.iter()) {
+                    write_at_dva(
+                        &mut members[c.devidx as usize],
+                        c.offset,
+                        &bytes[..c.size as usize],
+                    );
+                }
+                for (c, bytes) in m.data().iter().zip(cols.iter()) {
+                    write_at_dva(&mut members[c.devidx as usize], c.offset, bytes);
+                }
+                self.next += m.asize;
+                self.bp(offset, m.asize, size as u64, &padded, otype, level, txg)
+            }
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn bp(
+        &self,
+        offset: u64,
+        asize: u64,
+        size: u64,
+        padded: &[u8],
+        otype: u8,
+        level: u8,
+        txg: u64,
+    ) -> [u8; blkptr::SIZE] {
         Builder::new()
-            .dva(0, 0, offset, size as u64, false)
-            .sizes(size as u64, size as u64)
+            .dva(0, 0, offset, asize, false)
+            .sizes(size, size)
             .props(2, 7, otype, level)
             .births(0, txg, 1)
-            .cksum(fletcher4(&padded, Endian::Little))
+            .cksum(fletcher4(padded, Endian::Little))
             .bytes(Endian::Little)
     }
 }
@@ -361,7 +439,7 @@ pub fn build_sample_mos_variant(
     let os_fs = a.put(m, &objset(&empty_meta, 2), ot::OBJSET, 0, 100);
     let mut zvol_dnodes = vec![0u8; 4096];
     // Data blocks 0 and 2 of the volume; 1 and 3 are holes.
-    if with_disk0 {
+    if with_disk0 && a.layout == Layout::Mirror {
         assert_eq!(
             a.next, SAMPLE_ZVOL_BLOCK0_OFFSET,
             "sample layout changed: update SAMPLE_ZVOL_BLOCK0_OFFSET"
@@ -479,7 +557,14 @@ pub fn destroyed_zvol_members(pool: &mut Pool, size: u64) -> (Vec<Vec<u8>>, u64,
     let previous = txgs[txgs.len() - 2];
     let n = pool.members.len();
     let mut members: Vec<Vec<u8>> = (0..n).map(|_| vec![0u8; size as usize]).collect();
-    let mut alloc = Alloc::new(0x20_0000);
+    let layout = match pool.nparity {
+        Some(p) if pool.kind == "raidz" => Layout::Raidz {
+            ashift: pool.ashift,
+            nparity: p,
+        },
+        _ => Layout::Mirror,
+    };
+    let mut alloc = Alloc::with_layout(0x20_0000, layout);
     let with = build_sample_mos_variant(&mut members, &mut alloc, true);
     let without = build_sample_mos_variant(&mut members, &mut alloc, false);
     pool.rootbp = Some(with);

@@ -11,6 +11,7 @@ use std::fmt;
 use zfs_ondisk::blkptr::{BlkPtr, Dva, LABEL_START_SIZE};
 use zfs_ondisk::checksum::{verify, Verify};
 use zfs_ondisk::compress::{decompress, DecompressError};
+use zfs_ondisk::raidz;
 use zvolrescue_io::trace::hexdump;
 use zvolrescue_io::{trace, BlockSource};
 
@@ -21,6 +22,7 @@ use crate::pool::PoolAssembly;
 struct Top {
     kind: String,
     nparity: u64,
+    ashift: u32,
     /// For each leaf in configuration order, the index of its scanned
     /// device, or `None` if that member is missing.
     leaves: Vec<Option<usize>>,
@@ -111,6 +113,7 @@ impl<'a> PoolReader<'a> {
                     Top {
                         kind: t.kind.clone(),
                         nparity: t.nparity.unwrap_or(0),
+                        ashift: t.ashift.and_then(|a| u32::try_from(a).ok()).unwrap_or(9),
                         leaves: t.members.iter().map(|m| m.present).collect(),
                     },
                 )
@@ -144,12 +147,201 @@ impl<'a> PoolReader<'a> {
                 }
                 Err(last)
             }
-            "raidz" | "draid" => Err(ReadError::Unsupported(format!(
-                "{}{}",
-                top.kind, top.nparity
-            ))),
+            "raidz" => Err(ReadError::Unsupported(
+                "raidz raw DVA reads go through read_block".into(),
+            )),
+            "draid" => Err(ReadError::Unsupported(format!("draid{}", top.nparity))),
             other => Err(ReadError::Unsupported(other.to_string())),
         }
+    }
+
+    /// Read one column of a RAIDZ stripe from its leaf.
+    fn read_column(&self, top: &Top, col: &raidz::Column) -> Result<Vec<u8>, ReadError> {
+        let leaf = top
+            .leaves
+            .get(col.devidx as usize)
+            .copied()
+            .flatten()
+            .ok_or(ReadError::NoMember)?;
+        let dev = self
+            .devices
+            .get(leaf)
+            .copied()
+            .flatten()
+            .ok_or(ReadError::NoMember)?;
+        let mut buf = vec![0u8; col.size as usize];
+        dev.read_at(LABEL_START_SIZE + col.offset, &mut buf)
+            .map_err(|e| ReadError::Io(e.to_string()))?;
+        Ok(buf)
+    }
+
+    /// Read the `psize` bytes behind a DVA on a RAIDZ top-level vdev,
+    /// reconstructing from parity when columns are missing or, if the
+    /// checksum still fails, trying every combination of up to `nparity`
+    /// data columns as silently corrupted (`vdev_raidz_combrec`).
+    fn read_raidz(
+        &self,
+        top: &Top,
+        dva: &Dva,
+        bp: &BlkPtr,
+        attempts: &mut Vec<Attempt>,
+        dva_index: usize,
+    ) -> Result<(Vec<u8>, Verify), ReadError> {
+        let unit = 1u64 << top.ashift;
+        let psize = bp.psize as usize;
+        let padded = bp.psize.div_ceil(unit) * unit;
+        let m = raidz::map(
+            dva.offset,
+            padded,
+            top.ashift,
+            top.leaves.len() as u64,
+            top.nparity,
+        );
+        trace!(
+            "raidz",
+            "  dva {dva_index}: {}{} ashift {} -> {} cols ({} parity, {} big, nskip {}): {}",
+            top.kind,
+            top.nparity,
+            top.ashift,
+            m.acols,
+            m.nparity,
+            m.bigcols,
+            m.nskip,
+            m.cols[..m.acols]
+                .iter()
+                .map(|c| format!("dev{}@{:#x}+{}", c.devidx, c.offset, c.size))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        let mut parity: Vec<Option<Vec<u8>>> = Vec::with_capacity(m.nparity);
+        for c in m.parity() {
+            parity.push(match self.read_column(top, c) {
+                Ok(b) => Some(b),
+                Err(e) => {
+                    trace!("raidz", "    parity column dev{}: {e}", c.devidx);
+                    None
+                }
+            });
+        }
+        let mut data: Vec<Vec<u8>> = Vec::with_capacity(m.acols - m.nparity);
+        let mut lost: Vec<usize> = Vec::new();
+        for (i, c) in m.data().iter().enumerate() {
+            match self.read_column(top, c) {
+                Ok(b) => data.push(b),
+                Err(e) => {
+                    trace!("raidz", "    data column {i} dev{}: {e}", c.devidx);
+                    lost.push(i);
+                    data.push(vec![0u8; c.size as usize]);
+                }
+            }
+        }
+        let available = parity.iter().filter(|p| p.is_some()).count();
+        let assemble = |data: &[Vec<u8>]| -> Vec<u8> {
+            let mut out: Vec<u8> = data.iter().flatten().copied().collect();
+            out.truncate(psize);
+            out
+        };
+        let record = |attempts: &mut Vec<Attempt>, result: Result<Verify, ReadError>| {
+            attempts.push(Attempt {
+                dva: dva_index,
+                vdev: dva.vdev,
+                device: None,
+                result,
+            });
+        };
+        // 1. Known losses first.
+        if lost.len() > available {
+            let e = ReadError::Unsupported(format!(
+                "{} data column(s) missing, only {} parity column(s) readable",
+                lost.len(),
+                available
+            ));
+            record(attempts, Err(e.clone()));
+            return Err(e);
+        }
+        if !lost.is_empty() {
+            raidz::reconstruct(&mut data, &parity, &lost)
+                .map_err(|e| ReadError::Io(format!("raidz reconstruct: {e:?}")))?;
+            trace!(
+                "raidz",
+                "    reconstructed missing data column(s) {lost:?} from parity"
+            );
+        }
+        let raw = assemble(&data);
+        let v = verify(bp.checksum, &raw, bp.endian, &bp.cksum);
+        trace!(
+            "raidz",
+            "    checksum after direct read{}: {v:?}",
+            if lost.is_empty() {
+                ""
+            } else {
+                " + reconstruction"
+            }
+        );
+        record(attempts, Ok(v));
+        if v != Verify::Mismatch {
+            return Ok((raw, v));
+        }
+        // 2. Silent corruption: assume every combination of up to `budget`
+        //    readable columns — parity or data — is bad, rebuild the data
+        //    among them from the parity that is not suspected, and keep
+        //    the first result that verifies (vdev_raidz_combrec).
+        let budget = available - lost.len();
+        let readable_parity: Vec<usize> =
+            (0..parity.len()).filter(|&r| parity[r].is_some()).collect();
+        let readable_data: Vec<usize> = (0..data.len()).filter(|i| !lost.contains(i)).collect();
+        let columns: Vec<(bool, usize)> = readable_parity
+            .iter()
+            .map(|&r| (true, r))
+            .chain(readable_data.iter().map(|&i| (false, i)))
+            .collect();
+        for k in 1..=budget.min(columns.len()) {
+            for combo in combinations(columns.len(), k) {
+                let mut bad_parity: Vec<usize> = Vec::new();
+                let mut missing = lost.clone();
+                for &j in &combo {
+                    match columns[j] {
+                        (true, r) => bad_parity.push(r),
+                        (false, i) => missing.push(i),
+                    }
+                }
+                missing.sort_unstable();
+                let usable: Vec<Option<Vec<u8>>> = parity
+                    .iter()
+                    .enumerate()
+                    .map(|(r, p)| {
+                        if bad_parity.contains(&r) {
+                            None
+                        } else {
+                            p.clone()
+                        }
+                    })
+                    .collect();
+                let usable_count = usable.iter().filter(|p| p.is_some()).count();
+                if missing.is_empty() || missing.len() > usable_count {
+                    continue;
+                }
+                let mut work = data.clone();
+                if raidz::reconstruct(&mut work, &usable, &missing).is_err() {
+                    continue;
+                }
+                let raw = assemble(&work);
+                let v = verify(bp.checksum, &raw, bp.endian, &bp.cksum);
+                if v != Verify::Mismatch {
+                    trace!(
+                        "raidz",
+                        "    combinatorial reconstruction succeeded: data columns {missing:?} rebuilt, parity rows {bad_parity:?} distrusted"
+                    );
+                    record(attempts, Ok(v));
+                    return Ok((raw, v));
+                }
+            }
+        }
+        trace!(
+            "raidz",
+            "    no reconstruction produced a block matching its checksum"
+        );
+        Err(ReadError::AllCopiesBad)
     }
 
     /// Read, verify and decompress the block behind `bp`.
@@ -212,6 +404,20 @@ impl<'a> PoolReader<'a> {
                     continue;
                 }
             };
+            if top.kind == "raidz" {
+                match self.read_raidz(top, dva, bp, &mut attempts, i) {
+                    Ok((raw, v)) => {
+                        let data = decompress(bp.compression, &raw, lsize)
+                            .map_err(ReadError::Decompress)?;
+                        return Ok(Block {
+                            data,
+                            verify: v,
+                            attempts,
+                        });
+                    }
+                    Err(_) => continue,
+                }
+            }
             // Mirror children are distinct copies: try each one. A missing
             // child is recorded as such, never silently substituted.
             let candidates: Vec<Option<Option<usize>>> = match top.kind.as_str() {
@@ -325,6 +531,25 @@ impl<'a> PoolReader<'a> {
             .next_back()
             .unwrap_or(ReadError::NoMember))
     }
+}
+
+/// All `k`-element index subsets of `0..n`, in lexicographic order.
+fn combinations(n: usize, k: usize) -> Vec<Vec<usize>> {
+    let mut out = Vec::new();
+    let mut cur: Vec<usize> = Vec::with_capacity(k);
+    fn go(start: usize, n: usize, k: usize, cur: &mut Vec<usize>, out: &mut Vec<Vec<usize>>) {
+        if cur.len() == k {
+            out.push(cur.clone());
+            return;
+        }
+        for i in start..n {
+            cur.push(i);
+            go(i + 1, n, k, cur, out);
+            cur.pop();
+        }
+    }
+    go(0, n, k, &mut cur, &mut out);
+    out
 }
 
 #[cfg(test)]
@@ -468,10 +693,157 @@ mod tests {
             ReadError::Hole
         );
 
+        // A pointer into unwritten space on the raidz: every column reads
+        // as zeros, no combination verifies, and the error says so.
         let (_, on_raidz) = compressed();
-        assert!(matches!(
+        assert_eq!(
             reader.read_block(&on_raidz, false).unwrap_err(),
-            ReadError::Unsupported(k) if k == "raidz2"
-        ));
+            ReadError::AllCopiesBad
+        );
+    }
+
+    mod raidz_tests {
+        use super::*;
+        use crate::dsl::{open_mos, walk};
+        use crate::fixture::{destroyed_zvol_members, Pool};
+        use crate::zvol::{extract, open_volume, OnError};
+        use zvolrescue_io::MemSink;
+
+        /// 4-wide raidz2 at ashift 12 with the sample MOS; returns images
+        /// and the assembly built from `present` members only.
+        fn raidz2(
+            present: &[bool],
+        ) -> (
+            Vec<MemSource>,
+            PoolAssembly,
+            zfs_ondisk::uberblock::Uberblock,
+        ) {
+            let mut pool = Pool::raidz("tank", 0x7a1d, 12, 4, 2).txgs(&[(100, 1), (101, 2)]);
+            let (members, _, _) = destroyed_zvol_members(&mut pool, 64 * LABEL_SIZE);
+            let sources: Vec<MemSource> = members.into_iter().map(MemSource::new).collect();
+            let scans: Vec<_> = sources
+                .iter()
+                .zip(present)
+                .map(|(s, &p)| if p { scan_device(s).ok() } else { None })
+                .collect();
+            // txg 100 still has the volume; 101 has it destroyed.
+            let ub = scans.iter().flatten().next().unwrap().labels[0]
+                .uberblocks
+                .iter()
+                .find(|s| s.ub.txg == 100)
+                .unwrap()
+                .ub
+                .clone();
+            let assembly = assemble(&scans).into_iter().next().unwrap();
+            (sources, assembly, ub)
+        }
+
+        fn devices<'a>(s: &'a [MemSource], present: &[bool]) -> Vec<Option<&'a dyn BlockSource>> {
+            s.iter()
+                .zip(present)
+                .map(|(m, &p)| if p { Some(m as &dyn BlockSource) } else { None })
+                .collect()
+        }
+
+        fn dump_disk0(
+            reader: &PoolReader<'_>,
+            ub: &zfs_ondisk::uberblock::Uberblock,
+        ) -> Result<(Vec<u8>, String), ReadError> {
+            let mos = open_mos(reader, ub)?;
+            let tree = walk(&mos, "tank")?;
+            let ds = tree.get("tank/vm/disk0").ok_or(ReadError::Hole)?;
+            let (obj, _) = open_volume(reader, ds)?;
+            let mut sink = MemSink::default();
+            let r = extract(
+                &obj,
+                ds.volsize.unwrap(),
+                &mut sink,
+                OnError::Abort,
+                |_, _| {},
+            )?;
+            assert!(!r.aborted);
+            Ok((sink.data, r.sha256))
+        }
+
+        #[test]
+        fn all_members_present() {
+            let present = [true; 4];
+            let (s, a, ub) = raidz2(&present);
+            let reader = PoolReader::new(&a, devices(&s, &present));
+            let (img, sha) = dump_disk0(&reader, &ub).unwrap();
+            assert_eq!(&img[..8192], &crate::fixture::zvol_pattern(0)[..]);
+            assert_eq!(&img[16384..24576], &crate::fixture::zvol_pattern(2)[..]);
+            // Same image as the mirror fixture produces.
+            assert_eq!(
+                sha,
+                "d6d58af862ec2761bf43158f7ee2b2b0f4628fa6ca8095544493f9d698d7b80d"
+            );
+        }
+
+        #[test]
+        fn two_members_missing_reconstructs() {
+            for present in [
+                [false, false, true, true],
+                [true, false, true, false],
+                [false, true, false, true],
+            ] {
+                let (s, a, ub) = raidz2(&present);
+                assert!(a.tops[0].readable());
+                let reader = PoolReader::new(&a, devices(&s, &present));
+                let (_, sha) = dump_disk0(&reader, &ub).unwrap();
+                assert_eq!(
+                    sha, "d6d58af862ec2761bf43158f7ee2b2b0f4628fa6ca8095544493f9d698d7b80d",
+                    "{present:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn three_members_missing_fails_cleanly() {
+            let present = [true, false, false, false];
+            let (s, a, ub) = raidz2(&present);
+            assert!(!a.tops[0].readable());
+            let reader = PoolReader::new(&a, devices(&s, &present));
+            let err = dump_disk0(&reader, &ub).unwrap_err();
+            assert!(matches!(err, ReadError::Unsupported(_)), "{err}");
+        }
+
+        #[test]
+        fn silently_corrupted_column_is_found_by_checksum() {
+            let present = [true; 4];
+            let (mut s, a, ub) = raidz2(&present);
+            // Flip bytes where the stripes land on each child: DVA offsets
+            // from 0x20_0000 map to child offsets from 0x20_0000 / 4, so a
+            // 1 MiB window there covers every column of every block.
+            let bytes = s[2].bytes_mut();
+            let start = LABEL_START_SIZE as usize + 0x20_0000 / 4;
+            for b in bytes[start..start + (1 << 20)].iter_mut() {
+                *b ^= 0xa5;
+            }
+            let reader = PoolReader::new(&a, devices(&s, &present));
+            let (_, sha) = dump_disk0(&reader, &ub).unwrap();
+            assert_eq!(
+                sha,
+                "d6d58af862ec2761bf43158f7ee2b2b0f4628fa6ca8095544493f9d698d7b80d"
+            );
+            // Two corrupted members: still within raidz2's budget.
+            let bytes = s[0].bytes_mut();
+            for b in bytes[start..start + (1 << 20)].iter_mut() {
+                *b ^= 0x5a;
+            }
+            let reader = PoolReader::new(&a, devices(&s, &present));
+            let (_, sha) = dump_disk0(&reader, &ub).unwrap();
+            assert_eq!(
+                sha,
+                "d6d58af862ec2761bf43158f7ee2b2b0f4628fa6ca8095544493f9d698d7b80d"
+            );
+            // Three: beyond the budget, and the failure is a clean error.
+            let bytes = s[1].bytes_mut();
+            for b in bytes[start..start + (1 << 20)].iter_mut() {
+                *b ^= 0x33;
+            }
+            let reader = PoolReader::new(&a, devices(&s, &present));
+            assert!(dump_disk0(&reader, &ub).is_err());
+        }
     }
 }

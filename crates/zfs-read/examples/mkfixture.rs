@@ -33,20 +33,11 @@ fn main() {
     std::fs::create_dir_all(&dir).expect("mkdir");
     let n = pool.members.len();
     let size = 64 * 1024 * 1024u64;
-    let members: Vec<Vec<u8>> = if kind == "mirror" {
-        // Mirror members carry the same blocks; give them a MOS in which
-        // tank/vm/disk0 exists at the older TXGs and is destroyed at the
-        // newest. RAIDZ data layout is phase 2.
-        let (m, destroyed_at, last_with) = destroyed_zvol_members(&mut pool, size);
-        println!("tank/vm/disk0 destroyed at txg {destroyed_at}, last present at txg {last_with}");
-        m
-    } else {
-        let mut m: Vec<Vec<u8>> = (0..n).map(|_| vec![0u8; size as usize]).collect();
-        for (i, img) in m.iter_mut().enumerate() {
-            pool.write_labels(i, img);
-        }
-        m
-    };
+    // A MOS in which tank/vm/disk0 exists at the older TXGs and is
+    // destroyed at the newest; laid out as a mirror or with RAIDZ parity.
+    let (members, destroyed_at, last_with) = destroyed_zvol_members(&mut pool, size);
+    println!("tank/vm/disk0 destroyed at txg {destroyed_at}, last present at txg {last_with}");
+    let _ = n;
     for (i, img) in members.iter().enumerate() {
         let p = dir.join(format!("member{i}.img"));
         std::fs::write(&p, img).expect("write");
