@@ -129,6 +129,15 @@ struct PoolOut {
     hosts: Vec<HostOut>,
     devices: Vec<PathBuf>,
     tops: Vec<TopOut>,
+    stale: Vec<StaleOut>,
+}
+
+#[derive(Debug, Serialize)]
+struct StaleOut {
+    device: PathBuf,
+    guid: Option<String>,
+    txg: Option<u64>,
+    reason: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -316,6 +325,16 @@ fn pool_out(p: &PoolAssembly, paths: &[PathBuf]) -> PoolOut {
             })
             .collect(),
         devices: p.devices.iter().map(|&i| paths[i].clone()).collect(),
+        stale: p
+            .stale
+            .iter()
+            .map(|m| StaleOut {
+                device: paths[m.device].clone(),
+                guid: m.guid.map(hex),
+                txg: m.txg,
+                reason: m.reason.clone(),
+            })
+            .collect(),
         tops: p
             .tops
             .iter()
@@ -472,6 +491,14 @@ fn print_text(out: &ScanOut, verbose: u8) {
         }
         for id in &p.missing_tops {
             println!("  top-level vdev #{id}: no scanned member describes it  MISSING");
+        }
+        for m in &p.stale {
+            println!(
+                "  {} {} NOT USED: {}",
+                m.guid.as_deref().unwrap_or("?"),
+                m.device.display(),
+                m.reason
+            );
         }
     }
 }

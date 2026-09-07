@@ -88,6 +88,24 @@ pub struct PoolAssembly {
     pub hosts: Vec<(Option<u64>, Option<String>)>,
     /// Indices of scanned devices that belong to this pool.
     pub devices: Vec<usize>,
+    /// Scanned devices carrying this pool's GUID whose label does not
+    /// describe part of the committed configuration: `txg 0` labels of a
+    /// device that was being attached or replaced, or a top-level vdev
+    /// superseded by a newer label with the same id. Reads never use them.
+    pub stale: Vec<StaleMember>,
+}
+
+/// A scanned device excluded from the assembled topology.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaleMember {
+    /// Index into the scanned device list.
+    pub device: usize,
+    /// Leaf vdev GUID from its label.
+    pub guid: Option<u64>,
+    /// Label `txg`.
+    pub txg: Option<u64>,
+    /// Why it was set aside.
+    pub reason: String,
 }
 
 impl PoolAssembly {
@@ -137,20 +155,62 @@ pub fn assemble(scans: &[Option<DeviceScan>]) -> Vec<PoolAssembly> {
             .expect("non-empty group");
 
         // Top-level vdevs: keyed by top guid, described by the newest label
-        // that carries that tree.
+        // that carries that tree. A label with txg 0 was written by
+        // vdev_label_init for a device being attached, replaced or added
+        // as a spare and never committed: it describes nothing.
+        let mut stale = Vec::new();
         let mut tops: BTreeMap<u64, (u64, &VdevNode)> = BTreeMap::new();
-        for (_, c) in &entries {
+        for (i, c) in &entries {
+            let txg = c.txg.unwrap_or(0);
+            if txg == 0 {
+                stale.push(StaleMember {
+                    device: *i,
+                    guid: c.guid,
+                    txg: c.txg,
+                    reason: "label txg 0: device was being attached/replaced, never part of a committed configuration".into(),
+                });
+                continue;
+            }
             if let Some(tree) = &c.tree {
-                let txg = c.txg.unwrap_or(0);
                 let e = tops.entry(tree.guid).or_insert((txg, tree));
                 if txg > e.0 {
                     *e = (txg, tree);
                 }
             }
         }
+        // Two tops with the same id: the older one was replaced or removed.
+        let mut by_id: BTreeMap<u64, (u64, u64)> = BTreeMap::new();
+        for (guid, (txg, tree)) in &tops {
+            let e = by_id.entry(tree.id).or_insert((*txg, *guid));
+            if *txg > e.0 {
+                *e = (*txg, *guid);
+            }
+        }
+        let superseded: Vec<u64> = tops
+            .iter()
+            .filter(|(guid, (_, tree))| by_id[&tree.id].1 != **guid)
+            .map(|(guid, _)| *guid)
+            .collect();
+        for guid in superseded {
+            let (txg, tree) = tops.remove(&guid).expect("present");
+            for (i, c) in &entries {
+                if c.top_guid == Some(guid) {
+                    stale.push(StaleMember {
+                        device: *i,
+                        guid: c.guid,
+                        txg: c.txg,
+                        reason: format!(
+                            "label txg {txg} describes top-level vdev #{} (guid {guid:#x}) superseded by a newer label",
+                            tree.id
+                        ),
+                    });
+                }
+            }
+        }
         let leaf_owner = |leaf_guid: u64| -> Option<usize> {
             entries
                 .iter()
+                .filter(|(i, _)| !stale.iter().any(|m| m.device == *i))
                 .find(|(_, c)| c.guid == Some(leaf_guid))
                 .map(|(i, _)| *i)
         };
@@ -217,6 +277,7 @@ pub fn assemble(scans: &[Option<DeviceScan>]) -> Vec<PoolAssembly> {
             tops,
             hosts,
             devices: entries.iter().map(|(i, _)| *i).collect(),
+            stale,
         });
     }
     pools
@@ -249,6 +310,33 @@ mod tests {
         assert_eq!(p.tops[0].members[1].present, None);
         assert!(p.tops[0].readable());
         assert!(p.readable());
+    }
+
+    #[test]
+    fn txg_zero_label_is_stale_not_a_top() {
+        // A device that was being attached: same pool GUID, label txg 0,
+        // no verified uberblocks (what vdev_label_init leaves behind).
+        let pool = Pool::mirror("tank", 0x1000, 12).txgs(&[(100, 1)]);
+        let mut attaching = Pool::mirror("tank", 0x1000, 12);
+        attaching.members[0].guid = 0xdead_0001;
+        attaching.members[1].guid = 0xdead_0002;
+        let scans = vec![
+            scan(attaching.member_image(0, 8 * LABEL_SIZE)),
+            scan(pool.member_image(0, 8 * LABEL_SIZE)),
+            scan(pool.member_image(1, 8 * LABEL_SIZE)),
+        ];
+        let pools = assemble(&scans);
+        assert_eq!(pools.len(), 1);
+        let p = &pools[0];
+        assert_eq!(p.tops.len(), 1);
+        assert_eq!(p.tops[0].members.len(), 2);
+        assert_eq!(p.tops[0].members[0].present, Some(1));
+        assert_eq!(p.tops[0].members[1].present, Some(2));
+        assert_eq!(p.stale.len(), 1);
+        assert_eq!(p.stale[0].device, 0);
+        assert_eq!(p.stale[0].txg, Some(0));
+        assert!(p.stale[0].reason.contains("txg 0"));
+        assert_eq!(p.devices.len(), 3);
     }
 
     #[test]
