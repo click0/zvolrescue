@@ -251,6 +251,9 @@ pub fn compute_salted(
         Checksum::Sha256 => Some(sha256(data)),
         Checksum::Sha512 => Some(sha512_256(data)),
         Checksum::Blake3 => salt.map(|s| blake3_salted(data, s, endian)),
+        Checksum::Skein => {
+            salt.map(|s| native_words(&crate::skein::skein_512_256_mac(s, data), endian))
+        }
         _ => None,
     }
 }
