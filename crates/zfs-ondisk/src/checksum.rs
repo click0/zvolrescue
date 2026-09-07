@@ -268,9 +268,41 @@ pub fn verify_salted(
     expected: &[u64; 4],
     salt: Option<&Salt>,
 ) -> Verify {
+    verify_block(kind, data, endian, expected, salt, false)
+}
+
+/// Like [`verify_salted`]; with `crypt` set, compare the way OpenZFS does
+/// for blocks of encrypted datasets (`BP_USES_CRYPT`, all but objset
+/// blocks): words 2 and 3 hold the MAC, so they are ignored, and the
+/// non-dedup algorithms (fletcher) fold words 2 and 3 into 0 and 1 first.
+pub fn verify_block(
+    kind: Checksum,
+    data: &[u8],
+    endian: Endian,
+    expected: &[u64; 4],
+    salt: Option<&Salt>,
+    crypt: bool,
+) -> Verify {
     match kind {
-        Checksum::Off => Verify::NotChecked,
+        // `noparity` is `off` under another code (`abd_checksum_off`).
+        Checksum::Off | Checksum::NoParity => Verify::NotChecked,
         _ => match compute_salted(kind, data, endian, salt) {
+            Some(mut c) if crypt => {
+                let mut e = *expected;
+                if !kind.dedup_capable() {
+                    c[0] ^= c[2];
+                    c[1] ^= c[3];
+                }
+                c[2] = 0;
+                c[3] = 0;
+                e[2] = 0;
+                e[3] = 0;
+                if c == e {
+                    Verify::Ok
+                } else {
+                    Verify::Mismatch
+                }
+            }
             Some(c) if c == *expected => Verify::Ok,
             Some(_) => Verify::Mismatch,
             None => Verify::Unsupported,
@@ -281,6 +313,45 @@ pub fn verify_salted(
 #[cfg(test)]
 mod data_tests {
     use super::*;
+
+    #[test]
+    fn crypt_truncation_ignores_mac_words() {
+        let data = vec![7u8; 4096];
+        // fletcher4: words 2,3 fold into 0,1 (no DEDUP flag).
+        let full = fletcher4(&data, Endian::Little);
+        let mut stored = [full[0] ^ full[2], full[1] ^ full[3], 0xdead, 0xbeef];
+        let k = Checksum::Fletcher4;
+        assert_eq!(
+            verify_block(k, &data, Endian::Little, &stored, None, true),
+            Verify::Ok
+        );
+        assert_eq!(
+            verify_block(k, &data, Endian::Little, &stored, None, false),
+            Verify::Mismatch
+        );
+        stored[0] ^= 1;
+        assert_eq!(
+            verify_block(k, &data, Endian::Little, &stored, None, true),
+            Verify::Mismatch
+        );
+        // sha256: words 0,1 as is, 2,3 replaced by the MAC.
+        let full = sha256(&data);
+        let stored = [full[0], full[1], 1, 2];
+        let k = Checksum::Sha256;
+        assert_eq!(
+            verify_block(k, &data, Endian::Little, &stored, None, true),
+            Verify::Ok
+        );
+        assert_eq!(
+            verify_block(k, &data, Endian::Little, &stored, None, false),
+            Verify::Mismatch
+        );
+        // noparity is never checked.
+        assert_eq!(
+            verify(Checksum::NoParity, &data, Endian::Little, &[9; 4]),
+            Verify::NotChecked
+        );
+    }
 
     #[test]
     fn fletcher4_small_vectors() {

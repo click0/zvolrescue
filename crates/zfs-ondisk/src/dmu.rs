@@ -68,6 +68,18 @@ pub mod ot {
     pub const SA: u8 = 44;
     /// Deadlist.
     pub const DEADLIST: u8 = 50;
+
+    /// `DMU_OT_IS_ENCRYPTED`: whether level-0 blocks of this type are
+    /// stored as ciphertext in an encrypted dataset. Other types (MOS
+    /// bookkeeping, indirect blocks) are only authenticated with a MAC and
+    /// stay readable without the key. Objset blocks are a special case:
+    /// plaintext with two MACs embedded (`zio_crypt_do_objset_hmacs`).
+    pub fn is_encrypted(t: u8) -> bool {
+        if t & super::OT_NEWTYPE != 0 {
+            return t & super::OT_ENCRYPTED != 0;
+        }
+        matches!(t, 9 | 10 | 17..=27 | 33..=36 | 39 | 40 | 44..=47)
+    }
 }
 
 /// Human name of a `dmu_object_type_t` byte.

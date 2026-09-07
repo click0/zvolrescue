@@ -11,8 +11,9 @@ use std::fmt;
 use std::cell::Cell;
 use zfs_ondisk::blkptr::{self, BlkPtr, Dva, LABEL_START_SIZE};
 
-use zfs_ondisk::checksum::{verify_salted, Salt, Verify};
+use zfs_ondisk::checksum::{verify_block, Salt, Verify};
 use zfs_ondisk::compress::{decompress, DecompressError};
+use zfs_ondisk::dmu::ot;
 use zfs_ondisk::raidz;
 use zvolrescue_io::trace::hexdump;
 use zvolrescue_io::{trace, BlockSource};
@@ -140,6 +141,9 @@ pub enum ReadError {
     /// Checksum algorithm not implemented; data returned unverified only
     /// when the caller asked for that.
     ChecksumUnsupported,
+    /// The copy verified but is ciphertext of an encrypted dataset and no
+    /// key is available (phase 3).
+    Encrypted,
 }
 
 impl fmt::Display for ReadError {
@@ -155,6 +159,7 @@ impl fmt::Display for ReadError {
             ReadError::Hole => write!(f, "block pointer is a hole"),
             ReadError::Decompress(e) => write!(f, "{e}"),
             ReadError::ChecksumUnsupported => write!(f, "checksum algorithm not supported yet"),
+            ReadError::Encrypted => write!(f, "encrypted block: no key (not supported yet)"),
         }
     }
 }
@@ -220,7 +225,8 @@ impl<'a> PoolReader<'a> {
     /// Verify `raw` against `bp` with the pool salt when one is known.
     fn verify(&self, bp: &BlkPtr, raw: &[u8]) -> Verify {
         let salt = self.salt.get();
-        verify_salted(bp.checksum, raw, bp.endian, &bp.cksum, salt.as_ref())
+        let crypt = bp.uses_crypt() && bp.object_type != ot::OBJSET;
+        verify_block(bp.checksum, raw, bp.endian, &bp.cksum, salt.as_ref(), crypt)
     }
 
     /// Read `size` bytes at vdev-relative `offset` from a leaf device.
@@ -755,6 +761,7 @@ impl<'a> PoolReader<'a> {
         let raw = self.read_raw_verified(bp, 0, &mut attempts);
         let _ = allow_unverified;
         match raw {
+            Ok(_) if bp.is_encrypted() => Err(ReadError::Encrypted),
             Ok(raw) => {
                 let verify = attempts
                     .iter()

@@ -133,6 +133,9 @@ fn main() {
                             Err(ReadError::ChecksumUnsupported) => {
                                 bump(&mut outcomes, format!("{key}: unsupported"))
                             }
+                            Err(ReadError::Encrypted) => {
+                                bump(&mut outcomes, format!("{key}: Ok, ciphertext (no key)"))
+                            }
                             Err(e) => {
                                 bump(&mut outcomes, format!("{key}: ERROR {e}"));
                                 if detail {

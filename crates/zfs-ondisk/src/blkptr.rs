@@ -175,6 +175,19 @@ impl Checksum {
         }
     }
 
+    /// `ZCHECKSUM_FLAG_DEDUP`: strong enough for dedup. OpenZFS keeps
+    /// such checksums whole under encryption instead of folding them.
+    pub fn dedup_capable(&self) -> bool {
+        matches!(
+            self,
+            Checksum::Sha256
+                | Checksum::Sha512
+                | Checksum::Skein
+                | Checksum::Edonr
+                | Checksum::Blake3
+        )
+    }
+
     /// Name as `zfs get checksum` would print it.
     pub fn name(&self) -> String {
         match self {
@@ -274,6 +287,17 @@ impl BlkPtr {
         };
         let compression_code = bits(prop, 32, 7) as u8;
         let checksum_code = if embedded { 0 } else { bits(prop, 40, 8) as u8 };
+        let object_type = bits(prop, 48, 8) as u8;
+        let level = bits(prop, 56, 5) as u8;
+        let encrypted = bits(prop, 61, 1) != 0;
+        let hole = !embedded && w(0) == 0 && w(1) == 0;
+        // `BP_IS_ENCRYPTED`: ciphertext block whose DVA[2] slot carries the
+        // salt and IV, and whose fill count is 32 bits (IV2 above it).
+        let ciphertext = encrypted
+            && !hole
+            && !embedded
+            && level == 0
+            && crate::dmu::ot::is_encrypted(object_type);
         let mut raw = [0u8; SIZE];
         raw.copy_from_slice(&buf[..SIZE]);
         Ok(BlkPtr {
@@ -283,7 +307,11 @@ impl BlkPtr {
                 [
                     Dva::parse(w(0), w(1)),
                     Dva::parse(w(2), w(3)),
-                    Dva::parse(w(4), w(5)),
+                    if ciphertext {
+                        Dva::default()
+                    } else {
+                        Dva::parse(w(4), w(5))
+                    },
                 ]
             },
             lsize,
@@ -292,16 +320,22 @@ impl BlkPtr {
             compression_code,
             checksum: Checksum::from_code(checksum_code),
             checksum_code,
-            object_type: bits(prop, 48, 8) as u8,
-            level: bits(prop, 56, 5) as u8,
+            object_type,
+            level,
             endian: byteorder,
-            encrypted: bits(prop, 61, 1) != 0,
+            encrypted,
             dedup: bits(prop, 62, 1) != 0,
             embedded,
             embedded_type,
             physical_birth: if embedded { 0 } else { bits(w(9), 0, 63) },
             birth: bits(w(10), 0, 63),
-            fill: if embedded { 1 } else { w(11) },
+            fill: if embedded {
+                1
+            } else if ciphertext {
+                bits(w(11), 0, 32)
+            } else {
+                w(11)
+            },
             cksum: if embedded {
                 [0; 4]
             } else {
@@ -314,6 +348,29 @@ impl BlkPtr {
     /// A hole: nothing allocated, reads as zeros.
     pub fn is_hole(&self) -> bool {
         !self.embedded && self.dva[0].is_empty()
+    }
+
+    /// `BP_USES_CRYPT`: the block belongs to an encrypted dataset. Its
+    /// checksum words 2 and 3 hold a MAC, so only words 0 and 1 verify.
+    pub fn uses_crypt(&self) -> bool {
+        self.encrypted && !self.embedded && !self.is_hole()
+    }
+
+    /// `BP_IS_ENCRYPTED`: the payload on disk is ciphertext (level-0 block
+    /// of an encrypted object type). Indirect and MOS-style blocks of an
+    /// encrypted dataset are only authenticated and read in the clear.
+    pub fn is_encrypted(&self) -> bool {
+        self.uses_crypt() && self.level == 0 && crate::dmu::ot::is_encrypted(self.object_type)
+    }
+
+    /// Salt, IV (96 bits as two words: 64 + 32) of an encrypted block,
+    /// from the DVA[2] slot and the top of the fill word.
+    pub fn crypt_params(&self) -> Option<(u64, u64, u32)> {
+        if !self.is_encrypted() {
+            return None;
+        }
+        let w = |i: usize| self.endian.u64_at(&self.raw, i * 8).expect("128 bytes");
+        Some((w(4), w(5), bits(w(11), 32, 32) as u32))
     }
 
     /// Effective allocation TXG (`BP_GET_PHYSICAL_BIRTH` semantics).
@@ -572,6 +629,39 @@ mod tests {
         assert_eq!(bp.compression, Compression::Lz4);
         assert_eq!(bp.birth, 77);
         assert_eq!(bp.embedded_payload().unwrap(), payload);
+    }
+
+    #[test]
+    fn encrypted_pointer_hides_salt_and_narrows_fill() {
+        // Level-0 block of an encrypted type: DVA[2] is salt/IV, fill 32-bit.
+        let raw = encode::Builder::new()
+            .dva(0, 0, 0x1000, 0x2000, false)
+            .dva(1, 1, 0x3000, 0x2000, false)
+            .dva(2, 7, 0x1234_5678 << 9, 0x9999, false) // salt / IV words
+            .sizes(4096, 4096)
+            .props(2, 7, 23, 0)
+            .flags(true, false)
+            .births(10, 10, (0xabcd_u64 << 32) | 1)
+            .bytes(Endian::Little);
+        let bp = BlkPtr::parse(&raw, Endian::Little).unwrap();
+        assert!(bp.uses_crypt() && bp.is_encrypted());
+        assert_eq!(bp.dvas().count(), 2);
+        assert_eq!(bp.fill, 1);
+        let (salt, _iv, iv2) = bp.crypt_params().unwrap();
+        assert_ne!(salt, 0);
+        assert_eq!(iv2, 0xabcd);
+        // An indirect block of the same object is only authenticated.
+        let raw = encode::Builder::new()
+            .dva(0, 0, 0x1000, 0x2000, false)
+            .sizes(4096, 4096)
+            .props(2, 7, 23, 1)
+            .flags(true, false)
+            .births(10, 10, 5)
+            .bytes(Endian::Little);
+        let bp = BlkPtr::parse(&raw, Endian::Little).unwrap();
+        assert!(bp.uses_crypt() && !bp.is_encrypted());
+        assert_eq!(bp.fill, 5);
+        assert!(bp.crypt_params().is_none());
     }
 
     #[test]
