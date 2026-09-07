@@ -3,7 +3,12 @@
 # ztest (no kernel module needed), then compare `zvolrescue list -r` with
 # `zdb -d`, and `zvolrescue -vv scan` with `zdb -l`.
 #
-#   tests/crosscheck-ztest.sh [ZVOLRESCUE] [WORKDIR]
+#   tests/crosscheck-ztest.sh [ZVOLRESCUE] [WORKDIR] [WALK-OBJECTS]
+#
+# Third, every block of every object of every dataset is read with the
+# walk-objects example (cargo build --release -p zfs-read --examples):
+# checksums of all algorithms, decompression, embedded/gang pointers, and
+# the per-dataset object count against the objset pointer's fill.
 #
 # Needs: ztest and zdb (Debian/Ubuntu: zfsutils-linux zfs-test), python3.
 # -K raidz pins the vdev class: ztest otherwise picks raidz or draid at
@@ -12,6 +17,7 @@
 set -eu
 ZR=${1:-./target/release/zvolrescue}
 WORK=${2:-/tmp/zvolrescue-crosscheck}
+WALK=${3:-./target/release/examples/walk-objects}
 rm -rf "$WORK"; mkdir -p "$WORK"
 fail=0
 
@@ -59,6 +65,18 @@ for k in sorted(out): print(k, out[k])' > "$dir/zr-label.txt"
         echo "   label: matches zdb -l"
     else
         echo "   label: MISMATCH"; fail=1
+    fi
+
+    # 3. every block of every object, all member files including any
+    #    leftover of an attach/replace and the spares.
+    if [ -x "$WALK" ]; then
+        if "$WALK" "$dir"/ztest.* > "$dir/walk.txt" 2> "$dir/walk.err"; then
+            echo "   walk: $(head -1 "$dir/walk.txt"), no checksum or decode error"
+        else
+            echo "   walk: FAILED"; cat "$dir/walk.txt"; tail -20 "$dir/walk.err"; fail=1
+        fi
+    else
+        echo "   walk: skipped ($WALK not built)"
     fi
 }
 

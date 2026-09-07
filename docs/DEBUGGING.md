@@ -44,7 +44,20 @@ raidz2 and a raidz1-of-mirrors pool and diffs `zvolrescue list -r` /
 `scan` against `zdb -d` / `zdb -l`; CI runs it on every push. The
 datasets ztest makes are of type *other* (no zvols), so it validates
 labels, uberblocks, MOS, dnodes, ZAPs, DSL and RAIDZ reads — not volume
-extraction.
+extraction. The script's third step runs the `walk-objects` example over
+every file in the pool directory: every block of every object of every
+dataset is read and checksum-verified (all algorithms, with the pool
+salt), decompressed, and each dataset's object count is compared with
+its objset pointer's fill. Encrypted datasets are walked as far as the
+plaintext goes (objset, indirect blocks); ciphertext blocks are counted,
+not failed. This is what caught the zstd, sha512 and encrypted-checksum
+bugs that synthetic fixtures could not: run it yourself with
+
+```
+cargo build --release -p zfs-read --examples
+./target/release/examples/walk-objects /path/to/pool/ztest.*
+ZR_DEBUG=1 ZR_DETAIL=1 ./target/release/examples/walk-objects ...   # trace + hexdumps
+```
 
 ## 2. Compare `scan` with `zdb`
 

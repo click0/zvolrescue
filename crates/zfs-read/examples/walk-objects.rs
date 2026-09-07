@@ -75,12 +75,18 @@ fn main() {
         let array = DnodeArray::new(&reader, os.meta_dnode, bp.endian);
         let max = array.max_object();
         let mut objnum = 0u64;
+        // Objects counted here must equal the objset pointer's fill count
+        // (what `zdb -d` prints as "N objects") unless some dnode block
+        // could not be read.
+        let mut counted = 0u64;
+        let mut dnode_unreadable = false;
         while objnum < max {
             let this = objnum;
             objnum += 1;
             let dn = match array.get(this) {
                 Ok(d) => d,
                 Err(e) => {
+                    dnode_unreadable = true;
                     bump(&mut outcomes, format!("dnode: {e}"));
                     if detail && e.to_string().contains("parse") {
                         // Show the raw slot so the failure can be understood.
@@ -103,6 +109,7 @@ fn main() {
             // its bonus buffer, not objects.
             objnum += u64::from(dn.extra_slots);
             objects += 1;
+            counted += 1;
             let obj = array.object(this).unwrap();
             let nblocks = dn.maxblkid + 1;
             for blkid in 0..nblocks.min(4096) {
@@ -157,6 +164,17 @@ fn main() {
                     Err(e) => bump(&mut outcomes, format!("locate: ERROR {e}")),
                 }
             }
+        }
+        if !dnode_unreadable && counted != bp.fill {
+            bump(
+                &mut outcomes,
+                format!(
+                    "objset {name}: ERROR counted {counted} objects but the objset pointer says fill {}",
+                    bp.fill
+                ),
+            );
+        } else if !dnode_unreadable {
+            bump(&mut outcomes, "object count == objset fill".into());
         }
     }
     println!(
