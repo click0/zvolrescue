@@ -83,6 +83,26 @@ pub fn open_volume<'r, 'a>(
     Ok((data, ds.phys.bp.endian))
 }
 
+/// `volsize` (from the volume's properties ZAP) and `volblocksize` (the
+/// data object's block size), read now — for example after the dataset
+/// keys were installed, when `list` could not read them.
+pub fn volume_facts(reader: &PoolReader<'_>, ds: &Dataset) -> Result<(u64, u64), ReadError> {
+    let block = reader.read_block(&ds.phys.bp, false)?;
+    let os = ObjsetPhys::parse(&block.data, ds.phys.bp.endian)?;
+    let objs = DnodeArray::new(reader, os.meta_dnode, ds.phys.bp.endian);
+    let data = objs.get(ZVOL_OBJ)?;
+    if data.is_free() {
+        return Err(ReadError::Io(format!("{}: data object is free", ds.name)));
+    }
+    let props = crate::zap::read_zap(&objs.object(crate::dsl::ZVOL_ZAP_OBJ)?)?;
+    let volsize = props
+        .iter()
+        .find(|e| e.name == "size")
+        .and_then(|e| e.value.as_u64())
+        .ok_or_else(|| ReadError::Io(format!("{}: volume properties have no size", ds.name)))?;
+    Ok((volsize, data.datablksz()))
+}
+
 /// Extract `obj` (a volume's data object) to `sink`, producing a
 /// `volsize`-byte image. Blocks are visited in order; holes are skipped,
 /// unreadable blocks handled per `on_error`. `progress` is called after

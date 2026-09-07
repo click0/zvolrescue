@@ -128,7 +128,7 @@ Priority: **M** = must (v1), **S** = should (v1 if time permits), **C** = could 
 | F-24 | M | Read from RAIDZ1/2/3 with parity reconstruction of a missing or corrupted column. |
 | F-25 | S | Read from dRAID with reconstruction. |
 | F-26 | S | Embedded block pointers (`embedded_data`), gang blocks, `large_blocks`, `large_dnode`. |
-| F-27 | S | Encrypted datasets: decrypt with a user-supplied raw/hex/passphrase key (`aes-128/192/256-ccm/gcm`); without a key, extract ciphertext and metadata only. *Status: metadata done (suite, key format, key location, PBKDF2 parameters, key GUID/version, encryption root) and cross-checked against `zdb`; wrapping-key derivation (raw/hex/PBKDF2 passphrase) and master-key unwrap (AES-GCM/CCM, both key versions) done and verified on `ztest` pools with ztest's key; data decryption pending.* |
+| F-27 | S | Encrypted datasets: decrypt with a user-supplied raw/hex/passphrase key (`aes-128/192/256-ccm/gcm`); without a key, extract ciphertext and metadata only. *Status: done for data and dnode blocks — metadata (cross-checked against `zdb`), wrapping-key derivation (raw/hex/PBKDF2 passphrase/prompt), master-key unwrap (AES-GCM/CCM, key versions 0 and 1), per-block HKDF-SHA512 key, AES-GCM/CCM decryption of data blocks and of the bonus buffers of dnode blocks with the dnode/blkptr associated data; every encrypted block of `ztest` pools decrypts and every object is accounted for. Not decrypted: ZIL blocks (not needed for extraction). Objset MACs are not re-verified (the block checksum already is).* |
 | F-28 | S | Dedup: resolve DDT-referenced blocks transparently (they are just blkptrs) — no special handling required beyond checksum handling. |
 | F-29 | S ◇ | Extract a filesystem dataset as a raw dump of all objects (per-object files + metadata JSON) as a stepping stone before file-level recovery. |
 | F-30 | C ◇ | File-level extraction from filesystem datasets (ZPL: directories, files, symlinks, xattrs). |
@@ -202,7 +202,7 @@ POOLSPEC:  one or more vdev members, e.g.
            /dev/ada0p3 /dev/ada1p3
            --image disk0.img --image disk1.img
            --pool-guid 0x1234…  (pick among several pools found)
-KEYSPEC:   raw:FILE | hex:HEX | passphrase:FILE | prompt
+KEYSPEC:   raw:FILE | hex:HEX | hex:@FILE | passphrase:FILE | prompt   (prompt reads stdin; echo is not disabled)
 ```
 
 Exit codes: `0` success, `1` usage error, `2` evidence unreadable, `3` pool

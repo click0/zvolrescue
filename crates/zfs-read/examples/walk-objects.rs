@@ -43,20 +43,45 @@ fn main() {
         zvolrescue_io::trace::enable(None);
     }
     let detail = std::env::var_os("ZR_DETAIL").is_some();
+    // ZR_KEY=raw:FILE|hex:..|passphrase:.. unlocks encrypted datasets.
+    let material = std::env::var("ZR_KEY")
+        .ok()
+        .map(|spec| zfs_read::crypt::KeyMaterial::from_spec(&spec).expect("ZR_KEY"));
+    let mut unwrapped: BTreeMap<u64, Option<zfs_read::crypt::DatasetKeys>> = BTreeMap::new();
 
-    let mut objsets: Vec<(String, zfs_ondisk::blkptr::BlkPtr)> = tree
+    let mut objsets: Vec<(
+        String,
+        zfs_ondisk::blkptr::BlkPtr,
+        Option<zfs_read::dsl::Encryption>,
+    )> = tree
         .datasets
         .iter()
-        .map(|d| (d.name.clone(), d.phys.bp.clone()))
+        .map(|d| (d.name.clone(), d.phys.bp.clone(), d.encryption.clone()))
         .collect();
     // The MOS itself, through the uberblock's root pointer.
     objsets.push((
         "<mos>".into(),
         zfs_ondisk::blkptr::BlkPtr::parse(&ub.ub.rootbp, ub.ub.endian).unwrap(),
+        None,
     ));
-    for (name, bp) in objsets {
+    for (name, bp, encryption) in objsets {
         if bp.is_hole() {
             continue;
+        }
+        reader.set_keys(None);
+        if let (Some(enc), Some(material)) = (&encryption, &material) {
+            let keys = unwrapped.entry(enc.crypto_key_obj).or_insert_with(|| {
+                match zfs_read::crypt::wrapping_key(material, enc)
+                    .and_then(|w| zfs_read::crypt::unwrap_keys(enc, &w))
+                {
+                    Ok(k) => Some(k),
+                    Err(e) => {
+                        eprintln!("{name}: key not accepted: {e}");
+                        None
+                    }
+                }
+            });
+            reader.set_keys(keys.clone());
         }
         let block = match reader.read_block(&bp, false) {
             Ok(b) => b,

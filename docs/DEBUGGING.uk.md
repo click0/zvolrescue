@@ -56,6 +56,8 @@ dataset-у порівнюється з fill його objset-вказівника
 cargo build --release -p zfs-read --examples
 ./target/release/examples/walk-objects /шлях/до/пулу/ztest.*
 ZR_DEBUG=1 ZR_DETAIL=1 ./target/release/examples/walk-objects ...   # трасування + hexdump-и
+ZR_KEY=raw:key.bin ./target/release/examples/walk-objects ...      # відімкнути шифровані dataset-и (також hex:.., passphrase:FILE)
+./target/release/examples/unwrap-key raw:key.bin /шлях/до/пулу/ztest.*  # чи відкриває цей ключ кожен корінь шифрування?
 ```
 
 ## 2. Звірити `scan` із `zdb`

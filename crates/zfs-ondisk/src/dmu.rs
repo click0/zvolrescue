@@ -78,7 +78,13 @@ pub mod ot {
         if t & super::OT_NEWTYPE != 0 {
             return t & super::OT_ENCRYPTED != 0;
         }
-        matches!(t, 9 | 10 | 17..=27 | 33..=36 | 39 | 40 | 44..=47)
+        // ot_encrypt column of dmu_ot[] (module/zfs/dmu.c). Notably NOT
+        // encrypted: znode (17), master node (21), zvol prop (24), other
+        // ZAP (27), FUID size (36): those are only authenticated.
+        matches!(
+            t,
+            9 | 10 | 18 | 19 | 20 | 22 | 23 | 25 | 26 | 33 | 34 | 35 | 39 | 40 | 44..=47 | 49
+        )
     }
 }
 

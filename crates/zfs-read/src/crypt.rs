@@ -10,15 +10,26 @@
 
 use std::fmt;
 
-use aes::Aes256;
+use aes::{Aes128, Aes192, Aes256};
 use aes_gcm::aead::{Aead, KeyInit, Payload};
-use aes_gcm::Aes256Gcm;
+use aes_gcm::{Aes128Gcm, Aes256Gcm, AesGcm};
 use ccm::consts::{U12, U16};
 use ccm::Ccm;
+use hkdf::Hkdf;
 use hmac::Hmac;
 use sha1::Sha1;
+use sha2::Sha512;
+use zfs_ondisk::blkptr::BlkPtr;
+use zfs_ondisk::dmu::{ot, DNODE_SIZE};
 
 use crate::dsl::Encryption;
+
+/// `ZIO_DATA_SALT_LEN`.
+pub const SALT_LEN: usize = 8;
+/// `ZIO_DATA_IV_LEN`.
+pub const IV_LEN: usize = 12;
+/// `ZIO_DATA_MAC_LEN`.
+pub const MAC_LEN: usize = 16;
 
 /// `WRAPPING_KEY_LEN`.
 pub const WRAPPING_KEY_LEN: usize = 32;
@@ -58,11 +69,13 @@ impl KeyMaterial {
     }
 
     /// Parse a `--key` spec: `raw:FILE` (32 bytes), `hex:HEXSTRING` or
-    /// `hex:@FILE`, `passphrase:STRING` or `passphrase:@FILE` (one line;
-    /// a trailing newline is dropped).
+    /// `hex:@FILE`, `passphrase:FILE` (the passphrase is the file's
+    /// content; one trailing newline is dropped). `prompt` is handled by
+    /// the caller with [`KeyMaterial::prompt`], as it needs the dataset's
+    /// key format.
     pub fn from_spec(spec: &str) -> Result<KeyMaterial, CryptError> {
         let (kind, rest) = spec.split_once(':').ok_or_else(|| {
-            CryptError::Spec("expected raw:FILE, hex:HEX or passphrase:TEXT".into())
+            CryptError::Spec("expected raw:FILE, hex:HEX|@FILE, passphrase:FILE or prompt".into())
         })?;
         let read =
             |path: &str| std::fs::read(path).map_err(|e| CryptError::Spec(format!("{path}: {e}")));
@@ -94,8 +107,37 @@ impl KeyMaterial {
                 Ok(KeyMaterial::Raw(bytes))
             }
             "hex" => Ok(KeyMaterial::Hex(text(rest)?)),
-            "passphrase" => Ok(KeyMaterial::Passphrase(text(rest)?)),
+            "passphrase" => Ok(KeyMaterial::Passphrase(text(&format!("@{rest}"))?)),
             other => Err(CryptError::Spec(format!("unknown key format {other:?}"))),
+        }
+    }
+
+    /// Read the key from standard input in the dataset's format: 32 raw
+    /// bytes, or one line of hex digits or passphrase. The terminal echo
+    /// is not disabled; prefer a file spec when others can see the screen.
+    pub fn prompt(keyformat: Option<u64>) -> Result<KeyMaterial, CryptError> {
+        use std::io::Read;
+        let mut stdin = std::io::stdin().lock();
+        let fail = |e: std::io::Error| CryptError::Spec(format!("stdin: {e}"));
+        let line = |stdin: &mut std::io::StdinLock<'_>| -> Result<String, CryptError> {
+            let mut s = String::new();
+            std::io::BufRead::read_line(stdin, &mut s).map_err(fail)?;
+            while s.ends_with('\n') || s.ends_with('\r') {
+                s.pop();
+            }
+            Ok(s)
+        };
+        match keyformat {
+            Some(1) => {
+                let mut b = vec![0u8; WRAPPING_KEY_LEN];
+                stdin.read_exact(&mut b).map_err(fail)?;
+                Ok(KeyMaterial::Raw(b))
+            }
+            Some(2) => Ok(KeyMaterial::Hex(line(&mut stdin)?)),
+            Some(3) => Ok(KeyMaterial::Passphrase(line(&mut stdin)?)),
+            other => Err(CryptError::Metadata(format!(
+                "unknown keyformat {other:?}: cannot prompt"
+            ))),
         }
     }
 }
@@ -132,7 +174,7 @@ impl fmt::Display for CryptError {
             }
             CryptError::Metadata(s) => write!(f, "encryption metadata: {s}"),
             CryptError::Suite(c) => write!(f, "unsupported encryption suite {c}"),
-            CryptError::WrongKey => write!(f, "wrong key: the wrapped keys' MAC does not verify"),
+            CryptError::WrongKey => write!(f, "MAC does not verify: wrong key or damaged data"),
         }
     }
 }
@@ -233,8 +275,9 @@ fn suite_is_ccm(suite: u64) -> bool {
     (3..=5).contains(&suite)
 }
 
-/// AEAD decrypt with a 32-byte key in the suite's mode; `ct` carries the
-/// tag appended. Returns the plaintext or `WrongKey`.
+/// AEAD decrypt in the suite's mode with a 16-, 24- or 32-byte key
+/// (the key length picks AES-128/192/256, as the ICP does); `ct` carries
+/// the 16-byte tag appended. Returns the plaintext or `WrongKey`.
 pub(crate) fn aead_open(
     suite: u64,
     key: &[u8],
@@ -246,20 +289,217 @@ pub(crate) fn aead_open(
         msg: ct_with_tag,
         aad,
     };
-    let nonce: &[u8; 12] = nonce
+    let nonce: &[u8; IV_LEN] = nonce
         .try_into()
         .map_err(|_| CryptError::Metadata("nonce is not 12 bytes".into()))?;
-    if suite_is_ccm(suite) {
-        let c = Ccm::<Aes256, U16, U12>::new_from_slice(key)
-            .map_err(|_| CryptError::Metadata("bad key length".into()))?;
-        c.decrypt(nonce.into(), payload)
-            .map_err(|_| CryptError::WrongKey)
-    } else {
-        let c = Aes256Gcm::new_from_slice(key)
-            .map_err(|_| CryptError::Metadata("bad key length".into()))?;
-        c.decrypt(nonce.into(), payload)
-            .map_err(|_| CryptError::WrongKey)
+    let bad = |_| CryptError::Metadata("bad key length".into());
+    let wrong = |_| CryptError::WrongKey;
+    let n = nonce.into();
+    match (suite_is_ccm(suite), key.len()) {
+        (true, 16) => Ccm::<Aes128, U16, U12>::new_from_slice(key)
+            .map_err(bad)?
+            .decrypt(n, payload)
+            .map_err(wrong),
+        (true, 24) => Ccm::<Aes192, U16, U12>::new_from_slice(key)
+            .map_err(bad)?
+            .decrypt(n, payload)
+            .map_err(wrong),
+        (true, _) => Ccm::<Aes256, U16, U12>::new_from_slice(key)
+            .map_err(bad)?
+            .decrypt(n, payload)
+            .map_err(wrong),
+        (false, 16) => Aes128Gcm::new_from_slice(key)
+            .map_err(bad)?
+            .decrypt(n, payload)
+            .map_err(wrong),
+        (false, 24) => AesGcm::<Aes192, U12>::new_from_slice(key)
+            .map_err(bad)?
+            .decrypt(n, payload)
+            .map_err(wrong),
+        (false, _) => Aes256Gcm::new_from_slice(key)
+            .map_err(bad)?
+            .decrypt(n, payload)
+            .map_err(wrong),
     }
+}
+
+/// Per-block encryption key: `hkdf_sha512(master, salt = none, info =
+/// the block's 8-byte salt)` truncated to the suite's key length.
+pub fn derive_block_key(keys: &DatasetKeys, salt: &[u8; SALT_LEN]) -> Vec<u8> {
+    let hk = Hkdf::<Sha512>::new(None, &keys.master);
+    let mut out = vec![0u8; keys.master.len()];
+    hk.expand(salt, &mut out)
+        .expect("key length below HKDF limit");
+    out
+}
+
+/// Salt, IV and MAC of an encrypted block as `zio_crypt_decode_params_bp`
+/// and `zio_crypt_decode_mac_bp` produce them (little-endian bytes of the
+/// pointer words; a byteswapped pointer has already been read in its own
+/// order, so the bytes come out the same).
+pub fn block_params(bp: &BlkPtr) -> Option<([u8; SALT_LEN], [u8; IV_LEN], [u8; MAC_LEN])> {
+    let (salt, iv1, iv2) = bp.crypt_params()?;
+    let mut iv = [0u8; IV_LEN];
+    iv[..8].copy_from_slice(&iv1.to_le_bytes());
+    iv[8..].copy_from_slice(&iv2.to_le_bytes());
+    Some((salt.to_le_bytes(), iv, block_mac(bp)))
+}
+
+/// `zio_crypt_decode_mac_bp`: checksum words 2 and 3, zero for objsets.
+fn block_mac(bp: &BlkPtr) -> [u8; MAC_LEN] {
+    let mut mac = [0u8; MAC_LEN];
+    if bp.object_type != ot::OBJSET {
+        mac[..8].copy_from_slice(&bp.cksum[2].to_le_bytes());
+        mac[8..].copy_from_slice(&bp.cksum[3].to_le_bytes());
+    }
+    mac
+}
+
+/// `blkptr_auth_buf_t` of a pointer found inside a dnode: the portable
+/// part of `blk_prop` (little-endian), the MAC, and (key version 1) an
+/// 8-byte pad. `zio_crypt_bp_zero_nonportable_blkprop` decides what is
+/// portable.
+fn blkptr_auth_buf(raw: &[u8], version: u64, endian: zfs_ondisk::Endian) -> Vec<u8> {
+    let bp = BlkPtr::parse(raw, endian);
+    let mut prop = endian.u64_at(raw, 6 * 8).unwrap_or(0);
+    let mut mac = [0u8; MAC_LEN];
+    if let Ok(bp) = &bp {
+        mac = block_mac(bp);
+        let clear = |prop: &mut u64, low: u32, len: u32| {
+            let mask = if len == 64 {
+                u64::MAX
+            } else {
+                ((1u64 << len) - 1) << low
+            };
+            *prop &= !mask;
+        };
+        if version == 0 {
+            clear(&mut prop, 62, 1); // dedup
+            clear(&mut prop, 40, 8); // checksum
+            clear(&mut prop, 16, 16); // psize -> SPA_MINBLOCKSIZE
+        } else if bp.is_hole() {
+            prop = 0;
+        } else {
+            if bp.level != 0 {
+                clear(&mut prop, 63, 1); // byteorder
+                clear(&mut prop, 32, 7); // compress
+                clear(&mut prop, 16, 16); // psize
+            }
+            clear(&mut prop, 62, 1);
+            clear(&mut prop, 40, 8);
+        }
+    }
+    let mut out = Vec::with_capacity(32);
+    out.extend_from_slice(&prop.to_le_bytes());
+    out.extend_from_slice(&mac);
+    if version != 0 {
+        out.extend_from_slice(&[0u8; 8]);
+    }
+    out
+}
+
+/// Decrypt one block of an encrypted dataset with its dataset keys. `ct`
+/// is the on-disk (still compressed) payload of `psize` bytes; the result
+/// has the same length and decompresses with the pointer's algorithm.
+/// Dnode blocks (`DMU_OT_DNODE`) are partly plaintext: only the bonus
+/// buffers of encrypted bonus types are ciphertext, everything else is
+/// authenticated as associated data (`zio_crypt_init_uios_dnode`).
+pub fn decrypt_block(keys: &DatasetKeys, bp: &BlkPtr, ct: &[u8]) -> Result<Vec<u8>, CryptError> {
+    let (salt, iv, mac) = block_params(bp)
+        .ok_or_else(|| CryptError::Metadata("pointer is not an encrypted block".into()))?;
+    let key = derive_block_key(keys, &salt);
+    match bp.object_type {
+        ot::DNODE => decrypt_dnode_block(keys, bp, ct, &key, &iv, &mac),
+        9 => Err(CryptError::Metadata(
+            "ZIL blocks are not decrypted (nothing to recover there)".into(),
+        )),
+        _ => {
+            let mut msg = ct.to_vec();
+            msg.extend_from_slice(&mac);
+            aead_open(keys.suite, &key, &iv, &[], &msg)
+        }
+    }
+}
+
+fn decrypt_dnode_block(
+    keys: &DatasetKeys,
+    bp: &BlkPtr,
+    ct: &[u8],
+    key: &[u8],
+    iv: &[u8; IV_LEN],
+    mac: &[u8; MAC_LEN],
+) -> Result<Vec<u8>, CryptError> {
+    let endian = bp.endian;
+    let mut aad = Vec::with_capacity(ct.len());
+    let mut cipher = Vec::new();
+    // (offset, len) of every bonus region that is ciphertext, in order.
+    let mut regions: Vec<(usize, usize)> = Vec::new();
+    let max = ct.len() / DNODE_SIZE;
+    let mut i = 0usize;
+    while i < max {
+        let at = i * DNODE_SIZE;
+        let dn = &ct[at..at + DNODE_SIZE];
+        let dn_type = dn[0];
+        let nblkptr = dn[3] as usize;
+        let bonustype = dn[4];
+        let flags = dn[7];
+        let bonuslen = u16::from_le_bytes([dn[10], dn[11]]);
+        let extra = dn[12] as usize;
+        let slots = (extra + 1).min(max - i);
+        let total = slots * DNODE_SIZE;
+        // Core: 64 bytes with only the portable flag and no dn_used.
+        let mut core = dn[..64].to_vec();
+        core[7] = flags & 0x04; // DNODE_CRYPT_PORTABLE_FLAGS_MASK
+        core[24..32].fill(0); // dn_used
+        aad.extend_from_slice(&core);
+        for j in 0..nblkptr {
+            let off = 64 + j * 128;
+            if off + 128 <= total {
+                aad.extend_from_slice(&blkptr_auth_buf(
+                    &ct[at + off..at + off + 128],
+                    keys.version,
+                    endian,
+                ));
+            }
+        }
+        // DN_BONUS: right after the dn_nblkptr block pointers.
+        let bonus_start = 64 + nblkptr * 128;
+        let bonus_end = if flags & 0x04 != 0 {
+            aad.extend_from_slice(&blkptr_auth_buf(
+                &ct[at + total - 128..at + total],
+                keys.version,
+                endian,
+            ));
+            total - 128
+        } else {
+            total
+        };
+        if bonus_start < bonus_end {
+            let len = bonus_end - bonus_start;
+            if dn_type != 0 && ot::is_encrypted(bonustype) && bonuslen != 0 {
+                regions.push((at + bonus_start, len));
+                cipher.extend_from_slice(&ct[at + bonus_start..at + bonus_end]);
+            } else {
+                aad.extend_from_slice(&ct[at + bonus_start..at + bonus_end]);
+            }
+        }
+        i += slots;
+    }
+    let mut out = ct.to_vec();
+    if cipher.is_empty() {
+        // no_crypt: nothing encrypted in this block; still authenticated.
+        cipher.extend_from_slice(mac);
+        aead_open(keys.suite, key, iv, &aad, &cipher)?;
+        return Ok(out);
+    }
+    cipher.extend_from_slice(mac);
+    let plain = aead_open(keys.suite, key, iv, &aad, &cipher)?;
+    let mut pos = 0;
+    for (off, len) in regions {
+        out[off..off + len].copy_from_slice(&plain[pos..pos + len]);
+        pos += len;
+    }
+    Ok(out)
 }
 
 /// `zio_crypt_key_unwrap`: recover the master and HMAC keys with the
@@ -395,6 +635,58 @@ mod tests {
     }
 
     #[test]
+    fn block_key_and_normal_block_roundtrip() {
+        use aes_gcm::aead::AeadInPlace;
+        use zfs_ondisk::blkptr::encode::Builder;
+        use zfs_ondisk::Endian;
+        let keys = DatasetKeys {
+            suite: 8,
+            key_guid: 1,
+            version: 1,
+            master: (0..32u8).collect(),
+            hmac: vec![0; 64],
+        };
+        let salt = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        let k = derive_block_key(&keys, &salt);
+        assert_eq!(k.len(), 32);
+        assert_ne!(k, derive_block_key(&keys, &[0; 8]));
+        // Build a zvol data pointer: salt/IV words in DVA[2], IV2 in fill.
+        let iv1 = 0x1111_2222_3333_4444u64;
+        let iv2 = 0x5555_6666u32;
+        let plain = vec![0xabu8; 4096];
+        let mut buf = plain.clone();
+        let mut iv = [0u8; 12];
+        iv[..8].copy_from_slice(&iv1.to_le_bytes());
+        iv[8..].copy_from_slice(&iv2.to_le_bytes());
+        let tag = Aes256Gcm::new_from_slice(&k)
+            .unwrap()
+            .encrypt_in_place_detached((&iv).into(), &[], &mut buf)
+            .unwrap();
+        let mac = [
+            u64::from_le_bytes(tag[..8].try_into().unwrap()),
+            u64::from_le_bytes(tag[8..].try_into().unwrap()),
+        ];
+        let raw = Builder::new()
+            .dva(0, 0, 0x1000, 0x1000, false)
+            .dva(2, 0, 0, 0, false)
+            .sizes(4096, 4096)
+            .props(2, 7, 23, 0)
+            .flags(true, false)
+            .births(10, 10, (u64::from(iv2) << 32) | 1)
+            .cksum([0, 0, mac[0], mac[1]])
+            .bytes(Endian::Little);
+        let mut raw = raw;
+        raw[4 * 8..5 * 8].copy_from_slice(&u64::from_le_bytes(salt).to_le_bytes());
+        raw[5 * 8..6 * 8].copy_from_slice(&iv1.to_le_bytes());
+        let bp = BlkPtr::parse(&raw, Endian::Little).unwrap();
+        assert!(bp.is_encrypted());
+        assert_eq!(decrypt_block(&keys, &bp, &buf).unwrap(), plain);
+        let mut bad = buf.clone();
+        bad[0] ^= 1;
+        assert_eq!(decrypt_block(&keys, &bp, &bad), Err(CryptError::WrongKey));
+    }
+
+    #[test]
     fn key_spec_parsing() {
         let dir = std::env::temp_dir().join(format!("zr-keyspec-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -409,8 +701,13 @@ mod tests {
         let pw = dir.join("pw");
         std::fs::write(&pw, "secret\n").unwrap();
         assert!(matches!(
-            KeyMaterial::from_spec(&format!("passphrase:@{}", pw.display())).unwrap(),
+            KeyMaterial::from_spec(&format!("passphrase:{}", pw.display())).unwrap(),
             KeyMaterial::Passphrase(p) if p == "secret"
+        ));
+        std::fs::write(&pw, "0a".repeat(32) + "\n").unwrap();
+        assert!(matches!(
+            KeyMaterial::from_spec(&format!("hex:@{}", pw.display())).unwrap(),
+            KeyMaterial::Hex(h) if h.len() == 64
         ));
         assert!(matches!(
             KeyMaterial::from_spec("hex:abcd").unwrap(),

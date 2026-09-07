@@ -7,10 +7,11 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use zfs_read::dsl::{open_mos, walk, Dataset, DatasetTree};
+use zfs_read::crypt::{unwrap_keys, wrapping_key, DatasetKeys, KeyMaterial};
+use zfs_read::dsl::{open_mos, walk, Dataset, DatasetTree, Encryption};
 use zfs_read::pool::{select_uberblock, uberblock_candidates, Candidate, TxgSelect};
 use zfs_read::zio::PoolReader;
-use zfs_read::zvol::{extract_from, open_volume, OnError, Report};
+use zfs_read::zvol::{extract_from, open_volume, volume_facts, OnError, Report};
 use zvolrescue_io::{refuse_if_evidence, SparseFile};
 
 use crate::list::{choose_pool, open_members};
@@ -66,6 +67,9 @@ struct DumpOut {
     bad: Vec<BadOut>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     warnings: Vec<String>,
+    /// Encryption suite the volume was decrypted with.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    encryption: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -151,6 +155,37 @@ fn find_dataset<'c>(
     Err(exit::UNRECOVERABLE)
 }
 
+/// Turn `--key` into the dataset keys of `enc`, or explain what is
+/// missing. No key, an unparsable spec, the wrong format and a wrong key
+/// are all exit `USAGE`: the pool is fine, the input is not.
+fn unlock(ds: &Dataset, enc: &Encryption, spec: Option<&str>) -> Result<DatasetKeys, u8> {
+    let Some(spec) = spec else {
+        eprintln!(
+            "zvolrescue: {} is encrypted ({}, keyformat {}{}); supply --key raw:FILE | hex:HEX | passphrase:FILE | prompt",
+            ds.name,
+            enc.suite_name(),
+            enc.keyformat_name(),
+            enc.keylocation
+                .as_ref()
+                .map_or(String::new(), |l| format!(", keylocation {l}"))
+        );
+        return Err(exit::USAGE);
+    };
+    let material = if spec == "prompt" {
+        eprint!("{} ({}) key: ", ds.name, enc.keyformat_name());
+        KeyMaterial::prompt(enc.keyformat)
+    } else {
+        KeyMaterial::from_spec(spec)
+    };
+    material
+        .and_then(|m| wrapping_key(&m, enc))
+        .and_then(|w| unwrap_keys(enc, &w))
+        .map_err(|e| {
+            eprintln!("zvolrescue: {}: {e}", ds.name);
+            exit::USAGE
+        })
+}
+
 /// Extract one volume to `output`. `Err(code)` is a hard failure; a
 /// completed-with-errors extraction is an `Ok` report with `aborted` set.
 #[allow(clippy::too_many_arguments)]
@@ -171,13 +206,25 @@ fn dump_one(
             return Err(exit::UNRECOVERABLE);
         }
     };
-    let Some(volsize) = ds.volsize else {
-        eprintln!(
-            "zvolrescue: {}: volsize unknown ({})",
-            ds.name,
-            ds.warnings.join("; ")
-        );
-        return Err(exit::UNRECOVERABLE);
+    // list could not read the size of an encrypted volume; with the
+    // keys installed it is readable now.
+    let volsize = match ds.volsize {
+        Some(v) => v,
+        None if reader.has_keys() => match volume_facts(reader, ds) {
+            Ok((v, _)) => v,
+            Err(e) => {
+                eprintln!("zvolrescue: {}: volume size: {e}", ds.name);
+                return Err(exit::UNRECOVERABLE);
+            }
+        },
+        None => {
+            eprintln!(
+                "zvolrescue: {}: volsize unknown ({})",
+                ds.name,
+                ds.warnings.join("; ")
+            );
+            return Err(exit::UNRECOVERABLE);
+        }
     };
     let blocksize = obj.dnode().datablksz();
     let state_path = resume_path(output);
@@ -342,7 +389,13 @@ fn dump_one(
                 reason: b.reason.clone(),
             })
             .collect(),
-        warnings: ds.warnings.clone(),
+        warnings: ds
+            .warnings
+            .iter()
+            .filter(|w| !(reader.has_keys() && w.contains("encrypted block: no key")))
+            .cloned()
+            .collect(),
+        encryption: ds.encryption.as_ref().map(Encryption::suite_name),
     })
 }
 
@@ -381,6 +434,9 @@ fn print_text(out: &RunOut) {
             v.blocks_total, v.blocks_read, v.blocks_holes, v.blocks_zeroed, v.bytes_written, v.seconds
         );
         println!("  sha256: {}", v.sha256);
+        if let Some(e) = &v.encryption {
+            println!("  decrypted: {e}");
+        }
         for w in &v.warnings {
             println!("  warning: {w}");
         }
@@ -412,10 +468,6 @@ fn print_text(out: &RunOut) {
 
 /// Run `dump`.
 pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
-    if opts.key.is_some() {
-        eprintln!("zvolrescue: --key (encrypted datasets) arrives in phase 3 (docs/SPEC.md §10)");
-        return exit::NOT_IMPLEMENTED;
-    }
     let members = match open_members(spec) {
         Ok(m) => m,
         Err(code) => return code,
@@ -487,10 +539,41 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         skipped: Vec::new(),
     };
     let mut code = 0u8;
+    let mut key_cache: std::collections::BTreeMap<u64, DatasetKeys> = Default::default();
     for (ds, output) in targets {
         if opts.recursive && ds.kind != Some(zfs_ondisk::dmu::ObjsetType::Zvol) {
             out.skipped.push(format!("{}: not a volume", ds.name));
             continue;
+        }
+        reader.set_keys(None);
+        if let Some(enc) = &ds.encryption {
+            let keys = match key_cache.get(&enc.crypto_key_obj) {
+                Some(k) => k.clone(),
+                None => match unlock(ds, enc, opts.key.as_deref()) {
+                    Ok(k) => {
+                        key_cache.insert(enc.crypto_key_obj, k.clone());
+                        k
+                    }
+                    Err(c) => {
+                        if opts.recursive {
+                            out.skipped
+                                .push(format!("{}: encrypted, not unlocked (exit {c})", ds.name));
+                            code = code.max(c);
+                            continue;
+                        }
+                        return c;
+                    }
+                },
+            };
+            if !g.quiet && g.format == Format::Text {
+                println!(
+                    "  {}: unlocked ({}, key guid {:#x})",
+                    ds.name,
+                    enc.suite_name(),
+                    keys.key_guid
+                );
+            }
+            reader.set_keys(Some(keys));
         }
         match dump_one(
             g,

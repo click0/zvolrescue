@@ -57,6 +57,8 @@ bugs that synthetic fixtures could not: run it yourself with
 cargo build --release -p zfs-read --examples
 ./target/release/examples/walk-objects /path/to/pool/ztest.*
 ZR_DEBUG=1 ZR_DETAIL=1 ./target/release/examples/walk-objects ...   # trace + hexdumps
+ZR_KEY=raw:key.bin ./target/release/examples/walk-objects ...      # unlock encrypted datasets (hex:.., passphrase:FILE too)
+./target/release/examples/unwrap-key raw:key.bin /path/to/pool/ztest.*  # does this key open each encryption root?
 ```
 
 ## 2. Compare `scan` with `zdb`

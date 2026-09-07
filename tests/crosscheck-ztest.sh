@@ -83,16 +83,17 @@ for k in sorted(out): print(k, out[k])' > "$dir/zr-label.txt"
     # 4. encryption metadata of every encrypted dataset against zdb's dump
     #    of the DSL crypto key object (suite, key guid, root dir, keyformat,
     #    version).
-    $ZR -f json list -r $members | python3 -c '
+    $ZR -f json list -r $members > "$dir/list.json"
+    python3 -c '
 import json,sys
-d = json.load(sys.stdin)
+d = json.load(open(sys.argv[1]))
 seen = set()
 for x in d["datasets"]:
     e = x.get("encryption")
     if e and e["crypto_key_object"] not in seen:
         seen.add(e["crypto_key_object"])
         fmt = {"raw": 1, "hex": 2, "passphrase": 3}[e["keyformat"]]
-        print(e["crypto_key_object"], e["suite"], int(e["key_guid"], 16), e["encryption_root_dir_object"], fmt, e["key_version"])' > "$dir/zr-crypto.txt"
+        print(e["crypto_key_object"], e["suite"], int(e["key_guid"], 16), e["encryption_root_dir_object"], fmt, e["key_version"])' "$dir/list.json" > "$dir/zr-crypto.txt"
     : > "$dir/zdb-crypto.txt"
     while read -r obj suite guid root fmt ver; do
         zdb -e -p "$dir" -dddd ztest "$obj" 2>/dev/null | python3 -c '
@@ -126,6 +127,44 @@ print(obj, names.get(v.get("DSL_CRYPTO_SUITE"), "?"), v.get("DSL_CRYPTO_GUID"), 
             echo "   unwrap: a WRONG key was accepted"; cat "$dir/unwrap-wrong.txt"; fail=1
         else
             echo "   unwrap: wrong key refused"
+        fi
+
+        # 6. every block of the encrypted datasets decrypted and verified:
+        #    the walk with the key must be clean and every dataset's object
+        #    count must equal its objset fill (no dnode block skipped).
+        if [ -x "$WALK" ]; then
+            if ZR_KEY="raw:$dir/ztest.key" "$WALK" "$dir"/ztest.* > "$dir/walk-key.txt" 2> "$dir/walk-key.err" \
+                && ! grep -q "no key\|decrypt" "$dir/walk-key.txt" \
+                && [ "$(grep -c 'object count == objset fill' "$dir/walk-key.txt")" = 1 ]; then
+                enc=$(grep -c "encrypted: Ok" "$dir/walk-key.txt")
+                echo "   walk with key: $(head -1 "$dir/walk-key.txt"), all encrypted blocks decrypted ($enc outcome lines), every object counted"
+            else
+                echo "   walk with key: FAILED"; cat "$dir/walk-key.txt"; tail -20 "$dir/walk-key.err"; fail=1
+            fi
+        fi
+
+        # 7. dump --key wiring on an encrypted dataset (ztest makes no
+        #    volumes, so the right key must get as far as "not a volume").
+        encds=$(python3 -c '
+import json,sys
+d = json.load(open(sys.argv[1]))
+print(next(x["name"] for x in d["datasets"] if x.get("encryption") and not x["name"].count("@")))' "$dir/list.json" 2>/dev/null || true)
+        if [ -n "$encds" ]; then
+            if $ZR -q dump "$encds" $members -o "$dir/enc.img" --key "raw:$dir/ztest.key" 2> "$dir/dump-key.err"; rc=$?; [ $rc = 3 ] && grep -q "not a volume" "$dir/dump-key.err"; then
+                echo "   dump --key: $encds unlocked with the right key (then refused as not a volume)"
+            else
+                echo "   dump --key: unexpected result (exit $rc)"; cat "$dir/dump-key.err"; fail=1
+            fi
+            if $ZR -q dump "$encds" $members -o "$dir/enc.img" --key "raw:$dir/wrong.key" 2> "$dir/dump-wrong.err"; rc=$?; [ $rc = 1 ] && grep -q "MAC does not verify" "$dir/dump-wrong.err"; then
+                echo "   dump --key: wrong key refused (exit 1)"
+            else
+                echo "   dump --key: wrong key NOT refused properly (exit $rc)"; cat "$dir/dump-wrong.err"; fail=1
+            fi
+            if $ZR -q dump "$encds" $members -o "$dir/enc.img" 2> "$dir/dump-nokey.err"; rc=$?; [ $rc = 1 ] && grep -q "supply --key" "$dir/dump-nokey.err"; then
+                echo "   dump: without a key it says which key is needed (exit 1)"
+            else
+                echo "   dump: no-key message wrong (exit $rc)"; cat "$dir/dump-nokey.err"; fail=1
+            fi
         fi
     fi
 }

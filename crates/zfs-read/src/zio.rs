@@ -8,7 +8,9 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+
+use crate::crypt::{decrypt_block, CryptError, DatasetKeys};
 use zfs_ondisk::blkptr::{self, BlkPtr, Dva, LABEL_START_SIZE};
 
 use zfs_ondisk::checksum::{verify_block, Salt, Verify};
@@ -115,6 +117,8 @@ pub struct PoolReader<'a> {
     tops: BTreeMap<u32, Node>,
     /// Pool checksum salt once the MOS object directory has been read.
     salt: Cell<Option<Salt>>,
+    /// Keys of the encrypted dataset currently being read, if any.
+    keys: RefCell<Option<DatasetKeys>>,
 }
 
 /// Why a block could not be produced.
@@ -142,8 +146,10 @@ pub enum ReadError {
     /// when the caller asked for that.
     ChecksumUnsupported,
     /// The copy verified but is ciphertext of an encrypted dataset and no
-    /// key is available (phase 3).
+    /// key is installed.
     Encrypted,
+    /// Decryption failed: wrong key for this block, or a MAC mismatch.
+    Crypt(CryptError),
 }
 
 impl fmt::Display for ReadError {
@@ -159,7 +165,8 @@ impl fmt::Display for ReadError {
             ReadError::Hole => write!(f, "block pointer is a hole"),
             ReadError::Decompress(e) => write!(f, "{e}"),
             ReadError::ChecksumUnsupported => write!(f, "checksum algorithm not supported yet"),
-            ReadError::Encrypted => write!(f, "encrypted block: no key (not supported yet)"),
+            ReadError::Encrypted => write!(f, "encrypted block: no key"),
+            ReadError::Crypt(e) => write!(f, "decrypt: {e}"),
         }
     }
 }
@@ -208,6 +215,7 @@ impl<'a> PoolReader<'a> {
             devices,
             tops,
             salt: Cell::new(None),
+            keys: RefCell::new(None),
         }
     }
 
@@ -220,6 +228,18 @@ impl<'a> PoolReader<'a> {
     /// The pool checksum salt, if known.
     pub fn salt(&self) -> Option<Salt> {
         self.salt.get()
+    }
+
+    /// Install (or clear) the dataset keys used to decrypt ciphertext
+    /// blocks from now on. Blocks of other datasets must not be read
+    /// with a foreign key: their MACs fail and read as `WrongKey`.
+    pub fn set_keys(&self, keys: Option<DatasetKeys>) {
+        *self.keys.borrow_mut() = keys;
+    }
+
+    /// Whether dataset keys are installed.
+    pub fn has_keys(&self) -> bool {
+        self.keys.borrow().is_some()
     }
 
     /// Verify `raw` against `bp` with the pool salt when one is known.
@@ -761,8 +781,24 @@ impl<'a> PoolReader<'a> {
         let raw = self.read_raw_verified(bp, 0, &mut attempts);
         let _ = allow_unverified;
         match raw {
-            Ok(_) if bp.is_encrypted() => Err(ReadError::Encrypted),
+            Ok(_) if bp.is_encrypted() && !self.has_keys() => Err(ReadError::Encrypted),
             Ok(raw) => {
+                let raw = if bp.is_encrypted() {
+                    let keys = self.keys.borrow();
+                    let keys = keys.as_ref().expect("checked");
+                    match decrypt_block(keys, bp, &raw) {
+                        Ok(p) => {
+                            trace!("zio", "    decrypted {} bytes ({})", p.len(), keys.suite);
+                            p
+                        }
+                        Err(e) => {
+                            trace!("zio", "    decrypt failed: {e}");
+                            return Err(ReadError::Crypt(e));
+                        }
+                    }
+                } else {
+                    raw
+                };
                 let verify = attempts
                     .iter()
                     .rev()
