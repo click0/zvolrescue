@@ -358,6 +358,35 @@ mod data_tests {
             verify(Checksum::NoParity, &data, Endian::Little, &[9; 4]),
             Verify::NotChecked
         );
+        // edonr has no DEDUP flag: folded like fletcher, unlike skein/blake3.
+        let salt: Salt = [3u8; 32];
+        let full = compute_salted(Checksum::Edonr, &data, Endian::Little, Some(&salt)).unwrap();
+        let stored = [full[0] ^ full[2], full[1] ^ full[3], 0xdead, 0xbeef];
+        assert_eq!(
+            verify_block(
+                Checksum::Edonr,
+                &data,
+                Endian::Little,
+                &stored,
+                Some(&salt),
+                true
+            ),
+            Verify::Ok
+        );
+        let full = compute_salted(Checksum::Skein, &data, Endian::Little, Some(&salt)).unwrap();
+        let stored = [full[0], full[1], 0xdead, 0xbeef];
+        assert_eq!(
+            verify_block(
+                Checksum::Skein,
+                &data,
+                Endian::Little,
+                &stored,
+                Some(&salt),
+                true
+            ),
+            Verify::Ok
+        );
+        assert!(!Checksum::Edonr.dedup_capable() && Checksum::Skein.dedup_capable());
     }
 
     #[test]

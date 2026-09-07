@@ -177,14 +177,12 @@ impl Checksum {
 
     /// `ZCHECKSUM_FLAG_DEDUP`: strong enough for dedup. OpenZFS keeps
     /// such checksums whole under encryption instead of folding them.
+    /// `edonr` is salted but *not* dedup-capable (`zio_checksum_table`),
+    /// so its words fold like fletcher's.
     pub fn dedup_capable(&self) -> bool {
         matches!(
             self,
-            Checksum::Sha256
-                | Checksum::Sha512
-                | Checksum::Skein
-                | Checksum::Edonr
-                | Checksum::Blake3
+            Checksum::Sha256 | Checksum::Sha512 | Checksum::Skein | Checksum::Blake3
         )
     }
 
