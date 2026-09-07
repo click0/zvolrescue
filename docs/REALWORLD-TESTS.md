@@ -43,7 +43,7 @@ Run every scenario on every environment; record `zvolrescue --version`,
 | B4 | raidz with one member silently corrupted (`dd` over 1 MiB in the middle) | `dump` heals it, reports rebuilt blocks in `--debug` |
 | B5 | pool with 2+ top-level vdevs, mixed mirror + raidz | same |
 | B6 | pool with a `log` and a `cache` vdev | `scan` lists them; `dump` unaffected |
-| B7 | dRAID (`draid2:8d:1s`) | *expected unsupported until F-25*; must fail cleanly with exit 3 |
+| B7 | dRAID (`draid2:8d:1s`), also with 1–2 members removed and with a distributed spare active | `list` matches `zpool list -t all`; `dump` hash matches |
 | B8 | pool after `zpool attach`/`detach`/`replace` (stale labels on old disks) | `scan` shows the old member with an older txg and does not mix it in |
 | B9 | whole-disk vdevs with GPT (Linux `-part1`, FreeBSD `p1`) | *needs F-06*: `scan` of the whole disk finds the ZFS partition |
 
@@ -116,3 +116,4 @@ Append one row per run.
 | 2026-09-07 | Ubuntu 24.04 (CI, userland `ztest` only) | 2.2.2 | `5d06443`+ | C (encrypted datasets: metadata) | ☑ | `list` reads the DSL crypto key ZAP and key properties of every encrypted ztest dataset; suite, key GUID, encryption root, keyformat and version match `zdb -dddd` of the crypto key object (step 4 of the crosscheck script). |
 | 2026-09-07 | Ubuntu 24.04 (CI, userland `ztest` only) | 2.2.2 | `7b88116`+ | C (encrypted datasets: key unwrap) | ☑ | ztest's raw wrapping key opens every encryption root of 3 pools (aes-128/192/256, GCM and CCM, key version 1); a key differing in one byte is refused. Step 5 of the crosscheck script. |
 | 2026-09-07 | Ubuntu 24.04 (CI, userland `ztest` only) | 2.2.2 | `3a4f756`+ | C (encrypted datasets: decryption) | ☑ | With ztest's key every encrypted block of 3 pools decrypts (aes-128/192/256, GCM and CCM; data, ZAP and dnode blocks; lz4/lzjb/zstd/off under encryption) and every dataset's object count equals its objset fill. Found on the way: `dmu_ot` marks other-ZAP, zvol-prop, znode, master-node and FUID-size objects as authenticated only, not encrypted. `dump --key` wiring checked (no key / wrong key / right key / prompt). |
+| 2026-09-07 | Ubuntu 24.04 (CI, userland `ztest` only) | 2.2.2 | `4e89a07`+ | B7 dRAID (draid1 4d:6c:1s, draid2 5d:9c:2s) | ☑ | Datasets match `zdb -d`; every block of every object verifies, with all members and with any 1 (draid1) or 2 (draid2) members left out; a member with 2 MiB of garbage is reconstructed around. Found on the way: dRAID parity runs over the whole group width, so the empty trailing columns of a short row shift the Q/R evaluation. |

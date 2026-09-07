@@ -63,7 +63,7 @@ pub fn node_readable(node: &VdevNode, members: &[Member]) -> bool {
         .count();
     let missing = node.children.len() - readable;
     match node.kind.as_str() {
-        "mirror" => readable >= 1,
+        "mirror" | "spare" | "replacing" => readable >= 1,
         "raidz" | "draid" => missing as u64 <= node.nparity.unwrap_or(0),
         _ => missing == 0,
     }

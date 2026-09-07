@@ -38,8 +38,8 @@ zpool export tpool
 
 `ztest` з OpenZFS створює і ганяє справжній пул цілком у userland (файли
 в каталозі, без `zfs.ko`), а `zdb -e -p DIR` так само його читає.
-`tests/crosscheck-ztest.sh` робить саме це для mirror, raidz2 і
-raidz1-of-mirrors пулів і порівнює `zvolrescue list -r` / `scan` із
+`tests/crosscheck-ztest.sh` робить саме це для mirror, raidz2,
+raidz1-of-mirrors, draid1 і draid2 пулів і порівнює `zvolrescue list -r` / `scan` із
 `zdb -d` / `zdb -l`; CI ганяє його на кожен push. Dataset-и від ztest
 мають тип *other* (томів нема), тож це валідує мітки, uberblock-и, MOS,
 dnode-и, ZAP-и, DSL і читання RAIDZ — але не витягання тома. Третій крок

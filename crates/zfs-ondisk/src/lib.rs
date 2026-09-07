@@ -13,6 +13,7 @@ pub mod blkptr;
 pub mod checksum;
 pub mod compress;
 pub mod dmu;
+pub mod draid;
 pub mod dsl;
 pub mod error;
 pub mod label;

@@ -125,6 +125,12 @@ pub struct VdevNode {
     pub asize: Option<u64>,
     /// `nparity` for raidz/draid.
     pub nparity: Option<u64>,
+    /// `draid_ndata`: data columns per dRAID group.
+    pub draid_ndata: Option<u64>,
+    /// `draid_nspares`: distributed spares of a dRAID.
+    pub draid_nspares: Option<u64>,
+    /// `draid_ngroups`: groups per dRAID slice.
+    pub draid_ngroups: Option<u64>,
     /// `is_log`.
     pub is_log: bool,
     /// `children`, in order.
@@ -142,6 +148,9 @@ impl VdevNode {
             ashift: nv.u64("ashift"),
             asize: nv.u64("asize"),
             nparity: nv.u64("nparity"),
+            draid_ndata: nv.u64("draid_ndata"),
+            draid_nspares: nv.u64("draid_nspares"),
+            draid_ngroups: nv.u64("draid_ngroups"),
             is_log: nv.u64("is_log").unwrap_or(0) != 0,
             children: nv
                 .list_array("children")

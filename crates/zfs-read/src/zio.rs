@@ -13,9 +13,11 @@ use std::cell::{Cell, RefCell};
 use crate::crypt::{decrypt_block, CryptError, DatasetKeys};
 use zfs_ondisk::blkptr::{self, BlkPtr, Dva, LABEL_START_SIZE};
 
+use std::rc::Rc;
 use zfs_ondisk::checksum::{verify_block, Salt, Verify};
 use zfs_ondisk::compress::{decompress, DecompressError};
 use zfs_ondisk::dmu::ot;
+use zfs_ondisk::draid;
 use zfs_ondisk::raidz;
 use zvolrescue_io::trace::hexdump;
 use zvolrescue_io::{trace, BlockSource};
@@ -27,8 +29,9 @@ use zfs_ondisk::label::VdevNode;
 /// single device) and the bytes or the error.
 type RawCandidate = (Option<usize>, Result<Vec<u8>, ReadError>);
 
-/// The columns of one raidz stripe: parity (`None` when unreadable), data
-/// (zero-filled where lost), lost data column indices, and the stripe map.
+/// The columns of one parity row (a raidz stripe or a dRAID row): parity
+/// (`None` when unreadable), data (zero-filled where lost), lost data
+/// column indices, and the row map.
 type Columns = (Vec<Option<Vec<u8>>>, Vec<Vec<u8>>, Vec<usize>, raidz::Map);
 
 /// A vdev as the reader sees it: the tree under one top-level vdev.
@@ -44,12 +47,30 @@ enum Node {
         ashift: u32,
         children: Vec<Node>,
     },
+    /// dRAID: parity rows placed by a permutation map; children may be
+    /// distributed spares standing in for a failed child.
+    Draid {
+        cfg: Rc<draid::Config>,
+        ashift: u32,
+        children: Vec<Node>,
+    },
+    /// A distributed spare (`draid<p>-<vdev>-<n>`): resolves to another
+    /// child of its dRAID per permutation row. Only read through `Draid`.
+    Dspare { spare_id: u64 },
     /// A vdev type this build cannot read.
     Unsupported { kind: String },
 }
 
 impl Node {
     fn from_tree(tree: &VdevNode, members: &[Member], ashift: u32) -> Node {
+        if tree.kind == "dspare" {
+            return match tree.path.as_deref().and_then(draid::spare_id_from_name) {
+                Some(spare_id) => Node::Dspare { spare_id },
+                None => Node::Unsupported {
+                    kind: format!("dspare {:?}", tree.path),
+                },
+            };
+        }
         if tree.children.is_empty() {
             return Node::Leaf {
                 device: members
@@ -64,14 +85,32 @@ impl Node {
             .iter()
             .map(|c| Node::from_tree(c, members, ashift))
             .collect();
+        let ashift = tree
+            .ashift
+            .and_then(|a| u32::try_from(a).ok())
+            .unwrap_or(ashift);
         match tree.kind.as_str() {
-            "mirror" => Node::Mirror { children },
+            // spare and replacing vdevs are mirrors of the old and new child.
+            "mirror" | "spare" | "replacing" => Node::Mirror { children },
+            "draid" => match draid::Config::new(
+                tree.draid_ndata.unwrap_or(0),
+                tree.nparity.unwrap_or(0),
+                tree.draid_nspares.unwrap_or(0),
+                tree.children.len() as u64,
+                tree.draid_ngroups.unwrap_or(0),
+            ) {
+                Ok(cfg) => Node::Draid {
+                    cfg: Rc::new(cfg),
+                    ashift,
+                    children,
+                },
+                Err(e) => Node::Unsupported {
+                    kind: format!("draid ({e})"),
+                },
+            },
             "raidz" => Node::Raidz {
                 nparity: tree.nparity.unwrap_or(1),
-                ashift: tree
-                    .ashift
-                    .and_then(|a| u32::try_from(a).ok())
-                    .unwrap_or(ashift),
+                ashift,
                 children,
             },
             other => Node::Unsupported {
@@ -106,6 +145,23 @@ impl Node {
                         .join(",")
                 )
             }
+            Node::Draid {
+                cfg,
+                ashift,
+                children,
+            } => format!(
+                "draid{}:{}d:{}c:{}s ashift {ashift} ({})",
+                cfg.nparity,
+                cfg.ndata,
+                cfg.children,
+                cfg.nspares,
+                children
+                    .iter()
+                    .map(Node::describe)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Node::Dspare { spare_id } => format!("dspare#{spare_id}"),
             Node::Unsupported { kind } => format!("{kind}?"),
         }
     }
@@ -275,29 +331,29 @@ impl<'a> PoolReader<'a> {
                 .iter()
                 .flat_map(|c| self.read_candidates(c, offset, size))
                 .collect(),
-            Node::Raidz {
-                nparity,
-                ashift,
-                children,
-            } => {
-                let (parity, data, lost, _) =
-                    self.read_columns(*nparity, *ashift, children, offset, size);
-                let mut data = data;
-                let result = if lost.is_empty() {
-                    Ok(())
-                } else {
-                    raidz::reconstruct(&mut data, &parity, &lost)
-                        .map_err(|e| ReadError::Unrecoverable(format!("raidz reconstruct: {e:?}")))
-                };
-                vec![(
-                    None,
-                    result.map(|()| {
-                        let mut out: Vec<u8> = data.iter().flatten().copied().collect();
-                        out.truncate(size);
-                        out
-                    }),
-                )]
+            Node::Raidz { .. } | Node::Draid { .. } => {
+                let rows = self.read_rows(node, offset, size);
+                let mut out = Vec::with_capacity(size);
+                for (parity, mut data, lost, _) in rows {
+                    if !lost.is_empty() {
+                        if let Err(e) = raidz::reconstruct(&mut data, &parity, &lost) {
+                            return vec![(
+                                None,
+                                Err(ReadError::Unrecoverable(format!("reconstruct: {e:?}"))),
+                            )];
+                        }
+                    }
+                    out.extend(data.iter().flatten());
+                }
+                out.truncate(size);
+                vec![(None, Ok(out))]
             }
+            Node::Dspare { .. } => vec![(
+                None,
+                Err(ReadError::Unsupported(
+                    "distributed spare read outside its dRAID".into(),
+                )),
+            )],
             Node::Unsupported { kind } => vec![(None, Err(ReadError::Unsupported(kind.clone())))],
         }
     }
@@ -334,22 +390,69 @@ impl<'a> PoolReader<'a> {
 
     /// Read the columns of one raidz stripe: parity (None when unreadable),
     /// data (zero-filled where lost), lost data column indices, and the map.
-    fn read_columns(
-        &self,
-        nparity: u64,
-        ashift: u32,
-        children: &[Node],
-        offset: u64,
-        size: usize,
-    ) -> Columns {
-        let unit = 1u64 << ashift;
-        let padded = (size as u64).div_ceil(unit) * unit;
-        let m = raidz::map(offset, padded, ashift, children.len() as u64, nparity);
+    /// The parity rows holding `size` bytes at `offset` under a raidz or
+    /// dRAID node, each read column by column.
+    fn read_rows(&self, node: &Node, offset: u64, size: usize) -> Vec<Columns> {
+        match node {
+            Node::Raidz {
+                nparity,
+                ashift,
+                children,
+            } => {
+                let unit = 1u64 << ashift;
+                let padded = (size as u64).div_ceil(unit) * unit;
+                let m = raidz::map(offset, padded, *ashift, children.len() as u64, *nparity);
+                vec![self.read_row(m, children, None)]
+            }
+            Node::Draid {
+                cfg,
+                ashift,
+                children,
+            } => {
+                let unit = 1u64 << ashift;
+                let padded = (size as u64).div_ceil(unit) * unit;
+                cfg.map(offset, padded, *ashift)
+                    .into_iter()
+                    .map(|m| self.read_row(m, children, Some(cfg)))
+                    .collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Read every column of one row. A distributed spare column is read
+    /// from the child the dRAID permutation assigns to it at that offset.
+    fn read_row(&self, m: raidz::Map, children: &[Node], cfg: Option<&draid::Config>) -> Columns {
         let column = |c: &raidz::Column| -> Result<Vec<u8>, ReadError> {
-            let child = children
-                .get(c.devidx as usize)
-                .ok_or(ReadError::UnknownVdev(c.devidx as u32))?;
-            self.read_first(child, c.offset, c.size as usize)
+            if c.size == 0 {
+                // An empty column (dRAID short row): nothing on disk, but
+                // it keeps its place in the parity equations.
+                return Ok(Vec::new());
+            }
+            let mut devidx = c.devidx;
+            for _ in 0..children.len() {
+                let child = children
+                    .get(devidx as usize)
+                    .ok_or(ReadError::UnknownVdev(devidx as u32))?;
+                match (child, cfg) {
+                    (Node::Dspare { spare_id }, Some(cfg)) => {
+                        let target = cfg.spare_child(*spare_id, c.offset);
+                        trace!(
+                            "draid",
+                            "    dspare#{spare_id} at {:#x} -> child {target}",
+                            c.offset
+                        );
+                        devidx = target;
+                    }
+                    (Node::Dspare { .. }, None) => {
+                        return Err(ReadError::Unsupported("dspare outside dRAID".into()))
+                    }
+                    _ => return self.read_first(child, c.offset, c.size as usize),
+                }
+            }
+            Err(ReadError::Unsupported(
+                "distributed spare chain loops".into(),
+            ))
         };
         let mut parity = Vec::with_capacity(m.nparity);
         for c in m.parity() {
@@ -361,7 +464,7 @@ impl<'a> PoolReader<'a> {
                 }
             });
         }
-        let mut data = Vec::with_capacity(m.acols - m.nparity);
+        let mut data = Vec::with_capacity(m.acols.saturating_sub(m.nparity));
         let mut lost = Vec::new();
         for (i, c) in m.data().iter().enumerate() {
             match column(c) {
@@ -376,41 +479,47 @@ impl<'a> PoolReader<'a> {
         (parity, data, lost, m)
     }
 
-    /// Read and verify the `psize` bytes behind a DVA on a raidz node,
-    /// reconstructing missing columns from parity and, if the checksum
-    /// still fails, distrusting every combination of up to `nparity`
-    /// readable columns — parity rows and data columns alike — as
-    /// `vdev_raidz_combrec` does.
-    #[allow(clippy::too_many_arguments)]
-    fn read_raidz(
+    /// Read and verify the `psize` bytes behind a DVA on a raidz or dRAID
+    /// node, reconstructing missing columns from parity and, if the
+    /// checksum still fails, distrusting every combination of up to
+    /// `nparity` readable columns of one row — parity rows and data
+    /// columns alike — as `vdev_raidz_combrec` does.
+    fn read_striped(
         &self,
-        nparity: u64,
-        ashift: u32,
-        children: &[Node],
+        node: &Node,
         dva: &Dva,
         bp: &BlkPtr,
         attempts: &mut Vec<Attempt>,
         dva_index: usize,
     ) -> Result<(Vec<u8>, Verify), ReadError> {
         let psize = bp.psize as usize;
-        let (parity, mut data, lost, m) =
-            self.read_columns(nparity, ashift, children, dva.offset, psize);
-        trace!(
-            "raidz",
-            "  dva {dva_index}: raidz{nparity} ashift {ashift} -> {} cols ({} parity, {} big, nskip {}): {}",
-            m.acols,
-            m.nparity,
-            m.bigcols,
-            m.nskip,
-            m.cols[..m.acols]
+        let mut rows = self.read_rows(node, dva.offset, psize);
+        let label = match node {
+            Node::Draid { cfg, .. } => format!("draid{}", cfg.nparity),
+            Node::Raidz { nparity, .. } => format!("raidz{nparity}"),
+            _ => "?".into(),
+        };
+        for (r, (parity, _, _, m)) in rows.iter().enumerate() {
+            trace!(
+                "raidz",
+                "  dva {dva_index}: {label} row {r} -> {} cols ({} parity, {} big, nskip {}, {} parity readable): {}",
+                m.acols,
+                m.nparity,
+                m.bigcols,
+                m.nskip,
+                parity.iter().filter(|p| p.is_some()).count(),
+                m.cols[..m.acols]
+                    .iter()
+                    .map(|c| format!("dev{}@{:#x}+{}", c.devidx, c.offset, c.size))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+        }
+        let assemble = |rows: &[Columns]| -> Vec<u8> {
+            let mut out: Vec<u8> = rows
                 .iter()
-                .map(|c| format!("dev{}@{:#x}+{}", c.devidx, c.offset, c.size))
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
-        let available = parity.iter().filter(|p| p.is_some()).count();
-        let assemble = |data: &[Vec<u8>]| -> Vec<u8> {
-            let mut out: Vec<u8> = data.iter().flatten().copied().collect();
+                .flat_map(|(_, data, _, _)| data.iter().flatten().copied())
+                .collect();
             out.truncate(psize);
             out
         };
@@ -422,86 +531,92 @@ impl<'a> PoolReader<'a> {
                 result,
             });
         };
-        if lost.len() > available {
-            let e = ReadError::Unrecoverable(format!(
-                "{} data column(s) missing, only {} parity column(s) readable",
-                lost.len(),
-                available
-            ));
-            record(attempts, Err(e.clone()));
-            return Err(e);
+        for (parity, data, lost, _) in rows.iter_mut() {
+            let available = parity.iter().filter(|p| p.is_some()).count();
+            if lost.len() > available {
+                let e = ReadError::Unrecoverable(format!(
+                    "{} data column(s) missing, only {} parity column(s) readable",
+                    lost.len(),
+                    available
+                ));
+                record(attempts, Err(e.clone()));
+                return Err(e);
+            }
+            if !lost.is_empty() {
+                raidz::reconstruct(data, parity, lost)
+                    .map_err(|e| ReadError::Unrecoverable(format!("reconstruct: {e:?}")))?;
+                trace!(
+                    "raidz",
+                    "    reconstructed missing data column(s) {lost:?} from parity"
+                );
+            }
         }
-        if !lost.is_empty() {
-            raidz::reconstruct(&mut data, &parity, &lost)
-                .map_err(|e| ReadError::Unrecoverable(format!("raidz reconstruct: {e:?}")))?;
-            trace!(
-                "raidz",
-                "    reconstructed missing data column(s) {lost:?} from parity"
-            );
-        }
-        let raw = assemble(&data);
+        let raw = assemble(&rows);
         let v = self.verify(bp, &raw);
+        let any_lost = rows.iter().any(|(_, _, lost, _)| !lost.is_empty());
         trace!(
             "raidz",
             "    checksum after direct read{}: {v:?}",
-            if lost.is_empty() {
-                ""
-            } else {
-                " + reconstruction"
-            }
+            if any_lost { " + reconstruction" } else { "" }
         );
         record(attempts, Ok(v));
         if v != Verify::Mismatch {
             return Ok((raw, v));
         }
-        let budget = available - lost.len();
-        let readable_parity: Vec<usize> =
-            (0..parity.len()).filter(|&r| parity[r].is_some()).collect();
-        let readable_data: Vec<usize> = (0..data.len()).filter(|i| !lost.contains(i)).collect();
-        let columns: Vec<(bool, usize)> = readable_parity
-            .iter()
-            .map(|&r| (true, r))
-            .chain(readable_data.iter().map(|&i| (false, i)))
-            .collect();
-        for k in 1..=budget.min(columns.len()) {
-            for combo in combinations(columns.len(), k) {
-                let mut bad_parity: Vec<usize> = Vec::new();
-                let mut missing = lost.clone();
-                for &j in &combo {
-                    match columns[j] {
-                        (true, r) => bad_parity.push(r),
-                        (false, i) => missing.push(i),
-                    }
-                }
-                missing.sort_unstable();
-                let usable: Vec<Option<Vec<u8>>> = parity
-                    .iter()
-                    .enumerate()
-                    .map(|(r, p)| {
-                        if bad_parity.contains(&r) {
-                            None
-                        } else {
-                            p.clone()
+        // Combinatorial reconstruction, one row at a time (the other rows
+        // are kept as read).
+        for r in 0..rows.len() {
+            let (parity, data, lost, _) = &rows[r];
+            let available = parity.iter().filter(|p| p.is_some()).count();
+            let budget = available - lost.len();
+            let readable_parity: Vec<usize> =
+                (0..parity.len()).filter(|&i| parity[i].is_some()).collect();
+            let readable_data: Vec<usize> = (0..data.len()).filter(|i| !lost.contains(i)).collect();
+            let columns: Vec<(bool, usize)> = readable_parity
+                .iter()
+                .map(|&i| (true, i))
+                .chain(readable_data.iter().map(|&i| (false, i)))
+                .collect();
+            for k in 1..=budget.min(columns.len()) {
+                for combo in combinations(columns.len(), k) {
+                    let mut bad_parity: Vec<usize> = Vec::new();
+                    let mut missing = lost.clone();
+                    for &j in &combo {
+                        match columns[j] {
+                            (true, i) => bad_parity.push(i),
+                            (false, i) => missing.push(i),
                         }
-                    })
-                    .collect();
-                let usable_count = usable.iter().filter(|p| p.is_some()).count();
-                if missing.is_empty() || missing.len() > usable_count {
-                    continue;
-                }
-                let mut work = data.clone();
-                if raidz::reconstruct(&mut work, &usable, &missing).is_err() {
-                    continue;
-                }
-                let raw = assemble(&work);
-                let v = self.verify(bp, &raw);
-                if v != Verify::Mismatch {
-                    trace!(
-                        "raidz",
-                        "    combinatorial reconstruction succeeded: data columns {missing:?} rebuilt, parity rows {bad_parity:?} distrusted"
-                    );
-                    record(attempts, Ok(v));
-                    return Ok((raw, v));
+                    }
+                    missing.sort_unstable();
+                    let usable: Vec<Option<Vec<u8>>> = parity
+                        .iter()
+                        .enumerate()
+                        .map(|(i, p)| {
+                            if bad_parity.contains(&i) {
+                                None
+                            } else {
+                                p.clone()
+                            }
+                        })
+                        .collect();
+                    let usable_count = usable.iter().filter(|p| p.is_some()).count();
+                    if missing.is_empty() || missing.len() > usable_count {
+                        continue;
+                    }
+                    let mut work = rows.clone();
+                    if raidz::reconstruct(&mut work[r].1, &usable, &missing).is_err() {
+                        continue;
+                    }
+                    let raw = assemble(&work);
+                    let v = self.verify(bp, &raw);
+                    if v != Verify::Mismatch {
+                        trace!(
+                            "raidz",
+                            "    combinatorial reconstruction succeeded (row {r}): data columns {missing:?} rebuilt, parity rows {bad_parity:?} distrusted"
+                        );
+                        record(attempts, Ok(v));
+                        return Ok((raw, v));
+                    }
                 }
             }
         }
@@ -583,11 +698,12 @@ impl<'a> PoolReader<'a> {
                 }
                 Err(last)
             }
-            Node::Raidz {
-                nparity,
-                ashift,
-                children,
-            } => self.read_raidz(*nparity, *ashift, children, dva, bp, attempts, i),
+            Node::Raidz { .. } | Node::Draid { .. } => {
+                self.read_striped(node, dva, bp, attempts, i)
+            }
+            Node::Dspare { .. } => Err(ReadError::Unsupported(
+                "distributed spare read outside its dRAID".into(),
+            )),
             Node::Unsupported { kind } => {
                 let e = ReadError::Unsupported(kind.clone());
                 attempts.push(Attempt {

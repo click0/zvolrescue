@@ -40,7 +40,7 @@ evidence.
 OpenZFS's `ztest` creates and exercises a real pool entirely in userland
 (files under a directory, no `zfs.ko`), and `zdb -e -p DIR` reads it the
 same way. `tests/crosscheck-ztest.sh` does exactly that for a mirror, a
-raidz2 and a raidz1-of-mirrors pool and diffs `zvolrescue list -r` /
+raidz2, a raidz1-of-mirrors, a draid1 and a draid2 pool and diffs `zvolrescue list -r` /
 `scan` against `zdb -d` / `zdb -l`; CI runs it on every push. The
 datasets ztest makes are of type *other* (no zvols), so it validates
 labels, uberblocks, MOS, dnodes, ZAPs, DSL and RAIDZ reads — not volume

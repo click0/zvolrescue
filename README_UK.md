@@ -9,7 +9,7 @@
 Також формує forensic-звіти: історію міток та uberblock-ів, часову шкалу
 створення/знищення dataset-ів і хеш-верифіковані логи витягання.
 
-**Мова:** Rust | **Ліцензія:** BSD 3-Clause | **Статус:** етап 1 MVP (pre-alpha) — `scan`, `list` і `dump` працюють на stripe, mirror і RAIDZ1/2/3 пулах (відновлення за парністю відсутніх і тихо зіпсованих колонок), gang-блоках, з checksum-ами fletcher/sha256/sha512/blake3/skein/edonr (усі алгоритми OpenZFS), стисненням lz4/zstd/gzip/lzjb/zle, `--resume` і масовим `-r`; шифровані dataset-и: `list` показує suite і формат ключа, `dump --key` (raw/hex/passphrase/prompt) розшифровує (етап 3; без ZIL). Звірено з userland OpenZFS (`ztest`/`zdb`) у CI; на справжньому пулі, імпортованому ядром, ще не запускалось. Див. [ТЗ](docs/SPEC.uk.md).
+**Мова:** Rust | **Ліцензія:** BSD 3-Clause | **Статус:** етап 1 MVP (pre-alpha) — `scan`, `list` і `dump` працюють на stripe, mirror, RAIDZ1/2/3 і dRAID пулах (відновлення за парністю відсутніх і тихо зіпсованих колонок, розподілені spare), gang-блоках, з checksum-ами fletcher/sha256/sha512/blake3/skein/edonr (усі алгоритми OpenZFS), стисненням lz4/zstd/gzip/lzjb/zle, `--resume` і масовим `-r`; шифровані dataset-и: `list` показує suite і формат ключа, `dump --key` (raw/hex/passphrase/prompt) розшифровує (етап 3; без ZIL). Звірено з userland OpenZFS (`ztest`/`zdb`) у CI; на справжньому пулі, імпортованому ядром, ще не запускалось. Див. [ТЗ](docs/SPEC.uk.md).
 
 [English version](README.md) | [ТЗ українською](docs/SPEC.uk.md) | [Technical specification](docs/SPEC.md) | [ТЗ супутніх інструментів](docs/COMPANIONS.uk.md) | [Налагодження на тестовому пулі](docs/DEBUGGING.uk.md) | [Матриця тестів на реальних системах](docs/REALWORLD-TESTS.uk.md)
 

@@ -5,14 +5,16 @@
 #
 #   tests/crosscheck-ztest.sh [ZVOLRESCUE] [WORKDIR] [WALK-OBJECTS] [UNWRAP-KEY]
 #
+# Pools: mirror, raidz2, raidz1-of-mirrors, draid1 (4d:6c:1s), draid2
+# (5d:9c:2s). Steps 4-8 need the walk-objects and unwrap-key examples.
+#
 # Third, every block of every object of every dataset is read with the
 # walk-objects example (cargo build --release -p zfs-read --examples):
 # checksums of all algorithms, decompression, embedded/gang pointers, and
 # the per-dataset object count against the objset pointer's fill.
 #
 # Needs: ztest and zdb (Debian/Ubuntu: zfsutils-linux zfs-test), python3.
-# -K raidz pins the vdev class: ztest otherwise picks raidz or draid at
-# random, and draid is not readable yet.
+# -K pins the vdev class (ztest otherwise picks raidz or draid at random).
 # Exit status is non-zero when any comparison differs.
 set -eu
 ZR=${1:-./target/release/zvolrescue}
@@ -22,11 +24,13 @@ UNWRAP=${4:-$(dirname "$WALK")/unwrap-key}
 rm -rf "$WORK"; mkdir -p "$WORK"
 fail=0
 
+# run_pool NAME REDUNDANCY ZTEST-ARGS...: REDUNDANCY is how many members
+# the walk in step 8 leaves out (parity level, or 1 for a mirror).
 run_pool() {
-    name=$1; shift
+    name=$1; redundancy=$2; shift 2
     dir="$WORK/$name"; mkdir -p "$dir"
     echo "== $name: ztest $*"
-    ( cd "$dir" && ztest -f "$dir" -v 1 -K raidz "$@" -s 96m -a 12 -d 3 -t 2 -k 0 -T 15 -P 8 > "$dir/ztest.log" 2>&1 ) || { echo "ztest failed:"; tail -5 "$dir/ztest.log"; fail=1; return; }
+    ( cd "$dir" && ztest -f "$dir" -v 1 "$@" -s 96m -a 12 -d 3 -t 2 -k 0 -T 15 -P 8 > "$dir/ztest.log" 2>&1 ) || { echo "ztest failed:"; tail -5 "$dir/ztest.log"; fail=1; return; }
     members=$(ls "$dir"/ztest.*a)
 
     # 1. datasets: name + creation txg, from zdb and from zvolrescue.
@@ -167,10 +171,27 @@ print(next(x["name"] for x in d["datasets"] if x.get("encryption") and not x["na
             fi
         fi
     fi
+
+    # 8. redundancy: the walk (with the key) must stay clean with the
+    #    first REDUNDANCY member files left out — parity reconstruction on
+    #    raidz/draid, the surviving side of a mirror.
+    if [ -x "$WALK" ] && [ "$redundancy" -gt 0 ]; then
+        left="$(ls "$dir"/ztest.*a | tail -n +$((redundancy + 1))) $(ls "$dir"/ztest.*b 2>/dev/null || true)"
+        omitted=$(ls "$dir"/ztest.*a | head -n "$redundancy" | xargs -n1 basename | tr '\n' ' ')
+        if ZR_KEY="raw:$dir/ztest.key" "$WALK" $left > "$dir/walk-missing.txt" 2> "$dir/walk-missing.err" \
+            && ! grep -q "ERROR\|dnode:\|no key\|decrypt" "$dir/walk-missing.txt" \
+            && [ "$(head -1 "$dir/walk-missing.txt")" = "$(head -1 "$dir/walk-key.txt")" ]; then
+            echo "   redundancy: without $omitted the walk is identical ($(head -1 "$dir/walk-missing.txt"))"
+        else
+            echo "   redundancy: FAILED without $omitted"; head -12 "$dir/walk-missing.txt"; tail -5 "$dir/walk-missing.err"; fail=1
+        fi
+    fi
 }
 
-run_pool mirror -m 2 -r 1 -R 0
-run_pool raidz2 -m 1 -r 4 -R 2
-run_pool raidz1-of-mirrors -m 2 -r 3 -R 1
+run_pool mirror 1 -K raidz -m 2 -r 1 -R 0
+run_pool raidz2 2 -K raidz -m 1 -r 4 -R 2
+run_pool raidz1-of-mirrors 1 -K raidz -m 2 -r 3 -R 1
+run_pool draid1 1 -K draid -m 1 -r 6 -R 1 -D 4 -S 1
+run_pool draid2 2 -K draid -m 1 -r 9 -R 2 -D 5 -S 2
 
 exit $fail
