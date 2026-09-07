@@ -191,8 +191,11 @@ pub fn sha256(data: &[u8]) -> [u64; 4] {
 }
 
 /// `sha512`: OpenZFS uses SHA-512/256 (distinct IV, 256-bit output).
-pub fn sha512_256(data: &[u8]) -> [u64; 4] {
-    digest_words(&Sha512_256::digest(data))
+/// Unlike `sha256`, the digest is written straight into the checksum
+/// words (`abd_checksum_SHA512_native`), so the words are in the
+/// writer's native byte order — confirmed on ztest pools.
+pub fn sha512_256(data: &[u8], endian: Endian) -> [u64; 4] {
+    native_words(&Sha512_256::digest(data), endian)
 }
 
 /// Pool checksum salt (`DMU_POOL_CHECKSUM_SALT`), 32 bytes, used as the key
@@ -201,7 +204,7 @@ pub type Salt = [u8; 32];
 
 /// Checksum words as OpenZFS stores them for algorithms that write the
 /// digest straight into `zio_cksum_t` memory: native byte order of the
-/// writer (unlike sha256/sha512, which store big-endian words).
+/// writer (unlike sha256, which stores big-endian words).
 fn native_words(digest: &[u8], endian: Endian) -> [u64; 4] {
     let mut out = [0u64; 4];
     for (i, w) in out.iter_mut().enumerate() {
@@ -249,7 +252,7 @@ pub fn compute_salted(
         Checksum::Fletcher2 => Some(fletcher2(data, endian)),
         Checksum::Fletcher4 => Some(fletcher4(data, endian)),
         Checksum::Sha256 => Some(sha256(data)),
-        Checksum::Sha512 => Some(sha512_256(data)),
+        Checksum::Sha512 => Some(sha512_256(data, endian)),
         Checksum::Blake3 => salt.map(|s| blake3_salted(data, s, endian)),
         Checksum::Skein => {
             salt.map(|s| native_words(&crate::skein::skein_512_256_mac(s, data), endian))
@@ -387,9 +390,14 @@ mod data_tests {
         let abc = sha256(b"abc");
         assert_eq!(abc[0], 0xba78_16bf_8f01_cfea);
         assert_eq!(abc[3], 0xb410_ff61_f200_15ad);
-        let abc = sha512_256(b"abc");
+        // SHA-512/256("abc") = 53048e26 81941ef9 9b2e29b7 6b4c7dab
+        //                       e4c2d0c6 34fc6d46 e0e2f131 07e7af23
+        let abc = sha512_256(b"abc", Endian::Big);
         assert_eq!(abc[0], 0x5304_8e26_8194_1ef9);
         assert_eq!(abc[3], 0xe0e2_f131_07e7_af23);
+        let abc = sha512_256(b"abc", Endian::Little);
+        assert_eq!(abc[0], 0xf91e_9481_268e_0453);
+        assert_eq!(abc[3], 0x23af_e707_31f1_e2e0);
     }
 
     #[test]
