@@ -40,8 +40,24 @@ struct DatasetOut {
     volsize: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     volblocksize: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    encryption: Option<EncryptionOut>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct EncryptionOut {
+    suite: String,
+    keyformat: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    keylocation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pbkdf2_iters: Option<u64>,
+    key_guid: String,
+    key_version: u64,
+    encryption_root_dir_object: u64,
+    crypto_key_object: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -96,6 +112,16 @@ fn dataset_out(d: &Dataset) -> DatasetOut {
         referenced_bytes: d.referenced_bytes,
         volsize: d.volsize,
         volblocksize: d.volblocksize,
+        encryption: d.encryption.as_ref().map(|e| EncryptionOut {
+            suite: e.suite_name(),
+            keyformat: e.keyformat_name(),
+            keylocation: e.keylocation.clone(),
+            pbkdf2_iters: e.pbkdf2_iters,
+            key_guid: format!("{:#018x}", e.key_guid),
+            key_version: e.key_version,
+            encryption_root_dir_object: e.root_ddobj,
+            crypto_key_object: e.crypto_key_obj,
+        }),
         warnings: d.warnings.clone(),
     }
 }
@@ -134,12 +160,12 @@ fn print_text(out: &ListOut) {
         .unwrap_or(4)
         .max(4);
     println!(
-        "{:<width$}  {:<18}  {:<18}  {:>12}  {:<20}  {:>8}  {:>8}  {:>6}",
+        "{:<width$}  {:<18}  {:<18}  {:>12}  {:<20}  {:>8}  {:>8}  {:>6}  ENCRYPTION",
         "NAME", "TYPE", "GUID", "CREATED_TXG", "CREATED", "REFER", "VOLSIZE", "VOLBLK"
     );
     for d in &out.datasets {
         println!(
-            "{:<width$}  {:<18}  {:<18}  {:>12}  {:<20}  {:>8}  {:>8}  {:>6}",
+            "{:<width$}  {:<18}  {:<18}  {:>12}  {:<20}  {:>8}  {:>8}  {:>6}  {}",
             d.name,
             d.kind,
             d.guid,
@@ -148,6 +174,14 @@ fn print_text(out: &ListOut) {
             human(d.referenced_bytes),
             d.volsize.map_or("-".to_string(), human),
             d.volblocksize.map_or("-".to_string(), human),
+            d.encryption.as_ref().map_or("-".to_string(), |e| format!(
+                "{} key={}{}",
+                e.suite,
+                e.keyformat,
+                e.keylocation
+                    .as_ref()
+                    .map_or(String::new(), |l| format!(" ({l})"))
+            )),
         );
         for w in &d.warnings {
             println!("{:<width$}  warning: {w}", "");

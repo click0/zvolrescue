@@ -8,7 +8,7 @@
 
 use std::collections::BTreeSet;
 
-use zfs_ondisk::dmu::{ObjsetPhys, ObjsetType};
+use zfs_ondisk::dmu::{ObjsetPhys, ObjsetType, OT_NEWTYPE};
 use zfs_ondisk::dsl::{DslDatasetPhys, DslDirPhys};
 use zfs_ondisk::uberblock::Uberblock;
 use zfs_ondisk::zap::Value;
@@ -29,6 +29,147 @@ pub const ZVOL_OBJ: u64 = 1;
 pub const ZVOL_ZAP_OBJ: u64 = 2;
 /// Recursion bound on DSL directory depth.
 pub const MAX_DEPTH: usize = 64;
+
+/// ZAP attribute of a zapified DSL directory naming its DSL crypto key
+/// object (`DD_FIELD_CRYPTO_KEY_OBJ`).
+pub const CRYPTO_KEY_OBJ: &str = "com.datto:crypto_key_obj";
+
+/// What an encrypted dataset's on-disk metadata says about its key,
+/// read without any key: the DSL crypto key ZAP (`dsl_crypt.h`) of the
+/// dataset's directory plus the key properties of its encryption root.
+/// Wrapped keys, IV and MAC are kept for the unwrap step of phase 3.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Encryption {
+    /// MOS object of the DSL crypto key ZAP.
+    pub crypto_key_obj: u64,
+    /// `DSL_CRYPTO_SUITE`: `ZIO_CRYPT_*` code (3..=5 AES-CCM, 6..=8 AES-GCM).
+    pub suite: u64,
+    /// `DSL_CRYPTO_GUID`: identifies the key (shared by clones).
+    pub key_guid: u64,
+    /// `DSL_CRYPTO_VERSION` (absent on the initial on-disk format = 0).
+    pub key_version: u64,
+    /// `DSL_CRYPTO_ROOT_DDOBJ`: directory of the encryption root, which
+    /// holds the key properties below.
+    pub root_ddobj: u64,
+    /// `keyformat`, stored in the crypto key ZAP: 1 raw, 2 hex, 3 passphrase.
+    pub keyformat: Option<u64>,
+    /// `keylocation` property of the encryption root (`prompt` or a
+    /// `file://` URI); the one value that lives in the directory's props ZAP.
+    pub keylocation: Option<String>,
+    /// `pbkdf2iters` (passphrase keys), from the crypto key ZAP.
+    pub pbkdf2_iters: Option<u64>,
+    /// `pbkdf2salt` (passphrase keys), the 64-bit salt as stored in the
+    /// crypto key ZAP.
+    pub pbkdf2_salt: Option<u64>,
+    /// `DSL_CRYPTO_IV` (12 bytes) used to wrap the keys.
+    pub iv: Vec<u8>,
+    /// `DSL_CRYPTO_MAC` (16 bytes) of the wrapped keys.
+    pub mac: Vec<u8>,
+    /// `DSL_CRYPTO_MASTER_KEY_1`: the wrapped master key.
+    pub wrapped_master_key: Vec<u8>,
+    /// `DSL_CRYPTO_HMAC_KEY_1`: the wrapped HMAC key (64 bytes).
+    pub wrapped_hmac_key: Vec<u8>,
+}
+
+impl Encryption {
+    /// `zio_crypt_table` name of the suite.
+    pub fn suite_name(&self) -> String {
+        match self.suite {
+            3 => "aes-128-ccm".into(),
+            4 => "aes-192-ccm".into(),
+            5 => "aes-256-ccm".into(),
+            6 => "aes-128-gcm".into(),
+            7 => "aes-192-gcm".into(),
+            8 => "aes-256-gcm".into(),
+            other => format!("suite-{other}"),
+        }
+    }
+
+    /// `keyformat` property name.
+    pub fn keyformat_name(&self) -> String {
+        match self.keyformat {
+            Some(1) => "raw".into(),
+            Some(2) => "hex".into(),
+            Some(3) => "passphrase".into(),
+            Some(other) => format!("keyformat-{other}"),
+            None => "?".into(),
+        }
+    }
+}
+
+/// Read the encryption facts of DSL directory `dir_obj`, or `None` when
+/// the directory is not zapified or carries no crypto key object (an
+/// unencrypted dataset).
+pub fn read_encryption(
+    mos: &DnodeArray<'_, '_>,
+    dir_obj: u64,
+) -> Result<Option<Encryption>, ReadError> {
+    let dn = mos.get(dir_obj)?;
+    // dmu_object_zapify() turns the directory dnode into a ZAP of type
+    // DMU_OTN_ZAP_METADATA; a plain DMU_OT_DSL_DIR has no attributes.
+    if dn.object_type & OT_NEWTYPE == 0 || dn.object_type & 0x1f != 4 {
+        return Ok(None);
+    }
+    let attrs = read_zap(&mos.object(dir_obj)?)?;
+    let Some(key_obj) = attrs
+        .iter()
+        .find(|e| e.name == CRYPTO_KEY_OBJ)
+        .and_then(|e| e.value.as_u64())
+    else {
+        return Ok(None);
+    };
+    let entries = read_zap(&mos.object(key_obj)?)?;
+    let u64_of = |name: &str| {
+        entries
+            .iter()
+            .find(|e| e.name == name)
+            .and_then(|e| e.value.as_u64())
+    };
+    let bytes_of = |name: &str| -> Vec<u8> {
+        match entries.iter().find(|e| e.name == name).map(|e| &e.value) {
+            Some(Value::Bytes(b)) => b.clone(),
+            Some(Value::Ints { raw, .. }) => raw.clone(),
+            _ => Vec::new(),
+        }
+    };
+    let root_ddobj = u64_of("DSL_CRYPTO_ROOT_DDOBJ").unwrap_or(dir_obj);
+    let mut enc = Encryption {
+        crypto_key_obj: key_obj,
+        suite: u64_of("DSL_CRYPTO_SUITE").unwrap_or(0),
+        key_guid: u64_of("DSL_CRYPTO_GUID").unwrap_or(0),
+        key_version: u64_of("DSL_CRYPTO_VERSION").unwrap_or(0),
+        root_ddobj,
+        keyformat: u64_of("keyformat"),
+        keylocation: None,
+        pbkdf2_iters: u64_of("pbkdf2iters"),
+        pbkdf2_salt: u64_of("pbkdf2salt"),
+        iv: bytes_of("DSL_CRYPTO_IV"),
+        mac: bytes_of("DSL_CRYPTO_MAC"),
+        wrapped_master_key: bytes_of("DSL_CRYPTO_MASTER_KEY_1"),
+        wrapped_hmac_key: bytes_of("DSL_CRYPTO_HMAC_KEY_1"),
+    };
+    // keylocation is an ordinary property of the encryption root.
+    let root = read_dir(mos, root_ddobj)?;
+    if root.props_zapobj != 0 {
+        let props = read_zap(&mos.object(root.props_zapobj)?)?;
+        enc.keylocation = props
+            .iter()
+            .find(|e| e.name == "keylocation")
+            .and_then(|e| e.value.as_str());
+    }
+    trace!(
+        "dsl",
+        "dir {dir_obj}: encrypted, crypto key obj {key_obj} suite {} ({}) guid {:#x} version {} root dir {root_ddobj} keyformat {} keylocation {:?} pbkdf2iters {:?}",
+        enc.suite,
+        enc.suite_name(),
+        enc.key_guid,
+        enc.key_version,
+        enc.keyformat_name(),
+        enc.keylocation,
+        enc.pbkdf2_iters
+    );
+    Ok(Some(enc))
+}
 
 /// A dataset as seen at one TXG.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +202,8 @@ pub struct Dataset {
     pub volsize: Option<u64>,
     /// `volblocksize` for volumes: the data object's block size.
     pub volblocksize: Option<u64>,
+    /// Encryption facts when the dataset is encrypted (no key needed).
+    pub encryption: Option<Encryption>,
     /// The dataset's own `dsl_dataset_phys_t`.
     pub phys: DslDatasetPhys,
     /// Problems met while describing this dataset (never fatal).
@@ -296,6 +439,13 @@ fn describe(
     let mut warnings = Vec::new();
     let mut volsize = None;
     let mut volblocksize = None;
+    let encryption = match read_encryption(mos, phys.dir_obj) {
+        Ok(e) => e,
+        Err(e) => {
+            warnings.push(format!("encryption metadata: {e}"));
+            None
+        }
+    };
     let kind = if phys.bp.is_hole() {
         None
     } else {
@@ -351,6 +501,7 @@ fn describe(
         props_zapobj: dir.props_zapobj,
         volsize,
         volblocksize,
+        encryption,
         phys,
         warnings,
     })

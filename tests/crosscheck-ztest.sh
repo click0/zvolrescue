@@ -78,6 +78,38 @@ for k in sorted(out): print(k, out[k])' > "$dir/zr-label.txt"
     else
         echo "   walk: skipped ($WALK not built)"
     fi
+
+    # 4. encryption metadata of every encrypted dataset against zdb's dump
+    #    of the DSL crypto key object (suite, key guid, root dir, keyformat,
+    #    version).
+    $ZR -f json list -r $members | python3 -c '
+import json,sys
+d = json.load(sys.stdin)
+seen = set()
+for x in d["datasets"]:
+    e = x.get("encryption")
+    if e and e["crypto_key_object"] not in seen:
+        seen.add(e["crypto_key_object"])
+        fmt = {"raw": 1, "hex": 2, "passphrase": 3}[e["keyformat"]]
+        print(e["crypto_key_object"], e["suite"], int(e["key_guid"], 16), e["encryption_root_dir_object"], fmt, e["key_version"])' > "$dir/zr-crypto.txt"
+    : > "$dir/zdb-crypto.txt"
+    while read -r obj suite guid root fmt ver; do
+        zdb -e -p "$dir" -dddd ztest "$obj" 2>/dev/null | python3 -c '
+import re,sys
+obj = sys.argv[1]
+names = {3:"aes-128-ccm",4:"aes-192-ccm",5:"aes-256-ccm",6:"aes-128-gcm",7:"aes-192-gcm",8:"aes-256-gcm"}
+v = {}
+for l in sys.stdin:
+    # zdb prints the GUID as a signed 64-bit number.
+    m = re.match(r"\s+(DSL_CRYPTO_SUITE|DSL_CRYPTO_GUID|DSL_CRYPTO_ROOT_DDOBJ|keyformat|DSL_CRYPTO_VERSION) = (-?\d+)", l)
+    if m: v[m.group(1)] = int(m.group(2)) & 0xffffffffffffffff
+print(obj, names.get(v.get("DSL_CRYPTO_SUITE"), "?"), v.get("DSL_CRYPTO_GUID"), v.get("DSL_CRYPTO_ROOT_DDOBJ"), v.get("keyformat"), v.get("DSL_CRYPTO_VERSION", 0))' "$obj" >> "$dir/zdb-crypto.txt"
+    done < "$dir/zr-crypto.txt"
+    if diff -u "$dir/zdb-crypto.txt" "$dir/zr-crypto.txt"; then
+        echo "   encryption: $(wc -l < "$dir/zr-crypto.txt") crypto key object(s) match zdb"
+    else
+        echo "   encryption: MISMATCH"; fail=1
+    fi
 }
 
 run_pool mirror -m 2 -r 1 -R 0
