@@ -202,6 +202,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "edonr"
+version = "0.0.1"
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -439,6 +443,7 @@ name = "zfs-ondisk"
 version = "0.0.1"
 dependencies = [
  "blake3",
+ "edonr",
  "flate2",
  "lz4_flex",
  "ruzstd",

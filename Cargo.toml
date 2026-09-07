@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/edonr",
     "crates/zfs-ondisk",
     "crates/zfs-read",
     "crates/zvolrescue-io",

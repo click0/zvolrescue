@@ -257,6 +257,7 @@ pub fn compute_salted(
         Checksum::Skein => {
             salt.map(|s| native_words(&crate::skein::skein_512_256_mac(s, data), endian))
         }
+        Checksum::Edonr => salt.map(|s| native_words(&edonr::zfs_checksum(s, data), endian)),
         _ => None,
     }
 }

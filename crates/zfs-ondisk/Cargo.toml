@@ -9,6 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+edonr = { path = "../edonr", version = "0.0.1" }
 sha2 = { workspace = true }
 lz4_flex = { workspace = true }
 flate2 = { workspace = true }

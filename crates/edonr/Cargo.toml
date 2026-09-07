@@ -1,0 +1,10 @@
+[package]
+name = "edonr"
+version = "0.0.1"
+edition = "2021"
+license = "CDDL-1.0"
+description = "Edon-R 512 hash as used by the OpenZFS `edonr` checksum (port of module/icp/algs/edonr/edonr.c)"
+repository = "https://github.com/click0/zvolrescue"
+
+[lints]
+workspace = true
