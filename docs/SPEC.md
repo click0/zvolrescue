@@ -128,7 +128,7 @@ Priority: **M** = must (v1), **S** = should (v1 if time permits), **C** = could 
 | F-24 | M | Read from RAIDZ1/2/3 with parity reconstruction of a missing or corrupted column. |
 | F-25 | S | Read from dRAID with reconstruction. |
 | F-26 | S | Embedded block pointers (`embedded_data`), gang blocks, `large_blocks`, `large_dnode`. |
-| F-27 | S | Encrypted datasets: decrypt with a user-supplied raw/hex/passphrase key (`aes-128/192/256-ccm/gcm`); without a key, extract ciphertext and metadata only. *Status: metadata done (suite, key format, key location, PBKDF2 parameters, key GUID/version, encryption root) and cross-checked against `zdb`; key unwrap and data decryption pending.* |
+| F-27 | S | Encrypted datasets: decrypt with a user-supplied raw/hex/passphrase key (`aes-128/192/256-ccm/gcm`); without a key, extract ciphertext and metadata only. *Status: metadata done (suite, key format, key location, PBKDF2 parameters, key GUID/version, encryption root) and cross-checked against `zdb`; wrapping-key derivation (raw/hex/PBKDF2 passphrase) and master-key unwrap (AES-GCM/CCM, both key versions) done and verified on `ztest` pools with ztest's key; data decryption pending.* |
 | F-28 | S | Dedup: resolve DDT-referenced blocks transparently (they are just blkptrs) — no special handling required beyond checksum handling. |
 | F-29 | S ◇ | Extract a filesystem dataset as a raw dump of all objects (per-object files + metadata JSON) as a stepping stone before file-level recovery. |
 | F-30 | C ◇ | File-level extraction from filesystem datasets (ZPL: directories, files, symlinks, xattrs). |

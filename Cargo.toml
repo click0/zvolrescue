@@ -28,6 +28,14 @@ lz4_flex = { version = "0.11", default-features = false, features = ["safe-decod
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 ruzstd = "0.9"
 blake3 = { version = "1", default-features = false, features = ["pure", "std"] }
+# Phase 3 (encrypted datasets): all pure Rust (RustCrypto).
+aes = "0.8"
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
+ccm = "0.5"
+hkdf = "0.12"
+hmac = "0.12"
+pbkdf2 = { version = "0.12", default-features = false }
+sha1 = "0.10"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

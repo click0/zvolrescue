@@ -8,6 +8,7 @@
 //! objects; [`dsl`] walks the MOS into a dataset tree; [`zvol`] extracts a
 //! volume's data object. [`fixture`] builds synthetic members for tests.
 
+pub mod crypt;
 pub mod dmu;
 pub mod dsl;
 pub mod fixture;

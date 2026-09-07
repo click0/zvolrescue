@@ -3,7 +3,7 @@
 # ztest (no kernel module needed), then compare `zvolrescue list -r` with
 # `zdb -d`, and `zvolrescue -vv scan` with `zdb -l`.
 #
-#   tests/crosscheck-ztest.sh [ZVOLRESCUE] [WORKDIR] [WALK-OBJECTS]
+#   tests/crosscheck-ztest.sh [ZVOLRESCUE] [WORKDIR] [WALK-OBJECTS] [UNWRAP-KEY]
 #
 # Third, every block of every object of every dataset is read with the
 # walk-objects example (cargo build --release -p zfs-read --examples):
@@ -18,6 +18,7 @@ set -eu
 ZR=${1:-./target/release/zvolrescue}
 WORK=${2:-/tmp/zvolrescue-crosscheck}
 WALK=${3:-./target/release/examples/walk-objects}
+UNWRAP=${4:-$(dirname "$WALK")/unwrap-key}
 rm -rf "$WORK"; mkdir -p "$WORK"
 fail=0
 
@@ -109,6 +110,23 @@ print(obj, names.get(v.get("DSL_CRYPTO_SUITE"), "?"), v.get("DSL_CRYPTO_GUID"), 
         echo "   encryption: $(wc -l < "$dir/zr-crypto.txt") crypto key object(s) match zdb"
     else
         echo "   encryption: MISMATCH"; fail=1
+    fi
+
+    # 5. unwrap the master keys with ztest's fixed raw wrapping key
+    #    (ztest_wkeydata); a wrong key must be refused.
+    if [ -x "$UNWRAP" ] && [ -s "$dir/zr-crypto.txt" ]; then
+        printf 'abcdefghijklmnopqrstuvwxyz012345' > "$dir/ztest.key"
+        printf 'abcdefghijklmnopqrstuvwxyz012346' > "$dir/wrong.key"
+        if "$UNWRAP" "raw:$dir/ztest.key" "$dir"/ztest.* > "$dir/unwrap.txt" 2>/dev/null; then
+            echo "   unwrap: $(wc -l < "$dir/unwrap.txt") encryption root(s) opened with ztest's key"
+        else
+            echo "   unwrap: FAILED"; cat "$dir/unwrap.txt"; fail=1
+        fi
+        if "$UNWRAP" "raw:$dir/wrong.key" "$dir"/ztest.* > "$dir/unwrap-wrong.txt" 2>/dev/null; then
+            echo "   unwrap: a WRONG key was accepted"; cat "$dir/unwrap-wrong.txt"; fail=1
+        else
+            echo "   unwrap: wrong key refused"
+        fi
     fi
 }
 
