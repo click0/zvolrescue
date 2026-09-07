@@ -33,7 +33,7 @@ jobs:
           ./target/release/zvolrescue -f json list -r /tmp/fx/member0.img --txg 4816229 | python3 -c 'import json,sys; d=json.load(sys.stdin); names=[x["name"] for x in d["datasets"]]; assert names == ["tank","tank/vm","tank/vm/disk0","tank/vm/disk0@before"], names; assert d["datasets"][2]["volsize"] == 33554432'
           ./target/release/zvolrescue -f json list -r /tmp/fx/member0.img --diff 4816229 | python3 -c 'import json,sys; d=json.load(sys.stdin); gone=[x["name"] for x in d["diff"]["destroyed_since"]]; assert gone == ["tank/vm/disk0","tank/vm/disk0@before"], gone'
           # dump without --txg must find the last TXG that still had the volume (SPEC F-40).
-          ./target/release/zvolrescue -f json dump tank/vm/disk0 /tmp/fx/member0.img /tmp/fx/member1.img -o /tmp/disk0.img --evidence-log /tmp/ev.jsonl | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["txg"] == 4816229, d["txg"]; assert d["txgs_searched"] == [4816230, 4816229], d["txgs_searched"]'
+          ./target/release/zvolrescue -f json dump tank/vm/disk0 /tmp/fx/member0.img /tmp/fx/member1.img -o /tmp/disk0.img --evidence-log /tmp/ev.jsonl | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["volumes"][0]["txg"] == 4816229, d["volumes"]; assert d["txgs_searched"] == [4816230, 4816229], d["txgs_searched"]'
           echo "d6d58af862ec2761bf43158f7ee2b2b0f4628fa6ca8095544493f9d698d7b80d  /tmp/disk0.img" | sha256sum -c -
           test "$(stat -c %s /tmp/disk0.img)" = 33554432
           # Damage block 0 on one member: the mirror copy must heal it, a lone damaged member must not.
