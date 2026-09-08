@@ -101,6 +101,21 @@ matching it.
 | F9 | Virtual disks: bhyve/QEMU virtio-blk with 512 vs 4096 logical, VMware, Hyper-V; `.img`/`.qcow2`-backed (raw only) | identical output |
 | F10 | Disk larger than 2 TiB and 16 TiB (GPT, offsets above 32/64-bit sector limits) | labels found at the correct end offsets |
 
+### G. Golden image and damage matrix (SPEC §9.1)
+
+Built once in a real-kernel VM by a script, then immutable; damage is
+applied to temporary copies from manifests. Every run is judged against the
+recorded oracle and lands in one of: bit-exact / reconstructed (visible in
+the evidence log) / refused cleanly (exit 3) / tool defect.
+
+| ID | Scenario | Expected |
+|---|---|---|
+| G1 | Build the golden image: one pool with mirror + RAIDZ2 + dRAID1 top-level vdevs, zvols of several block sizes, snapshots, clones, renamed/destroyed volume and snapshot, encrypted datasets (raw key, passphrase), every checksum/compression, gang blocks, large dnodes, hundreds of TXGs; record the oracle | image + oracle published in `zvolrescue-testdata` with SHA-256 |
+| G2 | Single damage classes (labels, partition, metadata, data, missing member, older-self member) on each geometry | every run in an expected category; no tool defects |
+| G3 | Pairs and triples of classes across members and geometries | as G2; the expected category derived from ZFS redundancy for the combination |
+| G4 | Held-out combinations run only before a release | as G2 |
+| G5 | Read-only invariant on every run | input copies' hashes unchanged |
+
 ## Results
 
 Append one row per run.

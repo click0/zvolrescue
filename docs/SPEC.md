@@ -371,6 +371,83 @@ on in-memory fixtures and portable.
 * **Fuzzing**: `cargo fuzz` targets for the nvlist, blkptr, dnode and ZAP parsers, run for a bounded time in CI on every push.
 * **Static analysis**: `cargo clippy -D warnings`, `cargo fmt --check`, `cargo deny` (licences, advisories, banned crates); Miri on the `zfs-ondisk` unit tests.
 
+### 9.1 The golden image and the damage matrix
+
+The tests above prove that the reader understands the on-disk format. They
+do not prove that recovery is *right*, and nothing does unless the correct
+answer is known in advance. The recovery test that counts is therefore
+built on one principle: **a known-good reference first, damage second, and
+the tool's output compared against the reference — never against the
+tool's own earlier output.** This also guards against the failure mode of
+an implementation developed largely by an AI: without an independent
+ground truth, an algorithm is easily tuned to the one case at hand and
+mistaken for general.
+
+**Quality over quantity.** One golden image, not many. What must vary is
+the *kind of damage and its combinations*, not the data: more images with
+different content add build time and no new failure modes. The one image
+is made rich enough that every failure mode has something to hit:
+
+* **One pool, several geometries.** A single pool may carry top-level vdevs
+  of different kinds (mirror, RAIDZ2, dRAID1 side by side, `zpool create
+  -f`); ZFS stripes every dataset across all of them, so one image
+  exercises every reconstruction path without three pools.
+* **Metadata worth damaging**: zvols of several `volblocksize`s, sparse
+  and dense, snapshots, clones, a renamed volume, a destroyed volume and a
+  destroyed snapshot, an encrypted dataset with a raw key and one with a
+  passphrase, every checksum and compression, gang blocks (low threshold),
+  large dnodes, pending deletions.
+* **Many versions**: hundreds of TXGs with writes to the volumes between
+  snapshots, so the uberblock rings are full, older TXGs point at data
+  that has since changed, and `--txg`, `--diff` and carving have history
+  to work on.
+* **The oracle**, recorded next to the image at build time: SHA-256 of
+  every volume at every snapshot and at export, `zdb -d` of every TXG,
+  `zdb -l` of every member, `zpool status`, the keys. This is the
+  "how it should be" that every comparison is made against.
+
+The image is built by a script in a real kernel environment (one of the
+VMs in [REALWORLD-TESTS.md](REALWORLD-TESTS.md)) and is then immutable:
+it is an artifact identified by its SHA-256, regenerable from the script,
+and never edited by hand.
+
+**Damage is applied, not stored.** Every damage case is a declarative
+manifest — member, byte range, pattern (zeros, random bytes, a shift by N
+sectors, an older copy of the same structure written over the newer one,
+single bit flips), possibly several ranges on several members — applied to
+a temporary copy at test time. What a practitioner would do in a hex
+editor is thereby written down once and reproduced exactly. The catalogue
+of damage classes (labels: one, the front pair, the rear pair, all four,
+only `vdev_phys`, only the rings, partial rings with a forged txg;
+partition: rewritten GPT, shifted start, truncated tail, re-created with
+another size; metadata: MOS, dnode blocks, indirect blocks, property ZAPs,
+the crypto key object; data: a RAIDZ column, both mirror halves in
+different places, a gang header, an encrypted block; whole member missing;
+a member replaced by an *older copy of itself*) is authored from ZFS's
+redundancy semantics, independently of the tool's current code.
+
+**Combinatorics.** Classes are run singly, then in pairs and triples across
+members and geometries; hundreds of runs at seconds each. Each run lands
+in exactly one of four outcomes, and the expected outcome is derived from
+the redundancy that ZFS itself guarantees for that combination, not from
+what the tool happens to do:
+
+1. recovered bit-exact (hash equals the oracle);
+2. recovered through reconstruction, with the reconstruction visible in the
+   evidence log;
+3. refused cleanly (exit 3) with no partial output presented as good;
+4. anything else — a tool defect.
+
+The read-only invariant is asserted on every run: the hashes of the damaged
+input copies are unchanged afterwards. A held-out subset of combinations is
+kept out of development and run only at release time.
+
+**Separate repository.** The image, its oracle and the damage manifests
+live in their own repository (`zvolrescue-testdata`), so that multi-GiB
+artifacts never enter this one. This repository holds the build script,
+the expected SHA-256 of the image, and the CI job that fetches the image
+and runs the matrix.
+
 ## 10. Delivery phases
 
 | Phase | Deliverable | Requirements | Acceptance |
@@ -416,6 +493,7 @@ not have to be re-argued.
 | D-4 | 2026-09-07 | The binary does **not link OpenZFS** (`libzpool`, `libzfs`, `libzfs_core`); on-disk primitives are reimplemented, and OpenZFS userland (`ztest`, `zdb`) is used only as an **oracle in tests**. | `libzpool` is the kernel SPA built for userland: no stable ABI (soname bumps, private headers), it drags in the whole pool machinery instead of raw reads, needs a C toolchain and a matching OpenZFS version on every target (mfsBSD, FreeBSD 14/15, Debian, Ubuntu ship different ones), and a forensic reader should not depend on the code whose failure it is investigating. `libzfs_core` only speaks to a running kernel. The duplicated code is small (skein ≈200 lines, edonr ≈250, lzjb/zle ≈100) and each piece is validated against real `ztest` pools in CI. |
 | D-5 | 2026-09-08 | The vdev base is a **verified** quantity, not a configured one: labels, partition tables and sibling configs only propose it; an on-disk checksum (uberblock label verifier, pointer→block checksum, gang verifier) must confirm it before any address is resolved (§5.6, F-60–F-67). | A wrong base silently produces plausible garbage; a checksum makes it impossible. Only the truly bare case (all rings gone) needs a full scan, and that scan is shared with carving. |
 | D-6 | 2026-09-08 | The bare-device case is solved as a **semi-automatic** workflow — user-supplied layout hints (a virtual `vdev_phys`), enumeration of what the hints leave open, checksum confirmation, export of the confirmed label (F-65–F-67) — and fully automatic topology inference (F-63) is only a "could". | Practitioner feedback: by hand the case reduces to editing a label template, after which standard tooling walks the metadata; the topology guess is what resists reliable automation. Keeping the human there and automating the enumeration (hundreds of permutations settled by checksums in seconds) is where a tool beats a hex editor. |
+| D-7 | 2026-09-08 | Recovery correctness is tested against **one golden image with a recorded oracle and a catalogue of damage manifests** applied combinatorially (§9.1); test data lives in a separate repository (`zvolrescue-testdata`). | A recovery test is only meaningful when the right answer is known beforehand; comparing against the tool's own output tunes the algorithm to the case at hand. Diversity must come from the kinds and combinations of damage, not from more images with different content, which add time and no failure modes. Multi-GiB artifacts do not belong in the source repository. |
 
 ## 14. References
 
