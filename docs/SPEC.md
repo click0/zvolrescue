@@ -170,27 +170,47 @@ the earlier ones are unavailable:
 
 | ID | Pri | Requirement |
 |---|---|---|
-| F-44 | S | **Partition tables** (F-06): primary and backup GPT, MBR, plus layout conventions (1 MiB alignment; Linux whole-disk `-part9` 8 MiB tail; FreeBSD `freebsd-boot`/swap/`freebsd-zfs` order) yield base *candidates*, never a base. |
-| F-45 | S | **Any surviving uberblock** (F-05): each uberblock carries a `ZIO_CHECKSUM_LABEL` embedded checksum whose verifier is its own vdev-relative offset. An uberblock found by magic at physical `P` confirms base `B` iff the checksum verifies with verifier `P − B`; one hit fixes the base exactly, tells which of L0–L3 the slot belonged to and so recovers the old vdev size even after the partition was re-created with another size. Works with all four `vdev_phys` gone as long as one ring slot survives. |
-| F-46 | S | **Sibling labels**: in a mirror or RAIDZ the other members' configs give the lost member's `guid`, `asize` and `ashift`; `asize` plus alignment leaves a handful of base candidates to confirm with F-45/F-47. |
-| F-47 | S ◇ | **Pointer self-consistency** (the worst case, all rings gone): scan for structures recognisable without a base (dnode arrays — type ≤ 54, `indblkshift` 9..17, small `nlevels`/`nblkptr`, 512-byte period; indirect blocks; objset headers), collect their block pointers, and confirm a candidate base `B` by checking that the block at `B + 4 MiB + offset` has the pointer's checksum. Candidates step by `1 << ashift` (`ashift` itself follows from the smallest DVA offset step and `asize` granularity) inside the alignment window. A wrong base passes no check; the right one passes all. Gang headers (verifier `[vdev, offset, birth]`) and ZIL chains (`zc_next_blk` vs. the physical position of the next block) are extra anchors. |
-| F-48 | S ◇ | **Root without uberblocks**: once the base is known and no uberblock survives, find the MOS by scanning for `objset_phys` candidates of type META, rank them by the highest `birth` in their pointers and by how complete a MOS walk they yield, then continue through the DSL as usual. This is `zvolcarve` territory (F-41/F-42), not the atomic binary's. |
+| F-60 | S | **Partition tables** (F-06): primary and backup GPT, MBR, plus layout conventions (1 MiB alignment; Linux whole-disk `-part9` 8 MiB tail; FreeBSD `freebsd-boot`/swap/`freebsd-zfs` order) yield base *candidates*, never a base. |
+| F-61 | S | **Any surviving uberblock** (F-05): each uberblock carries a `ZIO_CHECKSUM_LABEL` embedded checksum whose verifier is its own vdev-relative offset. An uberblock found by magic at physical `P` confirms base `B` iff the checksum verifies with verifier `P − B`; one hit fixes the base exactly, tells which of L0–L3 the slot belonged to and so recovers the old vdev size even after the partition was re-created with another size. Works with all four `vdev_phys` gone as long as one ring slot survives. |
+| F-62 | S | **Sibling labels**: in a mirror or RAIDZ the other members' configs give the lost member's `guid`, `asize` and `ashift`; `asize` plus alignment leaves a handful of base candidates to confirm with F-61/F-63. |
+| F-63 | C ◇ | **Pointer self-consistency, fully automatic** (the worst case, all rings gone and no hints): scan for structures recognisable without a base (dnode arrays — type ≤ 54, `indblkshift` 9..17, small `nlevels`/`nblkptr`, 512-byte period; indirect blocks; objset headers), collect their block pointers, and confirm a candidate base `B` by checking that the block at `B + 4 MiB + offset` has the pointer's checksum. Candidates step by `1 << ashift` (`ashift` itself follows from the smallest DVA offset step and `asize` granularity) inside the alignment window. A wrong base passes no check; the right one passes all. Gang headers (verifier `[vdev, offset, birth]`) and ZIL chains (`zc_next_blk` vs. the physical position of the next block) are extra anchors. |
+| F-64 | S ◇ | **Root without uberblocks**: once the base is known and no uberblock survives, find the MOS by scanning for `objset_phys` candidates of type META, rank them by the highest `birth` in their pointers and by how complete a MOS walk they yield, then continue through the DSL as usual. This is `zvolcarve` territory (F-41/F-42), not the atomic binary's. |
 
 Two regimes follow:
 
 * **Damage inside known bounds** (first N MiB zeroed, partition table
   rewritten, tail cut off): not a hard case. Everything outside the bounds
   reads normally; L2/L3 or their slots are found by magic and confirmed by
-  F-45; the root comes from the newest surviving uberblock. F-44–F-46
+  F-61; the root comes from the newest surviving uberblock. F-60–F-62
   cover it.
-* **Bounds unknown and all four labels gone**: the base comes from F-47,
+* **Bounds unknown and all four labels gone**: the base comes from F-63,
   which needs a full pass over the device — the same pass carving needs
-  anyway — and the root from F-48.
+  anyway — and the root from F-64.
 
 `scan` reports where the base came from (label, partition table, sibling,
-uberblock verifier, pointer consistency) and how many independent checks
-confirmed it, so the evidence log records the provenance of every address
-the extraction used.
+uberblock verifier, pointer consistency, user hints) and how many
+independent checks confirmed it, so the evidence log records the provenance
+of every address the extraction used.
+
+**The practitioner's route: a label template, not an algorithm.** People who
+do this by hand in a hex editor report that the bare-device case was rarely
+hard in practice: they *know* the layout (disk count, RAIDZ level, ashift,
+roughly where the partition sat) from the other members or from the case
+file, edit a `vdev_phys` template accordingly, and from then on ordinary
+import or the professional recovery suites walk the metadata with their
+usual means. What resists reliable automation is the topology *guess*;
+everything after it is mechanical. The tool therefore keeps the human where
+the human is better and automates what is mechanical and verifiable:
+
+| ID | Pri | Requirement |
+|---|---|---|
+| F-65 | S | **Layout hints = a virtual label.** The user can supply what a `vdev_phys` template would carry — top-level type, member list and order, `nparity`, `ashift`, base-offset candidates, pool/vdev GUIDs if known — and `scan`/`list`/`dump` use it exactly as they would use a real label. The template lives in memory and in the evidence log only; nothing is written to the device (N-01). |
+| F-66 | S | **Search inside the hint space, confirm by checksum.** Whatever the hint leaves open is enumerated and verified rather than guessed: member order (6 members of a RAIDZ2 = 720 permutations, each settled by the checksum of one block), `ashift` (a handful of values), base (the alignment window), `nparity`. A candidate is accepted only when block checksums agree (D-5); the search stops at the first fully consistent template and reports every alternative that also passed. |
+| F-67 | S | **Export the confirmed label.** `scan --emit-label FILE` writes the reconstructed `vdev_phys` nvlist (and the geometry as JSON) to a file, so it can be placed on a *copy* of the disk for `zpool import` or loaded into another recovery tool. The tool itself never places it on the evidence. |
+
+Reading order for the bare case is thus: F-65 hints → F-66 search →
+F-61/F-62 confirmation where any label material survives → F-64 for the
+root → F-67 to hand the result on. F-63 (no hints at all) stays optional.
 
 ## 6. Non-functional requirements
 
@@ -394,7 +414,8 @@ not have to be re-argued.
 | D-2 | 2026-09-06 | The main binary is **atomic**: `scan` / `list` / `dump` only (§3.0). | One job, composable; everything else is a companion tool. |
 | D-3 | 2026-09-06 | Companion tools live in the **same repository and cargo workspace**, one crate per binary. | One version, one release, one CI, one port; shared `zvol-common`; specified in [COMPANIONS.md](COMPANIONS.md). |
 | D-4 | 2026-09-07 | The binary does **not link OpenZFS** (`libzpool`, `libzfs`, `libzfs_core`); on-disk primitives are reimplemented, and OpenZFS userland (`ztest`, `zdb`) is used only as an **oracle in tests**. | `libzpool` is the kernel SPA built for userland: no stable ABI (soname bumps, private headers), it drags in the whole pool machinery instead of raw reads, needs a C toolchain and a matching OpenZFS version on every target (mfsBSD, FreeBSD 14/15, Debian, Ubuntu ship different ones), and a forensic reader should not depend on the code whose failure it is investigating. `libzfs_core` only speaks to a running kernel. The duplicated code is small (skein ≈200 lines, edonr ≈250, lzjb/zle ≈100) and each piece is validated against real `ztest` pools in CI. |
-| D-5 | 2026-09-08 | The vdev base is a **verified** quantity, not a configured one: labels, partition tables and sibling configs only propose it; an on-disk checksum (uberblock label verifier, pointer→block checksum, gang verifier) must confirm it before any address is resolved (§5.6, F-44–F-48). | A wrong base silently produces plausible garbage; a checksum makes it impossible. Only the truly bare case (all rings gone) needs a full scan, and that scan is shared with carving. |
+| D-5 | 2026-09-08 | The vdev base is a **verified** quantity, not a configured one: labels, partition tables and sibling configs only propose it; an on-disk checksum (uberblock label verifier, pointer→block checksum, gang verifier) must confirm it before any address is resolved (§5.6, F-60–F-67). | A wrong base silently produces plausible garbage; a checksum makes it impossible. Only the truly bare case (all rings gone) needs a full scan, and that scan is shared with carving. |
+| D-6 | 2026-09-08 | The bare-device case is solved as a **semi-automatic** workflow — user-supplied layout hints (a virtual `vdev_phys`), enumeration of what the hints leave open, checksum confirmation, export of the confirmed label (F-65–F-67) — and fully automatic topology inference (F-63) is only a "could". | Practitioner feedback: by hand the case reduces to editing a label template, after which standard tooling walks the metadata; the topology guess is what resists reliable automation. Keeping the human there and automating the enumeration (hundreds of permutations settled by checksums in seconds) is where a tool beats a hex editor. |
 
 ## 14. References
 
