@@ -1,0 +1,45 @@
+#!/bin/sh
+# prepare-commit-msg — додає повний блок атрибуції до коміту, коли коміт
+# робиться з сесії Claude Code (у її оточенні є змінна CLAUDECODE):
+#
+#     Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+#     Claude-Session: https://claude.ai/code/session_<id>      (якщо відомо)
+#     Generated-With: Claude Code <version>                     (якщо відомо)
+#
+# Активація (один раз на клон):
+#     git config core.hooksPath .githooks
+#
+# Ідемпотентно: трейлер, що вже є (переданий через `git commit --trailer`
+# або в тексті -m), другий раз не додається. Для merge/squash-комітів нічого
+# не робить.
+#
+# Перевизначити співавтора: git config claude.coauthor "Name <email>"
+
+MSG_FILE="$1"
+SOURCE="$2"
+
+# Лише для звичайних комітів (не merge, не squash)
+case "$SOURCE" in
+    merge|squash) exit 0 ;;
+esac
+
+# Лише з-під Claude Code
+[ -n "$CLAUDECODE" ] || exit 0
+
+COAUTHOR="$(git config --get claude.coauthor 2>/dev/null)"
+[ -n "$COAUTHOR" ] || COAUTHOR="Claude Fable 5.1 <noreply@anthropic.com>"
+
+set -- --in-place --if-exists doNothing --trailer "Co-Authored-By: $COAUTHOR"
+
+# Посилання на сесію: CLAUDE_CODE_REMOTE_SESSION_ID має вигляд cse_<id>,
+# а публічний URL сесії — https://claude.ai/code/session_<id>
+if [ -n "$CLAUDE_CODE_REMOTE_SESSION_ID" ]; then
+    SESSION_ID="${CLAUDE_CODE_REMOTE_SESSION_ID#cse_}"
+    set -- "$@" --trailer "Claude-Session: https://claude.ai/code/session_${SESSION_ID}"
+fi
+
+if [ -n "$CLAUDE_CODE_VERSION" ]; then
+    set -- "$@" --trailer "Generated-With: Claude Code ${CLAUDE_CODE_VERSION}"
+fi
+
+git interpret-trailers "$@" "$MSG_FILE"
