@@ -16,7 +16,10 @@
    notes and publishes a GitHub release — marked pre-release when the tag
    carries a suffix (`-alpha.1`, `-rc.1`).
 
-Version numbers follow SemVer. Until 1.0, on-disk coverage grows in
-minor versions and every release is validated per
-[REALWORLD-TESTS.md](REALWORLD-TESTS.md); the results log there says what a
-release was actually tried on.
+Version numbers follow SemVer. The first cut was `v0.1.0-alpha.1`; from
+then on every release is a plain minor bump — `v0.2.0`, `v0.3.0`, … — with
+no pre-release suffix (a suffixed tag is still supported and is marked
+pre-release on GitHub). Patch versions are for fixes to a released minor.
+Until 1.0 the release notes carry the validation caveat automatically, and
+[REALWORLD-TESTS.md](REALWORLD-TESTS.md) says what a release was actually
+tried on. `1.0.0` waits for the real-environment matrix there.

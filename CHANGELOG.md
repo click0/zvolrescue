@@ -1,9 +1,10 @@
 # Changelog
 
-All notable changes to zvolrescue. Pre-releases are validated against
-OpenZFS **userland** pools (`ztest` + `zdb`, no kernel) in CI; a real
-kernel-imported pool has not been used yet — see
-[docs/REALWORLD-TESTS.md](docs/REALWORLD-TESTS.md) for the matrix and log.
+All notable changes to zvolrescue. Versions: `v0.1.0-alpha.1` first, then
+plain minor bumps (`v0.2.0`, `v0.3.0`, …) until 1.0. Every 0.x release is
+validated against OpenZFS **userland** pools (`ztest` + `zdb`, no kernel)
+in CI; what was tried on real environments is logged in
+[docs/REALWORLD-TESTS.md](docs/REALWORLD-TESTS.md).
 
 ## v0.1.0-alpha.1 — 2026-09-08
 

@@ -93,8 +93,9 @@ jobs:
           {
             echo "**zvolrescue $tag** — read-only extraction of zvols from ZFS pools that no longer import: labels, uberblocks, mirror/RAIDZ/dRAID reconstruction, every checksum and compression, encrypted datasets with a key."
             echo
-            case "$tag" in
-              *-*) echo "> **Pre-release.** Validated in CI against OpenZFS 2.2 *userland* pools (\`ztest\` + \`zdb\`); not yet run on a kernel-imported pool. Treat the output as evidence to verify, not as a finished recovery. See [docs/REALWORLD-TESTS.md](https://github.com/${GITHUB_REPOSITORY}/blob/$tag/docs/REALWORLD-TESTS.md)." ; echo ;;
+            # Every 0.x release carries the validation caveat; 1.0 drops it.
+            case "$v" in
+              0.*) echo "> **0.x release.** Validated in CI against OpenZFS 2.2 *userland* pools (\`ztest\` + \`zdb\`) and on the environments listed in [docs/REALWORLD-TESTS.md](https://github.com/${GITHUB_REPOSITORY}/blob/$tag/docs/REALWORLD-TESTS.md); treat the output as evidence to verify, not as a finished recovery." ; echo ;;
             esac
             echo "## Downloads"
             echo
