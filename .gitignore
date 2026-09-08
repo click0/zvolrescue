@@ -1,3 +1,8 @@
 /target
 *.img
 *.jsonl
+*.key
+*.resume.json
+manifest.json
+ztest.*
+zpool.cache
