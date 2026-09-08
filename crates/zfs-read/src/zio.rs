@@ -737,12 +737,24 @@ impl<'a> PoolReader<'a> {
         {
             match candidate {
                 Ok(buf) => {
-                    let status = zfs_ondisk::checksum::verify_gang_header(
-                        &buf,
-                        u64::from(bp.dva[0].vdev),
-                        bp.dva[0].offset,
-                        bp.birth,
-                    );
+                    // Verifier: DVA[0] and the physical birth. A gang
+                    // header of an encrypted dataset carries the folded
+                    // checksum.
+                    let status = if bp.uses_crypt() && bp.object_type != ot::OBJSET {
+                        zfs_ondisk::checksum::verify_gang_header_crypt(
+                            &buf,
+                            u64::from(bp.dva[0].vdev),
+                            bp.dva[0].offset,
+                            bp.physical_birth_or_logical(),
+                        )
+                    } else {
+                        zfs_ondisk::checksum::verify_gang_header(
+                            &buf,
+                            u64::from(bp.dva[0].vdev),
+                            bp.dva[0].offset,
+                            bp.physical_birth_or_logical(),
+                        )
+                    };
                     trace!(
                         "gang",
                         "header @ vdev {} off {:#x} device {device:?} (depth {depth}): checksum {}",

@@ -50,8 +50,20 @@ pub fn verify_gang_header(buf: &[u8], vdev: u64, offset: u64, birth: u64) -> Che
     verify_embedded(buf, [vdev, offset, birth, 0])
 }
 
+/// Like [`verify_gang_header`] for the gang header of a block that
+/// `BP_USES_CRYPT`: `zio_checksum_compute` stores the folded checksum
+/// (`w0 ^ w2`, `w1 ^ w3`, 0, 0) there, as it does for every non-dedup
+/// checksum of an encrypted dataset.
+pub fn verify_gang_header_crypt(buf: &[u8], vdev: u64, offset: u64, birth: u64) -> ChecksumStatus {
+    verify_embedded_impl(buf, [vdev, offset, birth, 0], true)
+}
+
 /// Verify an embedded SHA-256 checksum with an explicit verifier.
 pub fn verify_embedded(buf: &[u8], verifier: [u64; 4]) -> ChecksumStatus {
+    verify_embedded_impl(buf, verifier, false)
+}
+
+fn verify_embedded_impl(buf: &[u8], verifier: [u64; 4], crypt: bool) -> ChecksumStatus {
     if buf.len() < ECK_SIZE {
         return ChecksumStatus::Missing;
     }
@@ -80,6 +92,9 @@ pub fn verify_embedded(buf: &[u8], verifier: [u64; 4]) -> ChecksumStatus {
     for (i, w) in computed.iter_mut().enumerate() {
         *w = u64::from_be_bytes(digest[i * 8..i * 8 + 8].try_into().expect("32-byte digest"));
     }
+    if crypt {
+        computed = [computed[0] ^ computed[2], computed[1] ^ computed[3], 0, 0];
+    }
     if computed == stored {
         ChecksumStatus::Ok
     } else {
@@ -96,6 +111,16 @@ pub fn seal_label(buf: &mut [u8], vdev_offset: u64) {
 
 /// Write a valid embedded checksum with an explicit verifier (fixtures).
 pub fn seal_embedded(buf: &mut [u8], verifier: [u64; 4]) {
+    seal_embedded_impl(buf, verifier, false);
+}
+
+/// Like [`seal_embedded`], storing the folded form an encrypted
+/// dataset's gang header carries (fixtures).
+pub fn seal_embedded_crypt(buf: &mut [u8], verifier: [u64; 4]) {
+    seal_embedded_impl(buf, verifier, true);
+}
+
+fn seal_embedded_impl(buf: &mut [u8], verifier: [u64; 4], crypt: bool) {
     assert!(buf.len() >= ECK_SIZE);
     let eck = buf.len() - ECK_SIZE;
     buf[eck..eck + 8].copy_from_slice(&ZEC_MAGIC.to_le_bytes());
@@ -103,8 +128,14 @@ pub fn seal_embedded(buf: &mut [u8], verifier: [u64; 4]) {
         buf[eck + 8 + i * 8..eck + 16 + i * 8].copy_from_slice(&v.to_le_bytes());
     }
     let digest = Sha256::digest(&*buf);
-    for i in 0..4 {
-        let w = u64::from_be_bytes(digest[i * 8..i * 8 + 8].try_into().expect("32-byte digest"));
+    let mut words = [0u64; 4];
+    for (i, w) in words.iter_mut().enumerate() {
+        *w = u64::from_be_bytes(digest[i * 8..i * 8 + 8].try_into().expect("32-byte digest"));
+    }
+    if crypt {
+        words = [words[0] ^ words[2], words[1] ^ words[3], 0, 0];
+    }
+    for (i, w) in words.iter().enumerate() {
         buf[eck + 8 + i * 8..eck + 16 + i * 8].copy_from_slice(&w.to_le_bytes());
     }
 }
@@ -112,6 +143,31 @@ pub fn seal_embedded(buf: &mut [u8], verifier: [u64; 4]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gang_header_of_encrypted_block_is_folded() {
+        let mut b = vec![0x11u8; 512];
+        seal_embedded_crypt(&mut b, [1, 0x4000, 77, 0]);
+        assert_eq!(
+            verify_gang_header_crypt(&b, 1, 0x4000, 77),
+            ChecksumStatus::Ok
+        );
+        assert_eq!(verify_gang_header(&b, 1, 0x4000, 77), ChecksumStatus::Bad);
+        assert_eq!(
+            verify_gang_header_crypt(&b, 1, 0x4000, 78),
+            ChecksumStatus::Bad
+        );
+        let mut plain = vec![0x11u8; 512];
+        seal_embedded(&mut plain, [1, 0x4000, 77, 0]);
+        assert_eq!(
+            verify_gang_header(&plain, 1, 0x4000, 77),
+            ChecksumStatus::Ok
+        );
+        assert_eq!(
+            verify_gang_header_crypt(&plain, 1, 0x4000, 77),
+            ChecksumStatus::Bad
+        );
+    }
 
     #[test]
     fn seal_then_verify() {

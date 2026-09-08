@@ -190,8 +190,10 @@ print(next(x["name"] for x in d["datasets"] if x.get("encryption") and not x["na
 
 run_pool mirror 1 -K raidz -m 2 -r 1 -R 0
 run_pool raidz2 2 -K raidz -m 1 -r 4 -R 2
-run_pool raidz1-of-mirrors 1 -K raidz -m 2 -r 3 -R 1
+# -g lowers the gang-block threshold so gang blocks (also of encrypted
+# datasets) are always present on these two.
+run_pool raidz1-of-mirrors 1 -K raidz -m 2 -r 3 -R 1 -g 8192
 run_pool draid1 1 -K draid -m 1 -r 6 -R 1 -D 4 -S 1
-run_pool draid2 2 -K draid -m 1 -r 9 -R 2 -D 5 -S 2
+run_pool draid2 2 -K draid -m 1 -r 9 -R 2 -D 5 -S 2 -g 8192
 
 exit $fail
