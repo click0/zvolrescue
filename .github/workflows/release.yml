@@ -1,0 +1,102 @@
+name: Release
+
+# Pushing a tag v* builds static binaries and publishes a GitHub release
+# (a pre-release when the tag has a suffix such as -alpha.1).
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    name: Linux static (musl)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            name: x86_64-linux-musl
+          - target: aarch64-unknown-linux-musl
+            name: aarch64-linux-musl
+            # No cross toolchain needed: pure Rust plus the self-contained
+            # linker and CRT objects that rustup ships for musl.
+            rustflags: "-C linker=rust-lld -C link-self-contained=yes"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --release --target ${{ matrix.target }} -p zvolrescue
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+      - name: Package
+        run: |
+          v=${GITHUB_REF_NAME#v}
+          out=zvolrescue-$v-${{ matrix.name }}
+          cp target/${{ matrix.target }}/release/zvolrescue "$out"
+          echo "$out" > artifact-name
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: zvolrescue-*-${{ matrix.name }}
+          if-no-files-found: error
+
+  freebsd:
+    name: FreeBSD amd64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: vmactions/freebsd-vm@v1
+        with:
+          release: "14.2"
+          usesh: true
+          prepare: pkg install -y rust
+          run: |
+            cargo build --release -p zvolrescue
+            ./target/release/zvolrescue --version
+      - name: Package
+        run: |
+          v=${GITHUB_REF_NAME#v}
+          cp target/release/zvolrescue "zvolrescue-$v-amd64-freebsd"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: amd64-freebsd
+          path: zvolrescue-*-amd64-freebsd
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: [linux, freebsd]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums and smoke test
+        run: |
+          cd dist
+          chmod +x zvolrescue-*
+          ./zvolrescue-*-x86_64-linux-musl --version
+          sha256sum zvolrescue-* > SHA256SUMS
+          cat SHA256SUMS
+      - name: Release notes from CHANGELOG.md
+        run: |
+          # The section for this tag: from its heading to the next "## ".
+          awk -v tag="${GITHUB_REF_NAME}" '
+            $0 ~ "^## " tag { p=1; next }
+            /^## / && p { exit }
+            p { print }' CHANGELOG.md > notes.md
+          [ -s notes.md ] || echo "See CHANGELOG.md." > notes.md
+          printf '\n---\nStatic binaries, no dependencies. Verify with `sha256sum -c SHA256SUMS`.\nPre-releases are validated against OpenZFS userland pools only (see docs/REALWORLD-TESTS.md).\n' >> notes.md
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          body_path: notes.md
+          prerelease: ${{ contains(github.ref_name, '-') }}

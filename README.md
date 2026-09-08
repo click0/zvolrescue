@@ -10,7 +10,7 @@ still present on disk. It also produces forensic reports: label and
 uberblock history, dataset creation/destruction timeline, and
 hash-verified extraction logs.
 
-**Language:** Rust | **License:** BSD 3-Clause | **Status:** Phase 1 MVP (pre-alpha) — `scan`, `list` and `dump` work on stripe, mirror, RAIDZ1/2/3 and dRAID pools (parity reconstruction of missing and silently corrupted columns, distributed spares), gang blocks, fletcher/sha256/sha512/blake3/skein/edonr checksums (every OpenZFS algorithm), lz4/zstd/gzip/lzjb/zle, with `--resume` and bulk `-r`; encrypted datasets: `list` reports the suite and key format, `dump --key` (raw/hex/passphrase/prompt) decrypts (phase 3; ZIL excluded). Cross-checked against OpenZFS userland (`ztest`/`zdb`) in CI; not yet run on a real kernel-imported pool. See the [specification](docs/SPEC.md).
+**Language:** Rust | **License:** BSD 3-Clause | **Status:** v0.1.0-alpha.1 (see [CHANGELOG.md](CHANGELOG.md)) — `scan`, `list` and `dump` work on stripe, mirror, RAIDZ1/2/3 and dRAID pools (parity reconstruction of missing and silently corrupted columns, distributed spares), gang blocks, fletcher/sha256/sha512/blake3/skein/edonr checksums (every OpenZFS algorithm), lz4/zstd/gzip/lzjb/zle, with `--resume` and bulk `-r`; encrypted datasets: `list` reports the suite and key format, `dump --key` (raw/hex/passphrase/prompt) decrypts (phase 3; ZIL excluded). Cross-checked against OpenZFS userland (`ztest`/`zdb`) in CI; not yet run on a real kernel-imported pool. See the [specification](docs/SPEC.md).
 
 [Українська версія](README_UK.md) | [Technical specification (ТЗ)](docs/SPEC.md) | [ТЗ українською](docs/SPEC.uk.md) | [Companion tools spec](docs/COMPANIONS.md) | [Debugging on a test pool](docs/DEBUGGING.md) | [Real-world test matrix](docs/REALWORLD-TESTS.md)
 
@@ -119,6 +119,17 @@ crates/edonr/               Edon-R checksum port from OpenZFS (CDDL), isolated
 fuzz/                       cargo-fuzz targets
 tests/                      fixture-pool integration tests
 ```
+
+## Installing
+
+Every tagged release ships static binaries with no runtime dependencies
+(see [Releases](https://github.com/click0/zvolrescue/releases)):
+`zvolrescue-<version>-x86_64-linux-musl`, `…-aarch64-linux-musl`,
+`…-amd64-freebsd`, plus `SHA256SUMS`. Drop the binary on the rescue
+medium and run it; nothing to install. Verify with `sha256sum -c SHA256SUMS`.
+The pre-releases (`-alpha`, `-beta`) have been validated against OpenZFS
+userland pools only; see [CHANGELOG.md](CHANGELOG.md) for what each one
+covers.
 
 ## Building
 

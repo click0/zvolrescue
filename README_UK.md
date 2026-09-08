@@ -9,7 +9,7 @@
 Також формує forensic-звіти: історію міток та uberblock-ів, часову шкалу
 створення/знищення dataset-ів і хеш-верифіковані логи витягання.
 
-**Мова:** Rust | **Ліцензія:** BSD 3-Clause | **Статус:** етап 1 MVP (pre-alpha) — `scan`, `list` і `dump` працюють на stripe, mirror, RAIDZ1/2/3 і dRAID пулах (відновлення за парністю відсутніх і тихо зіпсованих колонок, розподілені spare), gang-блоках, з checksum-ами fletcher/sha256/sha512/blake3/skein/edonr (усі алгоритми OpenZFS), стисненням lz4/zstd/gzip/lzjb/zle, `--resume` і масовим `-r`; шифровані dataset-и: `list` показує suite і формат ключа, `dump --key` (raw/hex/passphrase/prompt) розшифровує (етап 3; без ZIL). Звірено з userland OpenZFS (`ztest`/`zdb`) у CI; на справжньому пулі, імпортованому ядром, ще не запускалось. Див. [ТЗ](docs/SPEC.uk.md).
+**Мова:** Rust | **Ліцензія:** BSD 3-Clause | **Статус:** v0.1.0-alpha.1 (див. [CHANGELOG.uk.md](CHANGELOG.uk.md)) — `scan`, `list` і `dump` працюють на stripe, mirror, RAIDZ1/2/3 і dRAID пулах (відновлення за парністю відсутніх і тихо зіпсованих колонок, розподілені spare), gang-блоках, з checksum-ами fletcher/sha256/sha512/blake3/skein/edonr (усі алгоритми OpenZFS), стисненням lz4/zstd/gzip/lzjb/zle, `--resume` і масовим `-r`; шифровані dataset-и: `list` показує suite і формат ключа, `dump --key` (raw/hex/passphrase/prompt) розшифровує (етап 3; без ZIL). Звірено з userland OpenZFS (`ztest`/`zdb`) у CI; на справжньому пулі, імпортованому ядром, ще не запускалось. Див. [ТЗ](docs/SPEC.uk.md).
 
 [English version](README.md) | [ТЗ українською](docs/SPEC.uk.md) | [Technical specification](docs/SPEC.md) | [ТЗ супутніх інструментів](docs/COMPANIONS.uk.md) | [Налагодження на тестовому пулі](docs/DEBUGGING.uk.md) | [Матриця тестів на реальних системах](docs/REALWORLD-TESTS.uk.md)
 
@@ -120,6 +120,17 @@ crates/edonr/               порт checksum Edon-R з OpenZFS (CDDL), ізол
 fuzz/                       cargo-fuzz target-и
 tests/                      інтеграційні тести на fixture-пулах
 ```
+
+## Встановлення
+
+Кожен тегований реліз містить статичні бінарники без залежностей (див.
+[Releases](https://github.com/click0/zvolrescue/releases)):
+`zvolrescue-<версія>-x86_64-linux-musl`, `…-aarch64-linux-musl`,
+`…-amd64-freebsd`, а також `SHA256SUMS`. Скопіюйте бінарник на
+рятувальний носій і запускайте; встановлювати нічого не треба. Перевірка:
+`sha256sum -c SHA256SUMS`. Передрелізи (`-alpha`, `-beta`) перевірено лише
+на userland-пулах OpenZFS; що саме покриває кожен, описано в
+[CHANGELOG.md](CHANGELOG.md).
 
 ## Збірка
 
