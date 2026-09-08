@@ -86,17 +86,42 @@ jobs:
           ./zvolrescue-*-x86_64-linux-musl --version
           sha256sum zvolrescue-* > SHA256SUMS
           cat SHA256SUMS
-      - name: Release notes from CHANGELOG.md
+      - name: Release notes
         run: |
-          # The section for this tag: from its heading to the next "## ".
-          awk -v tag="${GITHUB_REF_NAME}" '
-            $0 ~ "^## " tag { p=1; next }
-            /^## / && p { exit }
-            p { print }' CHANGELOG.md > notes.md
-          [ -s notes.md ] || echo "See CHANGELOG.md." > notes.md
-          printf '\n---\nStatic binaries, no dependencies. Verify with `sha256sum -c SHA256SUMS`.\nPre-releases are validated against OpenZFS userland pools only (see docs/REALWORLD-TESTS.md).\n' >> notes.md
+          tag="${GITHUB_REF_NAME}"
+          v="${tag#v}"
+          {
+            echo "**zvolrescue $tag** — read-only extraction of zvols from ZFS pools that no longer import: labels, uberblocks, mirror/RAIDZ/dRAID reconstruction, every checksum and compression, encrypted datasets with a key."
+            echo
+            case "$tag" in
+              *-*) echo "> **Pre-release.** Validated in CI against OpenZFS 2.2 *userland* pools (\`ztest\` + \`zdb\`); not yet run on a kernel-imported pool. Treat the output as evidence to verify, not as a finished recovery. See [docs/REALWORLD-TESTS.md](https://github.com/${GITHUB_REPOSITORY}/blob/$tag/docs/REALWORLD-TESTS.md)." ; echo ;;
+            esac
+            echo "## Downloads"
+            echo
+            echo "| File | Platform | Notes |"
+            echo "|---|---|---|"
+            echo "| \`zvolrescue-$v-x86_64-linux-musl\` | Linux x86_64 | static, runs on any distro or rescue medium |"
+            echo "| \`zvolrescue-$v-aarch64-linux-musl\` | Linux aarch64 | static |"
+            echo "| \`zvolrescue-$v-amd64-freebsd\` | FreeBSD 14.x amd64 | built on 14.2; works on mfsBSD |"
+            echo "| \`SHA256SUMS\` | — | \`sha256sum -c SHA256SUMS\` |"
+            echo
+            echo "No installation: \`chmod +x\` and run. Nothing is ever written to the pool members."
+            echo
+            echo "## What is in $tag"
+            echo
+            # The tag's section of CHANGELOG.md: from its heading to the next "## ".
+            awk -v tag="$tag" '
+              $0 ~ "^## " tag { p=1; next }
+              /^## / && p { exit }
+              p { print }' CHANGELOG.md
+            echo
+            echo "Full history: [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/$tag/CHANGELOG.md)."
+          } > notes.md
+          cat notes.md
       - uses: softprops/action-gh-release@v2
         with:
+          name: zvolrescue ${{ github.ref_name }}
           files: dist/*
           body_path: notes.md
           prerelease: ${{ contains(github.ref_name, '-') }}
+          fail_on_unmatched_files: true
