@@ -116,6 +116,8 @@ the evidence log) / refused cleanly (exit 3) / tool defect.
 | G4 | Held-out combinations run only before a release | as G2 |
 | G5 | Read-only invariant on every run | input copies' hashes unchanged |
 
+How to run: build the image once with `tests/golden/build-image.sh OUT` in a real-kernel VM, publish `OUT/release` and `OUT/oracle` in `zvolrescue-testdata`, then `tests/golden/run-matrix.py --image OUT/members --oracle OUT/oracle --manifests <testdata>/manifests --tool ./target/release/zvolrescue` (add `--held-out` before a release). The report lands in `golden-report/report.md`.
+
 ## Results
 
 Append one row per run.

@@ -117,6 +117,8 @@
 | G4 | Відкладені комбінації, що ганяються лише перед релізом | як G2 |
 | G5 | Інваріант «лише читання» на кожному прогоні | хеші копій входу не змінились |
 
+Як запускати: зібрати образ один раз `tests/golden/build-image.sh OUT` у віртуалці зі справжнім ядром, опублікувати `OUT/release` і `OUT/oracle` у `zvolrescue-testdata`, потім `tests/golden/run-matrix.py --image OUT/members --oracle OUT/oracle --manifests <testdata>/manifests --tool ./target/release/zvolrescue` (перед релізом додати `--held-out`). Звіт у `golden-report/report.md`.
+
 ## Результати
 
 Дописувати по рядку на прогін.
