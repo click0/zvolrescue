@@ -35,6 +35,9 @@ die() { printf 'build-ztest-image: %s\n' "$*" >&2; exit 1; }
 command -v ztest >/dev/null || die "ztest not found (Debian/Ubuntu: zfs-test)"
 command -v zdb   >/dev/null || die "zdb not found (zfsutils-linux)"
 command -v zstd  >/dev/null || die "zstd not found"
+command -v python3 >/dev/null || die "python3 not found"
+ZFS_VERSION=$(zpool version 2>/dev/null | tr '\n' ' ' | sed 's/  */ /g; s/ $//')
+[ -n "$ZFS_VERSION" ] || ZFS_VERSION="OpenZFS (version not reported)"
 if command -v sha256sum >/dev/null; then sha() { sha256sum "$1" | awk '{print $1}'; }
 else sha() { sha256 -q "$1"; }; fi
 
@@ -116,8 +119,8 @@ done
     echo "# The interim golden image ($TAG)"
     echo
     echo "Built $(date -u +%Y-%m-%dT%H:%M:%SZ) on $(uname -srm) with OpenZFS userland"
-    echo "(\`$(zdb -V 2>/dev/null || echo 'zdb, version unknown')\`), **no kernel module**:"
-    echo "\`ztest\` created and exercised the pools in userland."
+    echo "$ZFS_VERSION, **no kernel module**: \`ztest\` created and exercised the"
+    echo "pools entirely in user space."
     echo
     echo "## What this is and is not"
     echo
@@ -135,12 +138,17 @@ done
     echo
     echo "## Pools"
     echo
-    echo "| Pool | Topology | Members (role → file) |"
-    echo "|---|---|---|"
+    echo "| Pool | Top-level vdev | Shape | Members (role → file) |"
+    echo "|---|---|---|---|"
     for topo in mirror raidz2 draid1; do
-        m=$(awk '{printf "%s → %s, ", $1, $2}' "$OUT/oracle/$topo/members.txt" | sed 's/, $//')
-        k=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tops"][0]["kind"])' "$OUT/oracle/$topo/layout.json")
-        echo "| $topo | $k | $m |"
+        python3 - "$OUT/oracle/$topo/layout.json" "$topo" <<'PYEOF'
+import json, sys
+layout = json.load(open(sys.argv[1]))
+for top in layout["tops"]:
+    shape = " of ".join(dict.fromkeys([top["kind"]] + [g["kind"] for g in top["groups"]]))
+    files = ", ".join(f'`{r}` → `{layout["members"][r]["file"]}`' for r in top["members"])
+    print(f'| {sys.argv[2]} | {top["index"]} | {shape} | {files} |')
+PYEOF
     done
     echo
     echo "## Datasets"
