@@ -1,6 +1,7 @@
 # zvolrescue — Technical Specification (ТЗ)
 
-**Status:** Draft v0.1 · **Date:** 2026-09-06 · **Owner:** Vladyslav V. Prodan
+**Status:** living document, revised 2026-09-09 (tool at v0.1.0-alpha.1) · **Owner:** Vladyslav V. Prodan
+
 **Ukrainian version:** [SPEC.uk.md](SPEC.uk.md) · **Companion tools:** [COMPANIONS.md](COMPANIONS.md)
 
 This document is the founding requirements specification for `zvolrescue`,

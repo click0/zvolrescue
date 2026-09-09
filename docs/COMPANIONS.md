@@ -1,6 +1,7 @@
 # Companion tools — Technical Specification
 
 **Status:** Draft v0.1 · **Date:** 2026-09-06 · **Parent:** [SPEC.md](SPEC.md) §3.0, §7.1
+
 **Ukrainian version:** [COMPANIONS.uk.md](COMPANIONS.uk.md)
 
 The main binary `zvolrescue` does one job (SPEC §3.0). Everything marked ◇
