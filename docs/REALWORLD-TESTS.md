@@ -110,7 +110,7 @@ the evidence log) / refused cleanly (exit 3) / tool defect.
 
 | ID | Scenario | Expected |
 |---|---|---|
-| G1 | Build the golden image: one pool with mirror + RAIDZ2 + dRAID1 top-level vdevs, zvols of several block sizes, snapshots, clones, renamed/destroyed volume and snapshot, encrypted datasets (raw key, passphrase), every checksum/compression, gang blocks, large dnodes, hundreds of TXGs; record the oracle | image + oracle published in `zvolrescue-testdata` with SHA-256 |
+| G1 | Build the golden image with `tests/golden/build-image.sh` in a real-kernel VM: one pool with mirror + RAIDZ2 + dRAID1 top-level vdevs, zvols of several block sizes, snapshots, clones, renamed/destroyed volume and snapshot, encrypted datasets (raw key, passphrase), every checksum/compression, gang blocks, large dnodes, hundreds of TXGs; record the oracle | image + oracle published in `zvolrescue-testdata` with SHA-256 |
 | G2 | Single damage classes (labels, partition, metadata, data, missing member, older-self member) on each geometry | every run in an expected category; no tool defects |
 | G3 | Pairs and triples of classes across members and geometries | as G2; the expected category derived from ZFS redundancy for the combination |
 | G4 | Held-out combinations run only before a release | as G2 |
