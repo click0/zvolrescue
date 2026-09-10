@@ -188,11 +188,19 @@ fn confirm_slot_at(buf: &[u8], physical: u64, psize: Option<u64>, thorough: bool
     found
 }
 
-/// Confirm a slot against bases that are already known, one checksum each.
+/// Confirm a slot against a base that is already known, one checksum each.
 ///
 /// Once the first anchor has fixed the base, every further hit is a single
-/// verification: the vdev-relative offset is `physical - base`.
-pub fn confirm_against_base(buf: &[u8], physical: u64, base: u64) -> Option<Anchor> {
+/// verification: the vdev-relative offset is `physical - base`. `psize`
+/// names the vdev's physical size when it is known, which is what tells L2
+/// from L3; without it a hit in the rear pair still confirms the base, it
+/// just cannot say which of the two labels it came from.
+pub fn confirm_against_base(
+    buf: &[u8],
+    physical: u64,
+    base: u64,
+    psize: Option<u64>,
+) -> Option<Anchor> {
     let ub = Uberblock::parse(buf).ok()?;
     let vdev_offset = physical.checked_sub(base)?;
     for shift in plausible_shifts(buf) {
@@ -204,13 +212,13 @@ pub fn confirm_against_base(buf: &[u8], physical: u64, base: u64) -> Option<Anch
         if ring_relative < UBERBLOCK_RING_OFFSET {
             continue;
         }
-        let label = (vdev_offset / LABEL_SIZE) as usize;
         let slot = ((ring_relative - UBERBLOCK_RING_OFFSET) >> shift) as usize;
+        let label = (0..4).find(|&l| slot_offset(l, slot, shift, psize) == Some(vdev_offset));
         return Some(Anchor {
             physical,
             base,
             vdev_offset,
-            label: (label < 2).then_some(label),
+            label,
             slot,
             shift,
             ub,
@@ -334,11 +342,11 @@ mod tests {
 
         // Given a base, the check is a verdict on that base: only the right
         // one produces the offset the checksum was taken with.
-        assert!(confirm_against_base(&buf, base + offset, base + 512).is_none());
-        assert!(confirm_against_base(&buf, base + offset, base - 4096).is_none());
+        assert!(confirm_against_base(&buf, base + offset, base + 512, None).is_none());
+        assert!(confirm_against_base(&buf, base + offset, base - 4096, None).is_none());
         assert_eq!(
-            confirm_against_base(&buf, base + offset, base).map(|a| a.vdev_offset),
-            Some(offset)
+            confirm_against_base(&buf, base + offset, base, None).map(|a| (a.vdev_offset, a.label)),
+            Some((offset, Some(0)))
         );
     }
 
