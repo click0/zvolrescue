@@ -81,6 +81,16 @@ in CI; what was tried on real environments is logged in
   the uberblock ring of a label whose configuration is gone. It belongs to
   the vdev, not to one copy of its label, and reading a 4 KiB ring as if
   its slots were 1 KiB found the uberblocks but verified none of them.
+* **Whole-disk images (SPEC F-06, F-60).** A member is usually a
+  partition, and an image of the disk it lived on carries the table that
+  says where it began. `scan` reports that table — GPT (primary or backup,
+  512- or 4096-byte sectors) or MBR, with the ZFS partition types marked —
+  and every command now looks there first when nothing verifies at offset
+  0. The partition's *length* matters as much as its start: the rear label
+  pair is placed against the vdev's own size, so a member read to the end
+  of the disk instead of the end of its partition finds only two of its
+  four labels. The table is a hint like any other: the base it suggests is
+  accepted only when a label checksum verifies there.
 
 ## v0.1.0-alpha.1 — 2026-09-08
 

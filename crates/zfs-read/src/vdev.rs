@@ -89,6 +89,10 @@ pub struct DeviceScan {
     /// found somewhere other than the start of what was opened — see
     /// [`scan_device_at`].
     pub base: u64,
+    /// How that base was arrived at: `"partition table"` when a table
+    /// pointed at it, `"uberblock checksum"` when the anchor search did,
+    /// `None` when the labels were simply where they should be.
+    pub base_source: Option<&'static str>,
     /// The four labels.
     pub labels: Vec<LabelScan>,
     /// Index into `labels` of the label to trust: checksum-verified with
@@ -154,7 +158,16 @@ pub fn scan_device(dev: &dyn BlockSource) -> io::Result<DeviceScan> {
 /// start therefore scans as blank at base 0 and reads normally once the
 /// base recovered from its uberblocks (SPEC F-61) is passed here.
 pub fn scan_device_at(dev: &dyn BlockSource, base: u64) -> io::Result<DeviceScan> {
-    let psize = dev.size().saturating_sub(base);
+    scan_device_range(dev, base, dev.size().saturating_sub(base))
+}
+
+/// Read the four labels of a vdev that occupies `psize` bytes from `base`.
+///
+/// The rear label pair is placed against the vdev's own size, so a member
+/// inside a whole-disk image has to be scanned with the length its
+/// partition declares, not with everything to the end of the disk.
+pub fn scan_device_range(dev: &dyn BlockSource, base: u64, psize: u64) -> io::Result<DeviceScan> {
+    let psize = psize.min(dev.size().saturating_sub(base));
     let offsets = label_offsets(psize).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,
@@ -270,6 +283,7 @@ pub fn scan_device_at(dev: &dyn BlockSource, base: u64) -> io::Result<DeviceScan
     Ok(DeviceScan {
         size: dev.size(),
         base,
+        base_source: None,
         labels,
         best_label,
     })

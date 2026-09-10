@@ -11,6 +11,7 @@
 use std::collections::BTreeMap;
 use std::io;
 
+use zfs_ondisk::part::{parse_gpt, parse_mbr, PartitionTable};
 use zfs_ondisk::uberblock::{self, MAX_UBERBLOCK_SHIFT};
 use zfs_ondisk::zeropoint::{
     confirm_against_base, confirm_slot, confirm_slot_thorough, plausible_shifts, Anchor,
@@ -231,6 +232,63 @@ fn ranked(by_base: BTreeMap<u64, Vec<Anchor>>) -> Vec<ZeroPoint> {
     out
 }
 
+/// Read the partition table of a whole-disk image, if it has one.
+///
+/// Both sector sizes are tried, the primary GPT first, then the backup at
+/// the end of the device, then an MBR. What comes back is a hint: every
+/// base it suggests is still confirmed by a checksum before anything is
+/// read through it (F-06, F-60).
+pub fn partition_table(dev: &dyn BlockSource) -> io::Result<Option<PartitionTable>> {
+    let size = dev.size();
+    for sector in [512u64, 4096] {
+        if size < sector * 3 {
+            continue;
+        }
+        let mut header = vec![0u8; sector as usize];
+        dev.read_at(sector, &mut header)?;
+        // The entry array normally follows the header; read the 32 KiB a
+        // 128-entry table needs, bounded by the device.
+        let want = (32 * 1024).min(size - sector * 2) as usize;
+        let mut entries = vec![0u8; want];
+        dev.read_at(sector * 2, &mut entries)?;
+        if let Some(t) = parse_gpt(&header, &entries, sector, false) {
+            trace!(
+                "part",
+                "GPT with {} partition(s), {sector}-byte sectors",
+                t.partitions.len()
+            );
+            return Ok(Some(t));
+        }
+        // The backup header sits in the last sector, its array before it.
+        let last = size - sector;
+        dev.read_at(last, &mut header)?;
+        let array_at = last.saturating_sub(32 * 1024);
+        if array_at > sector {
+            let mut entries = vec![0u8; (last - array_at) as usize];
+            dev.read_at(array_at, &mut entries)?;
+            if let Some(t) = parse_gpt(&header, &entries, sector, true) {
+                trace!(
+                    "part",
+                    "backup GPT with {} partition(s), {sector}-byte sectors",
+                    t.partitions.len()
+                );
+                return Ok(Some(t));
+            }
+        }
+    }
+    let mut sector0 = vec![0u8; 512];
+    if size >= 512 {
+        dev.read_at(0, &mut sector0)?;
+        for sector in [512u64, 4096] {
+            if let Some(t) = parse_mbr(&sector0, sector) {
+                trace!("part", "MBR with {} partition(s)", t.partitions.len());
+                return Ok(Some(t));
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// Scan a member's labels, falling back to the base its uberblocks
 /// confirm when nothing verifies at offset 0.
 ///
@@ -243,12 +301,41 @@ pub fn scan_with_recovered_base(dev: &dyn BlockSource) -> io::Result<crate::vdev
     if scan.config_verified() {
         return Ok(scan);
     }
+    // A whole-disk image: the table says where its partitions begin, and
+    // a member found at one of those offsets is the ordinary case, so try
+    // them before searching for anchors.
+    if let Some(table) = partition_table(dev)? {
+        for part in table
+            .partitions
+            .iter()
+            .filter(|p| p.zfs)
+            .chain(table.partitions.iter().filter(|p| !p.zfs))
+        {
+            let base = part.start;
+            if base == 0 || base >= dev.size() {
+                continue;
+            }
+            // The vdev is as long as its partition says: the rear labels
+            // are placed against that, not against the whole disk.
+            let mut inner = crate::vdev::scan_device_range(dev, base, part.length)?;
+            inner.base_source = Some("partition table");
+            if inner.config_verified() {
+                trace!(
+                    "zeropoint",
+                    "labels verify at byte {base}, where the {} table puts a partition",
+                    table.scheme
+                );
+                return Ok(inner);
+            }
+        }
+    }
     let found = find(dev, &Search::default())?;
     let Some(zero) = found.first() else {
         return Ok(scan);
     };
     if zero.base != 0 {
-        let shifted = crate::vdev::scan_device_at(dev, zero.base)?;
+        let mut shifted = crate::vdev::scan_device_at(dev, zero.base)?;
+        shifted.base_source = Some("uberblock checksum");
         if shifted.config_verified() {
             trace!(
                 "zeropoint",
@@ -312,6 +399,7 @@ fn scan_from_anchors(dev: &dyn BlockSource, zero: &ZeroPoint) -> crate::vdev::De
     crate::vdev::DeviceScan {
         size: dev.size(),
         base: zero.base,
+        base_source: Some("uberblock checksum"),
         labels,
         best_label: None,
     }
@@ -431,6 +519,58 @@ mod tests {
         let scan = scan_with_recovered_base(&plain).expect("scan");
         assert_eq!(scan.base, 0);
         assert!(scan.config_verified());
+    }
+
+    /// A whole-disk image: protective MBR, GPT, and the member inside the
+    /// second partition.
+    fn whole_disk(member: Vec<u8>, start: u64) -> Vec<u8> {
+        let sector = 512usize;
+        let mut disk = vec![0u8; start as usize + member.len() + 4096 * sector];
+        disk[510] = 0x55;
+        disk[511] = 0xaa;
+        disk[446 + 4] = 0xee;
+        disk[446 + 12..446 + 16].copy_from_slice(&u32::MAX.to_le_bytes());
+        disk[sector..sector + 8].copy_from_slice(b"EFI PART");
+        disk[sector + 80..sector + 84].copy_from_slice(&2u32.to_le_bytes());
+        disk[sector + 84..sector + 88].copy_from_slice(&128u32.to_le_bytes());
+        let mut entry = vec![0u8; 128];
+        // 6a898cc3-1dd2-11b2-99a6-080020736631, on-disk byte order.
+        entry[..16].copy_from_slice(&[
+            0xc3, 0x8c, 0x89, 0x6a, 0xd2, 0x1d, 0xb2, 0x11, 0x99, 0xa6, 0x08, 0x00, 0x20, 0x73,
+            0x66, 0x31,
+        ]);
+        entry[16..32].copy_from_slice(&[0x22; 16]);
+        let first = start / sector as u64;
+        let last = first + (member.len() / sector) as u64 - 1;
+        entry[32..40].copy_from_slice(&first.to_le_bytes());
+        entry[40..48].copy_from_slice(&last.to_le_bytes());
+        let at = sector * 2 + 128; // the second slot; the first stays unused
+        disk[at..at + 128].copy_from_slice(&entry);
+        disk[start as usize..start as usize + member.len()].copy_from_slice(&member);
+        disk
+    }
+
+    #[test]
+    fn a_member_inside_a_whole_disk_image_is_found_by_its_partition() {
+        let psize = 16 * 1024 * 1024;
+        let start = 2 * 1024 * 1024;
+        let dev = MemSource::new(whole_disk(member(psize), start));
+
+        let table = partition_table(&dev).expect("read").expect("a GPT");
+        assert_eq!(table.scheme, "gpt");
+        assert_eq!(table.partitions.len(), 1);
+        assert!(table.partitions[0].zfs);
+        assert_eq!(table.candidate_bases(), vec![start]);
+
+        let scan = scan_with_recovered_base(&dev).expect("scan");
+        assert_eq!(scan.base, start);
+        assert_eq!(scan.base_source, Some("partition table"));
+        assert!(scan.config_verified());
+        // Read with the partition's own length, so the rear pair is where
+        // the vdev put it and not at the end of the disk.
+        assert_eq!(scan.labels.len(), 4);
+        assert!(scan.labels.iter().all(|l| l.config.is_some()));
+        assert_eq!(scan.newest_txg(), Some(101));
     }
 
     #[test]

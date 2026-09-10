@@ -45,6 +45,7 @@ the libraries — they never become modes of the main binary.
 
 ## Planned features
 
+* **Whole disks or partitions** — given an image of a whole disk, the GPT or MBR says where the ZFS partition began and how long it was; nothing is taken from it until a label checksum verifies there.
 * **Read-only by construction** — evidence is opened `O_RDONLY`; output can never land on an input device.
 * **No kernel ZFS needed** — pure userland; runs where `zfs.ko` is not loaded or the pool cannot be imported.
 * **Any pool state** — healthy, degraded, destroyed, damaged labels, missing vdevs (as long as redundancy allows).

@@ -437,9 +437,10 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
             let scan = scan_with_recovered_base(&src)?;
             if scan.base != 0 {
                 eprintln!(
-                    "zvolrescue: {}: vdev starts at byte {}, confirmed by an uberblock checksum",
+                    "zvolrescue: {}: vdev starts at byte {} ({})",
                     p.display(),
-                    scan.base
+                    scan.base,
+                    scan.base_source.unwrap_or("confirmed by checksum")
                 );
             }
             Ok((src, scan))

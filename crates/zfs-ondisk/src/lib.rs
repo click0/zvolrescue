@@ -18,6 +18,7 @@ pub mod dsl;
 pub mod error;
 pub mod label;
 pub mod nvlist;
+pub mod part;
 pub mod raidz;
 pub mod skein;
 pub mod uberblock;

@@ -13,8 +13,10 @@ use zfs_ondisk::checksum::ChecksumStatus;
 use zfs_ondisk::label::{pool_state_name, LabelConfig};
 use zfs_ondisk::nvlist::{NvList, Value};
 use zfs_read::pool::{assemble, PoolAssembly};
-use zfs_read::vdev::{scan_device, DeviceScan, LabelScan};
-use zfs_read::zeropoint::{find as find_zero_point, Search};
+use zfs_read::vdev::{DeviceScan, LabelScan};
+use zfs_read::zeropoint::{
+    find as find_zero_point, partition_table, scan_with_recovered_base, Search,
+};
 use zvolrescue_io::{BlockSource, FileSource};
 
 use crate::timefmt::iso8601;
@@ -101,6 +103,15 @@ struct DeviceOut {
     /// in when the labels cannot say where the vdev starts, or on request.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     zero_point: Vec<ZeroPointOut>,
+    /// Where this device's vdev begins, when that is not offset 0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vdev_base: Option<u64>,
+    /// How that was arrived at.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vdev_base_from: Option<&'static str>,
+    /// The partition table of a whole-disk image, if it has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    partitions: Option<TableOut>,
 }
 
 /// How `scan` should look for a vdev's zero point (SPEC F-61).
@@ -112,6 +123,24 @@ pub struct ZeroPointOpts {
     pub whole: bool,
     /// Physical sizes to assume for the vdev when testing rear labels.
     pub psize_hints: Vec<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct PartitionOut {
+    index: usize,
+    start: u64,
+    length: u64,
+    kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    zfs: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct TableOut {
+    scheme: &'static str,
+    sector: u64,
+    partitions: Vec<PartitionOut>,
 }
 
 #[derive(Debug, Serialize)]
@@ -322,8 +351,13 @@ fn device_out(
         newest_txg: None,
         oldest_txg: None,
         zero_point: Vec::new(),
+        vdev_base: None,
+        vdev_base_from: None,
+        partitions: None,
     };
     if let Some(s) = scan {
+        out.vdev_base = (s.base != 0).then_some(s.base);
+        out.vdev_base_from = s.base_source;
         out.best_label = s.best_label;
         out.config = s.config().as_ref().map(config_out);
         if verbose >= 2 {
@@ -402,6 +436,34 @@ fn print_text(out: &ScanOut, verbose: u8) {
         if let Some(e) = &d.error {
             println!("  error: {e}");
             continue;
+        }
+        if let Some(t) = &d.partitions {
+            println!(
+                "  {} table, {}-byte sectors, {} partition(s):",
+                t.scheme,
+                t.sector,
+                t.partitions.len()
+            );
+            for p in &t.partitions {
+                println!(
+                    "    {:>2}  {:>14} + {:>14}  {}{}{}",
+                    p.index,
+                    p.start,
+                    p.length,
+                    p.kind,
+                    p.name
+                        .as_deref()
+                        .map_or(String::new(), |n| format!("  {n:?}")),
+                    if p.zfs {
+                        "  <- a ZFS partition type"
+                    } else {
+                        ""
+                    },
+                );
+            }
+        }
+        if let (Some(base), Some(from)) = (d.vdev_base, d.vdev_base_from) {
+            println!("  this member's vdev begins at byte {base} ({from})");
         }
         match &d.config {
             Some(c) => {
@@ -715,12 +777,13 @@ pub fn run(g: &Global, devices: &[PathBuf], zp: &ZeroPointOpts, emit: &EmitOpts)
     let mut scans: Vec<Option<DeviceScan>> = Vec::with_capacity(devices.len());
     let mut outs: Vec<DeviceOut> = Vec::with_capacity(devices.len());
     for path in devices {
-        let (scan, size, error, zero_point) = match FileSource::open(path) {
+        let (scan, size, error, zero_point, table) = match FileSource::open(path) {
             Ok(src) => {
-                let (scan, error) = match scan_device(&src) {
+                let (scan, error) = match scan_with_recovered_base(&src) {
                     Ok(s) => (Some(s), None),
                     Err(e) => (None, Some(e.to_string())),
                 };
+                let table = partition_table(&src).ok().flatten();
                 // A member whose four label configurations are all
                 // unusable still has its uberblock rings, and one slot
                 // fixes the base (SPEC F-61).
@@ -730,12 +793,28 @@ pub fn run(g: &Global, devices: &[PathBuf], zp: &ZeroPointOpts, emit: &EmitOpts)
                 } else {
                     Vec::new()
                 };
-                (scan, src.size(), error, zero_point)
+                (scan, src.size(), error, zero_point, table)
             }
-            Err(e) => (None, 0, Some(e.to_string()), Vec::new()),
+            Err(e) => (None, 0, Some(e.to_string()), Vec::new(), None),
         };
         let mut out = device_out(path, &scan, size, error, g.verbose);
         out.zero_point = zero_point;
+        out.partitions = table.map(|t| TableOut {
+            scheme: t.scheme,
+            sector: t.sector,
+            partitions: t
+                .partitions
+                .into_iter()
+                .map(|p| PartitionOut {
+                    index: p.index,
+                    start: p.start,
+                    length: p.length,
+                    kind: p.kind,
+                    name: p.name,
+                    zfs: p.zfs,
+                })
+                .collect(),
+        });
         outs.push(out);
         scans.push(scan);
     }

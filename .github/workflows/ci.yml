@@ -76,6 +76,49 @@ jobs:
           ./target/release/zvolrescue -f json list -r /tmp/moved-intact.img --txg 4816229 | python3 -c 'import json,sys; d=json.load(sys.stdin); names=[x["name"] for x in d["datasets"]]; assert names == ["tank","tank/vm","tank/vm/disk0","tank/vm/disk0@before"], names'
           ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/moved-intact.img -o /tmp/moved.img --txg 4816229
           cmp /tmp/disk0.img /tmp/moved.img
+      - name: A member inside a whole-disk image (SPEC F-06, F-60)
+        run: |
+          python3 - <<'EOF'
+          import struct
+          member = open("/tmp/fx/member0.img", "rb").read()
+          sector, start_lba = 512, 4096
+          disk = bytearray(sector * (start_lba + len(member)//sector + 4096))
+          disk[510], disk[511] = 0x55, 0xAA          # protective MBR
+          disk[446+4] = 0xee
+          struct.pack_into("<I", disk, 446+8, 1)
+          struct.pack_into("<I", disk, 446+12, 0xffffffff)
+          disk[sector:sector+8] = b"EFI PART"        # GPT header at LBA 1
+          struct.pack_into("<I", disk, sector+80, 2)
+          struct.pack_into("<I", disk, sector+84, 128)
+          def guid_le(g):
+              hx = bytes.fromhex(g.replace("-", ""))
+              return struct.pack("<IHH", int.from_bytes(hx[0:4], "big"),
+                                 int.from_bytes(hx[4:6], "big"),
+                                 int.from_bytes(hx[6:8], "big")) + hx[8:16]
+          def entry(kind, first, last, name):
+              e = bytearray(128)
+              e[0:16] = guid_le(kind)
+              e[16:32] = b"\x22" * 16
+              struct.pack_into("<Q", e, 32, first)
+              struct.pack_into("<Q", e, 40, last)
+              n = name.encode("utf-16-le")
+              e[56:56+len(n)] = n
+              return e
+          entries = entry("0fc63daf-8483-4772-8e79-3d69d8477de4", 2048, 4095, "boot")
+          entries += entry("6a898cc3-1dd2-11b2-99a6-080020736631", start_lba,
+                           start_lba + len(member)//sector - 1, "zfs0")
+          disk[sector*2:sector*2+len(entries)] = entries
+          disk[start_lba*sector:start_lba*sector+len(member)] = member
+          open("/tmp/fx/wholedisk.img", "wb").write(bytes(disk))
+          EOF
+          ./target/release/zvolrescue scan /tmp/fx/wholedisk.img
+          ./target/release/zvolrescue -f json scan /tmp/fx/wholedisk.img | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"][0]; t=d["partitions"]; assert t["scheme"] == "gpt", t; assert [p["zfs"] for p in t["partitions"]] == [False, True], t; assert d["vdev_base"] == 2097152, d; assert d["vdev_base_from"] == "partition table", d; assert all(l["config_checksum"] == "ok" for l in d["labels"]), d["labels"]'
+          # The pool inside it reads: the partition says where the vdev
+          # starts and how long it is, so all four labels are where they
+          # should be, and the volume comes back bit-exact.
+          ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/fx/wholedisk.img --txg 4816229 -o /tmp/fx/from-disk.img
+          cmp /tmp/disk0.img /tmp/fx/from-disk.img
+
       - name: A pool with no labels at all, read through a hand-written layout (SPEC F-65)
         run: |
           cargo run -q -p zfs-read --example mkfixture -- /tmp/hz raidz2 12
