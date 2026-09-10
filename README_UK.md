@@ -100,6 +100,28 @@ zvoltimeline /dev/ada0p3 /dev/ada1p3 --dataset pool/vm/disk0
 спрацює там, де спрацювала сама історія.
 
 ```
+zvolcarve scan    POOLSPEC -o DIR [--volblocksize BYTES] [--levels N] [--txg FROM..TO]
+                                  [--size MIN..MAX] [--like DATASET] [--strict-profile] [--resume]
+zvolcarve list    DIR
+zvolcarve dump    DIR CANDIDATE POOLSPEC -o OUT.img [--size BYTES] [--strict]
+                                                           томи, на які вже не вказує жоден uberblock
+```
+
+```sh
+# Тому нема на жодній транзакційній групі, яку ще тримає кільце.
+# Його блоків це не стосується: шукаємо їх у сирому просторі.
+zvolcarve scan /dev/ada0p3 /dev/ada1p3 -o /case42/carve --like pool/vm/disk1
+zvolcarve list /case42/carve
+zvolcarve dump /case42/carve c0001 /dev/ada0p3 /dev/ada1p3 -o disk0.img --size 34359738368
+```
+
+Профіль — це фільтр, а не припущення: кандидат, який збігся з усім, про
+що просили, має оцінку вище 0.5, а той, що ні, — нижче; порожній перелік
+каже, яке саме поле його спорожнило. Ніщо не вважається правильним через
+те, що збіглося: кожен блок, який читає `dump`, перевіряється своєю
+контрольною сумою, як і в основному бінарнику.
+
+```
 zvolreport build  LOG... -o report.json [--md report.md] [--case ID] [--examiner NAME]
 zvolreport verify report.json [--evidence-root DIR] [--outputs-root DIR]
                                                            логи evidence як один документ — і перевірка цього документа
@@ -122,7 +144,7 @@ zvolreport verify report.json --outputs-root /mnt/case42
 | Інструмент | Робота |
 |---|---|
 | `zvoltimeline` | **уже є** — TXG ↔ час ↔ створення/знищення dataset-ів |
-| `zvolcarve` | знайти від'єднані zvol, чиї uberblock-и вже зникли, і передати їх у `dump` |
+| `zvolcarve` | **уже є** — знайти томи, чиї uberblock-и вже зникли, і видобути їх |
 | `zvolreport` | **уже є** — зведений звіт із ланцюжком SHA-256 |
 | `zvolfiles` | файлове відновлення з файлових dataset-ів |
 
@@ -151,6 +173,7 @@ Cargo.toml                  cargo workspace
 crates/zvolrescue/          основний бінарник (scan / list / dump)
 crates/zvoltimeline/        історія пулу з його транзакційних груп
 crates/zvolreport/          логи evidence, зведені в один перевірюваний документ
+crates/zvolcarve/           скан сирого простору по томах, на які вже ніщо не вказує
 crates/zvol*/               решта супутніх бінарників, по одному crate (етапи 3–4)
 crates/zvol-common/         спільна CLI-обв'язка (лог evidence, коди виходу, POOLSPEC)
 crates/zvolrescue-io/       read-only доступ до пристроїв/образів (єдиний crate з `unsafe`)
@@ -166,8 +189,8 @@ tests/                      інтеграційні тести на fixture-п�
 Кожен тегований реліз містить статичні бінарники без залежностей (див.
 [Releases](https://github.com/click0/zvolrescue/releases)):
 `zvolrescue-<версія>-x86_64-linux-musl`, `…-aarch64-linux-musl`,
-`…-amd64-freebsd`, ті самі три для `zvoltimeline` і `zvolreport`, а також
-`SHA256SUMS`. Скопіюйте бінарник на
+`…-amd64-freebsd`, ті самі три для `zvoltimeline`, `zvolreport` і
+`zvolcarve`, а також `SHA256SUMS`. Скопіюйте бінарник на
 рятувальний носій і запускайте; встановлювати нічого не треба. Перевірка:
 `sha256sum -c SHA256SUMS`. Передрелізи (`-alpha`, `-beta`) перевірено лише
 на userland-пулах OpenZFS; що саме покриває кожен, описано в

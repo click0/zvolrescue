@@ -94,6 +94,9 @@ C-тулчейна і системних бібліотек, **без лінку
   груп, що вціліли (COMPANIONS §2).
 - `crates/zvolreport` — другий супутник: логи evidence, зведені в один
   документ із ланцюжком SHA-256, і його перевірка (COMPANIONS §4).
+- `crates/zvolcarve` — третій супутник: скан сирого простору vdev по
+  dnode-ах, на які вже не вказує жоден уберблок, профіль пошуку і
+  видобування через ту саму трубу, що й `zvolrescue dump` (COMPANIONS §3).
 - `tests/crosscheck-ztest.sh` — звірка з OpenZFS userland; ключ шифрування
   ztest — рядок `abcdefghijklmnopqrstuvwxyz012345` (keyformat raw).
 

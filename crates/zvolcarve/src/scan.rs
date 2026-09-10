@@ -234,14 +234,16 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         None => None,
     };
 
-    if let Err(e) = std::fs::create_dir_all(&opts.output) {
-        eprintln!("zvolcarve: {}: {e}", opts.output.display());
-        return exit::USAGE;
-    }
-    // The workspace must never be the evidence.
+    // The workspace must never be the evidence — asked before anything
+    // is created, so a workspace named after a member is refused rather
+    // than failing later on some unrelated error.
     if let Err(e) = zvolrescue_io::refuse_if_evidence(&opts.output, &members.paths) {
         eprintln!("zvolcarve: {e}");
         return exit::REFUSED;
+    }
+    if let Err(e) = std::fs::create_dir_all(&opts.output) {
+        eprintln!("zvolcarve: {}: {e}", opts.output.display());
+        return exit::USAGE;
     }
 
     let previous: State = if opts.resume {

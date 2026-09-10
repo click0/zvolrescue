@@ -223,6 +223,33 @@ zero candidates *and* a non-zero rejection count for the field at fault.
 The extracted image is bit-identical in every case, because the profile
 never touches what `dump` verifies.
 
+*Status: C-01…C-05, C-07, C-08, C-10 (lz4) and C-13…C-18 are
+implemented, and the acceptance run is a CI step on a fixture where the
+volume is on the members and no uberblock mentions it at any
+transaction group: `zvolrescue list` shows only `tank` and `tank/vm`,
+`zvolcarve scan` ranks the volume's dnode first, and `zvolcarve dump`
+produces the SHA-256 the walked extraction already pins. Also checked
+there: every candidate that failed the profile ranks below every one
+that matched it, an empty result names the field that emptied it, a
+profile taken off a surviving sibling carries its numbers, and an
+interrupted scan resumed equals one pass.
+
+Two details of the fixture rather than of the tool: its volume's dnode
+has one level and more blocks than its pointers cover, which is not a
+shape OpenZFS writes, so it loses part of its structural score and lands
+at 0.94 rather than the ≥ 0.95 this section asks for — the shape test
+that costs it is the correct one, and it still ranks first by a wide
+margin. And the size a carved volume is extracted at is the one its
+dnode implies, since the `zvol_prop` ZAP that knew `volsize` is not
+reachable from a carved dnode; `--size` gives the real one when it is
+known.
+
+Not implemented: overwrite detection against the space map (C-06),
+RAIDZ/dRAID-aware scanning of members (C-09, mirrors and single disks
+work today), compressed metadata other than lz4 (C-10), dataset dnodes
+recorded so a candidate can be named (C-11), signature carving inside
+candidate data (C-12), and the auto-profile histograms (C-19).*
+
 ---
 
 ## 4. `zvolreport` — one document that a third party can check

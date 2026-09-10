@@ -344,7 +344,8 @@ pub fn scan_member(
 /// below 0.5 — always, whatever else it has going for it. That is what
 /// C-18 asks for: a hint that was wrong costs ranking rather than the
 /// recovery, and a hint that was right is not outvoted by a well-formed
-/// dnode of something else.
+/// dnode of something else. The two bands are disjoint, so 0.5 reads as
+/// a line between them and not as a score anything can have.
 ///
 /// Within a half: the structure says whether the slot could be a dnode,
 /// the walk says whether what it points at is really there, and the
@@ -355,11 +356,13 @@ pub fn rank(hit: &Hit, assessed: Option<&Assessment>) -> f64 {
         None => score(hit),
         Some(a) => 0.5 * score(hit) + 0.5 * a.agreement(),
     };
-    let half = 0.5 * base.clamp(0.0, 1.0);
+    // The two bands do not touch, so 0.5 reads as a dividing line
+    // rather than as a value a candidate can land on from either side.
+    let base = base.clamp(0.0, 1.0);
     if hit.misses.is_empty() {
-        0.5 + half
+        0.55 + 0.45 * base
     } else {
-        half
+        0.45 * base
     }
 }
 
@@ -621,7 +624,7 @@ mod tests {
         let hit = kept[0];
         let mut matched = hit.clone();
         matched.misses.clear();
-        assert!(rank(&matched, None) >= 0.5);
+        assert!(rank(&matched, None) > 0.5);
         assert!(rank(hit, None) < 0.5);
         assert!(rank(&matched, None) > rank(hit, None));
     }

@@ -99,6 +99,28 @@ it back — with this run's own `--hints`, `--image` and `--assume-member`
 carried over, so it works where the timeline worked.
 
 ```
+zvolcarve scan    POOLSPEC -o DIR [--volblocksize BYTES] [--levels N] [--txg FROM..TO]
+                                  [--size MIN..MAX] [--like DATASET] [--strict-profile] [--resume]
+zvolcarve list    DIR
+zvolcarve dump    DIR CANDIDATE POOLSPEC -o OUT.img [--size BYTES] [--strict]
+                                                           volumes no uberblock points at any more
+```
+
+```sh
+# The volume is gone from every transaction group the ring still has.
+# Its blocks are not. Scan raw space for them, describing what was lost.
+zvolcarve scan /dev/ada0p3 /dev/ada1p3 -o /case42/carve --like pool/vm/disk1
+zvolcarve list /case42/carve
+zvolcarve dump /case42/carve c0001 /dev/ada0p3 /dev/ada1p3 -o disk0.img --size 34359738368
+```
+
+The profile is a filter, never an assumption: a candidate that matched
+everything asked for ranks above 0.5 and one that did not ranks below
+it, and an empty list says which field emptied it. Nothing is trusted
+for having matched — every block `dump` reads is verified by its own
+checksum, exactly as in the main binary.
+
+```
 zvolreport build  LOG... -o report.json [--md report.md] [--case ID] [--examiner NAME]
 zvolreport verify report.json [--evidence-root DIR] [--outputs-root DIR]
                                                            the evidence logs as one document, and that document checked back
@@ -121,7 +143,7 @@ Specified in [docs/COMPANIONS.md](docs/COMPANIONS.md).
 | Tool | Job |
 |---|---|
 | `zvoltimeline` | **shipping** — TXG ↔ time ↔ dataset created/destroyed |
-| `zvolcarve` | find unlinked zvols whose uberblocks are gone, hand them to `dump` |
+| `zvolcarve` | **shipping** — find volumes whose uberblocks are gone, and extract them |
 | `zvolreport` | **shipping** — consolidated report with a SHA-256 chain of custody |
 | `zvolfiles` | file-level recovery from filesystem datasets |
 
@@ -150,6 +172,7 @@ Cargo.toml                  cargo workspace
 crates/zvolrescue/          the main binary (scan / list / dump)
 crates/zvoltimeline/        the pool's history from its transaction groups
 crates/zvolreport/          the evidence logs consolidated into one checkable document
+crates/zvolcarve/           raw-space scan for volumes nothing points at any more
 crates/zvol*/               the remaining companion binaries, one crate each (phases 3–4)
 crates/zvol-common/         shared CLI plumbing (evidence log, exit codes, POOLSPEC)
 crates/zvolrescue-io/       read-only device/image access (the only crate allowed `unsafe`)
@@ -165,8 +188,8 @@ tests/                      fixture-pool integration tests
 Every tagged release ships static binaries with no runtime dependencies
 (see [Releases](https://github.com/click0/zvolrescue/releases)):
 `zvolrescue-<version>-x86_64-linux-musl`, `…-aarch64-linux-musl`,
-`…-amd64-freebsd`, the same three for `zvoltimeline` and `zvolreport`,
-plus `SHA256SUMS`. Drop the binary on the rescue
+`…-amd64-freebsd`, the same three for `zvoltimeline`, `zvolreport` and
+`zvolcarve`, plus `SHA256SUMS`. Drop the binary on the rescue
 medium and run it; nothing to install. Verify with `sha256sum -c SHA256SUMS`.
 The pre-releases (`-alpha`, `-beta`) have been validated against OpenZFS
 userland pools only; see [CHANGELOG.md](CHANGELOG.md) for what each one

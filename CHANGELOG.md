@@ -42,8 +42,35 @@ in CI; what was tried on real environments is logged in
   just the command line and the result. Every file written carries its
   SHA-256; inputs are hashed only under the new `--hash-inputs`, because
   a shelf of disk images takes hours to read through.
-* Releases now carry `zvoltimeline` and `zvolreport` for the same three
-  platforms as `zvolrescue`.
+* **`zvolcarve` — volumes that no uberblock points at any more
+  (COMPANIONS §3).** Once the ring has rolled past the last transaction
+  group that referenced a volume, no walk can reach it and `list` cannot
+  see it at any transaction group; its blocks are still on the disk.
+  `zvolcarve scan` reads the members through, recognises dnodes by
+  structure alone — every field inside the range OpenZFS's `dnode.h`
+  allows — walks the trees of what survives, ranks them, and writes a
+  workspace `list` and `dump` work from. `dump` extracts through the
+  same code and the same checksum verification as `zvolrescue dump`: a
+  candidate's score buys it a place in the list and nothing else.
+
+  Metadata is normally compressed, so the scan also tries each
+  allocation-aligned offset as the start of an lz4 block. On a `ztest`
+  pool that is where 32056 of 33483 dnodes were found; a plaintext-only
+  scan would have seen 4% of what is there.
+
+  The search profile (`--volblocksize`, `--levels`, `--txg`, `--size`,
+  `--dnode-type`, `--profile`, `--like`) is a filter, never an
+  assumption. It is applied at recognition time, so a search for one
+  volume does not pay to walk the trees of everything else in the pool,
+  and it is decisive in the ranking: a candidate that matched everything
+  asked for scores above 0.5 and one that did not scores below it, so a
+  hint that was wrong costs ranking rather than the recovery. An empty
+  result says which field emptied it — "0 candidates, 15 rejected by
+  volblocksize" is a different fact from "there is nothing on this
+  disk". `--resume` adds to the index and re-reads the chunk it stopped
+  inside; an interrupted scan exits 6.
+* Releases now carry `zvoltimeline`, `zvolreport` and `zvolcarve` for
+  the same three platforms as `zvolrescue`.
 
 ### Fixed
 * A dataset is no longer called a clone because its origin is non-zero.

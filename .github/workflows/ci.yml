@@ -268,6 +268,54 @@ jobs:
           echo '{"hello":1}' > junk.jsonl
           if "$B/zvolreport" build junk.jsonl -o no.json; then echo "must fail"; exit 1; else test $? = 2; fi
           cd "$GITHUB_WORKSPACE"
+      - name: A volume no uberblock leads to, found by carving (COMPANIONS §3.4)
+        run: |
+          ./target/release/zvolcarve --version
+          # The same pool, with the volume on the members and no
+          # uberblock mentioning it at any transaction group.
+          cargo run -q -p zfs-read --example mkfixture -- /tmp/cv mirror 12 carved
+          ./target/release/zvolrescue -f json list -r /tmp/cv/member0.img /tmp/cv/member1.img | python3 -c 'import json,sys; n=[d["name"] for d in json.load(sys.stdin)["datasets"]]; assert n == ["tank","tank/vm"], n'
+          # A walk cannot find it. A scan of raw space can.
+          rm -rf /tmp/carve
+          ./target/release/zvolcarve -q scan /tmp/cv/member0.img /tmp/cv/member1.img -o /tmp/carve
+          ./target/release/zvolcarve list /tmp/carve
+          python3 - <<'EOF'
+          import json
+          i = json.load(open("/tmp/carve/candidates.json"))
+          best = i["candidates"][0]
+          assert best["dnode_type_code"] == 23, best        # DMU_OT_ZVOL
+          assert best["volblocksize"] == 8192, best
+          assert not best.get("profile_misses"), best
+          assert best["assessment"]["blocks_failed"] == 0, best
+          assert best["assessment"]["agreement"] == 1.0, best
+          # Everything that failed the profile ranks below everything
+          # that matched it, whatever else it has going for it (C-18).
+          matched = [c["score"] for c in i["candidates"] if not c.get("profile_misses")]
+          missed = [c["score"] for c in i["candidates"] if c.get("profile_misses")]
+          assert min(matched) > 0.5 > max(missed, default=0.0), (matched, missed)
+          open("/tmp/carve/best", "w").write(best["id"])
+          EOF
+          # And it comes out byte for byte what the walked extraction gives.
+          ./target/release/zvolcarve dump /tmp/carve "$(cat /tmp/carve/best)" /tmp/cv/member0.img /tmp/cv/member1.img -o /tmp/carved.img --size 33554432
+          echo "d6d58af862ec2761bf43158f7ee2b2b0f4628fa6ca8095544493f9d698d7b80d  /tmp/carved.img" | sha256sum -c -
+          cmp /tmp/disk0.img /tmp/carved.img
+          # C-14: an empty result must be a rejection, not an absence.
+          rm -rf /tmp/carve-none
+          ./target/release/zvolcarve -f json scan /tmp/cv/member0.img -o /tmp/carve-none --volblocksize 1048576 --strict-profile | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["candidates"] == []; assert d["rejected_by_profile"] > 0, d; names=[r["reason"] for r in d["rejected"] if r["profile"]]; assert "profile_volblocksize" in names, names'
+          # C-17: the profile taken off a sibling the pool still has.
+          rm -rf /tmp/carve-like
+          ./target/release/zvolcarve -q scan /tmp/fx/member0.img -o /tmp/carve-like --like tank/vm/disk0
+          python3 -c 'import json; p=json.load(open("/tmp/carve-like/candidates.json"))["profile"]; assert p["volblocksize"] == 8192 and p["levels"] == 1 and p["size"] == [33554432, 33554432], p'
+          # C-08: interrupted, then resumed, is the same as one pass.
+          rm -rf /tmp/carve-r /tmp/carve-1
+          if ./target/release/zvolcarve -q scan /tmp/cv/member0.img -o /tmp/carve-r --max-hits 3 --dnode-type any; then echo "must exit 6"; exit 1; else test $? = 6; fi
+          ./target/release/zvolcarve -q scan /tmp/cv/member0.img -o /tmp/carve-r --resume --dnode-type any
+          ./target/release/zvolcarve -q scan /tmp/cv/member0.img -o /tmp/carve-1 --dnode-type any
+          python3 -c 'import json; a=json.load(open("/tmp/carve-r/candidates.json")); b=json.load(open("/tmp/carve-1/candidates.json")); ka=sorted((c["device"],c["offset"],c["slot"]) for c in a["candidates"]); kb=sorted((c["device"],c["offset"],c["slot"]) for c in b["candidates"]); assert ka == kb, (len(ka), len(kb))'
+          # Never a write to the evidence, and never one onto it.
+          sha256sum /tmp/cv/member0.img /tmp/cv/member1.img > /tmp/cv.sums
+          sha256sum -c /tmp/cv.sums
+          if ./target/release/zvolcarve -q scan /tmp/cv/member0.img -o /tmp/cv/member0.img; then echo "must refuse"; exit 1; else test $? = 5; fi
       - name: End-to-end on a raidz2 fixture (missing and corrupted members)
         run: |
           cargo run -p zfs-read --example mkfixture -- /tmp/rz raidz2 12
