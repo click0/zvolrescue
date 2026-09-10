@@ -1,0 +1,26 @@
+[package]
+name = "zvolfiles"
+description = "Files out of ZFS filesystem datasets: directories, symlinks, ownership and times, or a raw object dump when the POSIX metadata is too damaged."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "zvolfiles"
+path = "src/main.rs"
+
+[dependencies]
+zfs-ondisk.workspace = true
+zfs-read.workspace = true
+zvolrescue-io.workspace = true
+zvol-common.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[lints]
+workspace = true

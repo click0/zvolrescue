@@ -685,6 +685,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "zvolfiles"
+version = "0.2.0"
+dependencies = [
+ "clap",
+ "serde",
+ "serde_json",
+ "sha2",
+ "zfs-ondisk",
+ "zfs-read",
+ "zvol-common",
+ "zvolrescue-io",
+]
+
+[[package]]
 name = "zvolreport"
 version = "0.2.0"
 dependencies = [
