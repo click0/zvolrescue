@@ -619,18 +619,25 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         ),
         Format::Text => print_text(&out),
     }
-    if let Some(log) = &g.evidence_log {
-        if let Err(e) = evidence::append(log, &json) {
-            eprintln!(
-                "zvolrescue: cannot write evidence log {}: {e}",
-                log.display()
-            );
-            return exit::USAGE;
-        }
-    }
-    if code == 0 && members.any_failed() {
+    let code = if code == 0 && members.any_failed() {
         exit::EVIDENCE
     } else {
         code
+    };
+    // Every image this run wrote, with the hash `dump` already computed
+    // over it — there is no reason to read a 32 GiB image back to hash
+    // what was just hashed on the way out. The manifest of a bulk run is
+    // small enough to hash here.
+    let mut written: Vec<evidence::FileRef> = out
+        .volumes
+        .iter()
+        .map(|v| evidence::FileRef::known(&v.output, &v.sha256))
+        .collect();
+    if opts.recursive {
+        let manifest = opts.output.join("manifest.json");
+        if let Ok(f) = evidence::FileRef::hashed(&manifest) {
+            written.push(f);
+        }
     }
+    g.log_evidence("zvolrescue", &json, code, &members.paths, written)
 }

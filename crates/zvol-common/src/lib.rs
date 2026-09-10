@@ -55,6 +55,12 @@ pub struct Global {
     /// Append a JSON Lines evidence log to FILE.
     #[arg(long, global = true, value_name = "FILE")]
     pub evidence_log: Option<PathBuf>,
+    /// Also record the SHA-256 of every input in the evidence log.
+    ///
+    /// Off by default: hashing a shelf of disk images means reading all
+    /// of them through, which can take hours. Outputs are always hashed.
+    #[arg(long, global = true)]
+    pub hash_inputs: bool,
     /// Disable colour in text output.
     #[arg(long, global = true)]
     pub no_color: bool,
@@ -90,6 +96,34 @@ impl Global {
         zvolrescue_io::trace::enable(file);
         zvolrescue_io::trace!("cli", "{}", std::env::args().collect::<Vec<_>>().join(" "));
         Ok(())
+    }
+}
+
+impl Global {
+    /// Append this run to the evidence log, when one was asked for, and
+    /// give back the exit code to use.
+    ///
+    /// A run that was asked to record what it did and could not is a
+    /// usage error, not a success: the record is part of the result.
+    pub fn log_evidence(
+        &self,
+        tool: &str,
+        result: &serde_json::Value,
+        status: u8,
+        inputs: &[PathBuf],
+        outputs: Vec<evidence::FileRef>,
+    ) -> u8 {
+        let Some(log) = &self.evidence_log else {
+            return status;
+        };
+        let rec = evidence::Record::new(tool, result, status)
+            .with_inputs(inputs, self.hash_inputs)
+            .with_outputs(outputs);
+        if let Err(e) = evidence::append(log, &rec) {
+            eprintln!("{tool}: cannot write evidence log {}: {e}", log.display());
+            return exit::USAGE;
+        }
+        status
     }
 }
 

@@ -286,19 +286,19 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         eprintln!("zvoltimeline: writing the report: {e}");
         return exit::USAGE;
     }
-    if let Some(log) = &g.evidence_log {
-        if let Err(e) = evidence::append(log, &json) {
-            eprintln!(
-                "zvoltimeline: cannot write evidence log {}: {e}",
-                log.display()
-            );
-            return exit::USAGE;
-        }
-    }
     let txgs: BTreeSet<u64> = out.txgs.iter().copied().collect();
-    if txgs.is_empty() {
+    let code = if txgs.is_empty() {
         exit::UNRECOVERABLE
     } else {
         0
-    }
+    };
+    // The report is the only thing this tool writes; record it with the
+    // hash of what actually landed on disk.
+    let written = match &opts.output {
+        Some(path) => evidence::FileRef::hashed(path)
+            .map(|f| vec![f])
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+    g.log_evidence("zvoltimeline", &json, code, &members.paths, written)
 }

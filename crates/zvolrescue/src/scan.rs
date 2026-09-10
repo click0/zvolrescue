@@ -751,9 +751,9 @@ fn emit_label(
     opts: &EmitOpts,
     txg: Option<u64>,
     psize: u64,
-) -> Result<(), String> {
+) -> Result<Vec<PathBuf>, String> {
     let (Some(file), Some(out)) = (&opts.hints, &opts.emit_label) else {
-        return Ok(());
+        return Ok(Vec::new());
     };
     let hints = zvol_common::hints::load(file, devices)?;
     let (top, leaf) = match &opts.emit_for {
@@ -822,7 +822,7 @@ fn emit_label(
             meta.display()
         );
     }
-    Ok(())
+    Ok(vec![out.clone(), meta])
 }
 
 /// Run `scan`.
@@ -888,15 +888,7 @@ pub fn run(g: &Global, devices: &[PathBuf], zp: &ZeroPointOpts, emit: &EmitOpts)
         ),
         Format::Text => print_text(&out, g.verbose),
     }
-    if let Some(log) = &g.evidence_log {
-        if let Err(e) = evidence::append(log, &json) {
-            eprintln!(
-                "zvolrescue: cannot write evidence log {}: {e}",
-                log.display()
-            );
-            return exit::USAGE;
-        }
-    }
+    let mut written: Vec<evidence::FileRef> = Vec::new();
     if emit.emit_label.is_some() {
         // Seal it for a vdev the size of the smallest member scanned: the
         // rear labels' position depends on it, and a label sealed for the
@@ -915,14 +907,22 @@ pub fn run(g: &Global, devices: &[PathBuf], zp: &ZeroPointOpts, emit: &EmitOpts)
                     .max()
             })
             .max();
-        if let Err(e) = emit_label(g, devices, emit, txg, psize) {
-            eprintln!("zvolrescue: {e}");
-            return exit::USAGE;
+        match emit_label(g, devices, emit, txg, psize) {
+            Ok(files) => written.extend(
+                files
+                    .iter()
+                    .filter_map(|p| evidence::FileRef::hashed(p).ok()),
+            ),
+            Err(e) => {
+                eprintln!("zvolrescue: {e}");
+                return exit::USAGE;
+            }
         }
     }
-    if out.devices.iter().any(|d| d.error.is_some()) {
+    let code = if out.devices.iter().any(|d| d.error.is_some()) {
         exit::EVIDENCE
     } else {
         0
-    }
+    };
+    g.log_evidence("zvolrescue", &json, code, devices, written)
 }

@@ -10,7 +10,7 @@ use zfs_read::zio::{PoolReader, ReadError};
 
 use zvol_common::members::{choose_pool, open_members};
 use zvol_common::timefmt::{iso8601, parse_timestamp};
-use zvol_common::{evidence, exit, Format, Global, PoolSpec};
+use zvol_common::{exit, Format, Global, PoolSpec};
 
 /// Options of the `list` command.
 pub struct Options {
@@ -322,18 +322,11 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         ),
         Format::Text => print_text(&out),
     }
-    if let Some(log) = &g.evidence_log {
-        if let Err(e) = evidence::append(log, &json) {
-            eprintln!(
-                "zvolrescue: cannot write evidence log {}: {e}",
-                log.display()
-            );
-            return exit::USAGE;
-        }
-    }
-    if code == 0 && members.any_failed() {
+    let code = if code == 0 && members.any_failed() {
         exit::EVIDENCE
     } else {
         code
-    }
+    };
+    // `list` writes nothing but its report on stdout.
+    g.log_evidence("zvolrescue", &json, code, &members.paths, Vec::new())
 }
