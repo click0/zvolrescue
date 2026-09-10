@@ -122,6 +122,15 @@ recorded TXGs, imported on two hostids): the event list equals the script,
 and the `dump` command printed for the destroyed zvol recovers it
 bit-exact.
 
+*Status: T-01…T-06, T-08, T-10 and T-11 are implemented and run in CI on
+the mirror fixture (three transaction groups, the volume destroyed at the
+newest): the event list is the scripted one, and the `dump` command the
+tool prints recovers the volume with the SHA-256 the end-to-end step
+already pins. `--pending` (T-07), property events (T-09) and
+`--hash-inputs` are not implemented yet. A `ztest` pool exercises the
+same code on real on-disk bytes, including transaction groups whose MOS
+can no longer be walked, but scripts no history of its own.*
+
 ---
 
 ## 3. `zvolcarve` — find zvols that no uberblock points to any more

@@ -86,9 +86,18 @@ C-тулчейна і системних бібліотек, **без лінку
   (ключі), `zvol` (витягання), `fixture` (синтетичні пули для тестів);
   приклади `mkfixture`, `walk-objects`, `unwrap-key`.
 - `crates/zvolrescue` — CLI, **атомарний**: лише `scan`, `list`, `dump`.
-  Усе форензичне — майбутні супутні інструменти (`docs/COMPANIONS.md`).
+  Усе форензичне — супутні інструменти (`docs/COMPANIONS.md`).
+- `crates/zvol-common` — спільний контракт бінарників: прапорці (`Global`,
+  `PoolSpec` з `--hints`/`--search-order`/`--assume-member`), коди виходу,
+  відкриття членів і вибір пулу, лог evidence, формат часу.
+- `crates/zvoltimeline` — перший супутник: історія пулу з транзакційних
+  груп, що вціліли (COMPANIONS §2).
 - `tests/crosscheck-ztest.sh` — звірка з OpenZFS userland; ключ шифрування
   ztest — рядок `abcdefghijklmnopqrstuvwxyz012345` (keyformat raw).
+
+Новий супутній інструмент = новий член workspace `crates/<tool>/`, CLI
+через `zvol-common`, крок у `ci.yml` на fixture-пулі з `mkfixture`,
+рядок у README/README_UK і секція стану в `docs/COMPANIONS*.md`.
 
 ## Інваріанти — не ламати
 

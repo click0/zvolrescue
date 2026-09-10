@@ -83,13 +83,28 @@ zvolrescue dump pool/vm/disk0 /dev/ada0p3 /dev/ada1p3 --txg 4816230 \
     --strict -o /mnt/rescue/disk0.img --evidence-log case42.jsonl
 ```
 
-### Companion tools (later, separate binaries in the same workspace)
+```
+zvoltimeline POOLSPEC [--from TXG] [--to TXG] [--dataset NAME|GUID]
+                                                           the pool's history: what existed at each TXG, and what the destroyed ones need
+```
+
+```sh
+# What happened to this pool, and which TXG still had the volume?
+zvoltimeline /dev/ada0p3 /dev/ada1p3 --dataset pool/vm/disk0
+```
+
+Each `destroyed` line carries the last transaction group that still
+referenced the object and the exact `zvolrescue dump` command that gets
+it back — with this run's own `--hints`, `--image` and `--assume-member`
+carried over, so it works where the timeline worked.
+
+### Companion tools (separate binaries in the same workspace)
 
 Specified in [docs/COMPANIONS.md](docs/COMPANIONS.md).
 
 | Tool | Job |
 |---|---|
-| `zvoltimeline` | TXG ↔ time ↔ dataset created/destroyed, pending deletions |
+| `zvoltimeline` | **shipping** — TXG ↔ time ↔ dataset created/destroyed |
 | `zvolcarve` | find unlinked zvols whose uberblocks are gone, hand them to `dump` |
 | `zvolreport` | consolidated forensic report with a SHA-256 chain of custody |
 | `zvolfiles` | file-level recovery from filesystem datasets |
@@ -117,7 +132,8 @@ docs/DEBUGGING.md           how to verify against a test pool in a VM with zdb a
 docs/research/              analyses of related tools, on-disk format notes
 Cargo.toml                  cargo workspace
 crates/zvolrescue/          the main binary (scan / list / dump)
-crates/zvol*/               companion binaries, one crate each (phases 3–4)
+crates/zvoltimeline/        the pool's history from its transaction groups
+crates/zvol*/               the remaining companion binaries, one crate each (phases 3–4)
 crates/zvol-common/         shared CLI plumbing (evidence log, exit codes, POOLSPEC)
 crates/zvolrescue-io/       read-only device/image access (the only crate allowed `unsafe`)
 crates/zfs-ondisk/          pure on-disk structure parsers (labels, nvlist, uberblocks, blkptr, dnode, ZAP)
@@ -132,7 +148,7 @@ tests/                      fixture-pool integration tests
 Every tagged release ships static binaries with no runtime dependencies
 (see [Releases](https://github.com/click0/zvolrescue/releases)):
 `zvolrescue-<version>-x86_64-linux-musl`, `…-aarch64-linux-musl`,
-`…-amd64-freebsd`, plus `SHA256SUMS`. Drop the binary on the rescue
+`…-amd64-freebsd`, the same three for `zvoltimeline`, plus `SHA256SUMS`. Drop the binary on the rescue
 medium and run it; nothing to install. Verify with `sha256sum -c SHA256SUMS`.
 The pre-releases (`-alpha`, `-beta`) have been validated against OpenZFS
 userland pools only; see [CHANGELOG.md](CHANGELOG.md) for what each one

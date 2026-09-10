@@ -6,6 +6,33 @@ validated against OpenZFS **userland** pools (`ztest` + `zdb`, no kernel)
 in CI; what was tried on real environments is logged in
 [docs/REALWORLD-TESTS.md](docs/REALWORLD-TESTS.md).
 
+## Unreleased
+
+### Added
+* **`zvoltimeline` — the pool's history from the transaction groups that
+  survive (COMPANIONS §2).** Every uberblock that still verifies is the
+  pool as it was at that moment; read in order, the transaction groups
+  say when a dataset appeared, when it was renamed, and which one still
+  had the volume that is gone from the newest. Identity is the `ds_guid`,
+  so a rename does not read as a destroy and a create, and a reused name
+  with a new GUID reads as both. A transaction group whose MOS can no
+  longer be walked is one `unreadable` line, not the end of the run.
+  Every `destroyed` line carries the last transaction group that still
+  referenced the object and the `zvolrescue dump` command that gets it
+  back — with this run's own `--hints`, `--image` and `--assume-member`
+  carried over, so it works where the timeline worked. `--from`/`--to`,
+  `--dataset` by name or GUID, `-f json`, `--evidence-log`.
+* Releases now carry `zvoltimeline` for the same three platforms as
+  `zvolrescue`.
+
+### Fixed
+* A dataset is no longer called a clone because its origin is non-zero.
+  Every dataset in a modern pool has one — OpenZFS gives the ordinary
+  ones the pool's own hidden `$ORIGIN@$ORIGIN` snapshot — so the origin
+  is resolved once per walk and compared against it, as
+  `dsl_dir_is_clone` does. Checked against `zdb -dddd` on a `ztest` pool,
+  where all six datasets carry the `$ORIGIN` snapshot as their origin.
+
 ## v0.2.0 — 2026-09-10
 
 **When the labels are gone.** `v0.1.0-alpha.1` could read any pool whose

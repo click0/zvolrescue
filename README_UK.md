@@ -84,13 +84,28 @@ zvolrescue dump pool/vm/disk0 /dev/ada0p3 /dev/ada1p3 --txg 4816230 \
     --strict -o /mnt/rescue/disk0.img --evidence-log case42.jsonl
 ```
 
-### Супутні інструменти (пізніше, окремі бінарники в тому ж workspace)
+```
+zvoltimeline POOLSPEC [--from TXG] [--to TXG] [--dataset NAME|GUID]
+                                                           історія пулу: що існувало на кожному TXG і що потрібно знищеним
+```
+
+```sh
+# Що сталося з пулом і на якому TXG том ще був?
+zvoltimeline /dev/ada0p3 /dev/ada1p3 --dataset pool/vm/disk0
+```
+
+Кожен рядок `destroyed` несе останній TXG, який ще посилався на об'єкт, і
+точну команду `zvolrescue dump`, що поверне його, — з перенесеними
+`--hints`, `--image` та `--assume-member` цього ж запуску, тож вона
+спрацює там, де спрацювала сама історія.
+
+### Супутні інструменти (окремі бінарники в тому ж workspace)
 
 Описані в [docs/COMPANIONS.uk.md](docs/COMPANIONS.uk.md).
 
 | Інструмент | Робота |
 |---|---|
-| `zvoltimeline` | TXG ↔ час ↔ створення/знищення dataset-ів, відкладені видалення |
+| `zvoltimeline` | **уже є** — TXG ↔ час ↔ створення/знищення dataset-ів |
 | `zvolcarve` | знайти від'єднані zvol, чиї uberblock-и вже зникли, і передати їх у `dump` |
 | `zvolreport` | зведений forensic-звіт із ланцюжком SHA-256 |
 | `zvolfiles` | файлове відновлення з файлових dataset-ів |
@@ -118,7 +133,8 @@ docs/DEBUGGING.uk.md        як звіряти з тестовим пулом �
 docs/research/              аналізи схожих інструментів, нотатки про on-disk формат
 Cargo.toml                  cargo workspace
 crates/zvolrescue/          основний бінарник (scan / list / dump)
-crates/zvol*/               супутні бінарники, по одному crate (етапи 3–4)
+crates/zvoltimeline/        історія пулу з його транзакційних груп
+crates/zvol*/               решта супутніх бінарників, по одному crate (етапи 3–4)
 crates/zvol-common/         спільна CLI-обв'язка (лог evidence, коди виходу, POOLSPEC)
 crates/zvolrescue-io/       read-only доступ до пристроїв/образів (єдиний crate з `unsafe`)
 crates/zfs-ondisk/          чисті парсери on-disk структур (мітки, nvlist, uberblock-и, blkptr, dnode, ZAP)
@@ -133,7 +149,7 @@ tests/                      інтеграційні тести на fixture-п�
 Кожен тегований реліз містить статичні бінарники без залежностей (див.
 [Releases](https://github.com/click0/zvolrescue/releases)):
 `zvolrescue-<версія>-x86_64-linux-musl`, `…-aarch64-linux-musl`,
-`…-amd64-freebsd`, а також `SHA256SUMS`. Скопіюйте бінарник на
+`…-amd64-freebsd`, ті самі три для `zvoltimeline`, а також `SHA256SUMS`. Скопіюйте бінарник на
 рятувальний носій і запускайте; встановлювати нічого не треба. Перевірка:
 `sha256sum -c SHA256SUMS`. Передрелізи (`-alpha`, `-beta`) перевірено лише
 на userland-пулах OpenZFS; що саме покриває кожен, описано в

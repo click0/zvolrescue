@@ -47,19 +47,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - run: cargo build --release --target ${{ matrix.target }} -p zvolrescue
+      - run: cargo build --release --target ${{ matrix.target }} -p zvolrescue -p zvoltimeline
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
       - name: Package
         run: |
           v=$(printf '%s' "$TAG" | sed 's/^[vV]\.*//')
-          out=zvolrescue-$v-${{ matrix.name }}
-          cp target/${{ matrix.target }}/release/zvolrescue "$out"
-          echo "$out" > artifact-name
+          for b in zvolrescue zvoltimeline; do
+            cp "target/${{ matrix.target }}/release/$b" "$b-$v-${{ matrix.name }}"
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
-          path: zvolrescue-*-${{ matrix.name }}
+          path: zvol*-${{ matrix.name }}
           if-no-files-found: error
 
   freebsd:
@@ -75,16 +75,19 @@ jobs:
           usesh: true
           prepare: pkg install -y rust
           run: |
-            cargo build --release -p zvolrescue
+            cargo build --release -p zvolrescue -p zvoltimeline
             ./target/release/zvolrescue --version
+            ./target/release/zvoltimeline --version
       - name: Package
         run: |
           v=$(printf '%s' "$TAG" | sed 's/^[vV]\.*//')
-          cp target/release/zvolrescue "zvolrescue-$v-amd64-freebsd"
+          for b in zvolrescue zvoltimeline; do
+            cp "target/release/$b" "$b-$v-amd64-freebsd"
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: amd64-freebsd
-          path: zvolrescue-*-amd64-freebsd
+          path: zvol*-amd64-freebsd
           if-no-files-found: error
 
   publish:
@@ -102,9 +105,10 @@ jobs:
       - name: Checksums and smoke test
         run: |
           cd dist
-          chmod +x zvolrescue-*
+          chmod +x zvol*
           ./zvolrescue-*-x86_64-linux-musl --version
-          sha256sum zvolrescue-* > SHA256SUMS
+          ./zvoltimeline-*-x86_64-linux-musl --version
+          sha256sum zvol* > SHA256SUMS
           cat SHA256SUMS
       - name: Release notes
         run: |
@@ -131,6 +135,7 @@ jobs:
             echo "| \`zvolrescue-$v-x86_64-linux-musl\` | Linux x86_64 | static, runs on any distro or rescue medium |"
             echo "| \`zvolrescue-$v-aarch64-linux-musl\` | Linux aarch64 | static |"
             echo "| \`zvolrescue-$v-amd64-freebsd\` | FreeBSD 14.x amd64 | built on 14.2; works on mfsBSD |"
+            echo "| \`zvoltimeline-$v-*\` | the same three | the pool's history from its transaction groups |"
             echo "| \`SHA256SUMS\` | — | \`sha256sum -c SHA256SUMS\` |"
             echo
             echo "No installation: \`chmod +x\` and run. Nothing is ever written to the pool members."
