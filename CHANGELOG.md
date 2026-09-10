@@ -6,42 +6,88 @@ validated against OpenZFS **userland** pools (`ztest` + `zdb`, no kernel)
 in CI; what was tried on real environments is logged in
 [docs/REALWORLD-TESTS.md](docs/REALWORLD-TESTS.md).
 
-## Unreleased
+## v0.7.0 — 2026-09-10
+
+**Everything the companion spec asked for.** The last of what
+COMPANIONS marks worth having, and the numbers to check it by.
 
 ### Added
-* **`zvoltimeline` — the pool's history from the transaction groups that
-  survive (COMPANIONS §2).** Every uberblock that still verifies is the
-  pool as it was at that moment; read in order, the transaction groups
-  say when a dataset appeared, when it was renamed, and which one still
-  had the volume that is gone from the newest. Identity is the `ds_guid`,
-  so a rename does not read as a destroy and a create, and a reused name
-  with a new GUID reads as both. A transaction group whose MOS can no
-  longer be walked is one `unreadable` line, not the end of the run.
-  Every `destroyed` line carries the last transaction group that still
-  referenced the object and the `zvolrescue dump` command that gets it
-  back — with this run's own `--hints`, `--image` and `--assume-member`
-  carried over, so it works where the timeline worked. `--from`/`--to`,
-  `--dataset` by name or GUID, `-f json`, `--evidence-log`.
-* **`zvolreport` — one document a third party can check (COMPANIONS
-  §4).** Every tool appends what it did to an evidence log;
-  `zvolreport build` consolidates those logs into a report — the case,
-  the evidence with its sizes and hashes and which tools read it, the
-  tool versions, every command in the order it ran with its exit code,
-  the pool and the transaction-group window the scan recorded, what was
-  extracted, and every file that was written. It is a function of the
-  logs: nothing in it comes from the clock, and two builds of the same
-  log are byte-identical. `zvolreport verify` recomputes the SHA-256 of
-  everything the report has a hash for and prints a PASS/FAIL table,
-  exiting 4 on any file that changed or went missing;
-  `--evidence-root`/`--outputs-root` re-base the paths for a machine
-  where the disks are mounted somewhere else. `--md` renders the whole
-  thing for a ticket or a case file.
-* **The evidence log is the record COMPANIONS §1.3 specifies.** It now
-  carries the format version, the tool and its version separately, the
-  host, the evidence read, the files written and the exit code — not
-  just the command line and the result. Every file written carries its
-  SHA-256; inputs are hashed only under the new `--hash-inputs`, because
-  a shelf of disk images takes hours to read through.
+* **`zvolfiles` reads extended attributes and keeps hard links
+  (COMPANIONS Z-04, Z-07, Z-09).** Attributes are read from both places
+  they live — packed into the system attributes as an nvlist
+  (`xattr=sa`) and in an object's own hidden directory (`xattr=on`) —
+  and recorded in `manifest.json` with their values rather than applied,
+  because setting one needs the platform's own call and this workspace
+  links no system libraries. An object met under a second name is
+  written as a hard link to the first rather than copied, so the
+  extracted tree keeps the shape it had. A path is matched exactly
+  first, and case-folded only where the dataset's `casesensitivity` says
+  names are matched that way.
+
+* **`zvoltimeline --pending` (COMPANIONS T-07, SPEC F-15).** How much
+  space ZFS has finished with but has not freed, per transaction group:
+  the pool's `free_bpobj` and every dataset's deadlist, read from their
+  bonus buffers so the answer costs no walk. While a block is still
+  accounted for there it has not been reallocated — the difference
+  between a destroyed dataset that can still be recovered and one that
+  cannot. Cross-checked against `zdb`'s own bpobj accounting on every
+  `ztest` pool in CI.
+
+### Fixed
+* A dnode with no block pointers but a bonus buffer is recognised as one.
+  Requiring at least one block made every DSL dataset and directory
+  invisible to a carve — objects that own no data and say everything in
+  their bonus — which is exactly the metadata that can name a candidate.
+
+## v0.6.0 — 2026-09-10
+
+**A carve that can name what it found.**
+
+### Added
+* **A carved candidate can be named (COMPANIONS C-11).** A dnode found
+  by scanning raw space carries no name: names live in the DSL directory
+  chain in the MOS, which is what a carve cannot reach. So the scan now
+  keeps every dataset dnode it meets, whatever the profile asked for,
+  and a candidate is reported with the GUID and creation transaction
+  group of the dataset whose objset still points at it — enough to match
+  against a `zvoltimeline` line.
+* **`zvolcarve scan --sample N` (C-19).** With no idea what to ask for,
+  ask the disk: the first N hits are reported as histograms of object
+  type, block size, tree depth and birth transaction group, so a profile
+  is picked from what is there rather than from memory.
+* Releases now carry `zvoltimeline`, `zvolreport`, `zvolcarve` and
+  `zvolfiles` for the same three platforms as `zvolrescue`.
+
+## v0.5.0 — 2026-09-10
+
+**Files, not just volumes.** The fourth companion tool, and the phase-4
+half of the delivery plan.
+
+### Added
+* **`zvolfiles` — files out of filesystem datasets (COMPANIONS §5).**
+  The main binary treats a filesystem dataset as an object dump at most;
+  this one reads the ZFS POSIX layer. `list` walks the tree with type,
+  mode, owner, size, times and symlink targets, at any transaction group
+  that still verifies and with `--key` for an encrypted dataset.
+  `extract` writes it out, hashing every file into `manifest.json` and
+  turning a block that cannot be read into zeros with the count
+  recorded, never a silently short file; `--strict` stops at the first
+  one. `objects` is the fallback for when the POSIX metadata is too
+  damaged to walk: one file per object plus an index — with the root
+  directory ZAP zeroed on every member, `list` fails and the file
+  contents still come out byte for byte.
+
+  Metadata comes from the system attributes, which is how any pool made
+  this decade stores it: a layout number, a packed run of values, and
+  two ZAPs in the dataset saying what each value is and how long. A
+  legacy `znode_phys_t` bonus is read as one when the magic says so.
+
+## v0.4.0 — 2026-09-10
+
+**What no uberblock points at any more.** The tool the whole
+labels-gone chapter was building towards.
+
+### Added
 * **`zvolcarve` — volumes that no uberblock points at any more
   (COMPANIONS §3).** Once the ring has rolled past the last transaction
   group that referenced a volume, no walk can reach it and `list` cannot
@@ -77,63 +123,46 @@ in CI; what was tried on real environments is logged in
   produced the same image, rebuilt from parity. Only the compressed pass
   is mirror-and-single-disk, because a compressed block is split across
   columns and no member holds one contiguously.
-* **`zvolfiles` — files out of filesystem datasets (COMPANIONS §5).**
-  The main binary treats a filesystem dataset as an object dump at most;
-  this one reads the ZFS POSIX layer. `list` walks the tree with type,
-  mode, owner, size, times and symlink targets, at any transaction group
-  that still verifies and with `--key` for an encrypted dataset.
-  `extract` writes it out, hashing every file into `manifest.json` and
-  turning a block that cannot be read into zeros with the count
-  recorded, never a silently short file; `--strict` stops at the first
-  one. `objects` is the fallback for when the POSIX metadata is too
-  damaged to walk: one file per object plus an index — with the root
-  directory ZAP zeroed on every member, `list` fails and the file
-  contents still come out byte for byte.
 
-  Metadata comes from the system attributes, which is how any pool made
-  this decade stores it: a layout number, a packed run of values, and
-  two ZAPs in the dataset saying what each value is and how long. A
-  legacy `znode_phys_t` bonus is read as one when the magic says so.
-* **A carved candidate can be named (COMPANIONS C-11).** A dnode found
-  by scanning raw space carries no name: names live in the DSL directory
-  chain in the MOS, which is what a carve cannot reach. So the scan now
-  keeps every dataset dnode it meets, whatever the profile asked for,
-  and a candidate is reported with the GUID and creation transaction
-  group of the dataset whose objset still points at it — enough to match
-  against a `zvoltimeline` line.
-* **`zvolcarve scan --sample N` (C-19).** With no idea what to ask for,
-  ask the disk: the first N hits are reported as histograms of object
-  type, block size, tree depth and birth transaction group, so a profile
-  is picked from what is there rather than from memory.
-* Releases now carry `zvoltimeline`, `zvolreport`, `zvolcarve` and
-  `zvolfiles` for the same three platforms as `zvolrescue`.
+## v0.3.0 — 2026-09-10
 
-* **`zvolfiles` reads extended attributes and keeps hard links
-  (COMPANIONS Z-04, Z-07, Z-09).** Attributes are read from both places
-  they live — packed into the system attributes as an nvlist
-  (`xattr=sa`) and in an object's own hidden directory (`xattr=on`) —
-  and recorded in `manifest.json` with their values rather than applied,
-  because setting one needs the platform's own call and this workspace
-  links no system libraries. An object met under a second name is
-  written as a hard link to the first rather than copied, so the
-  extracted tree keeps the shape it had. A path is matched exactly
-  first, and case-folded only where the dataset's `casesensitivity` says
-  names are matched that way.
+**One contract, and the first two companions.** The evidence log
+becomes the record the spec describes, and two tools start writing it.
 
-* **`zvoltimeline --pending` (COMPANIONS T-07, SPEC F-15).** How much
-  space ZFS has finished with but has not freed, per transaction group:
-  the pool's `free_bpobj` and every dataset's deadlist, read from their
-  bonus buffers so the answer costs no walk. While a block is still
-  accounted for there it has not been reallocated — the difference
-  between a destroyed dataset that can still be recovered and one that
-  cannot. Cross-checked against `zdb`'s own bpobj accounting on every
-  `ztest` pool in CI.
-
-### Fixed
-* A dnode with no block pointers but a bonus buffer is recognised as one.
-  Requiring at least one block made every DSL dataset and directory
-  invisible to a carve — objects that own no data and say everything in
-  their bonus — which is exactly the metadata that can name a candidate.
+### Added
+* **`zvoltimeline` — the pool's history from the transaction groups that
+  survive (COMPANIONS §2).** Every uberblock that still verifies is the
+  pool as it was at that moment; read in order, the transaction groups
+  say when a dataset appeared, when it was renamed, and which one still
+  had the volume that is gone from the newest. Identity is the `ds_guid`,
+  so a rename does not read as a destroy and a create, and a reused name
+  with a new GUID reads as both. A transaction group whose MOS can no
+  longer be walked is one `unreadable` line, not the end of the run.
+  Every `destroyed` line carries the last transaction group that still
+  referenced the object and the `zvolrescue dump` command that gets it
+  back — with this run's own `--hints`, `--image` and `--assume-member`
+  carried over, so it works where the timeline worked. `--from`/`--to`,
+  `--dataset` by name or GUID, `-f json`, `--evidence-log`.
+* **`zvolreport` — one document a third party can check (COMPANIONS
+  §4).** Every tool appends what it did to an evidence log;
+  `zvolreport build` consolidates those logs into a report — the case,
+  the evidence with its sizes and hashes and which tools read it, the
+  tool versions, every command in the order it ran with its exit code,
+  the pool and the transaction-group window the scan recorded, what was
+  extracted, and every file that was written. It is a function of the
+  logs: nothing in it comes from the clock, and two builds of the same
+  log are byte-identical. `zvolreport verify` recomputes the SHA-256 of
+  everything the report has a hash for and prints a PASS/FAIL table,
+  exiting 4 on any file that changed or went missing;
+  `--evidence-root`/`--outputs-root` re-base the paths for a machine
+  where the disks are mounted somewhere else. `--md` renders the whole
+  thing for a ticket or a case file.
+* **The evidence log is the record COMPANIONS §1.3 specifies.** It now
+  carries the format version, the tool and its version separately, the
+  host, the evidence read, the files written and the exit code — not
+  just the command line and the result. Every file written carries its
+  SHA-256; inputs are hashed only under the new `--hash-inputs`, because
+  a shelf of disk images takes hours to read through.
 
 ### Fixed
 * A dataset is no longer called a clone because its origin is non-zero.
