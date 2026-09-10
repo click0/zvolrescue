@@ -672,6 +672,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "zvolreport"
+version = "0.2.0"
+dependencies = [
+ "clap",
+ "serde",
+ "serde_json",
+ "zvol-common",
+]
+
+[[package]]
 name = "zvolrescue"
 version = "0.2.0"
 dependencies = [
