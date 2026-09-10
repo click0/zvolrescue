@@ -318,6 +318,19 @@ jobs:
           # Two of four members gone: rebuilt from parity, same bytes.
           ./target/release/zvolcarve -q dump /tmp/carvez "$(cat /tmp/carvez/best)" /tmp/cvz/member1.img /tmp/cvz/member3.img -o /tmp/carvedz2.img --size 33554432
           cmp /tmp/disk0.img /tmp/carvedz2.img
+          # C-11: a candidate is named by a dataset dnode the scan met,
+          # since names themselves live in the MOS a carve cannot reach.
+          python3 - <<'EOF'
+          import json
+          i = json.load(open("/tmp/carve/candidates.json"))
+          assert i["datasets_met"] > 0, i["datasets_met"]
+          best = i["candidates"][0]
+          assert best["dataset_guid"] == "0x00000000000000a3", best
+          assert best["dataset_creation_txg"] == 30, best
+          EOF
+          # C-19: with --sample, what is on the disk instead of a filter.
+          rm -rf /tmp/carve-s
+          ./target/release/zvolcarve -f json scan /tmp/cv/member0.img -o /tmp/carve-s --sample 50 | python3 -c 'import json,sys; h=json.load(sys.stdin)["histograms"]; assert h["sampled"] > 0, h; assert h["volblocksize"] and h["levels"] and h["dnode_type"], h; assert "8192" in [b["value"] for b in h["volblocksize"]], h["volblocksize"]'
           # C-14: an empty result must be a rejection, not an absence.
           rm -rf /tmp/carve-none
           ./target/release/zvolcarve -f json scan /tmp/cv/member0.img -o /tmp/carve-none --volblocksize 1048576 --strict-profile | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["candidates"] == []; assert d["rejected_by_profile"] > 0, d; names=[r["reason"] for r in d["rejected"] if r["profile"]]; assert "profile_volblocksize" in names, names'

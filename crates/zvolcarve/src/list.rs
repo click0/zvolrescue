@@ -38,6 +38,12 @@ pub fn print(index: &Index) {
             index.rejected_by_profile
         );
     }
+    if index.datasets_met > 0 {
+        println!(
+            "  {} dataset dnode(s) met, which is what can name a candidate",
+            index.datasets_met
+        );
+    }
     for r in index.rejected.iter().take(10) {
         println!(
             "  rejected {:>12} by {}{}",
@@ -45,6 +51,41 @@ pub fn print(index: &Index) {
             r.reason,
             if r.profile { " (profile)" } else { "" }
         );
+    }
+    // C-19: what is actually on the disk, so a profile can be picked
+    // from it. Printed before the candidates, because with a sample the
+    // candidates are the raw material of the histograms, not an answer.
+    if let Some(h) = &index.histograms {
+        println!();
+        println!("what {} sampled hit(s) look like:", h.sampled);
+        let bars = |title: &str, buckets: &[crate::model::Bucket]| {
+            if buckets.is_empty() {
+                return;
+            }
+            println!("  {title}");
+            let widest = buckets.iter().map(|b| b.count).max().unwrap_or(1).max(1);
+            for b in buckets.iter().take(8) {
+                let bar = (b.count * 40).div_ceil(widest) as usize;
+                println!(
+                    "    {:>16} {:>8}  {}",
+                    b.value,
+                    b.count,
+                    "#".repeat(bar.max(1))
+                );
+            }
+            if buckets.len() > 8 {
+                println!("    {:>16} {} more", "…", buckets.len() - 8);
+            }
+        };
+        bars("object type", &h.dnode_type);
+        bars("block size", &h.volblocksize);
+        bars("tree depth", &h.levels);
+        bars("birth txg", &h.txg);
+        println!();
+        println!(
+            "Pick a profile from these, then scan again with --volblocksize / --levels / --txg."
+        );
+        return;
     }
     if index.candidates.is_empty() {
         return;
@@ -74,6 +115,13 @@ pub fn print(index: &Index) {
             c.slot,
             c.found
         );
+        if let Some(g) = &c.dataset_guid {
+            println!(
+                "         belonged to dataset {g}{}",
+                c.dataset_creation_txg
+                    .map_or(String::new(), |t| format!(" (created at txg {t})"))
+            );
+        }
         if !c.profile_misses.is_empty() {
             println!("         did not match: {}", c.profile_misses.join(", "));
         }

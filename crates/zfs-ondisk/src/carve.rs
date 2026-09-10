@@ -46,7 +46,7 @@ pub enum Reject {
     ChecksumCode,
     /// The compression code is not one OpenZFS defines.
     CompressCode,
-    /// Every block pointer is a hole: nothing to follow.
+    /// No blocks and no bonus: nothing to follow and nothing to read.
     NoBlocks,
     /// A block pointer's sizes or birth cannot be right.
     BadBlkptr,
@@ -203,7 +203,12 @@ pub fn plausible_dnode(d: &DnodePhys) -> Result<(), Reject> {
         return Err(Reject::BonusLen);
     }
     let live: Vec<&BlkPtr> = d.blkptr.iter().filter(|b| !b.is_hole()).collect();
-    if live.is_empty() {
+    // A dnode with no blocks at all is nothing to follow — unless it
+    // carries a bonus, which is exactly what a DSL dataset or directory
+    // is: metadata that lives entirely in the bonus buffer and owns no
+    // data. Those are worth recognising; a slot with neither blocks nor
+    // a bonus is not.
+    if live.is_empty() && d.bonuslen == 0 {
         return Err(Reject::NoBlocks);
     }
     for b in live {
@@ -465,6 +470,21 @@ mod tests {
         for (what, spec, want) in cases {
             assert_eq!(plausible_dnode(&parse(&spec)), Err(want), "{what}");
         }
+    }
+
+    /// A DSL dataset owns no blocks; everything it says is in its bonus.
+    /// Rejecting it would throw away the only thing on a carved disk
+    /// that can name a candidate (C-11).
+    #[test]
+    fn a_dnode_that_is_all_bonus_is_still_a_dnode() {
+        let d = parse(&DnodeSpec {
+            object_type: ot::DSL_DATASET,
+            bonus_type: ot::DSL_DATASET,
+            bonus: vec![7u8; 320],
+            blkptrs: vec![[0u8; blkptr::SIZE]],
+            ..zvol()
+        });
+        assert_eq!(plausible_dnode(&d), Ok(()));
     }
 
     #[test]

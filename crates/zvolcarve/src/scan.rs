@@ -1,6 +1,7 @@
 //! `zvolcarve scan` — read the members through and record what could be
 //! a volume (C-01, C-04, C-05, C-08, C-13…C-18).
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use clap::Args;
@@ -16,8 +17,8 @@ use zvol_common::{exit, Format, Global, PoolSpec};
 use zvolrescue_io::BlockSource;
 
 use crate::model::{
-    to_hex, AssessmentOut, Candidate, Index, ProfileOut, Rejection, State, INDEX, INDEX_VERSION,
-    STATE,
+    to_hex, AssessmentOut, Bucket, Candidate, Histograms, Index, ProfileOut, Rejection, State,
+    INDEX, INDEX_VERSION, STATE,
 };
 
 /// The search profile, on the command line (C-13, C-16, C-17, C-18).
@@ -60,6 +61,7 @@ pub struct Options {
     pub resume: bool,
     pub full_assess: bool,
     pub max_hits: usize,
+    pub sample: Option<usize>,
 }
 
 /// `FROM..TO`, both optional around the dots.
@@ -216,13 +218,20 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         (None, _) => None,
     };
 
-    let (profile, profile_out) = match build_profile(&opts.profile, like) {
+    let (mut profile, mut profile_out) = match build_profile(&opts.profile, like) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("zvolcarve: {e}");
             return exit::USAGE;
         }
     };
+    // A sample is a look at what is there, not a search for something:
+    // it follows every type and filters nothing, because the point is
+    // to see the shape of the disk before deciding what to ask for.
+    if opts.sample.is_some() {
+        profile = Profile::default();
+        profile_out = ProfileOut::default();
+    }
     let range = match &opts.range {
         Some(s) => match byte_range(s) {
             Ok(r) => Some(r),
@@ -274,6 +283,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             }
         }
     }
+    let mut datasets_met = 0usize;
     let mut bytes_read = earlier.as_ref().map_or(0, |i| i.bytes_read);
     let mut slots = earlier.as_ref().map_or(0, |i| i.slots_examined);
     let mut reached = vec![0u64; members.paths.len()];
@@ -305,7 +315,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 profile: profile.clone(),
                 strict_profile: opts.profile.strict_profile,
                 range: member_range,
-                max_hits: opts.max_hits,
+                max_hits: opts.sample.unwrap_or(opts.max_hits),
                 ..ScanOptions::default()
             },
         ) {
@@ -316,6 +326,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             }
         };
         bytes_read += scan.bytes_read;
+        datasets_met += scan.datasets.len();
         slots += scan.slots_examined;
         reached[i] = scan.resume_at;
         if scan.stopped_early {
@@ -335,6 +346,9 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 let obj = ObjectReader::new(r, hit.dnode.clone(), Endian::Little);
                 assess(&obj, if opts.full_assess { 0 } else { 256 })
             });
+            let named = reader
+                .as_ref()
+                .and_then(|r| name_from_datasets(r, &scan.datasets, hit));
             let id = format!("c{:04}", candidates.len() + 1);
             candidates.push(Candidate {
                 id,
@@ -361,6 +375,8 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                     sampled: a.sampled,
                     agreement: a.agreement(),
                 }),
+                dataset_guid: named.map(|(g, _)| format!("{g:#018x}")),
+                dataset_creation_txg: named.map(|(_, t)| t),
                 dnode_hex: to_hex(&dnode_bytes(&hit.dnode)),
             });
         }
@@ -380,6 +396,8 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     for (n, c) in candidates.iter_mut().enumerate() {
         c.id = format!("c{:04}", n + 1);
     }
+
+    let histograms = opts.sample.map(|_| histograms_of(&candidates));
 
     let mut by_reason: Vec<Rejection> = rejected
         .iter()
@@ -407,6 +425,8 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         rejected: by_reason,
         bytes_read,
         slots_examined: slots,
+        datasets_met,
+        histograms,
         candidates,
     };
 
@@ -504,4 +524,88 @@ fn like_dataset(
     Err(format!(
         "no such dataset in any of the {looked} readable transaction group(s)"
     ))
+}
+
+/// What the sampled hits look like (C-19).
+///
+/// A carve on a pool that has lived for years meets far more metadata
+/// than belongs to what is being looked for, and the operator often
+/// does not know the block size or tree depth of the thing they lost.
+/// These are the numbers actually on the disk, so a profile can be
+/// picked from them instead of from memory.
+fn histograms_of(candidates: &[Candidate]) -> Histograms {
+    fn bars<T: Ord + std::fmt::Display>(values: impl Iterator<Item = T>) -> Vec<Bucket> {
+        let mut counts: BTreeMap<T, u64> = BTreeMap::new();
+        for v in values {
+            *counts.entry(v).or_insert(0) += 1;
+        }
+        let mut out: Vec<Bucket> = counts
+            .into_iter()
+            .map(|(v, n)| Bucket {
+                value: v.to_string(),
+                count: n,
+            })
+            .collect();
+        // Most common first, then by name, so two runs read the same.
+        out.sort_by(|a, b| b.count.cmp(&a.count).then(a.value.cmp(&b.value)));
+        out
+    }
+    Histograms {
+        sampled: candidates.len(),
+        dnode_type: bars(candidates.iter().map(|c| c.dnode_type.clone())),
+        volblocksize: bars(candidates.iter().map(|c| c.volblocksize)),
+        levels: bars(candidates.iter().map(|c| c.levels)),
+        // Thousands: a pool's transaction groups run to millions, and a
+        // bar per group would be a list, not a histogram.
+        txg: bars(candidates.iter().map(|c| {
+            let base = c.birth / 1000 * 1000;
+            format!("{base}..{}", base + 999)
+        })),
+    }
+}
+
+/// The dataset whose objset still points at this candidate (C-11).
+///
+/// A carved dnode carries no name: names live in the DSL directory
+/// chain in the MOS, which is what a carve cannot reach. What can be
+/// reached is a dataset dnode the scan happened to meet — its bonus
+/// points at an objset, and if that objset's data object is this one,
+/// the candidate belonged to that dataset. The GUID and creation
+/// transaction group are enough to match it against a timeline.
+fn name_from_datasets(
+    reader: &PoolReader<'_>,
+    datasets: &[zfs_read::carve::Hit],
+    candidate: &zfs_read::carve::Hit,
+) -> Option<(u64, u64)> {
+    let want = candidate.dnode.blkptr.iter().find(|b| !b.is_hole())?;
+    // A head dataset and its snapshots can all point at the same objset
+    // on a pool this small; the newest is the one worth reporting.
+    let mut found: Vec<(u64, u64)> = Vec::new();
+    for ds in datasets {
+        let Ok(phys) = zfs_ondisk::dsl::DslDatasetPhys::parse(&ds.dnode.bonus, Endian::Little)
+        else {
+            continue;
+        };
+        if phys.bp.is_hole() {
+            continue;
+        }
+        let Ok(block) = reader.read_block(&phys.bp, false) else {
+            continue;
+        };
+        let Ok(os) = zfs_ondisk::dmu::ObjsetPhys::parse(&block.data, phys.bp.endian) else {
+            continue;
+        };
+        let objs = zfs_read::dmu::DnodeArray::new(reader, os.meta_dnode, phys.bp.endian);
+        let Ok(data) = objs.get(zfs_read::dsl::ZVOL_OBJ) else {
+            continue;
+        };
+        let Some(theirs) = data.blkptr.iter().find(|b| !b.is_hole()) else {
+            continue;
+        };
+        if theirs.dva[0] == want.dva[0] {
+            found.push((phys.guid, phys.creation_txg));
+        }
+    }
+    found.sort_by_key(|(_, txg)| std::cmp::Reverse(*txg));
+    found.first().copied()
 }

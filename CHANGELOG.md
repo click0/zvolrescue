@@ -94,8 +94,25 @@ in CI; what was tried on real environments is logged in
   this decade stores it: a layout number, a packed run of values, and
   two ZAPs in the dataset saying what each value is and how long. A
   legacy `znode_phys_t` bonus is read as one when the magic says so.
+* **A carved candidate can be named (COMPANIONS C-11).** A dnode found
+  by scanning raw space carries no name: names live in the DSL directory
+  chain in the MOS, which is what a carve cannot reach. So the scan now
+  keeps every dataset dnode it meets, whatever the profile asked for,
+  and a candidate is reported with the GUID and creation transaction
+  group of the dataset whose objset still points at it — enough to match
+  against a `zvoltimeline` line.
+* **`zvolcarve scan --sample N` (C-19).** With no idea what to ask for,
+  ask the disk: the first N hits are reported as histograms of object
+  type, block size, tree depth and birth transaction group, so a profile
+  is picked from what is there rather than from memory.
 * Releases now carry `zvoltimeline`, `zvolreport`, `zvolcarve` and
   `zvolfiles` for the same three platforms as `zvolrescue`.
+
+### Fixed
+* A dnode with no block pointers but a bonus buffer is recognised as one.
+  Requiring at least one block made every DSL dataset and directory
+  invisible to a carve — objects that own no data and say everything in
+  their bonus — which is exactly the metadata that can name a candidate.
 
 ### Fixed
 * A dataset is no longer called a clone because its origin is non-zero.

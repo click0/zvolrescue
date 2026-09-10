@@ -256,10 +256,27 @@ disks find compressed metadata by scanning raw bytes. Reading logical
 space instead would fix that, and needs a per-block-size mapping to be
 worth its cost.
 
+C-11 and C-19 are implemented and covered in CI. A carved dnode carries
+no name — names live in the DSL directory chain in the MOS, which is what
+a carve cannot reach — so the scan keeps every dataset dnode it meets,
+whatever the profile asked for, and a candidate is named by the GUID and
+creation transaction group of the dataset whose objset still points at
+it. That is enough to match against a `zvoltimeline` line. `--sample N`
+reports what the first N hits actually look like — object types, block
+sizes, tree depths and birth transaction groups — so a profile can be
+picked from the disk rather than from memory.
+
+C-06 is not implemented, and what it would add is worth stating: the
+outcome it exists to report is already reported, because ranking reads
+every block a candidate claims and checks it against its own checksum, so
+a candidate whose blocks were rewritten scores low on its own. What the
+space map would add is the difference between *rewritten* and *freed but
+not yet rewritten* — data that verifies today and may not tomorrow — and
+a much cheaper way of noticing it than reading everything.
+
 Not implemented: overwrite detection against the space map (C-06),
-compressed metadata other than lz4 (C-10), dataset dnodes recorded so a
-candidate can be named (C-11), signature carving inside candidate data
-(C-12), and the auto-profile histograms (C-19).*
+compressed metadata other than lz4 (C-10), and signature carving inside
+candidate data (C-12).*
 
 ---
 

@@ -83,6 +83,15 @@ pub struct Candidate {
     pub profile_misses: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assessment: Option<AssessmentOut>,
+    /// The dataset whose objset still points at this object, when one of
+    /// them survived the scan (C-11). Not a name — the DSL directory
+    /// chain that holds names lives in the MOS, which is exactly what a
+    /// carve cannot reach — but a GUID that `zvoltimeline` can match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataset_guid: Option<String>,
+    /// Creation transaction group of that dataset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataset_creation_txg: Option<u64>,
     /// The dnode's own bytes, hex, so `list` and `dump` need not scan
     /// again. What they say is still only a claim: the extraction reads
     /// through the pool and checks every block against its checksum.
@@ -104,7 +113,38 @@ pub struct Index {
     pub rejected_by_profile: u64,
     pub bytes_read: u64,
     pub slots_examined: u64,
+    /// Dataset dnodes the scan met, which is what can name a candidate.
+    #[serde(default)]
+    pub datasets_met: usize,
+    /// What the disk actually holds, when `--sample` asked (C-19).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub histograms: Option<Histograms>,
     pub candidates: Vec<Candidate>,
+}
+
+/// What a sample of the hits looks like, so a profile can be picked from
+/// the disk rather than from memory (C-19).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Histograms {
+    /// Hits the histograms were built from.
+    pub sampled: usize,
+    /// Object types, most common first.
+    pub dnode_type: Vec<Bucket>,
+    /// Data block sizes.
+    pub volblocksize: Vec<Bucket>,
+    /// Tree depths.
+    pub levels: Vec<Bucket>,
+    /// Birth transaction groups, in ranges of a thousand.
+    pub txg: Vec<Bucket>,
+}
+
+/// One bar of a histogram.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Bucket {
+    /// What the bar is: a type name, a size, a depth, a TXG range.
+    pub value: String,
+    /// How many hits fell in it.
+    pub count: u64,
 }
 
 /// One reason, and how much it accounted for.

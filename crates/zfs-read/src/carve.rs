@@ -148,6 +148,11 @@ pub struct Scan {
     pub resume_at: u64,
     /// The scan stopped before the end of the range.
     pub stopped_early: bool,
+    /// Dataset dnodes met along the way, whatever the profile asked for
+    /// (C-11). A candidate whose DSL metadata survived somewhere on the
+    /// disk can be named from these, and a search for volumes would
+    /// otherwise throw them away.
+    pub datasets: Vec<Hit>,
 }
 
 /// Judge one candidate dnode and, if it survives, record it.
@@ -166,6 +171,19 @@ fn consider(
     if let Err(r) = plausible_dnode(&dnode) {
         scan.counts.bump(r);
         return;
+    }
+    // A dataset dnode is kept whatever was asked for: it is not a
+    // candidate, it is what lets one be named (C-11).
+    if dnode.object_type == zfs_ondisk::dmu::ot::DSL_DATASET && scan.datasets.len() < opts.max_hits
+    {
+        scan.datasets.push(Hit {
+            device,
+            offset,
+            slot,
+            found,
+            dnode: dnode.clone(),
+            misses: Vec::new(),
+        });
     }
     let misses = opts.profile.misses(&dnode);
     for m in &misses {

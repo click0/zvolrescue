@@ -57,6 +57,10 @@ enum Command {
         /// Stop after this many candidates.
         #[arg(long, value_name = "N", default_value_t = 100_000)]
         max_hits: usize,
+        /// Report what the first N hits look like instead of filtering,
+        /// so a profile can be picked from the disk (C-19).
+        #[arg(long, value_name = "N")]
+        sample: Option<usize>,
     },
     /// Show the candidates a previous scan found.
     List {
@@ -100,6 +104,7 @@ fn main() -> ExitCode {
             resume,
             full_assess,
             max_hits,
+            sample,
         } => scan::run(
             &cli.global,
             &pool,
@@ -110,6 +115,7 @@ fn main() -> ExitCode {
                 resume,
                 full_assess,
                 max_hits,
+                sample,
             },
         ),
         Command::List { dir } => list::run(&cli.global, &dir),
