@@ -46,6 +46,7 @@ fn main() {
     // ZR_KEY=raw:FILE|hex:..|passphrase:.. unlocks encrypted datasets.
     let material = std::env::var("ZR_KEY")
         .ok()
+        .filter(|spec| !spec.is_empty())
         .map(|spec| zfs_read::crypt::KeyMaterial::from_spec(&spec).expect("ZR_KEY"));
     let mut unwrapped: BTreeMap<u64, Option<zfs_read::crypt::DatasetKeys>> = BTreeMap::new();
 

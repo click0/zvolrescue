@@ -172,15 +172,22 @@ print(next(x["name"] for x in d["datasets"] if x.get("encryption") and not x["na
         fi
     fi
 
-    # 8. redundancy: the walk (with the key) must stay clean with the
-    #    first REDUNDANCY member files left out — parity reconstruction on
-    #    raidz/draid, the surviving side of a mirror.
+    # 8. redundancy: the walk (with the key, when the pool has one) must
+    #    stay clean with the first REDUNDANCY member files left out —
+    #    parity reconstruction on raidz/draid, the surviving side of a
+    #    mirror. ztest does not always create an encrypted dataset, so a
+    #    pool may have no key file and no keyed walk to compare against.
     if [ -x "$WALK" ] && [ "$redundancy" -gt 0 ]; then
         left="$(ls "$dir"/ztest.*a | tail -n +$((redundancy + 1))) $(ls "$dir"/ztest.*b 2>/dev/null || true)"
         omitted=$(ls "$dir"/ztest.*a | head -n "$redundancy" | xargs -n1 basename | tr '\n' ' ')
-        if ZR_KEY="raw:$dir/ztest.key" "$WALK" $left > "$dir/walk-missing.txt" 2> "$dir/walk-missing.err" \
+        if [ -f "$dir/ztest.key" ]; then
+            key="raw:$dir/ztest.key"; reference="$dir/walk-key.txt"
+        else
+            key=""; reference="$dir/walk.txt"
+        fi
+        if ZR_KEY="$key" "$WALK" $left > "$dir/walk-missing.txt" 2> "$dir/walk-missing.err" \
             && ! grep -q "ERROR\|dnode:\|no key\|decrypt" "$dir/walk-missing.txt" \
-            && [ "$(head -1 "$dir/walk-missing.txt")" = "$(head -1 "$dir/walk-key.txt")" ]; then
+            && [ "$(head -1 "$dir/walk-missing.txt")" = "$(head -1 "$reference")" ]; then
             echo "   redundancy: without $omitted the walk is identical ($(head -1 "$dir/walk-missing.txt"))"
         else
             echo "   redundancy: FAILED without $omitted"; head -12 "$dir/walk-missing.txt"; tail -5 "$dir/walk-missing.err"; fail=1
