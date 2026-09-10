@@ -177,7 +177,15 @@ the earlier ones are unavailable:
 | F-63 | C ◇ | **Pointer self-consistency, fully automatic** (the worst case, all rings gone and no hints): scan for structures recognisable without a base (dnode arrays — type ≤ 54, `indblkshift` 9..17, small `nlevels`/`nblkptr`, 512-byte period; indirect blocks; objset headers), collect their block pointers, and confirm a candidate base `B` by checking that the block at `B + 4 MiB + offset` has the pointer's checksum. Candidates step by `1 << ashift` (`ashift` itself follows from the smallest DVA offset step and `asize` granularity) inside the alignment window. A wrong base passes no check; the right one passes all. Gang headers (verifier `[vdev, offset, birth]`) and ZIL chains (`zc_next_blk` vs. the physical position of the next block) are extra anchors. |
 | F-64 | S ◇ | **Root without uberblocks**: once the base is known and no uberblock survives, find the MOS by scanning for `objset_phys` candidates of type META, rank them by the highest `birth` in their pointers and by how complete a MOS walk they yield, then continue through the DSL as usual. This is `zvolcarve` territory (F-41/F-42), not the atomic binary's. |
 
-**Implemented so far.** F-61 is in the tool: `scan` searches a member for
+**Implemented so far.** F-60's cheapest anchor is in: given an image of a
+whole disk, the GPT (primary or backup, 512- or 4096-byte sectors) or MBR
+is read, its ZFS partition types are marked, and every partition start is
+a base candidate — accepted only where a label checksum verifies, since a
+rewritten table is one of the ways a pool stops importing. The
+partition's *length* is used as well: the rear label pair sits against
+the vdev's own size, so a member read to the end of the disk rather than
+the end of its partition finds two of its four labels. That is F-06 as
+far as the atomic binary needs it. F-61 is in the tool: `scan` searches a member for
 uberblock magic, confirms each hit against its own embedded checksum and
 reports every base that verified, with the number of confirmations, the
 labels they came from, the TXG range and the vdev size a rear-label hit
