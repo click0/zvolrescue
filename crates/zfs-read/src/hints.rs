@@ -282,6 +282,114 @@ pub fn search_order(
     Ok(trials)
 }
 
+// ---------------------------------------------------------------------------
+// Handing the result on (F-67)
+// ---------------------------------------------------------------------------
+
+use zfs_ondisk::nvlist::{encode, NvList, Value};
+
+/// Build the `vdev_phys` configuration nvlist for one leaf of a layout.
+///
+/// This is the template a practitioner would otherwise edit by hand: what
+/// a label of that member would have said. `pool_guid`, `txg` and the
+/// pool name come from whatever survived — the uberblocks give the TXG,
+/// the operator gives the rest — and the vdev GUIDs are the synthetic ones
+/// the layout hands out, since the real ones are gone with the labels.
+pub fn label_nvlist(
+    layout: &LayoutHints,
+    top: usize,
+    leaf: usize,
+    txg: u64,
+    asize: Option<u64>,
+) -> NvList {
+    let assembly = layout.assemble();
+    let t = &assembly.tops[top];
+    let children: Vec<NvList> = t
+        .tree
+        .children
+        .iter()
+        .map(|c| {
+            encode::list(vec![
+                ("type", Value::String("disk".into())),
+                ("id", Value::Uint64(c.id)),
+                ("guid", Value::Uint64(c.guid)),
+                ("whole_disk", Value::Uint64(0)),
+                ("create_txg", Value::Uint64(4)),
+            ])
+        })
+        .collect();
+    let mut tree = vec![
+        ("type", Value::String(t.kind.clone())),
+        ("id", Value::Uint64(t.id)),
+        ("guid", Value::Uint64(t.guid)),
+        ("ashift", Value::Uint64(layout.ashift)),
+        ("create_txg", Value::Uint64(4)),
+    ];
+    if let Some(p) = t.nparity {
+        tree.push(("nparity", Value::Uint64(p)));
+    }
+    if let Some(a) = asize {
+        tree.push(("asize", Value::Uint64(a)));
+    }
+    if t.kind == "disk" {
+        // A single-device top is the leaf itself, not a wrapper.
+        tree.retain(|(k, _)| *k != "type");
+        tree.insert(0, ("type", Value::String("disk".into())));
+        tree.push(("guid", Value::Uint64(t.members[leaf].guid)));
+    } else {
+        tree.push(("children", Value::ListArray(children)));
+    }
+    encode::list(vec![
+        ("version", Value::Uint64(5000)),
+        (
+            "name",
+            Value::String(layout.name.clone().unwrap_or_else(|| "recovered".into())),
+        ),
+        ("state", Value::Uint64(0)),
+        ("txg", Value::Uint64(txg)),
+        ("pool_guid", Value::Uint64(layout.guid.unwrap_or(0))),
+        ("vdev_children", Value::Uint64(layout.tops.len() as u64)),
+        ("guid", Value::Uint64(assembly.tops[top].members[leaf].guid)),
+        ("top_guid", Value::Uint64(t.guid)),
+        ("vdev_tree", Value::List(encode::list(tree))),
+    ])
+}
+
+/// Render the front 128 KiB of a label carrying that configuration,
+/// sealed for label position `index` (0..=3) of a vdev of `psize` bytes.
+///
+/// Only the blank area, the boot header and the `vdev_phys` — everything
+/// before the uberblock ring. An uberblock cannot be forged, and the ones
+/// that survive are already on the disk, so an image that stopped short
+/// of the ring can be placed without destroying them. Nothing here writes
+/// anything: the caller decides what to do with the bytes, and never on
+/// the evidence (N-01).
+pub fn label_image(nv: &NvList, index: usize, psize: u64) -> Result<Vec<u8>, String> {
+    use zfs_ondisk::checksum::seal_label;
+    use zfs_ondisk::label::{
+        label_offsets, UBERBLOCK_RING_OFFSET, VDEV_PHYS_OFFSET, VDEV_PHYS_SIZE,
+    };
+
+    let packed = encode::pack(nv);
+    if packed.len() + 40 > VDEV_PHYS_SIZE as usize {
+        return Err(format!(
+            "the configuration is {} bytes, more than the {} a label holds",
+            packed.len(),
+            VDEV_PHYS_SIZE
+        ));
+    }
+    let offsets = label_offsets(psize)
+        .ok_or_else(|| format!("a vdev of {psize} bytes is too small to hold four labels"))?;
+    let offset = *offsets
+        .get(index)
+        .ok_or_else(|| format!("label index {index} is not 0..=3"))?;
+    let mut img = vec![0u8; UBERBLOCK_RING_OFFSET as usize];
+    let phys = &mut img[VDEV_PHYS_OFFSET as usize..(VDEV_PHYS_OFFSET + VDEV_PHYS_SIZE) as usize];
+    phys[..packed.len()].copy_from_slice(&packed);
+    seal_label(phys, offset + VDEV_PHYS_OFFSET);
+    Ok(img)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -417,112 +525,4 @@ mod tests {
         );
         assert_eq!(trials.iter().filter(|t| t.mismatches == 0).count(), 1);
     }
-}
-
-// ---------------------------------------------------------------------------
-// Handing the result on (F-67)
-// ---------------------------------------------------------------------------
-
-use zfs_ondisk::nvlist::{encode, NvList, Value};
-
-/// Build the `vdev_phys` configuration nvlist for one leaf of a layout.
-///
-/// This is the template a practitioner would otherwise edit by hand: what
-/// a label of that member would have said. `pool_guid`, `txg` and the
-/// pool name come from whatever survived — the uberblocks give the TXG,
-/// the operator gives the rest — and the vdev GUIDs are the synthetic ones
-/// the layout hands out, since the real ones are gone with the labels.
-pub fn label_nvlist(
-    layout: &LayoutHints,
-    top: usize,
-    leaf: usize,
-    txg: u64,
-    asize: Option<u64>,
-) -> NvList {
-    let assembly = layout.assemble();
-    let t = &assembly.tops[top];
-    let children: Vec<NvList> = t
-        .tree
-        .children
-        .iter()
-        .map(|c| {
-            encode::list(vec![
-                ("type", Value::String("disk".into())),
-                ("id", Value::Uint64(c.id)),
-                ("guid", Value::Uint64(c.guid)),
-                ("whole_disk", Value::Uint64(0)),
-                ("create_txg", Value::Uint64(4)),
-            ])
-        })
-        .collect();
-    let mut tree = vec![
-        ("type", Value::String(t.kind.clone())),
-        ("id", Value::Uint64(t.id)),
-        ("guid", Value::Uint64(t.guid)),
-        ("ashift", Value::Uint64(layout.ashift)),
-        ("create_txg", Value::Uint64(4)),
-    ];
-    if let Some(p) = t.nparity {
-        tree.push(("nparity", Value::Uint64(p)));
-    }
-    if let Some(a) = asize {
-        tree.push(("asize", Value::Uint64(a)));
-    }
-    if t.kind == "disk" {
-        // A single-device top is the leaf itself, not a wrapper.
-        tree.retain(|(k, _)| *k != "type");
-        tree.insert(0, ("type", Value::String("disk".into())));
-        tree.push(("guid", Value::Uint64(t.members[leaf].guid)));
-    } else {
-        tree.push(("children", Value::ListArray(children)));
-    }
-    encode::list(vec![
-        ("version", Value::Uint64(5000)),
-        (
-            "name",
-            Value::String(layout.name.clone().unwrap_or_else(|| "recovered".into())),
-        ),
-        ("state", Value::Uint64(0)),
-        ("txg", Value::Uint64(txg)),
-        ("pool_guid", Value::Uint64(layout.guid.unwrap_or(0))),
-        ("vdev_children", Value::Uint64(layout.tops.len() as u64)),
-        ("guid", Value::Uint64(assembly.tops[top].members[leaf].guid)),
-        ("top_guid", Value::Uint64(t.guid)),
-        ("vdev_tree", Value::List(encode::list(tree))),
-    ])
-}
-
-/// Render the front 128 KiB of a label carrying that configuration,
-/// sealed for label position `index` (0..=3) of a vdev of `psize` bytes.
-///
-/// Only the blank area, the boot header and the `vdev_phys` — everything
-/// before the uberblock ring. An uberblock cannot be forged, and the ones
-/// that survive are already on the disk, so an image that stopped short
-/// of the ring can be placed without destroying them. Nothing here writes
-/// anything: the caller decides what to do with the bytes, and never on
-/// the evidence (N-01).
-pub fn label_image(nv: &NvList, index: usize, psize: u64) -> Result<Vec<u8>, String> {
-    use zfs_ondisk::checksum::seal_label;
-    use zfs_ondisk::label::{
-        label_offsets, UBERBLOCK_RING_OFFSET, VDEV_PHYS_OFFSET, VDEV_PHYS_SIZE,
-    };
-
-    let packed = encode::pack(nv);
-    if packed.len() + 40 > VDEV_PHYS_SIZE as usize {
-        return Err(format!(
-            "the configuration is {} bytes, more than the {} a label holds",
-            packed.len(),
-            VDEV_PHYS_SIZE
-        ));
-    }
-    let offsets = label_offsets(psize)
-        .ok_or_else(|| format!("a vdev of {psize} bytes is too small to hold four labels"))?;
-    let offset = *offsets
-        .get(index)
-        .ok_or_else(|| format!("label index {index} is not 0..=3"))?;
-    let mut img = vec![0u8; UBERBLOCK_RING_OFFSET as usize];
-    let phys = &mut img[VDEV_PHYS_OFFSET as usize..(VDEV_PHYS_OFFSET + VDEV_PHYS_SIZE) as usize];
-    phys[..packed.len()].copy_from_slice(&packed);
-    seal_label(phys, offset + VDEV_PHYS_OFFSET);
-    Ok(img)
 }
