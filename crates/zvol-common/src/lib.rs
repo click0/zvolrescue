@@ -27,6 +27,9 @@ pub mod exit {
     pub const PARTIAL: u8 = 4;
     /// Refused: the operation would write to evidence.
     pub const REFUSED: u8 = 5;
+    /// A long scan was interrupted and left a resumable state file
+    /// (COMPANIONS §1.2).
+    pub const INTERRUPTED: u8 = 6;
     /// Command exists in the spec but is not implemented in this build.
     pub const NOT_IMPLEMENTED: u8 = 64;
 }

@@ -9,6 +9,7 @@ members = [
     "crates/zvolrescue",
     "crates/zvoltimeline",
     "crates/zvolreport",
+    "crates/zvolcarve",
 ]
 
 [workspace.package]

@@ -672,6 +672,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "zvolcarve"
+version = "0.2.0"
+dependencies = [
+ "clap",
+ "serde",
+ "serde_json",
+ "zfs-ondisk",
+ "zfs-read",
+ "zvol-common",
+ "zvolrescue-io",
+]
+
+[[package]]
 name = "zvolreport"
 version = "0.2.0"
 dependencies = [

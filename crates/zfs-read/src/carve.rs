@@ -322,13 +322,45 @@ pub fn scan_member(
                 off += step as usize;
             }
         }
-        at += opts.chunk as u64;
-        scan.resume_at = at.min(end);
         if scan.stopped_early {
+            // Stop where this chunk began. The rest of it was never
+            // looked at, and a resume that started after it would lose
+            // whatever is there; seeing a few candidates twice is the
+            // cheaper mistake.
+            scan.resume_at = at;
             break;
         }
+        at += opts.chunk as u64;
+        scan.resume_at = at.min(end);
     }
     Ok(scan)
+}
+
+/// A candidate's final rank, once its tree has been walked (C-05).
+///
+/// The profile decides the half of the range a candidate lands in, and
+/// the evidence decides where in that half. A candidate that matched
+/// everything asked for scores 0.5 or above and one that did not scores
+/// below 0.5 — always, whatever else it has going for it. That is what
+/// C-18 asks for: a hint that was wrong costs ranking rather than the
+/// recovery, and a hint that was right is not outvoted by a well-formed
+/// dnode of something else.
+///
+/// Within a half: the structure says whether the slot could be a dnode,
+/// the walk says whether what it points at is really there, and the
+/// second is much the stronger evidence — a slot can look perfect and
+/// address nothing — so the two weigh equally once a walk has happened.
+pub fn rank(hit: &Hit, assessed: Option<&Assessment>) -> f64 {
+    let base = match assessed {
+        None => score(hit),
+        Some(a) => 0.5 * score(hit) + 0.5 * a.agreement(),
+    };
+    let half = 0.5 * base.clamp(0.0, 1.0);
+    if hit.misses.is_empty() {
+        0.5 + half
+    } else {
+        half
+    }
 }
 
 /// How good a candidate looks, in 0.0..=1.0 (C-05).
@@ -340,11 +372,12 @@ pub fn scan_member(
 ///   only resembles a dnode;
 /// * whether the births are consistent — a real tree's children are no
 ///   younger than their parents;
-/// * whether the profile matched, when there was one — a hint that was
-///   wrong should cost ranking, not the recovery (C-18).
+/// * whether the shape is possible at all — a single-level tree cannot
+///   hold more blocks than the dnode has pointers.
 ///
-/// The extraction itself trusts none of this: every block `dump` reads
-/// is verified by its own checksum.
+/// Whether the profile matched is not weighed here; [`rank`] does that,
+/// and decisively. The extraction itself trusts none of it: every block
+/// `dump` reads is verified by its own checksum.
 pub fn score(hit: &Hit) -> f64 {
     let d = &hit.dnode;
     let live: Vec<&blkptr::BlkPtr> = d.blkptr.iter().filter(|b| !b.is_hole()).collect();
@@ -387,8 +420,7 @@ pub fn score(hit: &Hit) -> f64 {
             0.0
         }
     };
-    let profile = if hit.misses.is_empty() { 1.0 } else { 0.5 };
-    (0.4 * addressable + 0.2 * consistent + 0.2 * shape + 0.2 * profile).clamp(0.0, 1.0)
+    (0.5 * addressable + 0.25 * consistent + 0.25 * shape).clamp(0.0, 1.0)
 }
 
 /// What walking a candidate's tree found (C-04).
@@ -583,11 +615,15 @@ mod tests {
         assert!(kept
             .iter()
             .all(|h| h.misses.contains(&Reject::ProfileVolBlockSize)));
-        // And it ranks below what a right profile would have matched.
+        // And it ranks below what a right profile would have matched —
+        // decisively: no amount of structural quality lifts a candidate
+        // that failed the profile above one that passed it.
         let hit = kept[0];
         let mut matched = hit.clone();
         matched.misses.clear();
-        assert!(score(&matched) > score(hit));
+        assert!(rank(&matched, None) >= 0.5);
+        assert!(rank(hit, None) < 0.5);
+        assert!(rank(&matched, None) > rank(hit, None));
     }
 
     /// C-04: the tree of the carved volume is really there — every block
