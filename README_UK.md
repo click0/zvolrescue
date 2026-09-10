@@ -50,6 +50,7 @@ carving, звіти та файлове відновлення — *супутн
 * **Без ядрового ZFS** — чистий userland; працює там, де `zfs.ko` не завантажено або пул не імпортується.
 * **Будь-який стан пулу** — здоровий, degraded, знищений, пошкоджені мітки, відсутні vdev (поки дозволяє надлишковість).
 * **Будь-який TXG** — вибір явно, за часом або «останній, де цей dataset ще був».
+* **Мітки знищені** — коли перезаписані всі `vdev_phys`, нульову точку vdev усе одно фіксує один уцілілий уберблок: верифікатором його контрольної суми є власний зсув, тож `scan` відновлює базу (і колишній розмір vdev) навіть після того, як розділ створили в іншому місці.
 * **Повне покриття on-disk можливостей** — реконструкція stripe/mirror/RAIDZ1-3/dRAID; `lz4`, `zstd`, `gzip`, `lzjb`, `zle`; `fletcher`, `sha256/512`, `skein`, `edonr`, `blake3`; embedded та gang-блоки; шифровані dataset-и з наданим ключем.
 * **Sparse-aware витягання** zvol у сирі образи з поблочною перевіркою checksum, продовженням та режимом `--strict`.
 * **Машиночитний вивід** — `-f json` усюди, append-only лог evidence, SHA-256 кожного входу й виходу.
@@ -58,7 +59,7 @@ carving, звіти та файлове відновлення — *супутн
 ## Запланований CLI
 
 ```
-zvolrescue scan  DEV...                                    що тут є: мітки, пул, вікно TXG, топологія
+zvolrescue scan  DEV... [--zero-point] [--psize BYTES]      що тут є: мітки, пул, вікно TXG, топологія
 zvolrescue list  POOLSPEC [--txg N|--before TS] [--diff TXG2] [-r]
                                                            dataset-и / zvol / знімки на TXG
 zvolrescue dump  DATASET POOLSPEC -o OUT.img [--txg N] [--strict] [--key KEYSPEC] [--resume] [-r]
@@ -68,6 +69,9 @@ zvolrescue dump  DATASET POOLSPEC -o OUT.img [--txg N] [--strict] [--key KEYSPEC
 ```sh
 # Які TXG ще доступні на цих дисках?
 zvolrescue scan -v /dev/ada0p3 /dev/ada1p3
+
+# Усі чотири мітки перезаписані: де насправді починається цей vdev?
+zvolrescue scan --zero-point /dev/ada0p3
 
 # Коли зник pool/vm/disk0 і на якому TXG він ще був?
 zvolrescue list /dev/ada0p3 /dev/ada1p3 -r | grep disk0

@@ -43,6 +43,31 @@ jobs:
           cmp /tmp/disk0.img /tmp/healed.img
           if ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/bad.img -o /tmp/partial.img --strict; then echo "strict must fail"; exit 1; else test $? = 4; fi
           if ./target/release/zvolrescue dump tank/vm/disk0 /tmp/fx/member0.img -o /tmp/fx/member0.img; then echo "must refuse"; exit 1; else test $? = 5; fi
+      - name: Zero point of a member whose labels are gone (SPEC F-61)
+        run: |
+          # Erase all four vdev_phys areas, leaving only the uberblock rings.
+          python3 - <<'EOF'
+          import os, shutil
+          LABEL, PHYS_OFF, PHYS = 256*1024, 16*1024, 112*1024
+          shutil.copy("/tmp/fx/member0.img", "/tmp/nolabel.img")
+          size = os.path.getsize("/tmp/nolabel.img")
+          aligned = size & ~(LABEL-1)
+          with open("/tmp/nolabel.img", "r+b") as f:
+              for off in (0, LABEL, aligned-2*LABEL, aligned-LABEL):
+                  f.seek(off + PHYS_OFF); f.write(b"\0" * PHYS)
+          # The same member 1 MiB further along: a partition that moved.
+          data = open("/tmp/nolabel.img", "rb").read()
+          open("/tmp/moved.img", "wb").write(b"\x5a" * (1 << 20) + data)
+          EOF
+          ./target/release/zvolrescue scan /tmp/nolabel.img /tmp/moved.img
+          ./target/release/zvolrescue -f json scan /tmp/nolabel.img | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"][0]; assert d.get("config") is None; z=d["zero_point"][0]; assert z["base"] == 0, z; assert z["anchors"] >= 4, z; assert z["labels"] == ["L0","L1","L2","L3"], z'
+          ./target/release/zvolrescue -f json scan /tmp/moved.img | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"][0]; z=d["zero_point"][0]; assert z["base"] == 1048576, z; assert z["psize"] == 67108864, z'
+          # An intact member is not searched unless asked, and then agrees.
+          ./target/release/zvolrescue -f json scan /tmp/fx/member0.img | python3 -c 'import json,sys; assert "zero_point" not in json.load(sys.stdin)["devices"][0]'
+          ./target/release/zvolrescue -f json scan --zero-point /tmp/fx/member0.img | python3 -c 'import json,sys; z=json.load(sys.stdin)["devices"][0]["zero_point"]; assert z[0]["base"] == 0, z'
+          # Nothing to anchor to: no candidate is invented.
+          head -c 33554432 /dev/zero > /tmp/blank.img
+          ./target/release/zvolrescue -f json scan --zero-point /tmp/blank.img | python3 -c 'import json,sys; assert "zero_point" not in json.load(sys.stdin)["devices"][0]'
       - name: Bulk extraction and resume
         run: |
           ./target/release/zvolrescue -q dump -r tank /tmp/fx/member0.img /tmp/fx/member1.img -o /tmp/bulk --txg 4816229

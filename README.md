@@ -49,6 +49,7 @@ the libraries — they never become modes of the main binary.
 * **No kernel ZFS needed** — pure userland; runs where `zfs.ko` is not loaded or the pool cannot be imported.
 * **Any pool state** — healthy, degraded, destroyed, damaged labels, missing vdevs (as long as redundancy allows).
 * **Any TXG** — pick a transaction group explicitly, by timestamp, or "last one that still had this dataset".
+* **Labels gone** — when every `vdev_phys` has been overwritten, one surviving uberblock still fixes the vdev's zero point: its checksum verifier is its own offset, so `scan` recovers the base (and the old vdev size) even after the partition was re-created somewhere else.
 * **Full on-disk feature coverage** — stripe/mirror/RAIDZ1-3/dRAID reconstruction; `lz4`, `zstd`, `gzip`, `lzjb`, `zle`; `fletcher`, `sha256/512`, `skein`, `edonr`, `blake3`; embedded and gang blocks; encrypted datasets with a supplied key.
 * **Sparse-aware extraction** of zvols to raw images, with per-block checksum verification, resume, and `--strict` mode.
 * **Machine-readable output** — `-f json` everywhere, append-only evidence log, SHA-256 of every input and output.
@@ -57,7 +58,7 @@ the libraries — they never become modes of the main binary.
 ## Planned CLI
 
 ```
-zvolrescue scan  DEV...                                    what is here: labels, pool, TXG window, topology
+zvolrescue scan  DEV... [--zero-point] [--psize BYTES]      what is here: labels, pool, TXG window, topology
 zvolrescue list  POOLSPEC [--txg N|--before TS] [--diff TXG2] [-r]
                                                            datasets / zvols / snapshots at a TXG
 zvolrescue dump  DATASET POOLSPEC -o OUT.img [--txg N] [--strict] [--key KEYSPEC] [--resume] [-r]
@@ -67,6 +68,9 @@ zvolrescue dump  DATASET POOLSPEC -o OUT.img [--txg N] [--strict] [--key KEYSPEC
 ```sh
 # Which TXGs are still available on these disks?
 zvolrescue scan -v /dev/ada0p3 /dev/ada1p3
+
+# All four labels overwritten: where does this vdev actually start?
+zvolrescue scan --zero-point /dev/ada0p3
 
 # When did pool/vm/disk0 disappear, and which TXG still had it?
 zvolrescue list /dev/ada0p3 /dev/ada1p3 -r | grep disk0

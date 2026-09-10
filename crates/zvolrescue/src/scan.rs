@@ -14,6 +14,7 @@ use zfs_ondisk::label::{pool_state_name, LabelConfig};
 use zfs_ondisk::nvlist::{NvList, Value};
 use zfs_read::pool::{assemble, PoolAssembly};
 use zfs_read::vdev::{scan_device, DeviceScan, LabelScan};
+use zfs_read::zeropoint::{find as find_zero_point, Search};
 use zvolrescue_io::{BlockSource, FileSource};
 
 use crate::timefmt::iso8601;
@@ -96,6 +97,40 @@ struct DeviceOut {
     newest_txg: Option<u64>,
     /// Lowest verified TXG still present — how far back a rollback could reach.
     oldest_txg: Option<u64>,
+    /// Zero points confirmed from uberblock checksums, best first. Filled
+    /// in when the labels cannot say where the vdev starts, or on request.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    zero_point: Vec<ZeroPointOut>,
+}
+
+/// How `scan` should look for a vdev's zero point (SPEC F-61).
+#[derive(Debug, Default, Clone)]
+pub struct ZeroPointOpts {
+    /// Search every member, not only those whose labels are unusable.
+    pub always: bool,
+    /// Search the whole member instead of its first and last 64 MiB.
+    pub whole: bool,
+    /// Physical sizes to assume for the vdev when testing rear labels.
+    pub psize_hints: Vec<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct ZeroPointOut {
+    /// Confirmed vdev base: subtract it from a physical offset.
+    base: u64,
+    /// Number of uberblocks whose checksum verified for this base.
+    anchors: usize,
+    /// Labels the anchors came from, e.g. `["L0", "L1"]`.
+    labels: Vec<String>,
+    /// TXG range the anchors cover.
+    oldest_txg: u64,
+    newest_txg: u64,
+    /// Vdev size implied by a rear-label anchor, when one was found.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    psize: Option<u64>,
+    /// Logical birth of the root pointer in the newest anchor: the MOS
+    /// this base would be read through.
+    rootbp_birth: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -286,6 +321,7 @@ fn device_out(
         labels: Vec::new(),
         newest_txg: None,
         oldest_txg: None,
+        zero_point: Vec::new(),
     };
     if let Some(s) = scan {
         out.best_label = s.best_label;
@@ -439,6 +475,22 @@ fn print_text(out: &ScanOut, verbose: u8) {
             (Some(lo), Some(hi)) => println!("  verified txg window: {lo}..={hi}"),
             _ => println!("  no verified ZFS uberblocks found"),
         }
+        for z in &d.zero_point {
+            println!(
+                "  zero point: base {} confirmed by {} uberblock checksum(s) in {}, txg {}..={}, vdev size {}, root pointer born txg {}",
+                z.base,
+                z.anchors,
+                z.labels.join(","),
+                z.oldest_txg,
+                z.newest_txg,
+                z.psize
+                    .map_or("unknown".to_string(), |p| p.to_string()),
+                z.rootbp_birth,
+            );
+        }
+        if d.config.is_none() && d.zero_point.is_empty() && d.error.is_none() {
+            println!("  zero point: no uberblock anchor found either");
+        }
         if let Some(nv) = &d.nvlist {
             println!("  label nvlist (L{}):", d.best_label.unwrap_or(0));
             let pretty = serde_json::to_string_pretty(nv).expect("serialisable");
@@ -515,19 +567,74 @@ impl TopOut {
     }
 }
 
+/// Look for the vdev base of one member with [`zfs_read::zeropoint`].
+fn zero_points(src: &FileSource, opts: &ZeroPointOpts) -> Vec<ZeroPointOut> {
+    let search = Search {
+        windows: if opts.whole {
+            vec![(0, src.size())]
+        } else {
+            Vec::new()
+        },
+        psize_hints: opts.psize_hints.clone(),
+        ..Search::default()
+    };
+    let found = match find_zero_point(src, &search) {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
+    };
+    found
+        .iter()
+        .map(|z| {
+            let mut labels: Vec<String> = z
+                .anchors
+                .iter()
+                .map(|a| match a.label {
+                    Some(l) => format!("L{l}"),
+                    None => "L?".to_string(),
+                })
+                .collect();
+            labels.sort();
+            labels.dedup();
+            ZeroPointOut {
+                base: z.base,
+                anchors: z.anchors.len(),
+                labels,
+                oldest_txg: z.anchors.iter().map(|a| a.ub.txg).min().unwrap_or(0),
+                newest_txg: z.newest_txg(),
+                psize: z.implied_psize(),
+                rootbp_birth: z.best().map(|a| a.ub.rootbp_birth()).unwrap_or(0),
+            }
+        })
+        .collect()
+}
+
 /// Run `scan`.
-pub fn run(g: &Global, devices: &[PathBuf]) -> u8 {
+pub fn run(g: &Global, devices: &[PathBuf], zp: &ZeroPointOpts) -> u8 {
     let mut scans: Vec<Option<DeviceScan>> = Vec::with_capacity(devices.len());
     let mut outs: Vec<DeviceOut> = Vec::with_capacity(devices.len());
     for path in devices {
-        let (scan, size, error) = match FileSource::open(path) {
-            Ok(src) => match scan_device(&src) {
-                Ok(s) => (Some(s), src.size(), None),
-                Err(e) => (None, src.size(), Some(e.to_string())),
-            },
-            Err(e) => (None, 0, Some(e.to_string())),
+        let (scan, size, error, zero_point) = match FileSource::open(path) {
+            Ok(src) => {
+                let (scan, error) = match scan_device(&src) {
+                    Ok(s) => (Some(s), None),
+                    Err(e) => (None, Some(e.to_string())),
+                };
+                // A member whose four label configurations are all
+                // unusable still has its uberblock rings, and one slot
+                // fixes the base (SPEC F-61).
+                let unusable = scan.as_ref().is_none_or(|s| s.config().is_none());
+                let zero_point = if zp.always || unusable {
+                    zero_points(&src, zp)
+                } else {
+                    Vec::new()
+                };
+                (scan, src.size(), error, zero_point)
+            }
+            Err(e) => (None, 0, Some(e.to_string()), Vec::new()),
         };
-        outs.push(device_out(path, &scan, size, error, g.verbose));
+        let mut out = device_out(path, &scan, size, error, g.verbose);
+        out.zero_point = zero_point;
+        outs.push(out);
         scans.push(scan);
     }
     let pools: Vec<PoolOut> = assemble(&scans)

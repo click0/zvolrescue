@@ -6,6 +6,21 @@ validated against OpenZFS **userland** pools (`ztest` + `zdb`, no kernel)
 in CI; what was tried on real environments is logged in
 [docs/REALWORLD-TESTS.md](docs/REALWORLD-TESTS.md).
 
+## Unreleased
+
+### Added
+* **Zero-point recovery from uberblocks (SPEC F-61).** A member whose four
+  `vdev_phys` areas have been overwritten no longer scans as a blank disk:
+  every uberblock is a self-checksumming block whose verifier is its own
+  vdev-relative offset, so one surviving ring slot fixes where the vdev
+  starts. `scan` runs the search by itself when no label configuration is
+  readable, and on request with `--zero-point` (`--zero-point-whole` to
+  search the whole member, `--psize BYTES` to name the vdev's size for the
+  rear label pair). It reports the base, how many checksums confirmed it,
+  which labels they came from, the TXG range and the vdev size the rear
+  labels imply. Verified against a real ztest member with all four
+  configurations zeroed, before and after moving it 1 MiB.
+
 ## v0.1.0-alpha.1 — 2026-09-08
 
 First intermediate release: the atomic utility (`scan`, `list`, `dump`)

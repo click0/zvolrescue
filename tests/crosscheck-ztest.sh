@@ -193,6 +193,57 @@ print(next(x["name"] for x in d["datasets"] if x.get("encryption") and not x["na
             echo "   redundancy: FAILED without $omitted"; head -12 "$dir/walk-missing.txt"; tail -5 "$dir/walk-missing.err"; fail=1
         fi
     fi
+
+    # 9. zero point: with every vdev_phys erased, the base must still be
+    #    recovered from an uberblock checksum, and it must survive the
+    #    member being moved (a rewritten partition table).
+    # Pick a member that is really part of the committed pool: ztest
+    # leaves behind devices it was attaching, whose labels carry txg 0 and
+    # an uberblock template with no embedded checksum at all — nothing for
+    # an anchor to verify, and the tool must not invent one.
+    anchored=$(for m in $members; do
+        if [ "$($ZR -f json scan "$m" | python3 -c 'import json,sys; print(json.load(sys.stdin)["devices"][0]["newest_txg"])')" != "None" ]; then
+            echo "$m"; break
+        fi
+    done)
+    [ -n "$anchored" ] || anchored=$(echo "$members" | head -1)
+    cp "$anchored" "$dir/nolabel.img"
+    python3 - "$dir/nolabel.img" "$dir/moved.img" <<'EOF'
+import os, sys
+LABEL, PHYS_OFF, PHYS = 256*1024, 16*1024, 112*1024
+src, moved = sys.argv[1], sys.argv[2]
+size = os.path.getsize(src)
+aligned = size & ~(LABEL - 1)
+with open(src, "r+b") as f:
+    for off in (0, LABEL, aligned - 2*LABEL, aligned - LABEL):
+        f.seek(off + PHYS_OFF); f.write(b"\0" * PHYS)
+with open(src, "rb") as f, open(moved, "wb") as g:
+    g.write(b"\x5a" * (1 << 20))
+    while True:
+        b = f.read(1 << 20)
+        if not b:
+            break
+        g.write(b)
+EOF
+    zp=$($ZR -f json scan "$dir/nolabel.img" "$dir/moved.img" | python3 -c '
+import json,sys
+d = json.load(sys.stdin)["devices"]
+for x in d:
+    z = x.get("zero_point") or [{}]
+    print(x["path"], z[0].get("base"), z[0].get("anchors"), z[0].get("psize"))')
+    plain=$(echo "$zp" | head -1); shifted=$(echo "$zp" | tail -1)
+    # The rear labels sit at align_down(size, 256 KiB), so that is the
+    # size an anchor there implies.
+    want_size=$(( $(stat -c %s "$anchored") / 262144 * 262144 ))
+    if [ "$(echo "$plain" | awk '{print $2}')" = "0" ] \
+        && [ "$(echo "$shifted" | awk '{print $2}')" = "1048576" ] \
+        && [ "$(echo "$shifted" | awk '{print $4}')" = "$want_size" ]; then
+        echo "   zero point: base recovered from uberblocks without any vdev_phys ($(echo "$plain" | awk '{print $3}') anchors), and after a 1 MiB shift"
+    else
+        echo "   zero point: FAILED"; echo "$zp"; fail=1
+    fi
+    rm -f "$dir/nolabel.img" "$dir/moved.img"
+
 }
 
 run_pool mirror 1 -K raidz -m 2 -r 1 -R 0

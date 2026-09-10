@@ -87,6 +87,18 @@ enum Cmd {
         /// Devices, partitions or image files.
         #[arg(required = true, value_name = "DEV")]
         devices: Vec<PathBuf>,
+        /// Search for the vdev's zero point even when its labels are
+        /// readable. The search runs by itself on a member whose four
+        /// label configurations are all unusable.
+        #[arg(long)]
+        zero_point: bool,
+        /// Search the whole member, not just its first and last 64 MiB.
+        #[arg(long)]
+        zero_point_whole: bool,
+        /// Physical size to assume for the vdev when testing the rear
+        /// label pair (repeatable); the front pair needs no hypothesis.
+        #[arg(long, value_name = "BYTES")]
+        psize: Vec<u64>,
     },
     /// List datasets, zvols and snapshots at a TXG.
     List {
@@ -185,7 +197,20 @@ fn main() -> ExitCode {
         );
     }
     let code = match cli.cmd {
-        Cmd::Scan { devices } => scan::run(&cli.global, &devices),
+        Cmd::Scan {
+            devices,
+            zero_point,
+            zero_point_whole,
+            psize,
+        } => scan::run(
+            &cli.global,
+            &devices,
+            &scan::ZeroPointOpts {
+                always: zero_point || zero_point_whole || !psize.is_empty(),
+                whole: zero_point_whole,
+                psize_hints: psize,
+            },
+        ),
         Cmd::List {
             pool,
             txg,
