@@ -102,6 +102,14 @@ jobs:
           ./target/release/zvolrescue -f json list -r /tmp/hz/nolabel0.img /tmp/hz/nolabel1.img /tmp/hz/nolabel2.img /tmp/hz/nolabel3.img --hints /tmp/hz/hints.json --txg 4816229 | python3 -c 'import json,sys; d=json.load(sys.stdin); names=[x["name"] for x in d["datasets"]]; assert names == ["tank","tank/vm","tank/vm/disk0","tank/vm/disk0@before"], names'
           ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/hz/nolabel0.img /tmp/hz/nolabel1.img /tmp/hz/nolabel2.img /tmp/hz/nolabel3.img --hints /tmp/hz/hints.json --txg 4816229 -o /tmp/hz/out.img
           cmp /tmp/disk0.img /tmp/hz/out.img
+          # The order in a layout is what a DVA addresses, and a wrong one
+          # costs redundancy rather than correctness: --search-order finds
+          # the order no block has to be repaired around (SPEC F-66).
+          python3 -c 'import json; d=json.load(open("/tmp/hz/hints.json")); m=d["tops"][0]["members"]; m[1],m[2]=m[2],m[1]; json.dump(d, open("/tmp/hz/swapped.json","w"))'
+          ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/hz/nolabel0.img /tmp/hz/nolabel1.img /tmp/hz/nolabel2.img /tmp/hz/nolabel3.img --hints /tmp/hz/swapped.json --search-order --txg 4816229 -o /tmp/hz/searched.img 2>/tmp/hz/search.err
+          cmp /tmp/disk0.img /tmp/hz/searched.img
+          grep -q "best has 0 checksum mismatch" /tmp/hz/search.err
+          grep -q "just as good" /tmp/hz/search.err && { echo "the right order must be unique here"; exit 1; } || true
           # A layout that names a member which was not given is a usage error.
           python3 -c 'import json; d=json.load(open("/tmp/hz/hints.json")); d["tops"][0]["members"][0]="/tmp/nowhere.img"; json.dump(d, open("/tmp/hz/bad.json","w"))'
           if ./target/release/zvolrescue -q list /tmp/hz/nolabel0.img /tmp/hz/nolabel1.img /tmp/hz/nolabel2.img /tmp/hz/nolabel3.img --hints /tmp/hz/bad.json; then exit 1; else test $? = 1; fi

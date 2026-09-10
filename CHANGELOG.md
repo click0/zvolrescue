@@ -60,6 +60,15 @@ in CI; what was tried on real environments is logged in
   volume bit-exact. A member with no configuration now also yields a scan
   built from the anchors alone, so the TXG history and root pointers are
   available without any label at all.
+* **`--search-order`: the order the checksums accept (SPEC F-66).** What a
+  layout leaves open is enumerated rather than guessed. Member order
+  cannot be settled by "did it read": a raidz2 with two columns swapped
+  still returns the right bytes, reconstructed around the two that no
+  longer verify. It is settled by how much had to be repaired — read
+  through the right order a healthy pool produces no checksum mismatch at
+  all — so every ordering is tried and ranked by mismatches. Ties are
+  reported rather than hidden; a vdev too wide to enumerate (more than 7
+  members) says so instead of running for hours.
 
 ## v0.1.0-alpha.1 — 2026-09-08
 

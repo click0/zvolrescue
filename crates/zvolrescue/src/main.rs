@@ -166,6 +166,11 @@ pub struct PoolSpec {
     /// through it is still verified by its checksum.
     #[arg(long, value_name = "FILE")]
     pub hints: Option<PathBuf>,
+    /// Try every member order the layout leaves open and keep the one the
+    /// checksums accept (SPEC F-66). Only for raidz/draid, where order is
+    /// what a DVA addresses.
+    #[arg(long, requires = "hints")]
+    pub search_order: bool,
     /// Select a pool by GUID when several are found.
     #[arg(long, value_name = "GUID")]
     pub pool_guid: Option<String>,

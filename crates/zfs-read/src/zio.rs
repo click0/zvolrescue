@@ -180,6 +180,10 @@ pub struct PoolReader<'a> {
     /// How many leaf reads each device has served. Used when deciding
     /// whether a member really contributed to what was read (F-62).
     reads: RefCell<Vec<u64>>,
+    /// How many block checksums have failed on the data as first read.
+    /// Zero on a healthy pool read through the right topology; a wrong
+    /// member order shows up here before anything else does (F-66).
+    mismatches: Cell<u64>,
     /// Pool checksum salt once the MOS object directory has been read.
     salt: Cell<Option<Salt>>,
     /// Keys of the encrypted dataset currently being read, if any.
@@ -282,6 +286,7 @@ impl<'a> PoolReader<'a> {
             devices,
             bases,
             reads,
+            mismatches: Cell::new(0),
             tops,
             salt: Cell::new(None),
             keys: RefCell::new(None),
@@ -308,6 +313,11 @@ impl<'a> PoolReader<'a> {
     /// How many leaf reads device `index` has served.
     pub fn reads_of(&self, index: usize) -> u64 {
         self.reads.borrow().get(index).copied().unwrap_or(0)
+    }
+
+    /// How many checksums have failed on data as first read.
+    pub fn mismatches(&self) -> u64 {
+        self.mismatches.get()
     }
 
     /// Record the pool checksum salt (from `org.illumos:checksum_salt` in
@@ -337,7 +347,11 @@ impl<'a> PoolReader<'a> {
     fn verify(&self, bp: &BlkPtr, raw: &[u8]) -> Verify {
         let salt = self.salt.get();
         let crypt = bp.uses_crypt() && bp.object_type != ot::OBJSET;
-        verify_block(bp.checksum, raw, bp.endian, &bp.cksum, salt.as_ref(), crypt)
+        let v = verify_block(bp.checksum, raw, bp.endian, &bp.cksum, salt.as_ref(), crypt);
+        if v == Verify::Mismatch {
+            self.mismatches.set(self.mismatches.get() + 1);
+        }
+        v
     }
 
     /// Read `size` bytes at vdev-relative `offset` from a leaf device.

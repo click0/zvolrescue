@@ -6,6 +6,7 @@ use serde::Serialize;
 use zfs_ondisk::dmu::ObjsetType;
 use zfs_read::bind::{bind_by_reading, Verdict};
 use zfs_read::dsl::{open_mos, walk, Dataset, DatasetTree};
+use zfs_read::hints::{search_order, LayoutHints};
 use zfs_read::pool::{assemble, select_uberblock, uberblock_candidates, PoolAssembly, TxgSelect};
 use zfs_read::vdev::DeviceScan;
 use zfs_read::zeropoint::scan_with_recovered_base;
@@ -249,6 +250,53 @@ impl Members {
     }
 }
 
+/// Try the orders a layout leaves open and keep the one the checksums
+/// accept (SPEC F-66).
+fn search_layout(
+    layout: &LayoutHints,
+    scans: &[Option<DeviceScan>],
+    devices: &[Option<&dyn BlockSource>],
+    bases: &[u64],
+) -> Result<LayoutHints, u8> {
+    let mut out = layout.clone();
+    for (top, hint) in layout.tops.iter().enumerate() {
+        if !matches!(hint.kind.as_str(), "raidz" | "draid") || hint.members.len() < 2 {
+            continue;
+        }
+        let trials = search_order(&out, top, scans, devices, bases).map_err(|e| {
+            eprintln!("zvolrescue: --search-order: {e}");
+            exit::USAGE
+        })?;
+        match trials.split_first() {
+            None => {
+                eprintln!(
+                    "zvolrescue: --search-order: no order of {} members reads this pool at all",
+                    hint.members.len()
+                );
+                return Err(exit::UNRECOVERABLE);
+            }
+            Some((best, rest)) => {
+                let ties = rest
+                    .iter()
+                    .filter(|t| t.mismatches == best.mismatches)
+                    .count();
+                eprintln!(
+                    "zvolrescue: --search-order: {} order(s) read, best has {} checksum mismatch(es){}",
+                    trials.len(),
+                    best.mismatches,
+                    if ties > 0 {
+                        format!(" — {ties} other order(s) are just as good, taking the first")
+                    } else {
+                        String::new()
+                    }
+                );
+                out = best.layout.clone();
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Apply every `--assume-member`: put a member whose labels are gone into
 /// a leaf slot the configuration leaves vacant (SPEC F-62).
 fn bind_assumed(
@@ -430,7 +478,15 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
                     bases[i] = *b;
                 }
             }
-            let pool = hints.layout.assemble();
+            let mut layout = hints.layout;
+            if spec.search_order {
+                let devices: Vec<Option<&dyn BlockSource>> = sources
+                    .iter()
+                    .map(|s| s.as_ref().map(|s| s as &dyn BlockSource))
+                    .collect();
+                layout = search_layout(&layout, &scans, &devices, &bases)?;
+            }
+            let pool = layout.assemble();
             eprintln!(
                 "zvolrescue: reading through the layout in {}: {}",
                 file.display(),
