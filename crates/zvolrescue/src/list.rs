@@ -249,6 +249,61 @@ impl Members {
     }
 }
 
+/// Apply every `--assume-member`: put a member whose labels are gone into
+/// a leaf slot the configuration leaves vacant (SPEC F-62).
+fn bind_assumed(spec: &PoolSpec, paths: &[PathBuf], pools: &mut [PoolAssembly]) -> Result<(), u8> {
+    let assumed = spec.assumed().map_err(|e| {
+        eprintln!("zvolrescue: {e}");
+        exit::USAGE
+    })?;
+    for (path, guid) in assumed {
+        let Some(device) = paths.iter().position(|p| *p == path) else {
+            eprintln!(
+                "zvolrescue: --assume-member {}: not among the members given",
+                path.display()
+            );
+            return Err(exit::USAGE);
+        };
+        // With several pools the assertion applies to the one that is
+        // short of a leaf; refuse when more than one could take it.
+        let takers: Vec<usize> = pools
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| !p.vacant_leaves().is_empty())
+            .map(|(i, _)| i)
+            .collect();
+        let pool = match takers.len() {
+            1 => takers[0],
+            0 => {
+                eprintln!(
+                    "zvolrescue: --assume-member {}: no scanned pool is missing a member",
+                    path.display()
+                );
+                return Err(exit::USAGE);
+            }
+            n => {
+                eprintln!(
+                    "zvolrescue: --assume-member {}: {n} pools are missing members; scan them separately",
+                    path.display()
+                );
+                return Err(exit::USAGE);
+            }
+        };
+        match pools[pool].bind_member(device, guid) {
+            Ok(g) => eprintln!(
+                "zvolrescue: {}: assumed to be leaf {g:#018x} of pool {:?}; its blocks are still verified by checksum",
+                path.display(),
+                pools[pool].name
+            ),
+            Err(e) => {
+                eprintln!("zvolrescue: --assume-member {}: {e}", path.display());
+                return Err(exit::USAGE);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Open every member named in `spec`, scan it, and assemble pools.
 pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
     let paths = spec.members().map_err(|e| {
@@ -284,7 +339,8 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
     if scans.iter().all(|s| s.is_none()) {
         return Err(exit::EVIDENCE);
     }
-    let pools = assemble(&scans);
+    let mut pools = assemble(&scans);
+    bind_assumed(spec, &paths, &mut pools)?;
     Ok(Members {
         sources,
         scans,

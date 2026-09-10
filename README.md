@@ -50,6 +50,7 @@ the libraries — they never become modes of the main binary.
 * **Any pool state** — healthy, degraded, destroyed, damaged labels, missing vdevs (as long as redundancy allows).
 * **Any TXG** — pick a transaction group explicitly, by timestamp, or "last one that still had this dataset".
 * **Labels gone** — when every `vdev_phys` has been overwritten, one surviving uberblock still fixes the vdev's zero point: its checksum verifier is its own offset, so `scan` recovers the base (and the old vdev size) even after the partition was re-created somewhere else.
+* **A member with no labels at all** — the siblings' configuration still names the leaf it must be; `--assume-member PATH[=GUID]` puts it there, and every block read through it is verified by its checksum, so a wrong assertion is refused rather than believed.
 * **Full on-disk feature coverage** — stripe/mirror/RAIDZ1-3/dRAID reconstruction; `lz4`, `zstd`, `gzip`, `lzjb`, `zle`; `fletcher`, `sha256/512`, `skein`, `edonr`, `blake3`; embedded and gang blocks; encrypted datasets with a supplied key.
 * **Sparse-aware extraction** of zvols to raw images, with per-block checksum verification, resume, and `--strict` mode.
 * **Machine-readable output** — `-f json` everywhere, append-only evidence log, SHA-256 of every input and output.

@@ -162,6 +162,12 @@ pub struct PoolSpec {
     /// Select a pool by GUID when several are found.
     #[arg(long, value_name = "GUID")]
     pub pool_guid: Option<String>,
+    /// Treat a member whose labels are gone as a leaf the configuration
+    /// says is missing: `PATH` when only one leaf is missing, or
+    /// `PATH=GUID` to name it. Repeatable. Nothing is taken on trust —
+    /// every block read through it is still verified by its checksum.
+    #[arg(long, value_name = "PATH[=GUID]")]
+    pub assume_member: Vec<String>,
 }
 
 impl PoolSpec {
@@ -172,6 +178,22 @@ impl PoolSpec {
             return Err("no pool members given: name devices and/or --image FILE".into());
         }
         Ok(all)
+    }
+
+    /// `--assume-member` as `(path, leaf guid)` pairs.
+    pub fn assumed(&self) -> Result<Vec<(PathBuf, Option<u64>)>, String> {
+        self.assume_member
+            .iter()
+            .map(|spec| match spec.split_once('=') {
+                None => Ok((PathBuf::from(spec), None)),
+                Some((path, guid)) => {
+                    let g = guid.trim().trim_start_matches("0x");
+                    let g = u64::from_str_radix(g, 16)
+                        .map_err(|_| format!("--assume-member {spec}: GUID must be hexadecimal"))?;
+                    Ok((PathBuf::from(path), Some(g)))
+                }
+            })
+            .collect()
     }
 }
 

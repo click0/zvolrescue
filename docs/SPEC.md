@@ -188,10 +188,14 @@ is placed against the vdev's size, so it confirms a base only together
 with one. The base is also used for reading: a member whose labels
 verify only at that base is scanned there, and every DVA on it resolves
 to `base + 4 MiB + offset`, so `list` and `dump` work on a partition that
-was re-created with a different start. What is still missing is the case
-where the labels themselves are gone: binding such a member to the slot
-its siblings' configurations leave vacant is F-62, and supplying the
-topology by hand is F-65.
+was re-created with a different start. F-62 is half done: a member whose own
+labels are gone can be bound to a leaf its siblings' configuration names
+but no scanned device carries, through `--assume-member PATH[=GUID]`.
+The assertion buys nothing but a slot — every block read through it is
+still checksum-verified, so a wrong binding is refused rather than
+believed. What is left of F-62 is making that binding *automatic*:
+trying each vacant leaf and letting the checksums pick the one that
+works. Supplying a whole topology by hand is F-65.
 
 Two regimes follow:
 

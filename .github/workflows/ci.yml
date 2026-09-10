@@ -76,6 +76,30 @@ jobs:
           ./target/release/zvolrescue -f json list -r /tmp/moved-intact.img --txg 4816229 | python3 -c 'import json,sys; d=json.load(sys.stdin); names=[x["name"] for x in d["datasets"]]; assert names == ["tank","tank/vm","tank/vm/disk0","tank/vm/disk0@before"], names'
           ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/moved-intact.img -o /tmp/moved.img --txg 4816229
           cmp /tmp/disk0.img /tmp/moved.img
+      - name: A member whose labels are gone, bound to the leaf its siblings name (SPEC F-62)
+        run: |
+          python3 - <<'EOF'
+          LABEL, PHYS_OFF, PHYS = 256*1024, 16*1024, 112*1024
+          for i in (0, 1):
+              b = bytearray(open(f"/tmp/rz/member{i}.img", "rb").read())
+              aligned = len(b) & ~(LABEL-1)
+              for off in (0, LABEL, aligned-2*LABEL, aligned-LABEL):
+                  b[off+PHYS_OFF:off+PHYS_OFF+PHYS] = b"\0" * PHYS
+              open(f"/tmp/rz/nolabel{i}.img", "wb").write(bytes(b))
+          EOF
+          # The siblings' configuration names both leaves as missing.
+          ./target/release/zvolrescue -f json scan /tmp/rz/nolabel0.img /tmp/rz/nolabel1.img /tmp/rz/member2.img /tmp/rz/member3.img | python3 -c 'import json,sys; t=json.load(sys.stdin)["pools"][0]["tops"][0]; missing=[m["guid"] for m in t["members"] if m["present"] is None]; assert len(missing) == 2, t; open("/tmp/rz/guids","w").write(" ".join(missing))'
+          G0=$(cut -d" " -f1 /tmp/rz/guids); G1=$(cut -d" " -f2 /tmp/rz/guids)
+          # Bound correctly, with a third member left out so they must be
+          # used: the volume comes back bit-exact.
+          ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/rz/nolabel0.img /tmp/rz/nolabel1.img /tmp/rz/member2.img --assume-member /tmp/rz/nolabel0.img=$G0 --assume-member /tmp/rz/nolabel1.img=$G1 --txg 4816229 -o /tmp/rz-bound.img
+          cmp /tmp/disk0.img /tmp/rz-bound.img
+          # Swapped: the assertion is wrong, the checksums say so, and
+          # nothing is handed back as if it were the volume.
+          if ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/rz/nolabel0.img /tmp/rz/nolabel1.img /tmp/rz/member2.img --assume-member /tmp/rz/nolabel0.img=$G1 --assume-member /tmp/rz/nolabel1.img=$G0 --txg 4816229 -o /tmp/rz-swapped.img; then echo "a swapped binding must not succeed"; exit 1; else test $? = 3; fi
+          # Refusals: not a member of this run, and no leaf is missing.
+          if ./target/release/zvolrescue -q list /tmp/rz/member2.img /tmp/rz/member3.img --assume-member /tmp/elsewhere.img; then exit 1; else test $? = 1; fi
+          if ./target/release/zvolrescue -q list /tmp/fx/member0.img /tmp/fx/member1.img --assume-member /tmp/fx/member0.img; then exit 1; else test $? = 1; fi
       - name: Bulk extraction and resume
         run: |
           ./target/release/zvolrescue -q dump -r tank /tmp/fx/member0.img /tmp/fx/member1.img -o /tmp/bulk --txg 4816229

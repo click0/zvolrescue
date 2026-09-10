@@ -29,6 +29,15 @@ in CI; what was tried on real environments is logged in
   what a member read at the wrong base looks like. `list` and `dump` of a
   member moved 3 MiB give the same datasets and the same image hash as
   before the move, and a whole-object walk through it is identical.
+* **`--assume-member PATH[=GUID]` (SPEC F-62, first half).** A member whose
+  four labels are gone carries nothing that says which leaf it is, but its
+  siblings' configuration does: it names every leaf, and the ones no
+  scanned device carries are exactly the slots such a member can fill.
+  `list` and `dump` take the assertion — by GUID, or without one when a
+  single leaf is missing — and nothing else is taken on trust: on a raidz2
+  fixture with two label-less members and a third member left out, the
+  correct binding returns the volume bit-exact while a swapped one fails
+  every checksum and exits 3 instead of handing back plausible garbage.
 
 ## v0.1.0-alpha.1 — 2026-09-08
 

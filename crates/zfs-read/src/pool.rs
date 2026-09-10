@@ -123,6 +123,85 @@ impl PoolAssembly {
     pub fn readable(&self) -> bool {
         self.missing_tops().is_empty() && self.tops.iter().all(TopVdev::readable)
     }
+
+    /// Leaves the configuration names but no scanned device carries, as
+    /// `(top index, member index)`. These are the slots a member whose
+    /// labels are gone could belong to (SPEC F-62).
+    pub fn vacant_leaves(&self) -> Vec<(usize, usize)> {
+        self.tops
+            .iter()
+            .enumerate()
+            .flat_map(|(t, top)| {
+                top.members
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, m)| m.present.is_none())
+                    .map(move |(m, _)| (t, m))
+            })
+            .collect()
+    }
+
+    /// Put scanned device `device` into a leaf slot the configuration
+    /// leaves vacant.
+    ///
+    /// `guid` names the leaf; without it the pool must have exactly one
+    /// vacant leaf. Nothing about the device is checked here — the caller
+    /// is asserting an identity the labels can no longer state, and every
+    /// block read through it is still verified by its checksum.
+    pub fn bind_member(&mut self, device: usize, guid: Option<u64>) -> Result<u64, BindError> {
+        let vacant = self.vacant_leaves();
+        let (t, m) = match guid {
+            Some(g) => *vacant
+                .iter()
+                .find(|&&(t, m)| self.tops[t].members[m].guid == g)
+                .ok_or(BindError::NoSuchVacantLeaf(g))?,
+            None => match vacant.len() {
+                0 => return Err(BindError::NothingVacant),
+                1 => vacant[0],
+                n => return Err(BindError::Ambiguous(n)),
+            },
+        };
+        self.tops[t].members[m].present = Some(device);
+        if !self.devices.contains(&device) {
+            self.devices.push(device);
+            self.devices.sort_unstable();
+        }
+        let guid = self.tops[t].members[m].guid;
+        trace!(
+            "pool",
+            "device {device} bound to leaf {guid:#x} of {} by assertion, not by a label",
+            self.tops[t].name
+        );
+        Ok(guid)
+    }
+}
+
+/// Why a member could not be bound to a vacant leaf.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BindError {
+    /// The pool's configuration accounts for every leaf already.
+    NothingVacant,
+    /// Several leaves are vacant and none was named.
+    Ambiguous(usize),
+    /// No vacant leaf has that GUID.
+    NoSuchVacantLeaf(u64),
+}
+
+impl std::fmt::Display for BindError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BindError::NothingVacant => {
+                write!(f, "every leaf of this pool is already accounted for")
+            }
+            BindError::Ambiguous(n) => write!(
+                f,
+                "{n} leaves are missing; name the one this member is, by guid"
+            ),
+            BindError::NoSuchVacantLeaf(g) => {
+                write!(f, "no missing leaf has guid {g:#018x}")
+            }
+        }
+    }
 }
 
 /// Group scanned devices by pool GUID and rebuild each pool's topology.
@@ -293,6 +372,63 @@ mod tests {
 
     fn scan(img: Vec<u8>) -> Option<DeviceScan> {
         scan_device(&MemSource::new(img)).ok()
+    }
+
+    #[test]
+    fn a_member_without_labels_can_be_bound_to_the_vacant_leaf() {
+        // Sibling labels describe both leaves; only one device carries
+        // them, and the other is the label-less member to bind.
+        let pool = Pool::mirror("tank", 0x1000, 12).txgs(&[(100, 1)]);
+        let scans = vec![None, scan(pool.member_image(1, 8 * LABEL_SIZE))];
+        let mut p = assemble(&scans).into_iter().next().expect("one pool");
+        assert_eq!(p.vacant_leaves(), vec![(0, 0)]);
+
+        let guid = p.bind_member(0, None).expect("one vacant leaf");
+        assert_eq!(guid, p.tops[0].members[0].guid);
+        assert_eq!(p.tops[0].members[0].present, Some(0));
+        assert!(p.devices.contains(&0));
+        assert!(p.vacant_leaves().is_empty());
+        assert!(p.readable());
+        // The same on a raidz2 that has lost more members than parity
+        // covers: binding the label-less ones makes it readable again.
+        let rz = Pool::raidz("tank", 0x1000, 12, 4, 2).txgs(&[(100, 1)]);
+        let scans = vec![None, None, None, scan(rz.member_image(3, 8 * LABEL_SIZE))];
+        let mut p = assemble(&scans).into_iter().next().expect("one pool");
+        assert!(!p.readable());
+        let g0 = p.tops[0].members[0].guid;
+        let g1 = p.tops[0].members[1].guid;
+        p.bind_member(0, Some(g0)).expect("leaf 0");
+        p.bind_member(1, Some(g1)).expect("leaf 1");
+        assert!(p.readable());
+    }
+
+    #[test]
+    fn binding_needs_a_vacant_leaf_and_a_name_when_several_are_vacant() {
+        let pool = Pool::raidz("tank", 0x1000, 12, 4, 2).txgs(&[(100, 1)]);
+        let scans = vec![None, None, scan(pool.member_image(2, 8 * LABEL_SIZE)), None];
+        let mut p = assemble(&scans).into_iter().next().expect("one pool");
+        assert_eq!(p.vacant_leaves().len(), 3);
+        assert_eq!(p.bind_member(0, None), Err(BindError::Ambiguous(3)));
+        assert_eq!(
+            p.bind_member(0, Some(0xdead)),
+            Err(BindError::NoSuchVacantLeaf(0xdead))
+        );
+        let want = p.tops[0].members[3].guid;
+        assert_eq!(p.bind_member(0, Some(want)), Ok(want));
+        // The leaf that is now taken cannot be claimed twice, and a pool
+        // that is complete has nothing to offer.
+        assert_eq!(
+            p.bind_member(1, Some(want)),
+            Err(BindError::NoSuchVacantLeaf(want))
+        );
+
+        let full = Pool::mirror("tank", 0x1000, 12).txgs(&[(100, 1)]);
+        let scans = vec![
+            scan(full.member_image(0, 8 * LABEL_SIZE)),
+            scan(full.member_image(1, 8 * LABEL_SIZE)),
+        ];
+        let mut p = assemble(&scans).into_iter().next().expect("one pool");
+        assert_eq!(p.bind_member(0, None), Err(BindError::NothingVacant));
     }
 
     #[test]
