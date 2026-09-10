@@ -84,13 +84,16 @@ zvolrescue dump pool/vm/disk0 /dev/ada0p3 /dev/ada1p3 --txg 4816230 \
 ```
 
 ```
-zvoltimeline POOLSPEC [--from TXG] [--to TXG] [--dataset NAME|GUID]
+zvoltimeline POOLSPEC [--from TXG] [--to TXG] [--dataset NAME|GUID] [--pending]
                                                            the pool's history: what existed at each TXG, and what the destroyed ones need
 ```
 
 ```sh
 # What happened to this pool, and which TXG still had the volume?
 zvoltimeline /dev/ada0p3 /dev/ada1p3 --dataset pool/vm/disk0
+
+# Is what was destroyed still physically on the disk?
+zvoltimeline /dev/ada0p3 /dev/ada1p3 --pending
 ```
 
 Each `destroyed` line carries the last transaction group that still

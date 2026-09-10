@@ -85,13 +85,16 @@ zvolrescue dump pool/vm/disk0 /dev/ada0p3 /dev/ada1p3 --txg 4816230 \
 ```
 
 ```
-zvoltimeline POOLSPEC [--from TXG] [--to TXG] [--dataset NAME|GUID]
+zvoltimeline POOLSPEC [--from TXG] [--to TXG] [--dataset NAME|GUID] [--pending]
                                                            історія пулу: що існувало на кожному TXG і що потрібно знищеним
 ```
 
 ```sh
 # Що сталося з пулом і на якому TXG том ще був?
 zvoltimeline /dev/ada0p3 /dev/ada1p3 --dataset pool/vm/disk0
+
+# Чи знищене ще фізично лежить на диску?
+zvoltimeline /dev/ada0p3 /dev/ada1p3 --pending
 ```
 
 Кожен рядок `destroyed` несе останній TXG, який ще посилався на об'єкт, і

@@ -126,8 +126,16 @@ bit-exact.
 the mirror fixture (three transaction groups, the volume destroyed at the
 newest): the event list is the scripted one, and the `dump` command the
 tool prints recovers the volume with the SHA-256 the end-to-end step
-already pins. `--pending` (T-07), property events (T-09) and
-`--hash-inputs` are not implemented yet. A `ztest` pool exercises the
+already pins. `--pending` (T-07) reports how much space ZFS has finished with but has
+not freed: the pool's `free_bpobj` and every dataset's deadlist, read
+from their bonus buffers so the answer costs no walk. While a block is
+still accounted for there it has not been reallocated, which is the
+difference between a destroyed dataset that can still be recovered and
+one that cannot. The number is cross-checked against `zdb`'s own bpobj
+accounting on every `ztest` pool in CI. Property events (T-09) are
+reported for the properties this reader knows — `volsize`,
+`volblocksize` and the encryption suite — rather than for every dataset
+property. A `ztest` pool exercises the
 same code on real on-disk bytes, including transaction groups whose MOS
 can no longer be walked, but scripts no history of its own.*
 

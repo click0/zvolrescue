@@ -35,6 +35,11 @@ struct Cli {
     /// Only events about this object: a dataset name at any TXG, or a GUID.
     #[arg(long, value_name = "NAME|GUID")]
     dataset: Option<String>,
+    /// Also report how much space is held by things ZFS has finished
+    /// with but has not freed: while a block is still accounted for
+    /// there, it has not been reallocated (SPEC F-15, COMPANIONS T-07).
+    #[arg(long)]
+    pending: bool,
     /// Write the report to FILE instead of stdout.
     #[arg(short, long, value_name = "FILE")]
     output: Option<PathBuf>,
@@ -52,6 +57,7 @@ fn main() -> ExitCode {
             from: cli.from,
             to: cli.to,
             dataset: cli.dataset,
+            pending: cli.pending,
             output: cli.output,
         },
     ))

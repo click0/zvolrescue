@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use serde::Serialize;
-use zfs_read::dsl::{open_mos, walk, Dataset};
+use zfs_read::dsl::{open_mos, walk, Dataset, Pending};
 use zfs_read::pool::{uberblock_candidates, Candidate};
 use zfs_read::zio::PoolReader;
 use zvol_common::members::{choose_pool, open_members};
@@ -22,6 +22,8 @@ pub struct Options {
     pub to: Option<u64>,
     /// Restrict the report to one object.
     pub dataset: Option<String>,
+    /// Report the space held by pending frees and deadlists.
+    pub pending: bool,
     /// Write the report here instead of stdout.
     pub output: Option<PathBuf>,
 }
@@ -122,10 +124,20 @@ fn print_text(out: &TimelineOut, w: &mut dyn Write) -> std::io::Result<()> {
 }
 
 /// Datasets at one TXG, or `None` when its MOS cannot be walked.
-fn datasets_at(reader: &PoolReader<'_>, c: &Candidate, pool_name: &str) -> Option<Vec<Dataset>> {
+///
+/// `pending` is read from the same walk when it was asked for: opening
+/// the MOS twice to answer two questions about the same transaction
+/// group would double the reads for nothing.
+fn datasets_at(
+    reader: &PoolReader<'_>,
+    c: &Candidate,
+    pool_name: &str,
+    want_pending: bool,
+) -> Option<(Vec<Dataset>, Option<Pending>)> {
     let mos = open_mos(reader, &c.ub).ok()?;
     let tree = walk(&mos, pool_name).ok()?;
-    Some(tree.datasets)
+    let p = want_pending.then(|| zfs_read::dsl::pending(&mos, &tree.datasets));
+    Some((tree.datasets, p))
 }
 
 /// Run the tool.
@@ -155,7 +167,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     let mut previous: Option<(u64, Vec<Dataset>)> = None;
     // Only two dataset lists are ever held at once (T-11).
     for c in &candidates {
-        let Some(now) = datasets_at(&reader, c, &pool.name) else {
+        let Some((now, pending)) = datasets_at(&reader, c, &pool.name, opts.pending) else {
             unreadable.push(c.ub.txg);
             events.push(Event {
                 txg: c.ub.txg,
@@ -168,6 +180,29 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             });
             continue;
         };
+        if let Some(p) = pending {
+            events.push(Event {
+                txg: c.ub.txg,
+                time: Some(c.ub.timestamp),
+                kind: Kind::Pending,
+                object: None,
+                guid: 0,
+                details: format!(
+                    "{} byte(s) not yet freed: {} in the pool's free list ({} block pointer(s)), {} in {} deadlist(s){}",
+                    p.total(),
+                    p.free_bpobj_bytes,
+                    p.free_bpobj_blkptrs,
+                    p.deadlist_bytes,
+                    p.deadlists,
+                    if p.unreadable > 0 {
+                        format!(", {} unreadable", p.unreadable)
+                    } else {
+                        String::new()
+                    }
+                ),
+                last_seen_txg: None,
+            });
+        }
         match &previous {
             None => {
                 // The oldest readable TXG is the baseline: everything in

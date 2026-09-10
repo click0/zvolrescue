@@ -212,6 +212,10 @@ jobs:
           # T-10: the same evidence gives the same bytes.
           ./target/release/zvoltimeline -f json /tmp/fx/member0.img /tmp/fx/member1.img > /tmp/tl2.json
           cmp /tmp/tl.json /tmp/tl2.json
+          # T-07: what ZFS has finished with but has not freed. On the
+          # fixture nothing is pending, which is itself the right answer
+          # and has to be said rather than left out.
+          ./target/release/zvoltimeline -f json --pending /tmp/fx/member0.img /tmp/fx/member1.img | python3 -c 'import json,sys; e=[x for x in json.load(sys.stdin)["events"] if x["event"] == "pending"]; assert len(e) == 3, e; assert all("0 byte(s) not yet freed" in x["details"] for x in e), e'
           # T-08: one object, by name and by GUID.
           ./target/release/zvoltimeline -f json --dataset tank/vm/disk0 /tmp/fx/member0.img | python3 -c 'import json,sys; e=json.load(sys.stdin)["events"]; assert {x["object"] for x in e} == {"tank/vm/disk0"}, e; open("/tmp/guid","w").write(e[0]["guid"])'
           ./target/release/zvoltimeline -f json --dataset "$(cat /tmp/guid)" /tmp/fx/member0.img | python3 -c 'import json,sys; e=json.load(sys.stdin)["events"]; assert {x["object"] for x in e} == {"tank/vm/disk0"}, e'
@@ -491,7 +495,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends zfsutils-linux zfs-test
       - run: cargo build --release && cargo build --release -p zfs-read --examples
-      - run: tests/crosscheck-ztest.sh ./target/release/zvolrescue /tmp/crosscheck ./target/release/examples/walk-objects ./target/release/examples/unwrap-key
+      - run: tests/crosscheck-ztest.sh ./target/release/zvolrescue /tmp/crosscheck ./target/release/examples/walk-objects ./target/release/examples/unwrap-key ./target/release/zvoltimeline
 
   freebsd:
     name: FreeBSD 14 (ports rust)

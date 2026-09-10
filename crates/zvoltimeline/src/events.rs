@@ -30,6 +30,8 @@ pub enum Kind {
     Property,
     /// The pool's own facts: a host that had it imported.
     Host,
+    /// Space ZFS has finished with but has not freed yet.
+    Pending,
     /// The MOS at this TXG could not be read.
     Unreadable,
 }
@@ -46,6 +48,7 @@ impl Kind {
             Kind::SnapshotDestroyed => "snapshot-destroyed",
             Kind::Property => "property",
             Kind::Host => "host",
+            Kind::Pending => "pending",
             Kind::Unreadable => "unreadable",
         }
     }

@@ -9,7 +9,7 @@
 use std::collections::BTreeSet;
 
 use zfs_ondisk::dmu::{ObjsetPhys, ObjsetType, OT_NEWTYPE};
-use zfs_ondisk::dsl::{DslDatasetPhys, DslDirPhys};
+use zfs_ondisk::dsl::{BpobjPhys, DeadlistPhys, DslDatasetPhys, DslDirPhys};
 use zfs_ondisk::uberblock::Uberblock;
 use zfs_ondisk::zap::Value;
 use zfs_ondisk::Endian;
@@ -805,4 +805,65 @@ mod tests {
         assert!(r.aborted);
         assert!(r.bad[0].reason.contains("checksum algorithm not supported"));
     }
+}
+
+/// How much space is held by things ZFS has finished with but not freed
+/// (COMPANIONS T-07).
+///
+/// Two places account for it. The pool's `free_bpobj` holds blocks
+/// queued for freeing but not yet handed back to the allocator; each
+/// dataset's deadlist holds the blocks its successors stopped using.
+/// While either still accounts for a block, that block has not been
+/// reallocated — which is the difference between a destroyed dataset
+/// that can still be recovered and one that cannot.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Pending {
+    /// Bytes the pool's free bpobj still accounts for.
+    pub free_bpobj_bytes: u64,
+    /// Block pointers it holds.
+    pub free_bpobj_blkptrs: u64,
+    /// Bytes all readable deadlists account for.
+    pub deadlist_bytes: u64,
+    /// How many deadlists were read.
+    pub deadlists: usize,
+    /// Datasets whose deadlist could not be read.
+    pub unreadable: usize,
+}
+
+impl Pending {
+    /// Everything still held, in bytes.
+    pub fn total(&self) -> u64 {
+        self.free_bpobj_bytes.saturating_add(self.deadlist_bytes)
+    }
+}
+
+/// Read the pending-free accounting of one transaction group.
+pub fn pending(mos: &DnodeArray<'_, '_>, datasets: &[Dataset]) -> Pending {
+    let mut out = Pending::default();
+    if let Ok(dir) = object_directory(mos) {
+        if let Some((_, obj)) = dir.iter().find(|(n, _)| n == "free_bpobj") {
+            if let Ok(d) = mos.get(*obj) {
+                if let Ok(b) = BpobjPhys::parse(&d.bonus, mos.endian()) {
+                    out.free_bpobj_bytes = b.bytes;
+                    out.free_bpobj_blkptrs = b.num_blkptrs;
+                }
+            }
+        }
+    }
+    for ds in datasets {
+        if ds.phys.deadlist_obj == 0 {
+            continue;
+        }
+        match mos.get(ds.phys.deadlist_obj) {
+            Ok(d) => match DeadlistPhys::parse(&d.bonus, mos.endian()) {
+                Ok(dl) => {
+                    out.deadlist_bytes = out.deadlist_bytes.saturating_add(dl.used);
+                    out.deadlists += 1;
+                }
+                Err(_) => out.unreadable += 1,
+            },
+            Err(_) => out.unreadable += 1,
+        }
+    }
+    out
 }

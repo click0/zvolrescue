@@ -3,7 +3,7 @@
 # ztest (no kernel module needed), then compare `zvolrescue list -r` with
 # `zdb -d`, and `zvolrescue -vv scan` with `zdb -l`.
 #
-#   tests/crosscheck-ztest.sh [ZVOLRESCUE] [WORKDIR] [WALK-OBJECTS] [UNWRAP-KEY]
+#   tests/crosscheck-ztest.sh [ZVOLRESCUE] [WORKDIR] [WALK-OBJECTS] [UNWRAP-KEY] [ZVOLTIMELINE]
 #
 # Pools: mirror, raidz2, raidz1-of-mirrors, draid1 (4d:6c:1s), draid2
 # (5d:9c:2s). Steps 4-8 need the walk-objects and unwrap-key examples.
@@ -21,6 +21,7 @@ ZR=${1:-./target/release/zvolrescue}
 WORK=${2:-/tmp/zvolrescue-crosscheck}
 WALK=${3:-./target/release/examples/walk-objects}
 UNWRAP=${4:-$(dirname "$WALK")/unwrap-key}
+TIMELINE=${5:-$(dirname "$ZR")/zvoltimeline}
 rm -rf "$WORK"; mkdir -p "$WORK"
 fail=0
 
@@ -59,6 +60,10 @@ for l in sys.stdin:
     m = re.match(r"Dataset (\S+) \[(\w+)\], ID \d+, cr_txg (\d+)", l)
     if m and m.group(1) != "mos":
         print(m.group(1), m.group(3))' | sort > "$dir/zdb.txt"
+    # Every object zdb can see, taken now: later steps leave doctored
+    # copies of the members in this directory, and `zdb -e -p DIR` reads
+    # the directory, not the pool. Step 13 compares against this.
+    zdb -e -p "$dir" -dddd ztest 2>/dev/null > "$dir/objects.txt" || :
     $ZR -f json list -r $members | python3 -c '
 import json,sys
 d = json.load(sys.stdin)
@@ -372,6 +377,73 @@ if listed != oracle:
             rm -f $copies
         else
             echo "   layout: skipped (this pool's topology was not scanned whole)"
+        fi
+    fi
+
+    # 13. space ZFS has finished with but has not freed: zvoltimeline
+    #     --pending against zdb's own bpobj accounting. The deadlists a
+    #     dataset carries are what stands between a destroyed dataset and
+    #     an unrecoverable one, so the number has to be the right one.
+    if [ -x "$TIMELINE" ]; then
+        if $TIMELINE -f json --pending $members > "$dir/pending.json" 2>"$dir/pending.err"; then
+            if python3 - "$dir/pending.json" "$dir/objects.txt" <<'EOF'
+import json, re, sys
+report = json.load(open(sys.argv[1]))
+pending = [e for e in report["events"] if e["event"] == "pending"]
+if not pending:
+    print("no pending event")
+    sys.exit(1)
+# The newest transaction group's reading is the one zdb also describes.
+newest = max(pending, key=lambda e: e["txg"])
+ours = int(re.search(r"^(\d+) byte", newest["details"]).group(1))
+
+SCALE = {"": 1, "K": 1 << 10, "M": 1 << 20, "G": 1 << 30, "T": 1 << 40}
+
+def interval(text):
+    """What a number zdb printed could have been.
+
+    zdb rounds to whatever fits in five characters, so `808K` means
+    anything from 807.5K to 808.5K. Comparing against the midpoint would
+    fail by a few dozen bytes on a pool with a dozen bpobjs; comparing
+    against the range the printing allows is exact."""
+    m = re.fullmatch(r"(\d+)(?:\.(\d+))?([KMGT]?)", text)
+    if not m:
+        return None
+    digits = m.group(2) or ""
+    value = float(m.group(1) + ("." + digits if digits else ""))
+    scale = SCALE[m.group(3)]
+    if not m.group(3):
+        return (int(value), int(value))
+    half = 0.5 * (10 ** -len(digits))
+    return ((value - half) * scale, (value + half) * scale)
+
+# Every bpobj zdb dumped, and how much space it still accounts for. The
+# pool's free bpobj and every deadlist's bpobjs are all in here, which is
+# the same set our total covers.
+lo = hi = 0.0
+seen = 0
+current = None
+for line in open(sys.argv[2]):
+    obj = re.match(r"\s+(\d+)\s+\d+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+(.+)$", line)
+    if obj:
+        current = obj.group(2).strip()
+    m = re.match(r"\s+bytes = (\S+)$", line)
+    if m and current == "bpobj":
+        span = interval(m.group(1))
+        if span is None:
+            print(f"cannot read zdb's {m.group(1)!r}")
+            sys.exit(1)
+        lo += span[0]
+        hi += span[1]
+        seen += 1
+if not (lo <= ours <= hi):
+    print(f"pending says {ours} byte(s); zdb's {seen} bpobj(s) allow {lo:.0f}..{hi:.0f}")
+    sys.exit(1)
+print(f"   pending: {ours} byte(s) still held, inside what zdb's {seen} bpobj(s) allow")
+EOF
+            then :; else echo "   pending: FAILED"; fail=1; fi
+        else
+            echo "   pending: FAILED"; tail -3 "$dir/pending.err"; fail=1
         fi
     fi
 

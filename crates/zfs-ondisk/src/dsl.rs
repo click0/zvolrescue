@@ -303,3 +303,82 @@ mod tests {
         assert!(DslDatasetPhys::parse(&raw[..200], Endian::Little).is_err());
     }
 }
+
+/// `bpobj_phys_t`: the header of a block-pointer object.
+///
+/// A bpobj is where ZFS puts blocks it has finished with but has not
+/// freed yet. Its bonus buffer says how much is in it without walking
+/// anything, which is what makes "is the data still physically there?"
+/// a question with a cheap answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BpobjPhys {
+    /// Block pointers held directly.
+    pub num_blkptrs: u64,
+    /// Bytes of space those blocks occupy.
+    pub bytes: u64,
+    /// Compressed and uncompressed sizes.
+    pub comp: u64,
+    /// Uncompressed size.
+    pub uncomp: u64,
+    /// Object holding further bpobjs, when there is one.
+    pub subobjs: u64,
+    /// How many of those there are.
+    pub num_subobjs: u64,
+}
+
+impl BpobjPhys {
+    /// Parse from a bonus buffer.
+    pub fn parse(bonus: &[u8], endian: Endian) -> Result<BpobjPhys, ParseError> {
+        const NEEDED: usize = 48;
+        if bonus.len() < NEEDED {
+            return Err(ParseError::Truncated {
+                needed: NEEDED,
+                got: bonus.len(),
+            });
+        }
+        let at = |o: usize| endian.u64_at(bonus, o).expect("length checked");
+        Ok(BpobjPhys {
+            num_blkptrs: at(0),
+            bytes: at(8),
+            comp: at(16),
+            uncomp: at(24),
+            subobjs: at(32),
+            num_subobjs: at(40),
+        })
+    }
+}
+
+/// `dsl_deadlist_phys_t`: what a dataset stopped referencing.
+///
+/// A snapshot's deadlist holds the blocks its successor no longer uses.
+/// While a deadlist still accounts for them, those blocks have not been
+/// handed back to the allocator — which is exactly what someone hoping
+/// to recover a destroyed dataset wants to know.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DeadlistPhys {
+    /// Space the deadlist accounts for.
+    pub used: u64,
+    /// Compressed size.
+    pub comp: u64,
+    /// Uncompressed size.
+    pub uncomp: u64,
+}
+
+impl DeadlistPhys {
+    /// Parse from a bonus buffer.
+    pub fn parse(bonus: &[u8], endian: Endian) -> Result<DeadlistPhys, ParseError> {
+        const NEEDED: usize = 24;
+        if bonus.len() < NEEDED {
+            return Err(ParseError::Truncated {
+                needed: NEEDED,
+                got: bonus.len(),
+            });
+        }
+        let at = |o: usize| endian.u64_at(bonus, o).expect("length checked");
+        Ok(DeadlistPhys {
+            used: at(0),
+            comp: at(8),
+            uncomp: at(16),
+        })
+    }
+}

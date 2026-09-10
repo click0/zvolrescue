@@ -120,6 +120,15 @@ in CI; what was tried on real environments is logged in
   first, and case-folded only where the dataset's `casesensitivity` says
   names are matched that way.
 
+* **`zvoltimeline --pending` (COMPANIONS T-07, SPEC F-15).** How much
+  space ZFS has finished with but has not freed, per transaction group:
+  the pool's `free_bpobj` and every dataset's deadlist, read from their
+  bonus buffers so the answer costs no walk. While a block is still
+  accounted for there it has not been reallocated — the difference
+  between a destroyed dataset that can still be recovered and one that
+  cannot. Cross-checked against `zdb`'s own bpobj accounting on every
+  `ztest` pool in CI.
+
 ### Fixed
 * A dnode with no block pointers but a bonus buffer is recognised as one.
   Requiring at least one block made every DSL dataset and directory
