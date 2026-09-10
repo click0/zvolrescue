@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use zfs_ondisk::dmu::ObjsetPhys;
+use zfs_read::bind::{bind_by_reading, Verdict};
 use zfs_read::dmu::DnodeArray;
 use zfs_read::dsl::{open_mos, walk};
 use zfs_read::pool::{assemble, select_uberblock, uberblock_candidates, TxgSelect};
@@ -17,7 +18,19 @@ use zfs_read::zio::{PoolReader, ReadError};
 use zvolrescue_io::{BlockSource, FileSource};
 
 fn main() {
-    let paths: Vec<PathBuf> = std::env::args().skip(1).map(PathBuf::from).collect();
+    // `--assume-member PATH` (repeatable) says a member whose labels are
+    // gone belongs to the pool; which leaf it is comes from reading.
+    let mut paths: Vec<PathBuf> = Vec::new();
+    let mut assumed: Vec<PathBuf> = Vec::new();
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--assume-member" => {
+                assumed.push(PathBuf::from(args.next().expect("--assume-member PATH")))
+            }
+            _ => paths.push(PathBuf::from(a)),
+        }
+    }
     let sources: Vec<FileSource> = paths
         .iter()
         .map(|p| FileSource::open(p).expect("open"))
@@ -26,16 +39,34 @@ fn main() {
         .iter()
         .map(|s| scan_with_recovered_base(s).ok())
         .collect();
-    let pool = assemble(&scans).into_iter().next().expect("a pool");
+    let mut pool = assemble(&scans).into_iter().next().expect("a pool");
+    let bases: Vec<u64> = scans
+        .iter()
+        .map(|s| s.as_ref().map_or(0, |s| s.base))
+        .collect();
+    if !assumed.is_empty() {
+        let devices: Vec<Option<&dyn BlockSource>> = sources
+            .iter()
+            .map(|s| Some(s as &dyn BlockSource))
+            .collect();
+        for path in &assumed {
+            let device = paths
+                .iter()
+                .position(|p| p == path)
+                .expect("--assume-member names a member of this run");
+            match bind_by_reading(&mut pool, &scans, &devices, &bases, device) {
+                Verdict::Bound(b, _) => {
+                    eprintln!("assumed {}: leaf {:#x}", path.display(), b.guid)
+                }
+                other => panic!("{}: {other:?}", path.display()),
+            }
+        }
+    }
     let candidates = uberblock_candidates(&scans, &pool);
     let ub = select_uberblock(&candidates, TxgSelect::Newest).expect("uberblock");
     let devices: Vec<Option<&dyn BlockSource>> = sources
         .iter()
         .map(|s| Some(s as &dyn BlockSource))
-        .collect();
-    let bases: Vec<u64> = scans
-        .iter()
-        .map(|s| s.as_ref().map_or(0, |s| s.base))
         .collect();
     let reader = PoolReader::new(&pool, devices).with_base_offsets(&bases);
     let mos = open_mos(&reader, &ub.ub).expect("mos");

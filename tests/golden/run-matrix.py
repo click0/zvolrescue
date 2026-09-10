@@ -372,10 +372,10 @@ def apply_damage(oracle, manifest, work, rng):
                 else:
                     raise ValueError(f"unknown pattern {pat}")
     ordered = [paths[r] for r in oracle.roles if r not in missing]
-    return ordered, notes
+    return ordered, notes, paths
 
 
-def judge_dump(args, oracle, manifest, members, work):
+def judge_dump(args, oracle, manifest, members, work, assume=()):
     want = manifest["expect"].get("volumes", "all")
     volumes = list(oracle.volumes) if want == "all" else list(want)
     outcomes, redundancy = {}, False
@@ -383,6 +383,8 @@ def judge_dump(args, oracle, manifest, members, work):
         out = os.path.join(work, vol.replace("/", "_") + ".img")
         log = out + ".debug"
         cmd = [args.tool, "-q", "-f", "json", "--debug-log", log, "dump", vol, *members, "-o", out]
+        for path in assume:
+            cmd += ["--assume-member", path]
         if oracle.key:
             cmd += ["--key", oracle.key]
         proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -397,13 +399,14 @@ def judge_dump(args, oracle, manifest, members, work):
     return outcomes, redundancy
 
 
-def judge_walk(args, oracle, members, work):
+def judge_walk(args, oracle, members, work, assume=()):
     """No zvols: the datasets must match `zdb -d` and every block must read."""
     outcomes = {}
     env = dict(os.environ)
     if oracle.key:
         env["ZR_KEY"] = oracle.key
-    proc = subprocess.run([args.tool, "-f", "json", "list", "-r", *members],
+    hints = [a for path in assume for a in ("--assume-member", path)]
+    proc = subprocess.run([args.tool, "-f", "json", "list", "-r", *members, *hints],
                           capture_output=True, text=True)
     if proc.returncode in (2, 3):
         # 2: the members given are not readable as a pool at all.
@@ -427,7 +430,7 @@ def judge_walk(args, oracle, members, work):
     walk_out = os.path.join(work, "walk.txt")
     redundancy = False
     with open(walk_out, "w") as so:
-        wproc = subprocess.Popen([args.walker, *members], stdout=so,
+        wproc = subprocess.Popen([args.walker, *hints, *members], stdout=so,
                                  stderr=subprocess.PIPE, text=True, errors="replace",
                                  env=dict(env, ZR_DEBUG="1"))
         for line in wproc.stderr:
@@ -484,7 +487,7 @@ def run_case(args, oracle, manifest, rng):
               "expected": expected, "notes": []}
     try:
         try:
-            members, notes = apply_damage(oracle, manifest, work, rng)
+            members, notes, paths = apply_damage(oracle, manifest, work, rng)
         except Unresolved as e:
             result.update(actual="n/a", verdict="n/a", notes=[str(e)])
             return result
@@ -496,12 +499,23 @@ def run_case(args, oracle, manifest, rng):
                           inputs_unchanged=True)
             result["verdict"] = "pass" if "refused" in accepted else "unexpected"
             return result
+        # A manifest may name members the tool has to be *told* about: a
+        # member whose labels are gone carries nothing that places it, so
+        # the operator asserts it belongs and the tool works out which
+        # leaf by reading (SPEC F-62).
+        assume = []
+        for sel in manifest.get("recovery", {}).get("assume_members", []):
+            role = oracle.resolve(sel)
+            if role in paths and paths[role] in members:
+                assume.append(paths[role])
+        if assume:
+            result["notes"].append("told about " + ", ".join(os.path.basename(a) for a in assume))
         before = {p: sha256_file(p) for p in members}
         if oracle.has_volumes:
-            outcomes, redundancy = judge_dump(args, oracle, manifest, members, work)
+            outcomes, redundancy = judge_dump(args, oracle, manifest, members, work, assume)
             good = {"ok"}
         else:
-            outcomes, redundancy = judge_walk(args, oracle, members, work)
+            outcomes, redundancy = judge_walk(args, oracle, members, work, assume)
             good = {"ok"}
         result["outcomes"] = outcomes
         judged = {k: v for k, v in outcomes.items() if k not in ("counts", "refused_detail")}
