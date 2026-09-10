@@ -22,6 +22,7 @@ pub mod raidz;
 pub mod skein;
 pub mod uberblock;
 pub mod zap;
+pub mod zeropoint;
 
 pub use error::ParseError;
 
