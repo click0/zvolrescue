@@ -5,6 +5,7 @@ members = [
     "crates/zfs-ondisk",
     "crates/zfs-read",
     "crates/zvolrescue-io",
+    "crates/zvol-common",
     "crates/zvolrescue",
 ]
 
@@ -20,6 +21,7 @@ authors = ["Vladyslav V. Prodan"]
 zfs-ondisk = { path = "crates/zfs-ondisk" }
 zfs-read = { path = "crates/zfs-read" }
 zvolrescue-io = { path = "crates/zvolrescue-io" }
+zvol-common = { path = "crates/zvol-common" }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

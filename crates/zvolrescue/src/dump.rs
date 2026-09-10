@@ -14,9 +14,9 @@ use zfs_read::zio::PoolReader;
 use zfs_read::zvol::{extract_from, open_volume, volume_facts, OnError, Report};
 use zvolrescue_io::{refuse_if_evidence, SparseFile};
 
-use crate::list::{choose_pool, open_members};
-use crate::timefmt::iso8601;
-use crate::{evidence, exit, Format, Global, PoolSpec};
+use zvol_common::members::{choose_pool, open_members};
+use zvol_common::timefmt::iso8601;
+use zvol_common::{evidence, exit, Format, Global, PoolSpec};
 
 /// Options of the `dump` command.
 pub struct Options {

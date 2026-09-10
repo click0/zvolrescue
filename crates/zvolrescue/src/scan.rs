@@ -19,8 +19,8 @@ use zfs_read::zeropoint::{
 };
 use zvolrescue_io::{BlockSource, FileSource};
 
-use crate::timefmt::iso8601;
-use crate::{evidence, exit, Format, Global};
+use zvol_common::timefmt::iso8601;
+use zvol_common::{evidence, exit, Format, Global};
 
 #[derive(Debug, Serialize)]
 struct UberblockOut {
@@ -755,7 +755,7 @@ fn emit_label(
     let (Some(file), Some(out)) = (&opts.hints, &opts.emit_label) else {
         return Ok(());
     };
-    let hints = crate::hints::load(file, devices)?;
+    let hints = zvol_common::hints::load(file, devices)?;
     let (top, leaf) = match &opts.emit_for {
         None => (0usize, 0usize),
         Some(spec) => {

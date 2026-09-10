@@ -659,6 +659,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
+name = "zvol-common"
+version = "0.2.0"
+dependencies = [
+ "clap",
+ "serde",
+ "serde_json",
+ "zfs-ondisk",
+ "zfs-read",
+ "zvolrescue-io",
+]
+
+[[package]]
 name = "zvolrescue"
 version = "0.2.0"
 dependencies = [
@@ -668,6 +680,7 @@ dependencies = [
  "sha2",
  "zfs-ondisk",
  "zfs-read",
+ "zvol-common",
  "zvolrescue-io",
 ]
 
