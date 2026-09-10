@@ -80,8 +80,32 @@ evidence.
   will occupy — plus the geometry as JSON beside it. It stops short of the
   uberblock ring on purpose, so placing it on a *copy* of the disk leaves
   the uberblocks that are still there intact.
+* **One contract for every binary (COMPANIONS §1).** The flags, exit
+  codes and JSON envelope this tool established now live in a crate of
+  their own, `zvol-common`: the companion tools take the same `--hints`,
+  `--search-order` and `--assume-member`, mean the same thing by exit
+  code 2, and are pointed at a damaged pool the same way. Nothing about
+  `zvolrescue`'s own command line changes.
+
+### Documented
+* **The search profile a carver needs (COMPANIONS C-13…C-19).** What
+  narrows a raw scan of a disk to blocks that could belong to this pool:
+  the ashift and the addresses the geometry allows, the checksum a block
+  claims and whether it verifies, the salt for a keyed checksum, the
+  compression a block says it used, the TXG range a scan established, and
+  what a candidate must show before it is reported rather than guessed at.
+  Requirements only — no carver ships in this release.
+* [docs/RELEASING.md](docs/RELEASING.md) says how a release is cut, what a
+  mistyped tag does, and how to re-cut a release for a tag that is already
+  pushed.
 
 ### Fixed
+* The release job assembles a release as a **draft** and publishes it only
+  once it carries every file. A published release is frozen when release
+  immutability is on, so attaching the binaries afterwards — what the
+  previous job did — could not work at all. A mistyped tag no longer names
+  the files after itself, and release notes that would say nothing now
+  fail the job instead of being published.
 * `ashift` is taken from whichever label still states it when walking the
   uberblock ring of a label whose configuration is gone. It belongs to the
   vdev, not to one copy of its label, and reading a 4 KiB ring as if its
