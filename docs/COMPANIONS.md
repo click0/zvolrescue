@@ -244,11 +244,22 @@ dnode implies, since the `zvol_prop` ZAP that knew `volsize` is not
 reachable from a carved dnode; `--size` gives the real one when it is
 known.
 
+C-09 holds for RAIDZ and dRAID with one exception, and CI covers it on a
+raidz2 fixture: a dnode is 512 bytes and lies whole inside one
+allocation sector on one column, so recognising one on a member works
+there exactly as on a mirror, and the extraction goes through the pool,
+so it reconstructs from parity with members missing — the same image
+came out of a raidz2 carve with two of four members left out. The
+exception is the compressed pass: a compressed block is split across
+columns, so no member holds one contiguously and only mirrors and single
+disks find compressed metadata by scanning raw bytes. Reading logical
+space instead would fix that, and needs a per-block-size mapping to be
+worth its cost.
+
 Not implemented: overwrite detection against the space map (C-06),
-RAIDZ/dRAID-aware scanning of members (C-09, mirrors and single disks
-work today), compressed metadata other than lz4 (C-10), dataset dnodes
-recorded so a candidate can be named (C-11), signature carving inside
-candidate data (C-12), and the auto-profile histograms (C-19).*
+compressed metadata other than lz4 (C-10), dataset dnodes recorded so a
+candidate can be named (C-11), signature carving inside candidate data
+(C-12), and the auto-profile histograms (C-19).*
 
 ---
 

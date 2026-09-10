@@ -69,6 +69,14 @@ in CI; what was tried on real environments is logged in
   volblocksize" is a different fact from "there is nothing on this
   disk". `--resume` adds to the index and re-reads the chunk it stopped
   inside; an interrupted scan exits 6.
+
+  Carving works on RAIDZ and dRAID as well as on mirrors: a dnode is 512
+  bytes and lies whole inside one allocation sector on one column, so it
+  is recognised on a member the same way, and the extraction goes
+  through the pool — a raidz2 carve with two of four members left out
+  produced the same image, rebuilt from parity. Only the compressed pass
+  is mirror-and-single-disk, because a compressed block is split across
+  columns and no member holds one contiguously.
 * Releases now carry `zvoltimeline`, `zvolreport` and `zvolcarve` for
   the same three platforms as `zvolrescue`.
 

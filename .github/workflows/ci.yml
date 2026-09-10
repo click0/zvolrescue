@@ -299,6 +299,25 @@ jobs:
           ./target/release/zvolcarve dump /tmp/carve "$(cat /tmp/carve/best)" /tmp/cv/member0.img /tmp/cv/member1.img -o /tmp/carved.img --size 33554432
           echo "d6d58af862ec2761bf43158f7ee2b2b0f4628fa6ca8095544493f9d698d7b80d  /tmp/carved.img" | sha256sum -c -
           cmp /tmp/disk0.img /tmp/carved.img
+          # C-09: the same on raidz2. A dnode is 512 bytes and lies whole
+          # inside one allocation sector on one column, so recognition
+          # works there too; the extraction goes through the pool, so it
+          # works with members missing.
+          cargo run -q -p zfs-read --example mkfixture -- /tmp/cvz raidz2 12 carved
+          rm -rf /tmp/carvez
+          ./target/release/zvolcarve -q scan /tmp/cvz/member0.img /tmp/cvz/member1.img /tmp/cvz/member2.img /tmp/cvz/member3.img -o /tmp/carvez
+          python3 - <<'EOF'
+          import json
+          best = json.load(open("/tmp/carvez/candidates.json"))["candidates"][0]
+          assert best["dnode_type_code"] == 23, best
+          assert best["assessment"]["agreement"] == 1.0, best
+          open("/tmp/carvez/best", "w").write(best["id"])
+          EOF
+          ./target/release/zvolcarve -q dump /tmp/carvez "$(cat /tmp/carvez/best)" /tmp/cvz/member0.img /tmp/cvz/member1.img /tmp/cvz/member2.img /tmp/cvz/member3.img -o /tmp/carvedz.img --size 33554432
+          cmp /tmp/disk0.img /tmp/carvedz.img
+          # Two of four members gone: rebuilt from parity, same bytes.
+          ./target/release/zvolcarve -q dump /tmp/carvez "$(cat /tmp/carvez/best)" /tmp/cvz/member1.img /tmp/cvz/member3.img -o /tmp/carvedz2.img --size 33554432
+          cmp /tmp/disk0.img /tmp/carvedz2.img
           # C-14: an empty result must be a rejection, not an absence.
           rm -rf /tmp/carve-none
           ./target/release/zvolcarve -f json scan /tmp/cv/member0.img -o /tmp/carve-none --volblocksize 1048576 --strict-profile | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["candidates"] == []; assert d["rejected_by_profile"] > 0, d; names=[r["reason"] for r in d["rejected"] if r["profile"]]; assert "profile_volblocksize" in names, names'
