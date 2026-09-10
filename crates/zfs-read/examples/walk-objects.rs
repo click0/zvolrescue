@@ -58,7 +58,17 @@ fn main() {
                 Verdict::Bound(b, _) => {
                     eprintln!("assumed {}: leaf {:#x}", path.display(), b.guid)
                 }
-                other => panic!("{}: {other:?}", path.display()),
+                // Every candidate reads; take the first, as the CLI does.
+                Verdict::Ambiguous(fits) => {
+                    let guid = fits[0].guid;
+                    pool.bind_member(device, Some(guid)).expect("vacant leaf");
+                    eprintln!(
+                        "assumed {}: leaf {guid:#x} ({} read equally well)",
+                        path.display(),
+                        fits.len()
+                    );
+                }
+                Verdict::Nothing => panic!("{}: reads as no leaf", path.display()),
             }
         }
     }

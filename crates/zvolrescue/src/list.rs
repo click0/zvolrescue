@@ -282,6 +282,16 @@ fn bind_assumed(
             .collect();
         let pool = match takers.len() {
             1 => takers[0],
+            0 if pools.is_empty() => {
+                // Nothing at all could be assembled: the assertion has no
+                // configuration to attach to, which is unreadable
+                // evidence rather than a mistake by the operator.
+                eprintln!(
+                    "zvolrescue: --assume-member {}: no ZFS pool found on the given members — at least one member whose labels survive is needed to say what the pool looks like",
+                    path.display()
+                );
+                return Err(exit::EVIDENCE);
+            }
             0 => {
                 eprintln!(
                     "zvolrescue: --assume-member {}: no scanned pool is missing a member",
@@ -320,15 +330,26 @@ fn bind_assumed(
                     continue;
                 }
                 Verdict::Ambiguous(fits) => {
+                    // Every one of them reads, so the pool comes back
+                    // whichever is chosen and each block is still
+                    // checksum-verified. Take the first, and say plainly
+                    // that the evidence did not choose — if this member
+                    // is later needed in its true slot, =GUID pins it.
+                    let first = fits[0].guid;
                     eprintln!(
-                        "zvolrescue: --assume-member {}: {} leaves read equally well; name the right one with =GUID:",
+                        "zvolrescue: {}: {} leaves of {} read equally well; taking {:#018x}. Name one with =GUID to pin it. Candidates:",
                         path.display(),
-                        fits.len()
+                        fits.len(),
+                        pools[pool].tops[fits[0].top].name,
+                        first
                     );
-                    for b in fits {
+                    for b in &fits {
                         eprintln!("  {:#018x}  {}", b.guid, pools[pool].tops[b.top].name);
                     }
-                    return Err(exit::USAGE);
+                    if pools[pool].bind_member(device, Some(first)).is_err() {
+                        return Err(exit::USAGE);
+                    }
+                    continue;
                 }
                 Verdict::Nothing => {
                     eprintln!(
