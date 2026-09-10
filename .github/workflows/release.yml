@@ -154,13 +154,14 @@ jobs:
             echo "::error::CHANGELOG.md has no '## v$v' section; nothing to say about this release"
             exit 1
           fi
-      # This repository has release immutability enabled: once a release
-      # is published, its assets and its tag are frozen, and every later
-      # edit — including attaching a file — is refused. So the release is
-      # assembled as a draft, checked while it can still be changed, and
-      # published only when it is complete. A release that is already
-      # published cannot be added to by anyone, so the job says that
-      # plainly instead of failing on a bare 403.
+      # The release is assembled as a draft and published only once it
+      # carries every file. That order is right either way, and it is
+      # the only one that works when release immutability is on
+      # (Settings → General → Releases): with that setting a published
+      # release is frozen, and every later call — attaching a file
+      # included — comes back as a bare 403. Adding to a release that
+      # already exists is therefore attempted, not assumed, and a
+      # refusal is reported as what it is.
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
@@ -171,15 +172,17 @@ jobs:
           want=$(ls dist | wc -l)
 
           if gh release view "$tag" >/dev/null 2>&1; then
-            if [ "$(gh release view "$tag" --json isDraft --jq .isDraft)" != "true" ]; then
-              echo "::error::a published release already exists for $tag."
-              echo "::error::With release immutability on, it cannot be added to or edited."
-              echo "::error::Delete the release (the tag can stay) and re-run this job to cut it again."
+            draft=$(gh release view "$tag" --json isDraft --jq .isDraft)
+            echo "a release for $tag exists (draft=$draft): completing it"
+            if ! gh release upload "$tag" dist/* --clobber ||
+               ! gh release edit "$tag" --title "$title" --notes-file notes.md $pre; then
+              echo "::error::the existing release for $tag could not be added to."
+              echo "::error::A published release is frozen when release immutability is on"
+              echo "::error::(Settings → General → Releases): nothing can be attached to it."
+              echo "::error::Delete the release — the tag can stay — and cut it again:"
+              echo "::error::Actions → Release → Run workflow from main, with $tag as the input."
               exit 1
             fi
-            echo "a draft release for $tag exists: completing it"
-            gh release upload "$tag" dist/* --clobber
-            gh release edit "$tag" --title "$title" --notes-file notes.md $pre
           else
             echo "creating $tag as a draft, with every file"
             gh release create "$tag" dist/* --title "$title" --notes-file notes.md $pre --draft

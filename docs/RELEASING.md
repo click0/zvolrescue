@@ -23,18 +23,18 @@
    git tag -a vX.Y.Z <commit> -m "zvolrescue vX.Y.Z" && git push origin vX.Y.Z
    ```
 
-4. Do not create the release page by hand. This repository has
-   **release immutability** on (Settings → General → Releases —
-   “Disallow assets and tags from being modified once a release is
-   published”), so a published release is frozen: attaching a file to
-   it, renaming it or rewriting its notes is refused with a bare 403
-   even when the token has `contents: write`. The workflow therefore
-   creates the release as a **draft**, uploads every file into it,
-   checks that the draft carries all of them, and only then publishes
-   it — a draft is still editable, so everything happens before the
-   freeze. If a published release for the tag already exists, the job
-   stops and says so: delete that release (the tag can stay) and cut it
-   again as in step 6.
+4. Do not create the release page by hand. The workflow creates the
+   release as a **draft**, uploads every file into it, checks that the
+   draft carries all of them, and only then publishes it. That order
+   matters because of **release immutability** (Settings → General →
+   Releases — “Disallow assets and tags from being modified once a
+   release is published”): with that setting on, a published release is
+   frozen, and attaching a file to it, renaming it or rewriting its
+   notes is refused with a bare 403 even when the token has
+   `contents: write`. A draft is still editable, so everything happens
+   before the freeze. If a release for the tag already exists, the job
+   tries to complete it and, if GitHub refuses, says what to do: delete
+   that release (the tag can stay) and cut it again as in step 6.
 
 6. To re-cut a release for a tag that is already pushed — a release that
    came out empty, or one made by a version of this workflow that had a
