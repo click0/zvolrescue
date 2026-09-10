@@ -36,7 +36,7 @@ jobs:
           RUSTFLAGS: ${{ matrix.rustflags }}
       - name: Package
         run: |
-          v=${GITHUB_REF_NAME#v}
+          v=$(printf '%s' "$GITHUB_REF_NAME" | sed 's/^[vV]\.*//')
           out=zvolrescue-$v-${{ matrix.name }}
           cp target/${{ matrix.target }}/release/zvolrescue "$out"
           echo "$out" > artifact-name
@@ -61,7 +61,7 @@ jobs:
             ./target/release/zvolrescue --version
       - name: Package
         run: |
-          v=${GITHUB_REF_NAME#v}
+          v=$(printf '%s' "$GITHUB_REF_NAME" | sed 's/^[vV]\.*//')
           cp target/release/zvolrescue "zvolrescue-$v-amd64-freebsd"
       - uses: actions/upload-artifact@v4
         with:
@@ -89,7 +89,14 @@ jobs:
       - name: Release notes
         run: |
           tag="${GITHUB_REF_NAME}"
-          v="${tag#v}"
+          # A tag is `vX.Y.Z`; accept `v.X.Y.Z` and `VX.Y.Z` too rather
+          # than publishing files called `zvolrescue-.0.2.0-…`. The
+          # version is what the binaries are named after, and the
+          # CHANGELOG heading is looked up by it, not by the tag.
+          v=$(printf '%s' "$tag" | sed 's/^[vV]\.*//')
+          if [ "$tag" != "v$v" ]; then
+            echo "::warning::tag $tag is not vX.Y.Z; releasing version $v"
+          fi
           {
             echo "**zvolrescue $tag** — read-only extraction of zvols from ZFS pools that no longer import: labels, uberblocks, mirror/RAIDZ/dRAID reconstruction, every checksum and compression, encrypted datasets with a key."
             echo
@@ -110,15 +117,23 @@ jobs:
             echo
             echo "## What is in $tag"
             echo
-            # The tag's section of CHANGELOG.md: from its heading to the next "## ".
-            awk -v tag="$tag" '
-              $0 ~ "^## " tag { p=1; next }
+            # The version's section of CHANGELOG.md: from its heading to
+            # the next "## ".
+            awk -v want="v$v" '
+              $0 ~ "^## " want { p=1; next }
               /^## / && p { exit }
               p { print }' CHANGELOG.md
             echo
             echo "Full history: [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/$tag/CHANGELOG.md)."
           } > notes.md
           cat notes.md
+          # An empty section means the CHANGELOG has no heading for this
+          # version: publishing notes that say nothing is worse than
+          # failing here, where it can still be fixed.
+          if ! grep -q "^### " notes.md; then
+            echo "::error::CHANGELOG.md has no '## v$v' section; nothing to say about this release"
+            exit 1
+          fi
       - uses: softprops/action-gh-release@v2
         with:
           name: zvolrescue ${{ github.ref_name }}

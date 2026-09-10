@@ -3,11 +3,24 @@
 1. Update `version` in the workspace `Cargo.toml` and add a section
    `## vX.Y.Z — date` to `CHANGELOG.md` (and `CHANGELOG.uk.md`).
 2. Make sure CI is green on `main`.
-3. Tag and push:
+3. Tag and push. The tag is `vX.Y.Z` — no dot after the `v`, which is
+   what the release is named and linked by:
 
    ```sh
    git tag -a vX.Y.Z -m "zvolrescue vX.Y.Z"
    git push origin vX.Y.Z
+   ```
+
+   A mistyped tag (`v.X.Y.Z`, `VX.Y.Z`) still releases the right version:
+   the workflow normalises it for the file names and the CHANGELOG
+   lookup, and warns in the job log. What it cannot fix is the tag in the
+   URLs — the release page then links to a tag that does not exist. Fix
+   it by deleting the tag and the release and tagging again:
+
+   ```sh
+   git tag -d v.X.Y.Z && git push origin :refs/tags/v.X.Y.Z
+   # delete the release on GitHub (Releases → Edit → Delete)
+   git tag -a vX.Y.Z <commit> -m "zvolrescue vX.Y.Z" && git push origin vX.Y.Z
    ```
 
 4. `.github/workflows/release.yml` builds static binaries
