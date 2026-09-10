@@ -194,8 +194,15 @@ pub struct Dataset {
     pub referenced_bytes: u64,
     /// `ds_prev_snap_obj`.
     pub prev_snap_obj: u64,
-    /// `dd_origin_obj` of the directory: the clone origin snapshot, if any.
+    /// `dd_origin_obj` of the directory: the origin snapshot, if any.
     pub origin_obj: u64,
+    /// A clone: the origin is a snapshot of some other dataset.
+    ///
+    /// Not the same as `origin_obj != 0`. OpenZFS gives every ordinary
+    /// dataset an origin as well — the pool's own hidden `$ORIGIN`
+    /// snapshot — so what makes a dataset a clone is an origin that is
+    /// *not* that one (`dsl_dir_is_clone`).
+    pub clone: bool,
     /// MOS object of the directory's properties ZAP.
     pub props_zapobj: u64,
     /// `volsize` for volumes, from the zvol objset's properties ZAP.
@@ -323,9 +330,45 @@ pub fn walk(mos: &DnodeArray<'_, '_>, pool_name: &str) -> Result<DatasetTree, Re
         pool_name: pool_name.to_string(),
         ..Default::default()
     };
+    let origin_snap = origin_snapshot(mos, root);
+    trace!("dsl", "$ORIGIN snapshot object: {origin_snap}");
     let mut seen = BTreeSet::new();
-    walk_dir(mos, root, pool_name, 0, &mut tree, &mut seen);
+    walk_dir(mos, root, pool_name, 0, origin_snap, &mut tree, &mut seen);
     Ok(tree)
+}
+
+/// The object of `$ORIGIN@$ORIGIN`, the snapshot every dataset that is
+/// not a clone descends from, or 0 when the pool has none.
+///
+/// It lives in a directory the walk skips (`$`-prefixed names are MOS
+/// bookkeeping, not datasets), but its object number is what separates a
+/// clone from an ordinary dataset, so it is looked up once per walk. A
+/// pool that predates the mechanism simply has no `$ORIGIN`; then every
+/// non-zero origin is a real one.
+fn origin_snapshot(mos: &DnodeArray<'_, '_>, root_dir_obj: u64) -> u64 {
+    let Ok(root) = read_dir(mos, root_dir_obj) else {
+        return 0;
+    };
+    if root.child_dir_zapobj == 0 {
+        return 0;
+    }
+    let Ok(children) = mos.object(root.child_dir_zapobj).and_then(|o| read_zap(&o)) else {
+        return 0;
+    };
+    let Some(dir_obj) = children
+        .iter()
+        .find(|e| e.name == "$ORIGIN")
+        .and_then(|e| e.value.as_u64())
+    else {
+        return 0;
+    };
+    let Ok(dir) = read_dir(mos, dir_obj) else {
+        return 0;
+    };
+    if dir.head_dataset_obj == 0 {
+        return 0;
+    }
+    read_dataset(mos, dir.head_dataset_obj).map_or(0, |d| d.prev_snap_obj)
 }
 
 fn walk_dir(
@@ -333,6 +376,7 @@ fn walk_dir(
     dir_obj: u64,
     name: &str,
     depth: usize,
+    origin_snap: u64,
     tree: &mut DatasetTree,
     seen: &mut BTreeSet<u64>,
 ) {
@@ -360,9 +404,9 @@ fn walk_dir(
         dir.parent_obj
     );
     if dir.head_dataset_obj != 0 {
-        match describe(mos, dir.head_dataset_obj, name, &dir) {
+        match describe(mos, dir.head_dataset_obj, name, &dir, origin_snap) {
             Ok(mut head) => {
-                let snaps = snapshots(mos, &head, name);
+                let snaps = snapshots(mos, &head, name, origin_snap);
                 tree.datasets.push(head.clone());
                 for s in snaps {
                     tree.datasets.push(s);
@@ -396,7 +440,7 @@ fn walk_dir(
             continue;
         }
         let child_name = format!("{name}/{}", child.name);
-        walk_dir(mos, obj, &child_name, depth + 1, tree, seen);
+        walk_dir(mos, obj, &child_name, depth + 1, origin_snap, tree, seen);
     }
 }
 
@@ -417,6 +461,7 @@ fn describe(
     obj: u64,
     name: &str,
     dir: &DslDirPhys,
+    origin_snap: u64,
 ) -> Result<Dataset, ReadError> {
     let phys = read_dataset(mos, obj)?;
     trace!(
@@ -498,6 +543,7 @@ fn describe(
         referenced_bytes: phys.referenced_bytes,
         prev_snap_obj: phys.prev_snap_obj,
         origin_obj: dir.origin_obj,
+        clone: dir.origin_obj != 0 && dir.origin_obj != origin_snap,
         props_zapobj: dir.props_zapobj,
         volsize,
         volblocksize,
@@ -507,7 +553,12 @@ fn describe(
     })
 }
 
-fn snapshots(mos: &DnodeArray<'_, '_>, head: &Dataset, name: &str) -> Vec<Dataset> {
+fn snapshots(
+    mos: &DnodeArray<'_, '_>,
+    head: &Dataset,
+    name: &str,
+    origin_snap: u64,
+) -> Vec<Dataset> {
     let mut out = Vec::new();
     if head.phys.snapnames_zapobj == 0 {
         return out;
@@ -527,7 +578,7 @@ fn snapshots(mos: &DnodeArray<'_, '_>, head: &Dataset, name: &str) -> Vec<Datase
     for e in entries {
         let Value::U64(obj) = e.value else { continue };
         let snap_name = format!("{name}@{}", e.name);
-        if let Ok(mut d) = describe(mos, obj, &snap_name, &dir) {
+        if let Ok(mut d) = describe(mos, obj, &snap_name, &dir, origin_snap) {
             d.snapshot = true;
             out.push(d);
         }

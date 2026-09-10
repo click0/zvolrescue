@@ -1,0 +1,25 @@
+[package]
+name = "zvoltimeline"
+description = "What happened to a ZFS pool and when: the surviving TXGs turned into a history of its datasets, zvols and snapshots."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "zvoltimeline"
+path = "src/main.rs"
+
+[dependencies]
+zfs-ondisk.workspace = true
+zfs-read.workspace = true
+zvolrescue-io.workspace = true
+zvol-common.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
