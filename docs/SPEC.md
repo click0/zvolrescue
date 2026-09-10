@@ -200,7 +200,16 @@ candidate, and a device of zeros in the same slot separates "this slot
 must be occupied" from "this member's contents are what read". Where the
 evidence does not choose — several leaves of one mirror hold the same
 bytes, and a wide enough vdev can reconstruct around a wrong slot — the
-tool says so and asks for a GUID instead of guessing. Supplying a whole topology by hand is F-65.
+tool says so and asks for a GUID instead of guessing. F-65, F-66 and F-67 are in the tool as well: `--hints FILE`
+describes the layout the way a `vdev_phys` template would and is used
+exactly as a label is; `--search-order` enumerates the member orders the
+template leaves open and keeps the one no block has to be repaired
+around; `scan --emit-label` writes that layout back out as the front
+128 KiB of a label, sealed for its position and stopping short of the
+uberblock ring, so it can be placed on a copy of the disk and read by
+anything else. What is left of the bare-device case is F-63 (deriving the
+base with no uberblock at all) and F-64 (finding the MOS with no
+uberblock), which are `zvolcarve` territory.
 
 Two regimes follow:
 

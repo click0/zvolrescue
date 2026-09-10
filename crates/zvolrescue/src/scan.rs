@@ -608,8 +608,110 @@ fn zero_points(src: &FileSource, opts: &ZeroPointOpts) -> Vec<ZeroPointOut> {
         .collect()
 }
 
+/// What `scan --emit-label` should write (SPEC F-67).
+#[derive(Debug, Default, Clone)]
+pub struct EmitOpts {
+    /// Layout template to build the label from.
+    pub hints: Option<PathBuf>,
+    /// Where to write the label image.
+    pub emit_label: Option<PathBuf>,
+    /// Which member of the layout, as `TOP:LEAF`.
+    pub emit_for: Option<String>,
+    /// Which of the four label positions to seal it for.
+    pub emit_label_index: Option<usize>,
+}
+
+/// Write the label a layout describes for one member (SPEC F-67).
+///
+/// The bytes go where the operator asked and nowhere else: this never
+/// touches an input, and the file it writes is a *template* to place on a
+/// copy of the disk. It carries what the layout knows — pool name, TXG,
+/// vdev type, parity, ashift, member order — with synthetic vdev GUIDs,
+/// since the real ones went with the labels. Feature flags are not in it:
+/// nothing surviving says which the pool had, and `zpool import` will want
+/// them added by hand.
+fn emit_label(
+    g: &Global,
+    devices: &[PathBuf],
+    opts: &EmitOpts,
+    txg: Option<u64>,
+    psize: u64,
+) -> Result<(), String> {
+    let (Some(file), Some(out)) = (&opts.hints, &opts.emit_label) else {
+        return Ok(());
+    };
+    let hints = crate::hints::load(file, devices)?;
+    let (top, leaf) = match &opts.emit_for {
+        None => (0usize, 0usize),
+        Some(spec) => {
+            let (t, l) = spec
+                .split_once(':')
+                .ok_or_else(|| format!("--emit-for {spec}: expected TOP:LEAF"))?;
+            (
+                t.trim()
+                    .parse()
+                    .map_err(|_| format!("--emit-for {spec}: TOP is not a number"))?,
+                l.trim()
+                    .parse()
+                    .map_err(|_| format!("--emit-for {spec}: LEAF is not a number"))?,
+            )
+        }
+    };
+    let hint_top = hints.layout.tops.get(top).ok_or_else(|| {
+        format!(
+            "--emit-for: the layout has {} top-level vdev(s)",
+            hints.layout.tops.len()
+        )
+    })?;
+    if leaf >= hint_top.members.len() {
+        return Err(format!(
+            "--emit-for: top {top} has {} member(s)",
+            hint_top.members.len()
+        ));
+    }
+    let index = opts.emit_label_index.unwrap_or(0);
+    let nv = zfs_read::hints::label_nvlist(&hints.layout, top, leaf, txg.unwrap_or(0), None);
+    let img = zfs_read::hints::label_image(&nv, index, psize)?;
+    std::fs::write(out, &img).map_err(|e| format!("{}: {e}", out.display()))?;
+    let meta = out.with_extension("json");
+    let json = json!({
+        "label_index": index,
+        "label_bytes": img.len(),
+        "sealed_for_vdev_size": psize,
+        "top": top,
+        "leaf": leaf,
+        "pool": hints.layout.name,
+        "ashift": hints.layout.ashift,
+        "txg": txg,
+        "kind": hint_top.kind,
+        "nparity": hint_top.nparity,
+        "members": hint_top
+            .members
+            .iter()
+            .map(|m| m.map(|i| devices[i].display().to_string()))
+            .collect::<Vec<_>>(),
+        "note": "template only: synthetic vdev GUIDs, no feature flags; place on a copy of the disk, never on the evidence",
+    });
+    std::fs::write(
+        &meta,
+        serde_json::to_string_pretty(&json).expect("serialisable") + "\n",
+    )
+    .map_err(|e| format!("{}: {e}", meta.display()))?;
+    if !g.quiet {
+        eprintln!(
+            "zvolrescue: wrote L{index} of {}:{} to {} ({} bytes) and its geometry to {}",
+            top,
+            leaf,
+            out.display(),
+            img.len(),
+            meta.display()
+        );
+    }
+    Ok(())
+}
+
 /// Run `scan`.
-pub fn run(g: &Global, devices: &[PathBuf], zp: &ZeroPointOpts) -> u8 {
+pub fn run(g: &Global, devices: &[PathBuf], zp: &ZeroPointOpts, emit: &EmitOpts) -> u8 {
     let mut scans: Vec<Option<DeviceScan>> = Vec::with_capacity(devices.len());
     let mut outs: Vec<DeviceOut> = Vec::with_capacity(devices.len());
     for path in devices {
@@ -660,6 +762,29 @@ pub fn run(g: &Global, devices: &[PathBuf], zp: &ZeroPointOpts) -> u8 {
                 "zvolrescue: cannot write evidence log {}: {e}",
                 log.display()
             );
+            return exit::USAGE;
+        }
+    }
+    if emit.emit_label.is_some() {
+        // Seal it for a vdev the size of the smallest member scanned: the
+        // rear labels' position depends on it, and a label sealed for the
+        // wrong size verifies nowhere.
+        let psize = out.devices.iter().map(|d| d.size).min().unwrap_or(0);
+        // The TXG the labels would have carried: the newest any member
+        // verified, whether that came from a ring inside a label or from
+        // an anchor found without one.
+        let txg = out
+            .devices
+            .iter()
+            .filter_map(|d| {
+                d.newest_txg
+                    .into_iter()
+                    .chain(d.zero_point.iter().map(|z| z.newest_txg))
+                    .max()
+            })
+            .max();
+        if let Err(e) = emit_label(g, devices, emit, txg, psize) {
+            eprintln!("zvolrescue: {e}");
             return exit::USAGE;
         }
     }

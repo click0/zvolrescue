@@ -100,6 +100,26 @@ enum Cmd {
         /// label pair (repeatable); the front pair needs no hypothesis.
         #[arg(long, value_name = "BYTES")]
         psize: Vec<u64>,
+        /// Describe the layout by hand (SPEC F-65): the JSON template
+        /// `--emit-label` turns into a label.
+        #[arg(long, value_name = "FILE")]
+        hints: Option<PathBuf>,
+        /// Write the label the layout describes for one member to FILE:
+        /// a 256 KiB image with the configuration nvlist sealed for its
+        /// label position, to place on a *copy* of the disk (SPEC F-67).
+        /// The geometry goes to FILE.json beside it. Nothing is ever
+        /// written to the evidence.
+        #[arg(long, value_name = "FILE", requires = "hints")]
+        emit_label: Option<PathBuf>,
+        /// Which member of the layout the emitted label belongs to, as
+        /// `TOP:LEAF` (default `0:0`).
+        #[arg(long, value_name = "TOP:LEAF", requires = "emit_label")]
+        emit_for: Option<String>,
+        /// Which of the four label positions to seal the emitted label
+        /// for (default 0). A label verifies only at the offset it was
+        /// sealed for.
+        #[arg(long, value_name = "N", requires = "emit_label")]
+        emit_label_index: Option<usize>,
     },
     /// List datasets, zvols and snapshots at a TXG.
     List {
@@ -236,6 +256,10 @@ fn main() -> ExitCode {
             zero_point,
             zero_point_whole,
             psize,
+            hints,
+            emit_label,
+            emit_for,
+            emit_label_index,
         } => scan::run(
             &cli.global,
             &devices,
@@ -243,6 +267,12 @@ fn main() -> ExitCode {
                 always: zero_point || zero_point_whole || !psize.is_empty(),
                 whole: zero_point_whole,
                 psize_hints: psize,
+            },
+            &scan::EmitOpts {
+                hints,
+                emit_label,
+                emit_for,
+                emit_label_index,
             },
         ),
         Cmd::List {

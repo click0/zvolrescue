@@ -110,6 +110,19 @@ jobs:
           cmp /tmp/disk0.img /tmp/hz/searched.img
           grep -q "best has 0 checksum mismatch" /tmp/hz/search.err
           grep -q "just as good" /tmp/hz/search.err && { echo "the right order must be unique here"; exit 1; } || true
+          # The layout can be handed on as a label (SPEC F-67): placed on
+          # a *copy* of each member, it makes the pool readable with no
+          # hints at all. The image stops before the uberblock ring, so
+          # the uberblocks already on the disk survive it.
+          for i in 0 1 2 3; do
+            ./target/release/zvolrescue -q scan /tmp/hz/nolabel0.img /tmp/hz/nolabel1.img /tmp/hz/nolabel2.img /tmp/hz/nolabel3.img --hints /tmp/hz/hints.json --emit-label /tmp/hz/L-$i.bin --emit-for 0:$i
+            test "$(stat -c %s /tmp/hz/L-$i.bin)" = 131072
+            cp /tmp/hz/nolabel$i.img /tmp/hz/relabel$i.img
+            dd if=/tmp/hz/L-$i.bin of=/tmp/hz/relabel$i.img conv=notrunc status=none
+          done
+          ./target/release/zvolrescue -f json scan /tmp/hz/relabel0.img | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"][0]; assert d["config"]["ashift"] == 12, d["config"]; assert d["labels"][0]["verified"] > 0, d["labels"][0]'
+          ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/hz/relabel0.img /tmp/hz/relabel1.img /tmp/hz/relabel2.img /tmp/hz/relabel3.img --txg 4816229 -o /tmp/hz/from-labels.img
+          cmp /tmp/disk0.img /tmp/hz/from-labels.img
           # A layout that names a member which was not given is a usage error.
           python3 -c 'import json; d=json.load(open("/tmp/hz/hints.json")); d["tops"][0]["members"][0]="/tmp/nowhere.img"; json.dump(d, open("/tmp/hz/bad.json","w"))'
           if ./target/release/zvolrescue -q list /tmp/hz/nolabel0.img /tmp/hz/nolabel1.img /tmp/hz/nolabel2.img /tmp/hz/nolabel3.img --hints /tmp/hz/bad.json; then exit 1; else test $? = 1; fi

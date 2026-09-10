@@ -164,6 +164,21 @@ pub fn scan_device_at(dev: &dyn BlockSource, base: u64) -> io::Result<DeviceScan
             ),
         )
     })?;
+    // `ashift` belongs to the vdev, not to one copy of its label: a label
+    // whose configuration is gone still has a ring, and it was written
+    // with the same slot size as the others. Take it from whichever label
+    // still says so before walking any ring.
+    let mut vdev_ashift = None;
+    let mut probe = vec![0u8; VDEV_PHYS_SIZE as usize];
+    for &offset in offsets.iter() {
+        dev.read_at(base + offset + VDEV_PHYS_OFFSET, &mut probe)?;
+        if let Ok(c) = parse_vdev_phys(&probe, offset).config {
+            if let Some(a) = c.list("vdev_tree").and_then(|t| t.u64("ashift")) {
+                vdev_ashift = Some(a);
+                break;
+            }
+        }
+    }
     let mut label = vec![0u8; LABEL_SIZE as usize];
     let mut labels = Vec::with_capacity(LABELS_PER_VDEV);
     for (index, &offset) in offsets.iter().enumerate() {
@@ -199,7 +214,8 @@ pub fn scan_device_at(dev: &dyn BlockSource, base: u64) -> io::Result<DeviceScan
         let ashift = config
             .as_ref()
             .and_then(|c| c.list("vdev_tree"))
-            .and_then(|t| t.u64("ashift"));
+            .and_then(|t| t.u64("ashift"))
+            .or(vdev_ashift);
         let slot_shift = slot_shift_for(ashift);
         trace!(
             "label",

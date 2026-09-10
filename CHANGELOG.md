@@ -69,6 +69,18 @@ in CI; what was tried on real environments is logged in
   all — so every ordering is tried and ranked by mismatches. Ties are
   reported rather than hidden; a vdev too wide to enumerate (more than 7
   members) says so instead of running for hours.
+* **`scan --emit-label FILE` hands the result on (SPEC F-67).** The layout
+  is written out as the label it describes: the front 128 KiB of a label —
+  blank area, boot header and the `vdev_phys` nvlist sealed for the
+  position it will occupy — plus the geometry as JSON beside it. It stops
+  short of the uberblock ring on purpose, so placing it on a *copy* of the
+  disk leaves the uberblocks that are still there intact. In CI, four
+  emitted labels placed on copies make a pool whose labels were all zeroed
+  readable with no hints at all, and the volume comes back bit-exact.
+* `ashift` is now taken from whichever label still states it when walking
+  the uberblock ring of a label whose configuration is gone. It belongs to
+  the vdev, not to one copy of its label, and reading a 4 KiB ring as if
+  its slots were 1 KiB found the uberblocks but verified none of them.
 
 ## v0.1.0-alpha.1 — 2026-09-08
 
