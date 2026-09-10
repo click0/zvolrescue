@@ -6,99 +6,101 @@ validated against OpenZFS **userland** pools (`ztest` + `zdb`, no kernel)
 in CI; what was tried on real environments is logged in
 [docs/REALWORLD-TESTS.md](docs/REALWORLD-TESTS.md).
 
-## Unreleased
+## v0.2.0 — 2026-09-10
+
+**When the labels are gone.** `v0.1.0-alpha.1` could read any pool whose
+labels survived. This release is about the pools where they did not: a
+partition re-created somewhere else, a member whose four `vdev_phys`
+areas were overwritten, a whole disk imaged rather than a partition, or a
+pool with no configuration left anywhere. Nothing new is taken on trust —
+every address this release recovers is accepted only after a checksum
+verifies at it (SPEC D-5), and the tool still never writes to the
+evidence.
 
 ### Added
-* **Zero-point recovery from uberblocks (SPEC F-61).** A member whose four
-  `vdev_phys` areas have been overwritten no longer scans as a blank disk:
-  every uberblock is a self-checksumming block whose verifier is its own
-  vdev-relative offset, so one surviving ring slot fixes where the vdev
-  starts. `scan` runs the search by itself when no label configuration is
-  readable, and on request with `--zero-point` (`--zero-point-whole` to
-  search the whole member, `--psize BYTES` to name the vdev's size for the
-  rear label pair). It reports the base, how many checksums confirmed it,
-  which labels they came from, the TXG range and the vdev size the rear
-  labels imply. Verified against a real ztest member with all four
-  configurations zeroed, before and after moving it 1 MiB.
-* **Members are read from their own base.** A vdev that does not start at
-  offset 0 of what was opened — a partition re-created with another start,
-  an image cut differently — is now read correctly end to end: the labels
-  are re-read relative to the recovered base and every DVA resolves to
-  `base + 4 MiB + offset`. A configuration that parses but whose embedded
-  checksum does not verify counts as no configuration, which is exactly
-  what a member read at the wrong base looks like. `list` and `dump` of a
-  member moved 3 MiB give the same datasets and the same image hash as
-  before the move, and a whole-object walk through it is identical.
-* **`--assume-member PATH[=GUID]` (SPEC F-62, first half).** A member whose
-  four labels are gone carries nothing that says which leaf it is, but its
-  siblings' configuration does: it names every leaf, and the ones no
-  scanned device carries are exactly the slots such a member can fill.
-  `list` and `dump` take the assertion — by GUID, or without one when a
-  single leaf is missing — and nothing else is taken on trust: on a raidz2
-  fixture with two label-less members and a third member left out, the
-  correct binding returns the volume bit-exact while a swapped one fails
-  every checksum and exits 3 instead of handing back plausible garbage.
-* **`--assume-member PATH` works out *which* leaf on its own.** Without a
-  GUID the tool tries the member in each vacant leaf and reads the pool
-  through it: as many siblings of that top are withheld as the redundancy
-  can spare, so the walk leans on the candidate, and a device of zeros is
-  then put in its place to tell a slot that merely needs to be occupied
-  from one whose contents matter. A leaf is taken when its contents made
-  the difference, or when it is the only one that reads at all. Several
-  leaves of the same mirror are interchangeable and any is reported;
-  several that are not says so and asks for a GUID rather than guessing. A
-  device that does not hold this pool's data reads as no leaf and is
-  refused.
-* **`--hints FILE`: a layout described by hand (SPEC F-65).** When not one
-  `vdev_phys` survives on any member, nothing on disk says what the pool
-  looked like — but the uberblock rings are still there, and their
-  checksums verify against their own offsets. A JSON file gives what a
-  `vdev_phys` template would (ashift, the top-level vdevs, their members
-  in vdev order, and a base offset per member) and the tool reads through
-  it exactly as it would through a label: a raidz2 whose four members have
-  had every label configuration zeroed lists its datasets and extracts its
-  volume bit-exact. A member with no configuration now also yields a scan
-  built from the anchors alone, so the TXG history and root pointers are
-  available without any label at all.
-* **`--search-order`: the order the checksums accept (SPEC F-66).** What a
-  layout leaves open is enumerated rather than guessed. Member order
-  cannot be settled by "did it read": a raidz2 with two columns swapped
-  still returns the right bytes, reconstructed around the two that no
-  longer verify. It is settled by how much had to be repaired — read
-  through the right order a healthy pool produces no checksum mismatch at
-  all — so every ordering is tried and ranked by mismatches. Ties are
-  reported rather than hidden; a vdev too wide to enumerate (more than 7
-  members) says so instead of running for hours.
-* **`scan --emit-label FILE` hands the result on (SPEC F-67).** The layout
-  is written out as the label it describes: the front 128 KiB of a label —
-  blank area, boot header and the `vdev_phys` nvlist sealed for the
-  position it will occupy — plus the geometry as JSON beside it. It stops
-  short of the uberblock ring on purpose, so placing it on a *copy* of the
-  disk leaves the uberblocks that are still there intact. In CI, four
-  emitted labels placed on copies make a pool whose labels were all zeroed
-  readable with no hints at all, and the volume comes back bit-exact.
-* `ashift` is now taken from whichever label still states it when walking
-  the uberblock ring of a label whose configuration is gone. It belongs to
-  the vdev, not to one copy of its label, and reading a 4 KiB ring as if
-  its slots were 1 KiB found the uberblocks but verified none of them.
 * **Whole-disk images (SPEC F-06, F-60).** A member is usually a
   partition, and an image of the disk it lived on carries the table that
   says where it began. `scan` reports that table — GPT (primary or backup,
   512- or 4096-byte sectors) or MBR, with the ZFS partition types marked —
-  and every command now looks there first when nothing verifies at offset
-  0. The partition's *length* matters as much as its start: the rear label
+  and every command looks there first when nothing verifies at offset 0.
+  The partition's *length* matters as much as its start: the rear label
   pair is placed against the vdev's own size, so a member read to the end
   of the disk instead of the end of its partition finds only two of its
-  four labels. The table is a hint like any other: the base it suggests is
-  accepted only when a label checksum verifies there.
-* **Layouts nest, and `scan` prints one.** A hint node carries either
-  `members` or `children`, so a vdev being replaced, one backed by a spare,
-  or the mirror-of-raidz shapes ztest builds can be described. `scan -f
-  json` now emits each top-level vdev as a `tree` in exactly the shape
-  `--hints` takes: the scan of a healthy pool is the template for reading
-  a damaged one, and the crosscheck builds its layouts that way — with
-  every label configuration of every member erased, all five ztest pools
-  list the same datasets as `zdb`.
+  four labels.
+* **Zero-point recovery from uberblocks (SPEC F-61).** A member whose four
+  `vdev_phys` areas have been overwritten no longer scans as a blank disk:
+  every uberblock is a self-checksumming block whose verifier is its own
+  vdev-relative offset, so one surviving ring slot fixes where the vdev
+  starts. `scan` searches by itself when no label configuration is
+  readable, and on request with `--zero-point` (`--zero-point-whole`,
+  `--psize BYTES` for the rear pair). It reports the base, how many
+  checksums confirmed it, which labels they came from, the TXG range and
+  the vdev size a rear-label hit implies.
+* **Members are read from their own base.** A vdev that does not start at
+  offset 0 of what was opened is now read correctly end to end: the labels
+  are re-read relative to the recovered base and every DVA resolves to
+  `base + 4 MiB + offset`. A configuration that parses but whose embedded
+  checksum does not verify counts as no configuration — that is exactly
+  what a member read at the wrong base looks like. `list` and `dump` of a
+  member moved 3 MiB give the same datasets and the same image hash as
+  before the move.
+* **`--assume-member PATH[=GUID]` (SPEC F-62).** A member whose labels are
+  gone carries nothing that says which leaf it is; its siblings'
+  configuration names every leaf, and the ones no scanned device carries
+  are the slots it can fill. Without a GUID the tool works out which by
+  reading through it: as many siblings of that top are withheld as the
+  redundancy can spare, so the walk leans on the candidate, and a device
+  of zeros in the same slot separates "this slot has to be occupied" from
+  "this member's contents are what read". Leaves of one mirror are
+  interchangeable and any is reported; leaves that are not are listed for
+  the operator to name. A device that does not hold this pool's data reads
+  as no leaf and is refused.
+* **`--hints FILE`: a layout described by hand (SPEC F-65).** When not one
+  `vdev_phys` survives anywhere, a JSON template gives what a `vdev_phys`
+  would (ashift, the top-level vdevs, their members in vdev order, a base
+  offset per member) and the tool reads through it exactly as through a
+  label. Layouts nest, so a vdev being replaced, one backed by a spare, or
+  a mirror of raidz can be described. The uberblocks still come from the
+  members: a member with no configuration yields a scan built from the
+  anchors alone, which is what makes the template enough on its own.
+  `scan -f json` emits each top-level vdev as a `tree` in exactly the
+  shape `--hints` takes — the scan of a healthy pool is the template for
+  reading a damaged one.
+* **`--search-order`: the order the checksums accept (SPEC F-66).** Member
+  order cannot be settled by "did it read": a raidz2 with two columns
+  swapped still returns the right bytes, reconstructed around the two that
+  no longer verify. It is settled by how much had to be repaired — through
+  the right order a healthy pool produces no checksum mismatch at all — so
+  every ordering is tried and ranked by mismatches. Ties are reported
+  rather than hidden; a vdev too wide to enumerate (more than 7 members)
+  says so instead of running for hours.
+* **`scan --emit-label FILE` hands the result on (SPEC F-67).** The layout
+  is written out as the label it describes: the front 128 KiB — blank
+  area, boot header and the `vdev_phys` nvlist sealed for the position it
+  will occupy — plus the geometry as JSON beside it. It stops short of the
+  uberblock ring on purpose, so placing it on a *copy* of the disk leaves
+  the uberblocks that are still there intact.
+
+### Fixed
+* `ashift` is taken from whichever label still states it when walking the
+  uberblock ring of a label whose configuration is gone. It belongs to the
+  vdev, not to one copy of its label, and reading a 4 KiB ring as if its
+  slots were 1 KiB found the uberblocks but verified none of them.
+* `--assume-member` on members that assemble into no pool at all now exits
+  2 (unreadable evidence) instead of reporting a usage error.
+
+### Verified
+* The `ztest` + `zdb` crosscheck grew four steps, run on five fresh pools
+  (mirror, raidz2, raidz1-of-mirrors, draid1, draid2) on every push: the
+  base recovered from uberblocks with every `vdev_phys` erased and after a
+  1 MiB shift; a whole-object walk through a member moved 1 MiB; the same
+  through a member inside a GPT partition of a whole-disk image; and, with
+  **every label configuration of every member erased**, the same datasets
+  as `zdb` through a layout built mechanically from an earlier scan.
+* The damage matrix in
+  [zvolrescue-testdata](https://github.com/click0/zvolrescue-testdata)
+  runs 38 manifests over three pools; two damage classes now have to be
+  answered rather than survived, and both exposed fixes in the tool.
 
 ## v0.1.0-alpha.1 — 2026-09-08
 

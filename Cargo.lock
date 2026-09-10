@@ -271,7 +271,7 @@ dependencies = [
 
 [[package]]
 name = "edonr"
-version = "0.1.0-alpha.1"
+version = "0.2.0"
 
 [[package]]
 name = "find-msvc-tools"
@@ -625,7 +625,7 @@ dependencies = [
 
 [[package]]
 name = "zfs-ondisk"
-version = "0.1.0-alpha.1"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "edonr",
@@ -637,7 +637,7 @@ dependencies = [
 
 [[package]]
 name = "zfs-read"
-version = "0.1.0-alpha.1"
+version = "0.2.0"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -660,7 +660,7 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zvolrescue"
-version = "0.1.0-alpha.1"
+version = "0.2.0"
 dependencies = [
  "clap",
  "serde",
@@ -673,4 +673,4 @@ dependencies = [
 
 [[package]]
 name = "zvolrescue-io"
-version = "0.1.0-alpha.1"
+version = "0.2.0"
