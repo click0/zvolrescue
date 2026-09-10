@@ -180,6 +180,47 @@ jobs:
           ./target/release/zvolrescue -f json dump tank/vm/disk0 /tmp/fx/member0.img /tmp/fx/member1.img -o /tmp/resume.img --resume | python3 -c 'import json,sys; d=json.load(sys.stdin)["volumes"][0]; assert d["resumed_from_block"] == 2, d; assert d["blocks_read"] == 1, d; assert d["sha256"] == "d6d58af862ec2761bf43158f7ee2b2b0f4628fa6ca8095544493f9d698d7b80d"'
           cmp /tmp/disk0.img /tmp/resume.img
           test ! -e /tmp/resume.img.resume.json
+      - name: The pool's history from its transaction groups (COMPANIONS T-01…T-05, T-10)
+        run: |
+          ./target/release/zvoltimeline --version
+          ./target/release/zvoltimeline /tmp/fx/member0.img /tmp/fx/member1.img
+          # The fixture's newest TXG no longer has the volume; the one
+          # before it does. That is exactly what the timeline must say,
+          # and it must say which TXG to go back to (T-05).
+          ./target/release/zvoltimeline -f json /tmp/fx/member0.img /tmp/fx/member1.img > /tmp/tl.json
+          python3 - <<'EOF'
+          import json
+          d = json.load(open("/tmp/tl.json"))
+          assert d["txgs"] == [4816228, 4816229, 4816230], d["txgs"]
+          assert d["unreadable_txgs"] == [], d["unreadable_txgs"]
+          ev = {(e["event"], e.get("object")): e for e in d["events"]}
+          gone = ev[("destroyed", "tank/vm/disk0")]
+          assert gone["txg"] == 4816230, gone
+          assert gone["last_seen_txg"] == 4816229, gone
+          assert ("snapshot-destroyed", "tank/vm/disk0@before") in ev
+          # Every dataset of a modern pool has an origin; none of these is
+          # a clone (SPEC: dsl_dir_is_clone, not dd_origin_obj != 0).
+          assert not [e for e in d["events"] if e["event"] == "clone"], d["events"]
+          assert ("host", None) in ev, d["events"]
+          open("/tmp/recover.sh", "w").write(gone["recover_with"] + "\n")
+          EOF
+          # The command it printed is the command that gets the volume
+          # back, byte for byte (COMPANIONS §2.4).
+          cat /tmp/recover.sh
+          ( cd /tmp && PATH="$GITHUB_WORKSPACE/target/release:$PATH" sh recover.sh )
+          cmp /tmp/disk0.img /tmp/tank_vm_disk0.img
+          # T-10: the same evidence gives the same bytes.
+          ./target/release/zvoltimeline -f json /tmp/fx/member0.img /tmp/fx/member1.img > /tmp/tl2.json
+          cmp /tmp/tl.json /tmp/tl2.json
+          # T-08: one object, by name and by GUID.
+          ./target/release/zvoltimeline -f json --dataset tank/vm/disk0 /tmp/fx/member0.img | python3 -c 'import json,sys; e=json.load(sys.stdin)["events"]; assert {x["object"] for x in e} == {"tank/vm/disk0"}, e; open("/tmp/guid","w").write(e[0]["guid"])'
+          ./target/release/zvoltimeline -f json --dataset "$(cat /tmp/guid)" /tmp/fx/member0.img | python3 -c 'import json,sys; e=json.load(sys.stdin)["events"]; assert {x["object"] for x in e} == {"tank/vm/disk0"}, e'
+          # A range with nothing in it is answered, not guessed at.
+          if ./target/release/zvoltimeline --from 1 --to 2 /tmp/fx/member0.img; then echo "must fail"; exit 1; else test $? = 3; fi
+          # Never a write to the evidence.
+          sha256sum /tmp/fx/member0.img /tmp/fx/member1.img > /tmp/fx.sums
+          ./target/release/zvoltimeline /tmp/fx/member0.img /tmp/fx/member1.img -o /tmp/tl.txt
+          sha256sum -c /tmp/fx.sums
       - name: End-to-end on a raidz2 fixture (missing and corrupted members)
         run: |
           cargo run -p zfs-read --example mkfixture -- /tmp/rz raidz2 12
