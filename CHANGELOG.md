@@ -91,6 +91,14 @@ in CI; what was tried on real environments is logged in
   of the disk instead of the end of its partition finds only two of its
   four labels. The table is a hint like any other: the base it suggests is
   accepted only when a label checksum verifies there.
+* **Layouts nest, and `scan` prints one.** A hint node carries either
+  `members` or `children`, so a vdev being replaced, one backed by a spare,
+  or the mirror-of-raidz shapes ztest builds can be described. `scan -f
+  json` now emits each top-level vdev as a `tree` in exactly the shape
+  `--hints` takes: the scan of a healthy pool is the template for reading
+  a damaged one, and the crosscheck builds its layouts that way — with
+  every label configuration of every member erased, all five ztest pools
+  list the same datasets as `zdb`.
 
 ## v0.1.0-alpha.1 — 2026-09-08
 

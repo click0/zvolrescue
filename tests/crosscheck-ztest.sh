@@ -265,6 +265,116 @@ print(z.get("base"), z.get("anchors"), z.get("psize"))'
         rm -f "$dir/moved-intact.img"
     fi
 
+    # 11. a member inside a whole-disk image: a GPT says where its
+    #     partition began and how long it was, and the walk must be
+    #     identical to reading the bare member.
+    if [ -x "$WALK" ] && [ -s "$dir/walk.txt" ]; then
+        python3 - "$anchored" "$dir/wholedisk.img" <<'EOF'
+import os, struct, sys
+src, out = sys.argv[1], sys.argv[2]
+sector, start_lba = 512, 4096
+member = open(src, "rb").read()
+disk = bytearray(sector * (start_lba + len(member) // sector + 4096))
+disk[510], disk[511] = 0x55, 0xAA
+disk[446 + 4] = 0xee
+struct.pack_into("<I", disk, 446 + 8, 1)
+struct.pack_into("<I", disk, 446 + 12, 0xffffffff)
+disk[sector:sector + 8] = b"EFI PART"
+struct.pack_into("<I", disk, sector + 80, 1)
+struct.pack_into("<I", disk, sector + 84, 128)
+hx = bytes.fromhex("6a898cc31dd211b299a6080020736631")
+e = bytearray(128)
+e[0:16] = struct.pack("<IHH", int.from_bytes(hx[0:4], "big"),
+                      int.from_bytes(hx[4:6], "big"),
+                      int.from_bytes(hx[6:8], "big")) + hx[8:16]
+e[16:32] = b"\x22" * 16
+struct.pack_into("<Q", e, 32, start_lba)
+struct.pack_into("<Q", e, 40, start_lba + len(member) // sector - 1)
+e[56:62] = "zfs0".encode("utf-16-le")
+disk[sector * 2:sector * 2 + 128] = e
+disk[start_lba * sector:start_lba * sector + len(member)] = member
+open(out, "wb").write(bytes(disk))
+EOF
+        others="$(echo "$members" | grep -v "^$anchored$" | tr '\n' ' ') $(ls "$dir"/ztest.*b 2>/dev/null | tr '\n' ' ')"
+        if ZR_KEY="$key" "$WALK" "$dir/wholedisk.img" $others > "$dir/walk-disk.txt" 2> "$dir/walk-disk.err" \
+            && ! grep -q "ERROR\|dnode:\|no key\|decrypt" "$dir/walk-disk.txt" \
+            && [ "$(head -1 "$dir/walk-disk.txt")" = "$(head -1 "$reference")" ] \
+            && $ZR -f json scan "$dir/wholedisk.img" | python3 -c '
+import json,sys
+d = json.load(sys.stdin)["devices"][0]
+assert d["partitions"]["scheme"] == "gpt", d["partitions"]
+assert d["vdev_base"] == 2097152, d
+assert d["vdev_base_from"] == "partition table", d
+assert all(l["config_checksum"] == "ok" for l in d["labels"]), d["labels"]'; then
+            echo "   whole disk: the member inside a GPT partition walks identically ($(head -1 "$dir/walk-disk.txt"))"
+        else
+            echo "   whole disk: FAILED"; head -12 "$dir/walk-disk.txt"; tail -5 "$dir/walk-disk.err"; fail=1
+        fi
+        rm -f "$dir/wholedisk.img"
+    fi
+
+    # 12. every label configuration of every member erased: only a layout
+    #     given by hand can say what the pool was, and the uberblocks the
+    #     zero-point search confirms carry the rest.
+    if [ -x "$WALK" ] && [ -s "$dir/walk.txt" ]; then
+        $ZR -f json scan $members > "$dir/scan.json"
+        if python3 - "$dir/scan.json" "$dir/hints.json" "$dir" <<'EOF'
+import json, os, sys
+scan = json.load(open(sys.argv[1]))
+out, work = sys.argv[2], sys.argv[3]
+pool = scan["pools"][0]
+tops = sorted(pool["tops"], key=lambda t: t["id"])
+# Only a topology that was scanned whole can be described by hand.
+if [t["id"] for t in tops] != list(range(len(tops))):
+    sys.exit(1)
+def blank(node):
+    """The scanned tree is already the shape --hints takes; point it at
+    the copies whose label configurations are erased."""
+    n = dict(node)
+    if n.get("members") is not None:
+        if any(m is None for m in n["members"]):
+            sys.exit(1)
+        n["members"] = [os.path.join(work, "blank-" + os.path.basename(m))
+                        for m in n["members"]]
+    if n.get("children") is not None:
+        n["children"] = [blank(c) for c in n["children"]]
+    return n
+ashift = next((d["config"]["ashift"] for d in scan["devices"]
+               if d.get("config") and d["config"].get("ashift")), None)
+if ashift is None:
+    sys.exit(1)
+json.dump({"name": pool["name"], "ashift": ashift,
+           "tops": [blank(t["tree"]) for t in tops]},
+          open(out, "w"), indent=1)
+EOF
+        then
+            copies=""
+            for m in $members; do
+                c="$dir/blank-$(basename "$m")"
+                wipe_copy "$m" "$c" 0
+                copies="$copies $c"
+            done
+            if $ZR -f json list -r $copies > "$dir/list-blank.json" 2>/dev/null; then
+                echo "   layout: a pool with no configuration left read without one"; fail=1
+            elif $ZR -f json list -r $copies --hints "$dir/hints.json" > "$dir/list-hints.json" 2> "$dir/hints.err" \
+                && python3 -c '
+import json, sys
+listed = sorted(d["name"] for d in json.load(open(sys.argv[1]))["datasets"])
+oracle = sorted(l.split()[0] for l in open(sys.argv[2]) if l.strip())
+if listed != oracle:
+    print("listed", listed[:4], "oracle", oracle[:4])
+    sys.exit(1)
+' "$dir/list-hints.json" "$dir/zdb.txt"; then
+                echo "   layout: with every configuration erased, the hand-written layout lists the same $(wc -l < "$dir/zdb.txt") dataset(s) as zdb"
+            else
+                echo "   layout: FAILED"; tail -3 "$dir/hints.err"; fail=1
+            fi
+            rm -f $copies
+        else
+            echo "   layout: skipped (this pool's topology was not scanned whole)"
+        fi
+    fi
+
 }
 
 run_pool mirror 1 -K raidz -m 2 -r 1 -R 0

@@ -169,6 +169,46 @@ struct MemberOut {
     present: Option<PathBuf>,
 }
 
+/// A vdev as a layout template: the same shape `--hints` takes, so the
+/// scan of a healthy pool can be kept and used to read a damaged one.
+#[derive(Debug, Serialize)]
+struct TreeOut {
+    kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nparity: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    draid_ndata: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    draid_nspares: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    draid_ngroups: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    members: Option<Vec<Option<String>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    children: Option<Vec<TreeOut>>,
+}
+
+fn tree_out(node: &zfs_ondisk::label::VdevNode, members: &[MemberOut]) -> TreeOut {
+    let leaf_path = |guid: u64| {
+        members
+            .iter()
+            .find(|m| m.guid == hex(guid))
+            .and_then(|m| m.present.as_ref())
+            .map(|p| p.display().to_string())
+    };
+    let nested = node.children.iter().any(|c| !c.children.is_empty());
+    TreeOut {
+        kind: node.kind.clone(),
+        nparity: node.nparity,
+        draid_ndata: node.draid_ndata,
+        draid_nspares: node.draid_nspares,
+        draid_ngroups: node.draid_ngroups,
+        members: (!nested && !node.children.is_empty())
+            .then(|| node.children.iter().map(|c| leaf_path(c.guid)).collect()),
+        children: nested.then(|| node.children.iter().map(|c| tree_out(c, members)).collect()),
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct TopOut {
     id: u64,
@@ -179,6 +219,8 @@ struct TopOut {
     ashift: Option<u64>,
     readable: bool,
     members: Vec<MemberOut>,
+    /// The vdev as a layout template, in the shape `--hints` takes.
+    tree: TreeOut,
 }
 
 #[derive(Debug, Serialize)]
@@ -425,6 +467,17 @@ fn pool_out(p: &PoolAssembly, paths: &[PathBuf]) -> PoolOut {
                         present: m.present.map(|i| paths[i].clone()),
                     })
                     .collect(),
+                tree: tree_out(
+                    &t.tree,
+                    &t.members
+                        .iter()
+                        .map(|m| MemberOut {
+                            guid: hex(m.guid),
+                            path: m.path.clone(),
+                            present: m.present.map(|i| paths[i].clone()),
+                        })
+                        .collect::<Vec<_>>(),
+                ),
             })
             .collect(),
     }

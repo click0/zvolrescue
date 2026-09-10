@@ -17,10 +17,17 @@ use zfs_ondisk::label::VdevNode;
 
 use crate::pool::{Member, PoolAssembly, TopVdev};
 
-/// One top-level vdev of a hand-written layout.
+/// One vdev of a hand-written layout: a top-level vdev, or a group
+/// nested inside one.
+///
+/// A node has either `members` (leaves) or `children` (groups). Real
+/// pools are usually one level deep — a raidz of disks, a mirror of disks
+/// — but a vdev being replaced or backed by a spare nests, and so does
+/// anything ztest builds, which wraps parity vdevs in a mirror.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopHint {
-    /// `mirror`, `raidz`, `draid`, or `disk` for a single-device top.
+    /// `mirror`, `raidz`, `draid`, `replacing`, `spare`, or `disk` for a
+    /// single-device top.
     pub kind: String,
     /// Parity level for raidz/draid.
     pub nparity: Option<u64>,
@@ -33,6 +40,18 @@ pub struct TopHint {
     /// Indices into the scanned device list, in vdev order. `None` marks a
     /// member that is known to exist but was not supplied.
     pub members: Vec<Option<usize>>,
+    /// Groups under this one, when the vdev nests.
+    pub children: Vec<TopHint>,
+}
+
+impl TopHint {
+    /// Every leaf under this node, in vdev order.
+    pub fn leaves(&self) -> Vec<Option<usize>> {
+        if self.children.is_empty() {
+            return self.members.clone();
+        }
+        self.children.iter().flat_map(|c| c.leaves()).collect()
+    }
 }
 
 /// A whole pool described by hand.
@@ -59,53 +78,19 @@ impl LayoutHints {
         let mut tops = Vec::with_capacity(self.tops.len());
         let mut devices = Vec::new();
         for (id, hint) in self.tops.iter().enumerate() {
-            let mut members = Vec::with_capacity(hint.members.len());
-            let mut children = Vec::with_capacity(hint.members.len());
-            for (i, present) in hint.members.iter().enumerate() {
-                let guid = synthetic_guid(id, i);
-                members.push(Member {
-                    guid,
-                    path: None,
-                    present: *present,
-                });
-                if let Some(d) = present {
-                    if !devices.contains(d) {
-                        devices.push(*d);
+            let mut members = Vec::new();
+            let mut leaf = 0usize;
+            let tree = self.node(hint, id, 0, &mut leaf, &mut members);
+            for m in &members {
+                if let Some(d) = m.present {
+                    if !devices.contains(&d) {
+                        devices.push(d);
                     }
                 }
-                children.push(VdevNode {
-                    kind: "disk".into(),
-                    id: i as u64,
-                    guid,
-                    path: None,
-                    ashift: Some(self.ashift),
-                    asize: None,
-                    nparity: None,
-                    draid_ndata: None,
-                    draid_nspares: None,
-                    draid_ngroups: None,
-                    is_log: false,
-                    children: Vec::new(),
-                });
             }
-            let top_guid = synthetic_guid(id, usize::MAX);
-            let tree = VdevNode {
-                kind: hint.kind.clone(),
-                id: id as u64,
-                guid: top_guid,
-                path: None,
-                ashift: Some(self.ashift),
-                asize: None,
-                nparity: hint.nparity,
-                draid_ndata: hint.draid_ndata,
-                draid_nspares: hint.draid_nspares,
-                draid_ngroups: hint.draid_ngroups,
-                is_log: false,
-                children,
-            };
             tops.push(TopVdev {
                 id: id as u64,
-                guid: top_guid,
+                guid: tree.guid,
                 name: format!("{}-{id}", display_kind(hint)),
                 kind: hint.kind.clone(),
                 nparity: hint.nparity,
@@ -128,11 +113,68 @@ impl LayoutHints {
         }
     }
 
+    /// One node of the tree, numbering leaves in vdev order.
+    fn node(
+        &self,
+        hint: &TopHint,
+        top: usize,
+        id: u64,
+        leaf: &mut usize,
+        members: &mut Vec<Member>,
+    ) -> VdevNode {
+        let mut children = Vec::new();
+        if hint.children.is_empty() {
+            for present in &hint.members {
+                let guid = synthetic_guid(top, *leaf);
+                members.push(Member {
+                    guid,
+                    path: None,
+                    present: *present,
+                });
+                children.push(VdevNode {
+                    kind: "disk".into(),
+                    id: children.len() as u64,
+                    guid,
+                    path: None,
+                    ashift: Some(self.ashift),
+                    asize: None,
+                    nparity: None,
+                    draid_ndata: None,
+                    draid_nspares: None,
+                    draid_ngroups: None,
+                    is_log: false,
+                    children: Vec::new(),
+                });
+                *leaf += 1;
+            }
+        } else {
+            for (i, c) in hint.children.iter().enumerate() {
+                children.push(self.node(c, top, i as u64, leaf, members));
+            }
+        }
+        VdevNode {
+            kind: hint.kind.clone(),
+            id,
+            // Group GUIDs are numbered from the top down, well clear of
+            // the leaves' own numbering.
+            guid: synthetic_guid(top, usize::MAX - id as usize),
+            path: None,
+            ashift: Some(self.ashift),
+            asize: None,
+            nparity: hint.nparity,
+            draid_ndata: hint.draid_ndata,
+            draid_nspares: hint.draid_nspares,
+            draid_ngroups: hint.draid_ngroups,
+            is_log: false,
+            children,
+        }
+    }
+
     /// Every member index the template refers to, in vdev order.
     pub fn devices(&self) -> Vec<usize> {
         self.tops
             .iter()
-            .flat_map(|t| t.members.iter().flatten().copied())
+            .flat_map(|t| t.leaves().into_iter().flatten())
             .collect()
     }
 }
@@ -212,6 +254,10 @@ pub fn try_layout(
 /// Every ordering of the members of one top-level vdev, as layouts.
 fn permutations(layout: &LayoutHints, top: usize) -> Vec<LayoutHints> {
     let members = layout.tops[top].members.clone();
+    debug_assert!(
+        layout.tops[top].children.is_empty(),
+        "nested groups are permuted per group, not per top"
+    );
     let mut out = Vec::new();
     let mut order: Vec<usize> = (0..members.len()).collect();
     permute(&mut order, 0, &mut |o| {
@@ -430,6 +476,7 @@ mod tests {
                 draid_nspares: None,
                 draid_ngroups: None,
                 members: order.iter().map(|&i| Some(i)).collect(),
+                children: Vec::new(),
             }],
         }
     }
