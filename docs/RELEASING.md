@@ -23,12 +23,18 @@
    git tag -a vX.Y.Z <commit> -m "zvolrescue vX.Y.Z" && git push origin vX.Y.Z
    ```
 
-4. If the release page already exists (created by hand), the workflow
-   attaches the files to it and then refreshes the title and notes. The
-   second part can be refused — a protected tag pattern (Settings → Tags)
-   or immutable releases (Settings → General) both block editing a
-   release even when the token has `contents: write`. The job warns and
-   still leaves a complete release; the notes are then yours to paste.
+4. Do not create the release page by hand. This repository has
+   **release immutability** on (Settings → General → Releases —
+   “Disallow assets and tags from being modified once a release is
+   published”), so a published release is frozen: attaching a file to
+   it, renaming it or rewriting its notes is refused with a bare 403
+   even when the token has `contents: write`. The workflow therefore
+   creates the release as a **draft**, uploads every file into it,
+   checks that the draft carries all of them, and only then publishes
+   it — a draft is still editable, so everything happens before the
+   freeze. If a published release for the tag already exists, the job
+   stops and says so: delete that release (the tag can stay) and re-run
+   the job, which will cut it again from scratch.
 
 5. `.github/workflows/release.yml` builds static binaries
    (`x86_64-linux-musl`, `aarch64-linux-musl`, `amd64-freebsd`), writes

@@ -134,12 +134,13 @@ jobs:
             echo "::error::CHANGELOG.md has no '## v$v' section; nothing to say about this release"
             exit 1
           fi
-      # Publishing is deliberately split: uploading the files is what
-      # matters, and it goes through the assets API. Editing the title and
-      # notes is a separate call that a protected tag or an immutable
-      # release can refuse — when it does, the release still gets its
-      # binaries and the job says what to look at instead of failing with
-      # a bare 403.
+      # This repository has release immutability enabled: once a release
+      # is published, its assets and its tag are frozen, and every later
+      # edit — including attaching a file — is refused. So the release is
+      # assembled as a draft, checked while it can still be changed, and
+      # published only when it is complete. A release that is already
+      # published cannot be added to by anyone, so the job says that
+      # plainly instead of failing on a bare 403.
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
@@ -147,17 +148,31 @@ jobs:
           tag="${GITHUB_REF_NAME}"
           title="zvolrescue $tag"
           case "$tag" in *-*) pre="--prerelease" ;; *) pre="" ;; esac
+          want=$(ls dist | wc -l)
+
           if gh release view "$tag" >/dev/null 2>&1; then
-            echo "release $tag exists: uploading files, then refreshing the notes"
-            gh release upload "$tag" dist/* --clobber
-            if ! gh release edit "$tag" --title "$title" --notes-file notes.md $pre; then
-              echo "::warning::the files are attached, but the release notes could not be updated."
-              echo "::warning::check Settings → Tags (a protected tag pattern such as v* blocks this)"
-              echo "::warning::and Settings → General → Immutable releases."
+            if [ "$(gh release view "$tag" --json isDraft --jq .isDraft)" != "true" ]; then
+              echo "::error::a published release already exists for $tag."
+              echo "::error::With release immutability on, it cannot be added to or edited."
+              echo "::error::Delete the release (the tag can stay) and re-run this job to cut it again."
+              exit 1
             fi
+            echo "a draft release for $tag exists: completing it"
+            gh release upload "$tag" dist/* --clobber
+            gh release edit "$tag" --title "$title" --notes-file notes.md $pre
           else
-            echo "release $tag does not exist: creating it"
-            gh release create "$tag" dist/* --title "$title" --notes-file notes.md $pre
+            echo "creating $tag as a draft, with every file"
+            gh release create "$tag" dist/* --title "$title" --notes-file notes.md $pre --draft
           fi
+
+          # Nothing is published half-built: the draft must carry every
+          # file the build produced before it is frozen.
+          have=$(gh release view "$tag" --json assets --jq '.assets | length')
+          if [ "$have" != "$want" ]; then
+            echo "::error::the draft has $have of $want files; not publishing an incomplete release"
+            gh release view "$tag" --json assets --jq '.assets[].name'
+            exit 1
+          fi
+          gh release edit "$tag" --draft=false
           gh release view "$tag" --json name,isDraft,isPrerelease,assets \
             --jq '"published \(.name) (draft=\(.isDraft) prerelease=\(.isPrerelease)) with \(.assets | length) file(s): " + (.assets | map(.name) | join(", "))'
