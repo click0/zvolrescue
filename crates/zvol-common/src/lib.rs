@@ -67,6 +67,48 @@ pub struct Global {
     pub debug_log: Option<PathBuf>,
 }
 
+impl Global {
+    /// Turn on the read trace when `--debug`/`--debug-log` asked for it.
+    ///
+    /// Returns the exit code to use when the log file cannot be created,
+    /// so a caller can `return` it: a run that was asked to record what
+    /// it did must not silently do it without recording.
+    pub fn enable_tracing(&self, tool: &str) -> Result<(), u8> {
+        if !self.debug && self.debug_log.is_none() {
+            return Ok(());
+        }
+        let file = match &self.debug_log {
+            Some(p) => match std::fs::File::create(p) {
+                Ok(f) => Some(f),
+                Err(e) => {
+                    eprintln!("{tool}: cannot create debug log {}: {e}", p.display());
+                    return Err(exit::USAGE);
+                }
+            },
+            None => None,
+        };
+        zvolrescue_io::trace::enable(file);
+        zvolrescue_io::trace!("cli", "{}", std::env::args().collect::<Vec<_>>().join(" "));
+        Ok(())
+    }
+}
+
+/// Quote one argument for a POSIX shell.
+///
+/// A command line printed for someone to paste has to survive the paste:
+/// a device under `/dev/disk/by-id/` is fine bare, an image called
+/// `vm disk.img` is not.
+pub fn shell_quote(s: &str) -> String {
+    let safe = !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._/=@:+,-".contains(&b));
+    if safe {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', r"'\''"))
+    }
+}
+
 /// Members of a pool, given as devices and/or images (SPEC §7 `POOLSPEC`).
 #[derive(Debug, Args)]
 pub struct PoolSpec {
@@ -108,6 +150,40 @@ impl PoolSpec {
         Ok(all)
     }
 
+    /// The spec written back out as command-line arguments.
+    ///
+    /// What made a pool readable in this run is what makes it readable in
+    /// the next one: a recovery command printed for the operator that
+    /// dropped `--hints` or `--assume-member` would name a dataset nobody
+    /// can reach. Arguments come out in the order a command takes them,
+    /// quoted for a POSIX shell.
+    pub fn as_arguments(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        for d in &self.devices {
+            args.push(shell_quote(&d.display().to_string()));
+        }
+        for i in &self.image {
+            args.push("--image".into());
+            args.push(shell_quote(&i.display().to_string()));
+        }
+        if let Some(h) = &self.hints {
+            args.push("--hints".into());
+            args.push(shell_quote(&h.display().to_string()));
+        }
+        if self.search_order {
+            args.push("--search-order".into());
+        }
+        if let Some(g) = &self.pool_guid {
+            args.push("--pool-guid".into());
+            args.push(shell_quote(g));
+        }
+        for a in &self.assume_member {
+            args.push("--assume-member".into());
+            args.push(shell_quote(a));
+        }
+        args
+    }
+
     /// `--assume-member` as `(path, leaf guid)` pairs.
     pub fn assumed(&self) -> Result<Vec<(PathBuf, Option<u64>)>, String> {
         self.assume_member
@@ -122,5 +198,82 @@ impl PoolSpec {
                 }
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Cli {
+        #[command(flatten)]
+        pool: PoolSpec,
+    }
+
+    fn spec(args: &[&str]) -> PoolSpec {
+        Cli::parse_from(std::iter::once("t").chain(args.iter().copied())).pool
+    }
+
+    #[test]
+    fn a_plain_path_is_left_alone() {
+        assert_eq!(
+            shell_quote("/dev/disk/by-id/ata-X_1-part1"),
+            "/dev/disk/by-id/ata-X_1-part1"
+        );
+    }
+
+    #[test]
+    fn anything_a_shell_would_read_is_quoted() {
+        assert_eq!(shell_quote("vm disk.img"), "'vm disk.img'");
+        assert_eq!(shell_quote("a$b"), "'a$b'");
+        assert_eq!(shell_quote(""), "''");
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
+    }
+
+    /// A printed command has to reach the pool the same way this run did:
+    /// every part of the specification comes back out.
+    #[test]
+    fn the_spec_comes_back_as_the_arguments_it_was_given() {
+        let s = spec(&[
+            "/dev/sda1",
+            "--image",
+            "/tmp/b.img",
+            "--hints",
+            "/tmp/layout.json",
+            "--search-order",
+            "--pool-guid",
+            "0x1234",
+            "--assume-member",
+            "/dev/sdc1=0xabc",
+        ]);
+        assert_eq!(
+            s.as_arguments(),
+            [
+                "/dev/sda1",
+                "--image",
+                "/tmp/b.img",
+                "--hints",
+                "/tmp/layout.json",
+                "--search-order",
+                "--pool-guid",
+                "0x1234",
+                "--assume-member",
+                "/dev/sdc1=0xabc",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_member_whose_name_needs_quoting_is_quoted() {
+        let s = spec(&["--image", "/tmp/vm disk.img"]);
+        assert_eq!(s.as_arguments(), ["--image", "'/tmp/vm disk.img'"]);
+    }
+
+    #[test]
+    fn a_guid_may_be_given_with_or_without_the_prefix() {
+        let s = spec(&["/dev/sda1", "--assume-member", "/dev/sdb1=abc"]);
+        assert_eq!(s.assumed().unwrap(), [("/dev/sdb1".into(), Some(0xabc))]);
     }
 }
