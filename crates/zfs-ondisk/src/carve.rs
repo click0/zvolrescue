@@ -141,6 +141,38 @@ fn known_type(t: u8) -> bool {
     t <= 60
 }
 
+/// The four bytes that decide almost every slot, without parsing one.
+///
+/// A carve at 512-byte granularity over a multi-terabyte member looks at
+/// billions of slots; building a [`DnodePhys`] for each — three block
+/// pointers, a bonus buffer, two allocations — would make the scan cost
+/// the parse rather than the read. Nearly every slot is settled by its
+/// first four bytes, so they are checked first and the rest is parsed
+/// only for what survives. The bounds are exactly those of
+/// [`plausible_dnode`]; this is the same test done earlier and cheaper,
+/// never a looser one.
+pub fn plausible_head(slot: &[u8]) -> Result<(), Reject> {
+    if slot.len() < crate::dmu::DNODE_CORE_SIZE {
+        return Err(Reject::Free);
+    }
+    if slot[0] == 0 {
+        return Err(Reject::Free);
+    }
+    if !known_type(slot[0]) {
+        return Err(Reject::UnknownType);
+    }
+    if !(9..=17).contains(&slot[1]) {
+        return Err(Reject::IndBlkShift);
+    }
+    if !(1..=7).contains(&slot[2]) {
+        return Err(Reject::NLevels);
+    }
+    if !(1..=3).contains(&slot[3]) {
+        return Err(Reject::NBlkPtr);
+    }
+    Ok(())
+}
+
 /// Could these bytes be a dnode? Structure only (C-02).
 ///
 /// Every bound is the one OpenZFS's `dnode.h` enforces when it writes
@@ -540,5 +572,96 @@ mod tests {
         // A child born after the block that points at it cannot be one.
         assert!(!plausible_indirect(&bps, 85));
         assert!(!plausible_indirect(&[], 100));
+    }
+}
+
+#[cfg(test)]
+mod head_tests {
+    use super::*;
+    use crate::dmu::encode::DnodeSpec;
+    use crate::dmu::ot;
+    use crate::Endian;
+
+    /// The cheap test must never reject what the full one accepts: it
+    /// runs first, so anything it drops is never looked at again.
+    ///
+    /// Checked over every combination of the four fields it looks at,
+    /// around and past the bounds, on dnodes that are otherwise real.
+    #[test]
+    fn the_cheap_test_never_rejects_what_the_full_one_accepts() {
+        let bp = crate::blkptr::encode::Builder::new()
+            .dva(0, 0, 0x20_0000, 8192, false)
+            .sizes(8192, 8192)
+            .props(0, 2, ot::ZVOL, 0)
+            .births(0, 100, 1)
+            .bytes(Endian::Little);
+        let mut compared = 0;
+        for otype in [
+            ot::NONE,
+            ot::ZVOL,
+            ot::PLAIN_FILE_CONTENTS,
+            ot::DNODE,
+            200,
+            61,
+        ] {
+            for indblkshift in 7..=19u8 {
+                for nlevels in 0..=9u8 {
+                    for nblkptr in 1..=3usize {
+                        let spec = DnodeSpec {
+                            object_type: otype,
+                            indblkshift,
+                            nlevels,
+                            datablksz: 8192,
+                            maxblkid: 63,
+                            blkptrs: vec![bp; nblkptr],
+                            ..DnodeSpec::default()
+                        };
+                        let buf = spec.build();
+                        let Ok(d) = DnodePhys::parse(&buf, Endian::Little) else {
+                            continue;
+                        };
+                        if plausible_dnode(&d).is_ok() {
+                            compared += 1;
+                            assert_eq!(
+                                plausible_head(&buf),
+                                Ok(()),
+                                "type {otype} indblkshift {indblkshift} nlevels {nlevels} nblkptr {nblkptr}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert!(compared > 0, "the full test accepted nothing to compare");
+    }
+
+    #[test]
+    fn a_real_dnode_passes_the_cheap_test() {
+        let spec = DnodeSpec {
+            object_type: ot::ZVOL,
+            indblkshift: 17,
+            nlevels: 2,
+            datablksz: 8192,
+            maxblkid: 63,
+            blkptrs: vec![[0u8; blkptr::SIZE]],
+            ..DnodeSpec::default()
+        };
+        assert_eq!(plausible_head(&spec.build()), Ok(()));
+    }
+
+    #[test]
+    fn the_cheap_test_names_the_same_reasons() {
+        let mut slot = [0u8; crate::dmu::DNODE_SIZE];
+        assert_eq!(plausible_head(&slot), Err(Reject::Free));
+        slot[0] = ot::ZVOL;
+        slot[1] = 8;
+        assert_eq!(plausible_head(&slot), Err(Reject::IndBlkShift));
+        slot[1] = 12;
+        slot[2] = 0;
+        assert_eq!(plausible_head(&slot), Err(Reject::NLevels));
+        slot[2] = 2;
+        slot[3] = 4;
+        assert_eq!(plausible_head(&slot), Err(Reject::NBlkPtr));
+        assert_eq!(plausible_head(&slot[..8]), Err(Reject::Free));
     }
 }

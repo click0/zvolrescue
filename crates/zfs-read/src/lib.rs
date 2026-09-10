@@ -11,6 +11,7 @@
 //! synthetic members for tests.
 
 pub mod bind;
+pub mod carve;
 pub mod crypt;
 pub mod dmu;
 pub mod dsl;

@@ -666,3 +666,38 @@ pub fn destroyed_zvol_members(pool: &mut Pool, size: u64) -> (Vec<Vec<u8>>, u64,
     }
     (members, newest, previous)
 }
+
+/// A pool in which `tank/vm/disk0` exists on disk but no uberblock leads
+/// to it any more — the COMPANIONS §3.4 scenario for `zvolcarve`.
+///
+/// The volume's dnode, its indirect blocks and its data blocks are all
+/// written; what is missing is any path down to them. Every uberblock
+/// carries the MOS *without* the volume, exactly as it would after the
+/// ring has rolled past the transaction group that destroyed it, so
+/// `zvolrescue list` cannot see it at any transaction group and only a
+/// scan of raw space can.
+///
+/// Returns the member images.
+pub fn carved_zvol_members(pool: &mut Pool, size: u64) -> Vec<Vec<u8>> {
+    let n = pool.members.len();
+    let mut members: Vec<Vec<u8>> = (0..n).map(|_| vec![0u8; size as usize]).collect();
+    let layout = match pool.nparity {
+        Some(p) if pool.kind == "raidz" => Layout::Raidz {
+            ashift: pool.ashift,
+            nparity: p,
+        },
+        _ => Layout::Mirror,
+    };
+    let mut alloc = Alloc::with_layout(0x20_0000, layout);
+    // The volume is written first, so its blocks are really on the
+    // member; the root that is published is the one that does not
+    // mention it.
+    let _with = build_sample_mos_variant(&mut members, &mut alloc, true);
+    let without = build_sample_mos_variant(&mut members, &mut alloc, false);
+    pool.rootbp = Some(without);
+    pool.rootbp_by_txg = Vec::new();
+    for (i, img) in members.iter_mut().enumerate() {
+        pool.write_labels(i, img);
+    }
+    members
+}
