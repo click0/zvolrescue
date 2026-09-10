@@ -170,6 +170,12 @@ impl Node {
 /// Reads blocks from the members of one pool.
 pub struct PoolReader<'a> {
     devices: Vec<Option<&'a dyn BlockSource>>,
+    /// Byte offset at which each device's vdev begins. Zero unless a
+    /// member was found somewhere other than the start of what was
+    /// opened — a partition whose table was rewritten, an image cut with
+    /// a different start — in which case the zero point recovered from
+    /// its uberblocks (SPEC F-61) goes here.
+    bases: Vec<u64>,
     tops: BTreeMap<u32, Node>,
     /// Pool checksum salt once the MOS object directory has been read.
     salt: Cell<Option<Salt>>,
@@ -267,12 +273,31 @@ impl<'a> PoolReader<'a> {
                 (t.id as u32, node)
             })
             .collect();
+        let bases = vec![0u64; devices.len()];
         PoolReader {
             devices,
+            bases,
             tops,
             salt: Cell::new(None),
             keys: RefCell::new(None),
         }
+    }
+
+    /// Set where each device's vdev begins, indexed like the devices.
+    ///
+    /// A DVA is read at `base + 4 MiB + offset`, so a member whose labels
+    /// put it elsewhere than offset 0 is read correctly once its base is
+    /// known. Shorter lists leave the remaining devices at 0.
+    pub fn with_base_offsets(mut self, bases: &[u64]) -> Self {
+        for (i, &b) in bases.iter().enumerate() {
+            if let Some(slot) = self.bases.get_mut(i) {
+                *slot = b;
+                if b != 0 {
+                    trace!("zio", "device {i}: vdev starts at byte {b}");
+                }
+            }
+        }
+        self
     }
 
     /// Record the pool checksum salt (from `org.illumos:checksum_salt` in
@@ -312,11 +337,16 @@ impl<'a> PoolReader<'a> {
         offset: u64,
         size: usize,
     ) -> Result<Vec<u8>, ReadError> {
-        let dev = device
-            .and_then(|d| self.devices.get(d).copied().flatten())
+        let index = device.ok_or(ReadError::NoMember)?;
+        let dev = self
+            .devices
+            .get(index)
+            .copied()
+            .flatten()
             .ok_or(ReadError::NoMember)?;
+        let base = self.bases.get(index).copied().unwrap_or(0);
         let mut buf = vec![0u8; size];
-        dev.read_at(LABEL_START_SIZE + offset, &mut buf)
+        dev.read_at(base + LABEL_START_SIZE + offset, &mut buf)
             .map(|()| buf)
             .map_err(|e| ReadError::Io(e.to_string()))
     }
@@ -1061,6 +1091,39 @@ mod tests {
         assert_eq!(block.attempts[0].result, Ok(Verify::Mismatch));
         assert_eq!(block.attempts[0].device, Some(0));
         assert_eq!(block.attempts[1].device, Some(1));
+    }
+
+    #[test]
+    fn a_member_that_starts_later_is_read_from_its_base() {
+        // Member 0 was found 1 MiB into what was opened — a partition
+        // whose table was rewritten. Its copy is intact, member 1's is
+        // damaged, so the read succeeds only if the base is honoured.
+        let pool = Pool::mirror("tank", 0x77, 12).txgs(&[(100, 1)]);
+        let (raw, bp) = compressed();
+        let mut m0 = pool.member_image(0, SIZE);
+        let mut m1 = pool.member_image(1, SIZE);
+        write_at_dva(&mut m0, 0x10000, &raw);
+        write_at_dva(&mut m1, 0x10000, &raw);
+        m1[(LABEL_START_SIZE + 0x10000) as usize + 7] ^= 0xff;
+        let (_, assembly) = reader_over(vec![Some(m0.clone()), Some(m1.clone())]);
+
+        let base = 1024 * 1024u64;
+        let mut shifted = vec![0x5au8; base as usize];
+        shifted.extend_from_slice(&m0);
+        let sources = vec![Some(MemSource::new(shifted)), Some(MemSource::new(m1))];
+
+        // Without the base, member 0 reads garbage and only the damaged
+        // copy is left: the block does not verify.
+        let blind = PoolReader::new(&assembly, as_dyn(&sources));
+        assert!(matches!(
+            blind.read_block(&bp, false),
+            Err(ReadError::AllCopiesBad)
+        ));
+
+        let reader = PoolReader::new(&assembly, as_dyn(&sources)).with_base_offsets(&[base, 0]);
+        let block = reader.read_block(&bp, false).unwrap();
+        assert_eq!(block.data, payload());
+        assert_eq!(block.verify, Verify::Ok);
     }
 
     #[test]
