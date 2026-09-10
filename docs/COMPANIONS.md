@@ -139,7 +139,11 @@ same evidence record).
 ### 3.2 CLI
 
 ```
-zvolcarve scan    POOLSPEC -o DIR [--range VDEV:START-END] [--min-size BYTES]
+zvolcarve scan    POOLSPEC -o DIR [--range VDEV:START-END]
+                                  [--volblocksize BYTES] [--levels N]
+                                  [--txg FROM..TO] [--size MIN..MAX]
+                                  [--dnode-type TYPE...] [--profile FILE]
+                                  [--like DATASET] [--strict-profile]
                                   [--resume] [--hash-inputs] [-f text|json]
 zvolcarve list    DIR                      show candidates found by a previous scan
 zvolcarve dump    DIR CANDIDATE -o OUT.img [--strict] [--key KEYSPEC] [--resume]
@@ -166,6 +170,33 @@ writes.
 | C-11 | S | Also record `DMU_OT_OBJSET`/dataset dnodes found, so a candidate can be named when its DSL metadata survived. |
 | C-12 | C | Signature carving inside candidate data (UFS/ext4/NTFS superblocks, SPEC F-43) to bound `volsize` when metadata is gone. |
 
+#### The search profile
+
+A pool that has lived through a hundred thousand transaction groups holds
+far more recognisable metadata than belongs to the object being looked
+for: dnodes of every dataset that ever existed, indirect blocks of every
+generation of every tree. Structural validation (C-02) only says "this is
+a dnode"; it does not say "this could be the 300 GB volume that was lost".
+The operator usually knows the second thing — the volume's block size, how
+deep its tree had to be, roughly when it was written, roughly how big it
+was — and that knowledge is what turns a scan of millions of hits into a
+handful of candidates.
+
+The profile is a **filter, never an assumption**: it decides what is worth
+following, and nothing that is extracted is trusted because it matched a
+profile. Every block handed to `dump` is still verified by its own
+checksum, exactly as in the main binary.
+
+| ID | Pri | Requirement |
+|---|---|---|
+| C-13 | M | A **search profile** narrows what counts as a candidate *at recognition time*, before any tree is walked or scored: `--volblocksize` (data block size), `--levels` (`dn_nlevels`, i.e. tree depth L0…Ln), `--txg FROM..TO` (birth-TXG window), `--size MIN..MAX` (estimated `volsize`), `--dnode-type` (default `zvol`). Applying it during recognition rather than after is the point: a search for one 300 GB volume must not pay to walk the trees of everything else in the pool. |
+| C-14 | M | Every profile field is optional and independent; an absent field filters nothing. A profile that matches nothing must be visibly a *rejection*, not an absence: the run reports how many hits each field rejected, so "0 candidates, 4.2 M dnodes rejected by volblocksize" is distinguishable from "there is nothing on this disk". |
+| C-15 | M | Rejection counters per reason — dnode type, `indblkshift`, `nlevels`, `nblkptr`, DVA outside any member, birth TXG outside the window, size outside the range, checksum/compression code unknown — on stderr as progress and in the JSON result, so the operator can see which single field is too tight and loosen exactly that one. |
+| C-16 | S | `--profile FILE`: the same fields as a JSON document, so a case can be re-run, reviewed and shared; the profile as applied is copied verbatim into the evidence record (§1.3), because a candidate list means nothing without the filter that produced it. |
+| C-17 | S | `--like DATASET`: read `volblocksize`, `nlevels` and `volsize` from a dataset that *still* exists in the pool and use them as the profile. In most incidents the lost volume was created like its neighbours, and a surviving sibling is a better source for these numbers than the operator's memory. |
+| C-18 | S | Profile fields are *hints* by default: a hit that fails a soft field is still recorded, with the failing field named, and ranked below the ones that matched, so a wrong guess costs ranking rather than the whole recovery. `--strict-profile` turns them into hard filters for the cases where the operator is certain and the scan would otherwise be too slow. |
+| C-19 | C | Auto-profile: with no profile given, `scan --sample N` reads the first N hits and reports the histograms of `volblocksize`, `nlevels` and birth TXG it saw, so the operator can pick a profile from what is actually on the disk instead of guessing. |
+
 ### 3.4 Acceptance
 
 Fixture: create a zvol with known content, destroy it, write enough
@@ -173,6 +204,15 @@ unrelated data to rotate all 128 uberblocks past it without reusing its
 blocks. `zvolrescue list` no longer shows it; `zvolcarve scan` finds one
 candidate scoring ≥ 0.95; `zvolcarve dump` produces an image whose SHA-256
 equals the original.
+
+For the profile: the same fixture with three more zvols of other block
+sizes and sizes present in the pool. A scan with no profile finds all
+four candidates; a scan with the destroyed volume's `--volblocksize` and
+`--size` finds it and reports the other three as rejected, naming the
+field that rejected each; a profile that matches none of them reports
+zero candidates *and* a non-zero rejection count for the field at fault.
+The extracted image is bit-identical in every case, because the profile
+never touches what `dump` verifies.
 
 ---
 
