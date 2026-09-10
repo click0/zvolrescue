@@ -45,12 +45,16 @@ fn main() -> ExitCode {
     if let Err(code) = cli.global.enable_tracing("zvoltimeline") {
         return ExitCode::from(code);
     }
-    ExitCode::from(report::run(&cli.global, &cli.pool, &report::Options {
-        from: cli.from,
-        to: cli.to,
-        dataset: cli.dataset,
-        output: cli.output,
-    }))
+    ExitCode::from(report::run(
+        &cli.global,
+        &cli.pool,
+        &report::Options {
+            from: cli.from,
+            to: cli.to,
+            dataset: cli.dataset,
+            output: cli.output,
+        },
+    ))
 }
 
 /// Kept for the same reason the main binary keeps it: so a build that

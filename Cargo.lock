@@ -687,3 +687,16 @@ dependencies = [
 [[package]]
 name = "zvolrescue-io"
 version = "0.2.0"
+
+[[package]]
+name = "zvoltimeline"
+version = "0.2.0"
+dependencies = [
+ "clap",
+ "serde",
+ "serde_json",
+ "zfs-ondisk",
+ "zfs-read",
+ "zvol-common",
+ "zvolrescue-io",
+]

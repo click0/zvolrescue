@@ -10,7 +10,7 @@ use zfs_read::pool::{uberblock_candidates, Candidate};
 use zfs_read::zio::PoolReader;
 use zvol_common::members::{choose_pool, open_members};
 use zvol_common::timefmt::iso8601;
-use zvol_common::{evidence, exit, Format, Global, PoolSpec};
+use zvol_common::{evidence, exit, shell_quote, Format, Global, PoolSpec};
 
 use crate::events::{sort, Event, Kind};
 
@@ -61,15 +61,25 @@ struct TimelineOut {
     events: Vec<EventOut>,
 }
 
-/// The `zvolrescue dump` command that recovers a destroyed object.
-fn recover_with(members: &[PathBuf], object: &str, txg: u64) -> String {
-    let mut cmd = format!("zvolrescue dump {object}");
-    for m in members {
-        cmd.push(' ');
-        cmd.push_str(&m.display().to_string());
-    }
-    cmd.push_str(&format!(" --txg {txg} -o {}.img", object.replace('/', "_")));
-    cmd
+/// The `zvolrescue dump` command that recovers a destroyed object (T-05).
+///
+/// It repeats this run's own pool specification — the members as they
+/// were named, and any `--hints`, `--search-order` or `--assume-member`
+/// that made them readable — because a command that reached the pool by
+/// a different route would not reach the same dataset.
+fn recover_with(spec: &PoolSpec, object: &str, txg: u64) -> String {
+    let mut parts = vec![
+        "zvolrescue".to_string(),
+        "dump".to_string(),
+        shell_quote(object),
+    ];
+    parts.extend(spec.as_arguments());
+    parts.push(format!("--txg {txg}"));
+    parts.push(format!(
+        "-o {}",
+        shell_quote(&format!("{}.img", object.replace('/', "_")))
+    ));
+    parts.join(" ")
 }
 
 fn print_text(out: &TimelineOut, w: &mut dyn Write) -> std::io::Result<()> {
@@ -91,8 +101,8 @@ fn print_text(out: &TimelineOut, w: &mut dyn Write) -> std::io::Result<()> {
     }
     writeln!(
         w,
-        "{:<12} {:<22} {:<18} {:<28} {}",
-        "TXG", "TIME", "EVENT", "OBJECT", "DETAILS"
+        "{:<12} {:<22} {:<18} {:<28} DETAILS",
+        "TXG", "TIME", "EVENT", "OBJECT"
     )?;
     for e in &out.events {
         writeln!(
@@ -164,26 +174,33 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 // it was created at or before it, which the creation TXG
                 // of each dataset already says.
                 for d in &now {
+                    // The dataset records when it was made, which can be
+                    // older than anything still readable. Say so, rather
+                    // than dating it to the transaction group it happened
+                    // to be found in.
+                    let mut details = crate::events::describe(d);
+                    if d.creation_txg < c.ub.txg {
+                        if !details.is_empty() {
+                            details.push_str(", ");
+                        }
+                        details.push_str(&format!(
+                            "already there at the oldest readable txg {}",
+                            c.ub.txg
+                        ));
+                    }
                     events.push(Event {
                         txg: d.creation_txg.min(c.ub.txg),
                         time: (d.creation_time != 0).then_some(d.creation_time),
-                        kind: if d.snapshot {
-                            Kind::Snapshot
-                        } else if d.origin_obj != 0 {
-                            Kind::Clone
-                        } else {
-                            Kind::Created
-                        },
+                        kind: crate::events::appeared_as(d),
                         object: Some(d.name.clone()),
                         guid: d.guid,
-                        details: String::new(),
+                        details,
                         last_seen_txg: None,
                     });
                 }
             }
             Some((prev_txg, before)) => {
-                let mut diffed =
-                    crate::events::diff(before, &now, c.ub.txg, Some(c.ub.timestamp));
+                let mut diffed = crate::events::diff(before, &now, c.ub.txg, Some(c.ub.timestamp));
                 for e in &mut diffed {
                     if matches!(e.kind, Kind::Destroyed | Kind::SnapshotDestroyed) {
                         e.last_seen_txg = Some(*prev_txg);
@@ -239,9 +256,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 details: e.details.clone(),
                 last_seen_txg: e.last_seen_txg,
                 recover_with: match (e.kind, &e.object, e.last_seen_txg) {
-                    (Kind::Destroyed, Some(o), Some(t)) => {
-                        Some(recover_with(&members.paths, o, t))
-                    }
+                    (Kind::Destroyed, Some(o), Some(t)) => Some(recover_with(spec, o, t)),
                     _ => None,
                 },
             })
@@ -273,7 +288,10 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     }
     if let Some(log) = &g.evidence_log {
         if let Err(e) = evidence::append(log, &json) {
-            eprintln!("zvoltimeline: cannot write evidence log {}: {e}", log.display());
+            eprintln!(
+                "zvoltimeline: cannot write evidence log {}: {e}",
+                log.display()
+            );
             return exit::USAGE;
         }
     }
