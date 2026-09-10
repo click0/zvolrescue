@@ -13,7 +13,7 @@ use zfs_read::zio::{PoolReader, ReadError};
 use zvolrescue_io::{BlockSource, FileSource};
 
 use crate::timefmt::{iso8601, parse_timestamp};
-use crate::{evidence, exit, Format, Global, PoolSpec};
+use crate::{evidence, exit, hints, Format, Global, PoolSpec};
 
 /// Options of the `list` command.
 pub struct Options {
@@ -223,6 +223,8 @@ pub struct Members {
     pub pools: Vec<PoolAssembly>,
     /// Member paths in the same order.
     pub paths: Vec<PathBuf>,
+    /// Where each member's vdev begins, indexed like the scans.
+    pub base_offsets: Vec<u64>,
 }
 
 impl Members {
@@ -235,13 +237,10 @@ impl Members {
     }
 
     /// Where each member's vdev begins, indexed like the scans. Non-zero
-    /// only for a member whose labels were found somewhere other than the
-    /// start of what was opened (SPEC F-61).
+    /// for a member whose labels were found somewhere other than the start
+    /// of what was opened (SPEC F-61), or as a layout hint states.
     pub fn bases(&self) -> Vec<u64> {
-        self.scans
-            .iter()
-            .map(|s| s.as_ref().map_or(0, |s| s.base))
-            .collect()
+        self.base_offsets.clone()
     }
 
     /// True when at least one member could not be opened or scanned.
@@ -412,14 +411,42 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
     if scans.iter().all(|s| s.is_none()) {
         return Err(exit::EVIDENCE);
     }
-    let mut pools = assemble(&scans);
+    let mut bases: Vec<u64> = scans
+        .iter()
+        .map(|s| s.as_ref().map_or(0, |s| s.base))
+        .collect();
+    // A hand-written layout replaces the labels' account of the topology
+    // (SPEC F-65). The uberblocks still come from the members themselves:
+    // where no label survives, they are the ones the zero-point search
+    // confirmed by their own checksums.
+    let mut pools = match &spec.hints {
+        Some(file) => {
+            let hints = hints::load(file, &paths).map_err(|e| {
+                eprintln!("zvolrescue: {e}");
+                exit::USAGE
+            })?;
+            for (i, b) in hints.bases.iter().enumerate() {
+                if *b != 0 {
+                    bases[i] = *b;
+                }
+            }
+            let pool = hints.layout.assemble();
+            eprintln!(
+                "zvolrescue: reading through the layout in {}: {}",
+                file.display(),
+                pool.tops
+                    .iter()
+                    .map(|t| format!("{} of {}", t.name, t.members.len()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            vec![pool]
+        }
+        None => assemble(&scans),
+    };
     let devices: Vec<Option<&dyn BlockSource>> = sources
         .iter()
         .map(|s| s.as_ref().map(|s| s as &dyn BlockSource))
-        .collect();
-    let bases: Vec<u64> = scans
-        .iter()
-        .map(|s| s.as_ref().map_or(0, |s| s.base))
         .collect();
     bind_assumed(spec, &paths, &mut pools, &scans, &devices, &bases)?;
     drop(devices);
@@ -428,6 +455,7 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
         scans,
         pools,
         paths,
+        base_offsets: bases,
     })
 }
 

@@ -76,6 +76,35 @@ jobs:
           ./target/release/zvolrescue -f json list -r /tmp/moved-intact.img --txg 4816229 | python3 -c 'import json,sys; d=json.load(sys.stdin); names=[x["name"] for x in d["datasets"]]; assert names == ["tank","tank/vm","tank/vm/disk0","tank/vm/disk0@before"], names'
           ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/moved-intact.img -o /tmp/moved.img --txg 4816229
           cmp /tmp/disk0.img /tmp/moved.img
+      - name: A pool with no labels at all, read through a hand-written layout (SPEC F-65)
+        run: |
+          cargo run -q -p zfs-read --example mkfixture -- /tmp/hz raidz2 12
+          python3 - <<'EOF'
+          import json
+          LABEL, PHYS_OFF, PHYS = 256*1024, 16*1024, 112*1024
+          paths = []
+          for i in range(4):
+              b = bytearray(open(f"/tmp/hz/member{i}.img", "rb").read())
+              aligned = len(b) & ~(LABEL-1)
+              for off in (0, LABEL, aligned-2*LABEL, aligned-LABEL):
+                  b[off+PHYS_OFF:off+PHYS_OFF+PHYS] = b"\0" * PHYS
+              out = f"/tmp/hz/nolabel{i}.img"
+              open(out, "wb").write(bytes(b))
+              paths.append(out)
+          json.dump({"name": "tank", "ashift": 12,
+                     "tops": [{"kind": "raidz", "nparity": 2, "members": paths}]},
+                    open("/tmp/hz/hints.json", "w"))
+          EOF
+          # Not one label survives: without the layout there is no pool.
+          if ./target/release/zvolrescue -q list /tmp/hz/nolabel0.img /tmp/hz/nolabel1.img /tmp/hz/nolabel2.img /tmp/hz/nolabel3.img; then echo "must not read"; exit 1; else test $? = 2; fi
+          # With it, the uberblocks the zero-point search confirmed carry
+          # the rest: datasets, TXG history and the volume itself.
+          ./target/release/zvolrescue -f json list -r /tmp/hz/nolabel0.img /tmp/hz/nolabel1.img /tmp/hz/nolabel2.img /tmp/hz/nolabel3.img --hints /tmp/hz/hints.json --txg 4816229 | python3 -c 'import json,sys; d=json.load(sys.stdin); names=[x["name"] for x in d["datasets"]]; assert names == ["tank","tank/vm","tank/vm/disk0","tank/vm/disk0@before"], names'
+          ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/hz/nolabel0.img /tmp/hz/nolabel1.img /tmp/hz/nolabel2.img /tmp/hz/nolabel3.img --hints /tmp/hz/hints.json --txg 4816229 -o /tmp/hz/out.img
+          cmp /tmp/disk0.img /tmp/hz/out.img
+          # A layout that names a member which was not given is a usage error.
+          python3 -c 'import json; d=json.load(open("/tmp/hz/hints.json")); d["tops"][0]["members"][0]="/tmp/nowhere.img"; json.dump(d, open("/tmp/hz/bad.json","w"))'
+          if ./target/release/zvolrescue -q list /tmp/hz/nolabel0.img /tmp/hz/nolabel1.img /tmp/hz/nolabel2.img /tmp/hz/nolabel3.img --hints /tmp/hz/bad.json; then exit 1; else test $? = 1; fi
       - name: Bulk extraction and resume
         run: |
           ./target/release/zvolrescue -q dump -r tank /tmp/fx/member0.img /tmp/fx/member1.img -o /tmp/bulk --txg 4816229

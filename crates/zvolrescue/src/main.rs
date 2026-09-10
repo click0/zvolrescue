@@ -6,6 +6,7 @@
 
 mod dump;
 mod evidence;
+mod hints;
 mod list;
 mod scan;
 mod timefmt;
@@ -159,6 +160,12 @@ pub struct PoolSpec {
     /// Image files that are members of the pool (repeatable).
     #[arg(long, value_name = "FILE")]
     pub image: Vec<PathBuf>,
+    /// Describe the layout by hand when the labels cannot: a JSON file
+    /// with ashift, the top-level vdevs and their members in vdev order
+    /// (SPEC F-65). Used exactly as a label would be; every block read
+    /// through it is still verified by its checksum.
+    #[arg(long, value_name = "FILE")]
+    pub hints: Option<PathBuf>,
     /// Select a pool by GUID when several are found.
     #[arg(long, value_name = "GUID")]
     pub pool_guid: Option<String>,

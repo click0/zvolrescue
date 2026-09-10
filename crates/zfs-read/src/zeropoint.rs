@@ -243,26 +243,78 @@ pub fn scan_with_recovered_base(dev: &dyn BlockSource) -> io::Result<crate::vdev
     if scan.config_verified() {
         return Ok(scan);
     }
-    let opts = Search {
-        max_anchors: 1,
-        ..Search::default()
-    };
-    let Some(base) = find(dev, &opts)?
-        .into_iter()
-        .map(|z| z.base)
-        .find(|&b| b != 0)
-    else {
+    let found = find(dev, &Search::default())?;
+    let Some(zero) = found.first() else {
         return Ok(scan);
     };
-    let shifted = crate::vdev::scan_device_at(dev, base)?;
-    if shifted.config_verified() {
-        trace!(
-            "zeropoint",
-            "labels verify at base {base}: reading this member from there"
-        );
-        return Ok(shifted);
+    if zero.base != 0 {
+        let shifted = crate::vdev::scan_device_at(dev, zero.base)?;
+        if shifted.config_verified() {
+            trace!(
+                "zeropoint",
+                "labels verify at base {}: reading this member from there",
+                zero.base
+            );
+            return Ok(shifted);
+        }
     }
-    Ok(scan)
+    // No configuration survives anywhere, but the uberblock rings do, and
+    // every anchor's checksum verified. Hand back a scan carrying them:
+    // the TXG history, the root pointers and the base are all there, and
+    // only the topology is missing — which is what a layout hint or a
+    // sibling's label supplies.
+    trace!(
+        "zeropoint",
+        "no configuration on this member; {} uberblock(s) verify for base {}",
+        zero.anchors.len(),
+        zero.base
+    );
+    Ok(scan_from_anchors(dev, zero))
+}
+
+/// Build a scan out of confirmed uberblock anchors alone.
+fn scan_from_anchors(dev: &dyn BlockSource, zero: &ZeroPoint) -> crate::vdev::DeviceScan {
+    use crate::vdev::{LabelScan, UberblockSlot};
+    use zfs_ondisk::checksum::ChecksumStatus;
+    use zfs_ondisk::label::UBERBLOCK_RING_OFFSET;
+
+    let mut labels: Vec<LabelScan> = Vec::new();
+    for anchor in &zero.anchors {
+        let index = anchor.label.unwrap_or(0);
+        let shift = anchor.shift;
+        let slots = zfs_ondisk::zeropoint::slots_per_ring(shift);
+        let offset =
+            anchor.vdev_offset - UBERBLOCK_RING_OFFSET - (anchor.slot as u64) * (1 << shift);
+        let label = match labels.iter_mut().find(|l| l.index == index) {
+            Some(l) => l,
+            None => {
+                labels.push(LabelScan {
+                    index,
+                    offset,
+                    phys_checksum: ChecksumStatus::Missing,
+                    config: None,
+                    config_error: None,
+                    slot_shift: shift,
+                    uberblocks: Vec::new(),
+                    invalid: Vec::new(),
+                    slots,
+                });
+                labels.last_mut().expect("just pushed")
+            }
+        };
+        label.uberblocks.push(UberblockSlot {
+            slot: anchor.slot,
+            ub: anchor.ub.clone(),
+            checksum: ChecksumStatus::Ok,
+        });
+    }
+    labels.sort_by_key(|l| l.index);
+    crate::vdev::DeviceScan {
+        size: dev.size(),
+        base: zero.base,
+        labels,
+        best_label: None,
+    }
 }
 
 #[cfg(test)]

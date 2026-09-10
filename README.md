@@ -51,6 +51,7 @@ the libraries — they never become modes of the main binary.
 * **Any TXG** — pick a transaction group explicitly, by timestamp, or "last one that still had this dataset".
 * **Labels gone** — when every `vdev_phys` has been overwritten, one surviving uberblock still fixes the vdev's zero point: its checksum verifier is its own offset, so `scan` recovers the base (and the old vdev size) even after the partition was re-created somewhere else.
 * **A member with no labels at all** — the siblings' configuration still names the leaf it must be, and `--assume-member PATH` works out which one by reading the pool through it; every block is verified by its checksum, so a device that is not this pool's is refused rather than believed.
+* **No labels anywhere** — `--hints FILE` describes the layout the way a `vdev_phys` template would (ashift, vdev type, members in order) and the tool reads through it; the TXG history and root pointers come from the uberblocks, which verify against their own offsets.
 * **Full on-disk feature coverage** — stripe/mirror/RAIDZ1-3/dRAID reconstruction; `lz4`, `zstd`, `gzip`, `lzjb`, `zle`; `fletcher`, `sha256/512`, `skein`, `edonr`, `blake3`; embedded and gang blocks; encrypted datasets with a supplied key.
 * **Sparse-aware extraction** of zvols to raw images, with per-block checksum verification, resume, and `--strict` mode.
 * **Machine-readable output** — `-f json` everywhere, append-only evidence log, SHA-256 of every input and output.

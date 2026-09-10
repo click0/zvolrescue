@@ -15,6 +15,7 @@ pub mod crypt;
 pub mod dmu;
 pub mod dsl;
 pub mod fixture;
+pub mod hints;
 pub mod pool;
 pub mod vdev;
 pub mod zap;

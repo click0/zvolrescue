@@ -49,6 +49,17 @@ in CI; what was tried on real environments is logged in
   several that are not says so and asks for a GUID rather than guessing. A
   device that does not hold this pool's data reads as no leaf and is
   refused.
+* **`--hints FILE`: a layout described by hand (SPEC F-65).** When not one
+  `vdev_phys` survives on any member, nothing on disk says what the pool
+  looked like — but the uberblock rings are still there, and their
+  checksums verify against their own offsets. A JSON file gives what a
+  `vdev_phys` template would (ashift, the top-level vdevs, their members
+  in vdev order, and a base offset per member) and the tool reads through
+  it exactly as it would through a label: a raidz2 whose four members have
+  had every label configuration zeroed lists its datasets and extracts its
+  volume bit-exact. A member with no configuration now also yields a scan
+  built from the anchors alone, so the TXG history and root pointers are
+  available without any label at all.
 
 ## v0.1.0-alpha.1 — 2026-09-08
 
