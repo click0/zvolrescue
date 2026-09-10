@@ -33,10 +33,20 @@
    checks that the draft carries all of them, and only then publishes
    it — a draft is still editable, so everything happens before the
    freeze. If a published release for the tag already exists, the job
-   stops and says so: delete that release (the tag can stay) and re-run
-   the job, which will cut it again from scratch.
+   stops and says so: delete that release (the tag can stay) and cut it
+   again as in step 6.
 
-5. `.github/workflows/release.yml` builds static binaries
+6. To re-cut a release for a tag that is already pushed — a release that
+   came out empty, or one made by a version of this workflow that had a
+   bug — delete the release on GitHub (Releases → Edit → Delete; leave
+   the tag alone) and start **Actions → Release → Run workflow** from
+   `main`, giving the tag (`v0.2.0`) as the input. A tag carries the
+   workflow file as it was when the tag was made, so re-running the old
+   run would repeat the old behaviour; a manual run takes the workflow
+   from the branch it is started on and checks out the tag for the
+   source. No tag is moved, and nothing is rebuilt from different code.
+
+7. `.github/workflows/release.yml` builds static binaries
    (`x86_64-linux-musl`, `aarch64-linux-musl`, `amd64-freebsd`), writes
    `SHA256SUMS`, takes the tag's section of `CHANGELOG.md` as the release
    notes and publishes a GitHub release — marked pre-release when the tag

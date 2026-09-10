@@ -2,15 +2,29 @@ name: Release
 
 # Pushing a tag v* builds static binaries and publishes a GitHub release
 # (a pre-release when the tag has a suffix such as -alpha.1).
+#
+# It can also be run by hand for a tag that is already pushed. That is
+# how a release is re-cut: a tag carries the workflow as it was when the
+# tag was made, so a fix to this file only reaches a tag pushed after
+# it — but a manual run uses the file from the branch it is started on.
+# Delete the release (the tag can stay), then run this workflow from
+# `main` with the tag as its input.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and release, e.g. v0.2.0"
+        required: true
 
 permissions:
   contents: write
 
 env:
   CARGO_TERM_COLOR: always
+  # The tag being released: the one pushed, or the one asked for by hand.
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
 jobs:
   linux:
@@ -28,6 +42,8 @@ jobs:
             rustflags: "-C linker=rust-lld -C link-self-contained=yes"
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -36,7 +52,7 @@ jobs:
           RUSTFLAGS: ${{ matrix.rustflags }}
       - name: Package
         run: |
-          v=$(printf '%s' "$GITHUB_REF_NAME" | sed 's/^[vV]\.*//')
+          v=$(printf '%s' "$TAG" | sed 's/^[vV]\.*//')
           out=zvolrescue-$v-${{ matrix.name }}
           cp target/${{ matrix.target }}/release/zvolrescue "$out"
           echo "$out" > artifact-name
@@ -51,6 +67,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
       - uses: vmactions/freebsd-vm@v1
         with:
           release: "14.2"
@@ -61,7 +79,7 @@ jobs:
             ./target/release/zvolrescue --version
       - name: Package
         run: |
-          v=$(printf '%s' "$GITHUB_REF_NAME" | sed 's/^[vV]\.*//')
+          v=$(printf '%s' "$TAG" | sed 's/^[vV]\.*//')
           cp target/release/zvolrescue "zvolrescue-$v-amd64-freebsd"
       - uses: actions/upload-artifact@v4
         with:
@@ -75,6 +93,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -88,7 +108,7 @@ jobs:
           cat SHA256SUMS
       - name: Release notes
         run: |
-          tag="${GITHUB_REF_NAME}"
+          tag="$TAG"
           # A tag is `vX.Y.Z`; accept `v.X.Y.Z` and `VX.Y.Z` too rather
           # than publishing files called `zvolrescue-.0.2.0-…`. The
           # version is what the binaries are named after, and the
@@ -145,7 +165,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="${GITHUB_REF_NAME}"
+          tag="$TAG"
           title="zvolrescue $tag"
           case "$tag" in *-*) pre="--prerelease" ;; *) pre="" ;; esac
           want=$(ls dist | wc -l)
