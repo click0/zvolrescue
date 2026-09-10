@@ -185,9 +185,13 @@ implies. It runs by itself on a member with no readable label
 configuration, and on request with `--zero-point` (`--zero-point-whole`,
 `--psize BYTES`). The front label pair needs no hypothesis; the rear pair
 is placed against the vdev's size, so it confirms a base only together
-with one. What the base is not yet wired into is reading: F-65 (a hint
-template used as if it were a label) is what turns a recovered base into
-an extraction.
+with one. The base is also used for reading: a member whose labels
+verify only at that base is scanned there, and every DVA on it resolves
+to `base + 4 MiB + offset`, so `list` and `dump` work on a partition that
+was re-created with a different start. What is still missing is the case
+where the labels themselves are gone: binding such a member to the slot
+its siblings' configurations leave vacant is F-62, and supplying the
+topology by hand is F-65.
 
 Two regimes follow:
 

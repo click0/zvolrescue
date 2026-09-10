@@ -68,6 +68,14 @@ jobs:
           # Nothing to anchor to: no candidate is invented.
           head -c 33554432 /dev/zero > /tmp/blank.img
           ./target/release/zvolrescue -f json scan --zero-point /tmp/blank.img | python3 -c 'import json,sys; assert "zero_point" not in json.load(sys.stdin)["devices"][0]'
+          # A member whose labels are intact but which starts 3 MiB in:
+          # list and dump must read it through the recovered base. The
+          # move is a whole number of labels, so the rear pair even parses
+          # at base 0 — with a checksum that does not verify there.
+          python3 -c 'data=open("/tmp/fx/member0.img","rb").read(); open("/tmp/moved-intact.img","wb").write(b"\x5a"*(3<<20)+data)'
+          ./target/release/zvolrescue -f json list -r /tmp/moved-intact.img --txg 4816229 | python3 -c 'import json,sys; d=json.load(sys.stdin); names=[x["name"] for x in d["datasets"]]; assert names == ["tank","tank/vm","tank/vm/disk0","tank/vm/disk0@before"], names'
+          ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/moved-intact.img -o /tmp/moved.img --txg 4816229
+          cmp /tmp/disk0.img /tmp/moved.img
       - name: Bulk extraction and resume
         run: |
           ./target/release/zvolrescue -q dump -r tank /tmp/fx/member0.img /tmp/fx/member1.img -o /tmp/bulk --txg 4816229

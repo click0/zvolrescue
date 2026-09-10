@@ -12,7 +12,7 @@ use zfs_ondisk::dmu::ObjsetPhys;
 use zfs_read::dmu::DnodeArray;
 use zfs_read::dsl::{open_mos, walk};
 use zfs_read::pool::{assemble, select_uberblock, uberblock_candidates, TxgSelect};
-use zfs_read::vdev::scan_device;
+use zfs_read::zeropoint::scan_with_recovered_base;
 use zfs_read::zio::{PoolReader, ReadError};
 use zvolrescue_io::{BlockSource, FileSource};
 
@@ -22,7 +22,10 @@ fn main() {
         .iter()
         .map(|p| FileSource::open(p).expect("open"))
         .collect();
-    let scans: Vec<_> = sources.iter().map(|s| scan_device(s).ok()).collect();
+    let scans: Vec<_> = sources
+        .iter()
+        .map(|s| scan_with_recovered_base(s).ok())
+        .collect();
     let pool = assemble(&scans).into_iter().next().expect("a pool");
     let candidates = uberblock_candidates(&scans, &pool);
     let ub = select_uberblock(&candidates, TxgSelect::Newest).expect("uberblock");
@@ -30,7 +33,11 @@ fn main() {
         .iter()
         .map(|s| Some(s as &dyn BlockSource))
         .collect();
-    let reader = PoolReader::new(&pool, devices);
+    let bases: Vec<u64> = scans
+        .iter()
+        .map(|s| s.as_ref().map_or(0, |s| s.base))
+        .collect();
+    let reader = PoolReader::new(&pool, devices).with_base_offsets(&bases);
     let mos = open_mos(&reader, &ub.ub).expect("mos");
     let tree = walk(&mos, &pool.name).expect("walk");
 

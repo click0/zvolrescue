@@ -231,6 +231,40 @@ fn ranked(by_base: BTreeMap<u64, Vec<Anchor>>) -> Vec<ZeroPoint> {
     out
 }
 
+/// Scan a member's labels, falling back to the base its uberblocks
+/// confirm when nothing verifies at offset 0.
+///
+/// A configuration that parses but whose embedded checksum does not
+/// verify is treated as no configuration: that is what a member read at
+/// the wrong base looks like, and a base is only ever accepted when a
+/// checksum confirms it. The returned scan carries the base it used.
+pub fn scan_with_recovered_base(dev: &dyn BlockSource) -> io::Result<crate::vdev::DeviceScan> {
+    let scan = crate::vdev::scan_device(dev)?;
+    if scan.config_verified() {
+        return Ok(scan);
+    }
+    let opts = Search {
+        max_anchors: 1,
+        ..Search::default()
+    };
+    let Some(base) = find(dev, &opts)?
+        .into_iter()
+        .map(|z| z.base)
+        .find(|&b| b != 0)
+    else {
+        return Ok(scan);
+    };
+    let shifted = crate::vdev::scan_device_at(dev, base)?;
+    if shifted.config_verified() {
+        trace!(
+            "zeropoint",
+            "labels verify at base {base}: reading this member from there"
+        );
+        return Ok(shifted);
+    }
+    Ok(scan)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,6 +350,35 @@ mod tests {
             .anchors
             .iter()
             .all(|a| matches!(a.label, Some(2) | Some(3))));
+    }
+
+    #[test]
+    fn labels_are_re_read_at_the_recovered_base() {
+        let psize = 16 * 1024 * 1024;
+        let intact = member(psize);
+        // Moved by a whole number of labels: the rear pair even lands
+        // where label_offsets() would look for it, so the nvlist parses
+        // at base 0 — and its checksum, sealed with the vdev-relative
+        // offset, does not verify there.
+        let base = 3 * 1024 * 1024;
+        let mut img = vec![0x5au8; base as usize];
+        img.extend_from_slice(&intact);
+        let dev = MemSource::new(img);
+
+        let blind = crate::vdev::scan_device(&dev).expect("scan");
+        assert!(!blind.config_verified());
+        assert_eq!(blind.base, 0);
+
+        let scan = scan_with_recovered_base(&dev).expect("scan");
+        assert_eq!(scan.base, base);
+        assert!(scan.config_verified());
+        assert_eq!(scan.newest_txg(), Some(101));
+
+        // An unmoved member is scanned as before, with no search at all.
+        let plain = MemSource::new(member(psize));
+        let scan = scan_with_recovered_base(&plain).expect("scan");
+        assert_eq!(scan.base, 0);
+        assert!(scan.config_verified());
     }
 
     #[test]

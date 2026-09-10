@@ -6,7 +6,8 @@ use serde::Serialize;
 use zfs_ondisk::dmu::ObjsetType;
 use zfs_read::dsl::{open_mos, walk, Dataset, DatasetTree};
 use zfs_read::pool::{assemble, select_uberblock, uberblock_candidates, PoolAssembly, TxgSelect};
-use zfs_read::vdev::{scan_device, DeviceScan};
+use zfs_read::vdev::DeviceScan;
+use zfs_read::zeropoint::scan_with_recovered_base;
 use zfs_read::zio::{PoolReader, ReadError};
 use zvolrescue_io::{BlockSource, FileSource};
 
@@ -232,6 +233,16 @@ impl Members {
             .collect()
     }
 
+    /// Where each member's vdev begins, indexed like the scans. Non-zero
+    /// only for a member whose labels were found somewhere other than the
+    /// start of what was opened (SPEC F-61).
+    pub fn bases(&self) -> Vec<u64> {
+        self.scans
+            .iter()
+            .map(|s| s.as_ref().map_or(0, |s| s.base))
+            .collect()
+    }
+
     /// True when at least one member could not be opened or scanned.
     pub fn any_failed(&self) -> bool {
         self.scans.iter().any(|s| s.is_none())
@@ -247,7 +258,17 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
     let mut sources = Vec::with_capacity(paths.len());
     let mut scans = Vec::with_capacity(paths.len());
     for p in &paths {
-        let opened = FileSource::open(p).and_then(|src| scan_device(&src).map(|s| (src, s)));
+        let opened = FileSource::open(p).and_then(|src| {
+            let scan = scan_with_recovered_base(&src)?;
+            if scan.base != 0 {
+                eprintln!(
+                    "zvolrescue: {}: vdev starts at byte {}, confirmed by an uberblock checksum",
+                    p.display(),
+                    scan.base
+                );
+            }
+            Ok((src, scan))
+        });
         match opened {
             Ok((src, s)) => {
                 scans.push(Some(s));
@@ -345,7 +366,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         );
         return exit::UNRECOVERABLE;
     };
-    let reader = PoolReader::new(&pool, members.devices());
+    let reader = PoolReader::new(&pool, members.devices()).with_base_offsets(&members.bases());
     let tree = match walk_at(&reader, &chosen.ub, &pool.name) {
         Ok(t) => t,
         Err(e) => {

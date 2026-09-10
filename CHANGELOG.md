@@ -20,6 +20,15 @@ in CI; what was tried on real environments is logged in
   which labels they came from, the TXG range and the vdev size the rear
   labels imply. Verified against a real ztest member with all four
   configurations zeroed, before and after moving it 1 MiB.
+* **Members are read from their own base.** A vdev that does not start at
+  offset 0 of what was opened — a partition re-created with another start,
+  an image cut differently — is now read correctly end to end: the labels
+  are re-read relative to the recovered base and every DVA resolves to
+  `base + 4 MiB + offset`. A configuration that parses but whose embedded
+  checksum does not verify counts as no configuration, which is exactly
+  what a member read at the wrong base looks like. `list` and `dump` of a
+  member moved 3 MiB give the same datasets and the same image hash as
+  before the move, and a whole-object walk through it is identical.
 
 ## v0.1.0-alpha.1 — 2026-09-08
 

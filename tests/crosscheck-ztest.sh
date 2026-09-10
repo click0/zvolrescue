@@ -24,6 +24,25 @@ UNWRAP=${4:-$(dirname "$WALK")/unwrap-key}
 rm -rf "$WORK"; mkdir -p "$WORK"
 fail=0
 
+# wipe_copy SRC OUT PAD: copy SRC to OUT after PAD bytes of filler, with
+# every vdev_phys area of the copy erased — a member whose four label
+# configurations are gone, optionally moved along.
+wipe_copy() {
+    python3 - "$1" "$2" "$3" <<'EOF'
+import os, shutil, sys
+LABEL, PHYS_OFF, PHYS = 256*1024, 16*1024, 112*1024
+src, out, pad = sys.argv[1], sys.argv[2], int(sys.argv[3])
+with open(src, "rb") as f, open(out, "wb") as g:
+    if pad:
+        g.write(b"\x5a" * pad)
+    shutil.copyfileobj(f, g)
+aligned = os.path.getsize(src) & ~(LABEL - 1)
+with open(out, "r+b") as f:
+    for off in (0, LABEL, aligned - 2*LABEL, aligned - LABEL):
+        f.seek(pad + off + PHYS_OFF); f.write(b"\0" * PHYS)
+EOF
+}
+
 # run_pool NAME REDUNDANCY ZTEST-ARGS...: REDUNDANCY is how many members
 # the walk in step 8 leaves out (parity level, or 1 for a mirror).
 run_pool() {
@@ -196,7 +215,8 @@ print(next(x["name"] for x in d["datasets"] if x.get("encryption") and not x["na
 
     # 9. zero point: with every vdev_phys erased, the base must still be
     #    recovered from an uberblock checksum, and it must survive the
-    #    member being moved (a rewritten partition table).
+    #    member being moved (a rewritten partition table). One temporary
+    #    copy at a time: these are whole members.
     # Pick a member that is really part of the committed pool: ztest
     # leaves behind devices it was attaching, whose labels carry txg 0 and
     # an uberblock template with no embedded checksum at all — nothing for
@@ -207,42 +227,43 @@ print(next(x["name"] for x in d["datasets"] if x.get("encryption") and not x["na
         fi
     done)
     [ -n "$anchored" ] || anchored=$(echo "$members" | head -1)
-    cp "$anchored" "$dir/nolabel.img"
-    python3 - "$dir/nolabel.img" "$dir/moved.img" <<'EOF'
-import os, sys
-LABEL, PHYS_OFF, PHYS = 256*1024, 16*1024, 112*1024
-src, moved = sys.argv[1], sys.argv[2]
-size = os.path.getsize(src)
-aligned = size & ~(LABEL - 1)
-with open(src, "r+b") as f:
-    for off in (0, LABEL, aligned - 2*LABEL, aligned - LABEL):
-        f.seek(off + PHYS_OFF); f.write(b"\0" * PHYS)
-with open(src, "rb") as f, open(moved, "wb") as g:
-    g.write(b"\x5a" * (1 << 20))
-    while True:
-        b = f.read(1 << 20)
-        if not b:
-            break
-        g.write(b)
-EOF
-    zp=$($ZR -f json scan "$dir/nolabel.img" "$dir/moved.img" | python3 -c '
-import json,sys
-d = json.load(sys.stdin)["devices"]
-for x in d:
-    z = x.get("zero_point") or [{}]
-    print(x["path"], z[0].get("base"), z[0].get("anchors"), z[0].get("psize"))')
-    plain=$(echo "$zp" | head -1); shifted=$(echo "$zp" | tail -1)
     # The rear labels sit at align_down(size, 256 KiB), so that is the
     # size an anchor there implies.
     want_size=$(( $(stat -c %s "$anchored") / 262144 * 262144 ))
-    if [ "$(echo "$plain" | awk '{print $2}')" = "0" ] \
-        && [ "$(echo "$shifted" | awk '{print $2}')" = "1048576" ] \
-        && [ "$(echo "$shifted" | awk '{print $4}')" = "$want_size" ]; then
-        echo "   zero point: base recovered from uberblocks without any vdev_phys ($(echo "$plain" | awk '{print $3}') anchors), and after a 1 MiB shift"
+    zero_point() {  # zero_point FILE -> "base anchors psize"
+        $ZR -f json scan "$1" | python3 -c '
+import json,sys
+z = (json.load(sys.stdin)["devices"][0].get("zero_point") or [{}])[0]
+print(z.get("base"), z.get("anchors"), z.get("psize"))'
+    }
+    wipe_copy "$anchored" "$dir/tmp.img" 0
+    plain=$(zero_point "$dir/tmp.img"); rm -f "$dir/tmp.img"
+    wipe_copy "$anchored" "$dir/tmp.img" 1048576
+    shifted=$(zero_point "$dir/tmp.img"); rm -f "$dir/tmp.img"
+    if [ "$(echo "$plain" | awk '{print $1}')" = "0" ] \
+        && [ "$(echo "$shifted" | awk '{print $1}')" = "1048576" ] \
+        && [ "$(echo "$shifted" | awk '{print $3}')" = "$want_size" ]; then
+        echo "   zero point: base recovered from uberblocks without any vdev_phys ($(echo "$plain" | awk '{print $2}') anchors), and after a 1 MiB shift"
     else
-        echo "   zero point: FAILED"; echo "$zp"; fail=1
+        echo "   zero point: FAILED"; echo "plain: $plain"; echo "shifted: $shifted"; fail=1
     fi
-    rm -f "$dir/nolabel.img" "$dir/moved.img"
+
+    # 10. a member whose labels are intact but which starts 1 MiB in (a
+    #     partition re-created with another start): every block of every
+    #     object must still read, through the recovered base.
+    if [ -x "$WALK" ] && [ -s "$dir/walk.txt" ]; then
+        : "${key:=}"; : "${reference:=$dir/walk.txt}"
+        { head -c 1048576 /dev/zero | tr '\0' 'Z'; cat "$anchored"; } > "$dir/moved-intact.img"
+        others="$(echo "$members" | grep -v "^$anchored$" | tr '\n' ' ') $(ls "$dir"/ztest.*b 2>/dev/null | tr '\n' ' ')"
+        if ZR_KEY="$key" "$WALK" "$dir/moved-intact.img" $others > "$dir/walk-moved.txt" 2> "$dir/walk-moved.err" \
+            && ! grep -q "ERROR\|dnode:\|no key\|decrypt" "$dir/walk-moved.txt" \
+            && [ "$(head -1 "$dir/walk-moved.txt")" = "$(head -1 "$reference")" ]; then
+            echo "   moved member: the walk through a member shifted by 1 MiB is identical ($(head -1 "$dir/walk-moved.txt"))"
+        else
+            echo "   moved member: FAILED"; head -12 "$dir/walk-moved.txt"; tail -5 "$dir/walk-moved.err"; fail=1
+        fi
+        rm -f "$dir/moved-intact.img"
+    fi
 
 }
 

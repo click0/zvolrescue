@@ -85,6 +85,10 @@ impl LabelScan {
 pub struct DeviceScan {
     /// Device size in bytes.
     pub size: u64,
+    /// Byte offset at which the vdev begins. Zero unless the labels were
+    /// found somewhere other than the start of what was opened — see
+    /// [`scan_device_at`].
+    pub base: u64,
     /// The four labels.
     pub labels: Vec<LabelScan>,
     /// Index into `labels` of the label to trust: checksum-verified with
@@ -96,6 +100,17 @@ impl DeviceScan {
     /// Typed configuration from the best label.
     pub fn config(&self) -> Option<LabelConfig> {
         self.best_label.and_then(|i| self.labels[i].typed())
+    }
+
+    /// Whether any label holds a configuration whose embedded checksum
+    /// verified at the offset it was read from. A configuration that
+    /// parses but does not verify is the signature of a member read at
+    /// the wrong base: the nvlist is intact, the offset it was sealed
+    /// with is not the one it was found at.
+    pub fn config_verified(&self) -> bool {
+        self.labels
+            .iter()
+            .any(|l| l.config.is_some() && l.phys_checksum == ChecksumStatus::Ok)
     }
 
     /// Highest TXG of any checksum-verified uberblock across all labels.
@@ -128,21 +143,31 @@ pub fn slot_shift_for(ashift: Option<u64>) -> u32 {
 /// Read all four labels of `dev`: configuration nvlists with their
 /// checksums, and uberblock rings walked at the real slot size.
 pub fn scan_device(dev: &dyn BlockSource) -> io::Result<DeviceScan> {
-    let offsets = label_offsets(dev.size()).ok_or_else(|| {
+    scan_device_at(dev, 0)
+}
+
+/// Read the four labels of a vdev that begins at byte `base` of `dev`.
+///
+/// Everything about a label — where the rear pair sits, and the offset
+/// each embedded checksum was taken with — is relative to the vdev, not
+/// to the file. A member whose partition was re-created with a different
+/// start therefore scans as blank at base 0 and reads normally once the
+/// base recovered from its uberblocks (SPEC F-61) is passed here.
+pub fn scan_device_at(dev: &dyn BlockSource, base: u64) -> io::Result<DeviceScan> {
+    let psize = dev.size().saturating_sub(base);
+    let offsets = label_offsets(psize).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
                 "device is {} bytes, smaller than {} labels of {} bytes",
-                dev.size(),
-                LABELS_PER_VDEV,
-                LABEL_SIZE
+                psize, LABELS_PER_VDEV, LABEL_SIZE
             ),
         )
     })?;
     let mut label = vec![0u8; LABEL_SIZE as usize];
     let mut labels = Vec::with_capacity(LABELS_PER_VDEV);
     for (index, &offset) in offsets.iter().enumerate() {
-        dev.read_at(offset, &mut label)?;
+        dev.read_at(base + offset, &mut label)?;
         let phys_start = VDEV_PHYS_OFFSET as usize;
         let phys = parse_vdev_phys(
             &label[phys_start..phys_start + VDEV_PHYS_SIZE as usize],
@@ -228,6 +253,7 @@ pub fn scan_device(dev: &dyn BlockSource) -> io::Result<DeviceScan> {
     trace!("label", "best label: {best_label:?}");
     Ok(DeviceScan {
         size: dev.size(),
+        base,
         labels,
         best_label,
     })

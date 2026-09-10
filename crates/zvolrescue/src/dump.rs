@@ -485,7 +485,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         eprintln!("zvolrescue: no verified uberblocks on the scanned members");
         return exit::UNRECOVERABLE;
     }
-    let reader = PoolReader::new(&pool, members.devices());
+    let reader = PoolReader::new(&pool, members.devices()).with_base_offsets(&members.bases());
     let mut searched = Vec::new();
     let (chosen, tree) = match find_dataset(
         &reader,
