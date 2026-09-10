@@ -121,6 +121,22 @@ for having matched — every block `dump` reads is verified by its own
 checksum, exactly as in the main binary.
 
 ```
+zvolfiles list    DATASET POOLSPEC [--txg N] [--key KEYSPEC] [--path PATH] [-R]
+zvolfiles extract DATASET POOLSPEC [--txg N] [--key KEYSPEC] [--path PATH]... -o DIR [--strict]
+zvolfiles objects DATASET POOLSPEC [--txg N] [--key KEYSPEC] -o DIR
+                                                           files out of a filesystem dataset
+```
+
+```sh
+# What is in there, and what came out of it.
+zvolfiles list pool/home /dev/ada0p3 /dev/ada1p3 -R --txg 4816229
+zvolfiles extract pool/home /dev/ada0p3 /dev/ada1p3 -o /mnt/rescue/home
+
+# The POSIX metadata is too damaged to walk: take the objects instead.
+zvolfiles objects pool/home /dev/ada0p3 -o /mnt/rescue/objects
+```
+
+```
 zvolreport build  LOG... -o report.json [--md report.md] [--case ID] [--examiner NAME]
 zvolreport verify report.json [--evidence-root DIR] [--outputs-root DIR]
                                                            the evidence logs as one document, and that document checked back
@@ -145,7 +161,7 @@ Specified in [docs/COMPANIONS.md](docs/COMPANIONS.md).
 | `zvoltimeline` | **shipping** — TXG ↔ time ↔ dataset created/destroyed |
 | `zvolcarve` | **shipping** — find volumes whose uberblocks are gone, and extract them |
 | `zvolreport` | **shipping** — consolidated report with a SHA-256 chain of custody |
-| `zvolfiles` | file-level recovery from filesystem datasets |
+| `zvolfiles` | **shipping** — file-level recovery from filesystem datasets |
 
 ## Roadmap
 
@@ -173,6 +189,7 @@ crates/zvolrescue/          the main binary (scan / list / dump)
 crates/zvoltimeline/        the pool's history from its transaction groups
 crates/zvolreport/          the evidence logs consolidated into one checkable document
 crates/zvolcarve/           raw-space scan for volumes nothing points at any more
+crates/zvolfiles/           the ZFS POSIX layer: directories, files, symlinks, or a raw object dump
 crates/zvol*/               the remaining companion binaries, one crate each (phases 3–4)
 crates/zvol-common/         shared CLI plumbing (evidence log, exit codes, POOLSPEC)
 crates/zvolrescue-io/       read-only device/image access (the only crate allowed `unsafe`)
@@ -188,8 +205,8 @@ tests/                      fixture-pool integration tests
 Every tagged release ships static binaries with no runtime dependencies
 (see [Releases](https://github.com/click0/zvolrescue/releases)):
 `zvolrescue-<version>-x86_64-linux-musl`, `…-aarch64-linux-musl`,
-`…-amd64-freebsd`, the same three for `zvoltimeline`, `zvolreport` and
-`zvolcarve`, plus `SHA256SUMS`. Drop the binary on the rescue
+`…-amd64-freebsd`, the same three for `zvoltimeline`, `zvolreport`,
+`zvolcarve` and `zvolfiles`, plus `SHA256SUMS`. Drop the binary on the rescue
 medium and run it; nothing to install. Verify with `sha256sum -c SHA256SUMS`.
 The pre-releases (`-alpha`, `-beta`) have been validated against OpenZFS
 userland pools only; see [CHANGELOG.md](CHANGELOG.md) for what each one

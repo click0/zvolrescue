@@ -77,8 +77,25 @@ in CI; what was tried on real environments is logged in
   produced the same image, rebuilt from parity. Only the compressed pass
   is mirror-and-single-disk, because a compressed block is split across
   columns and no member holds one contiguously.
-* Releases now carry `zvoltimeline`, `zvolreport` and `zvolcarve` for
-  the same three platforms as `zvolrescue`.
+* **`zvolfiles` — files out of filesystem datasets (COMPANIONS §5).**
+  The main binary treats a filesystem dataset as an object dump at most;
+  this one reads the ZFS POSIX layer. `list` walks the tree with type,
+  mode, owner, size, times and symlink targets, at any transaction group
+  that still verifies and with `--key` for an encrypted dataset.
+  `extract` writes it out, hashing every file into `manifest.json` and
+  turning a block that cannot be read into zeros with the count
+  recorded, never a silently short file; `--strict` stops at the first
+  one. `objects` is the fallback for when the POSIX metadata is too
+  damaged to walk: one file per object plus an index — with the root
+  directory ZAP zeroed on every member, `list` fails and the file
+  contents still come out byte for byte.
+
+  Metadata comes from the system attributes, which is how any pool made
+  this decade stores it: a layout number, a packed run of values, and
+  two ZAPs in the dataset saying what each value is and how long. A
+  legacy `znode_phys_t` bonus is read as one when the magic says so.
+* Releases now carry `zvoltimeline`, `zvolreport`, `zvolcarve` and
+  `zvolfiles` for the same three platforms as `zvolrescue`.
 
 ### Fixed
 * A dataset is no longer called a clone because its origin is non-zero.

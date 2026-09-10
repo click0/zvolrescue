@@ -47,13 +47,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - run: cargo build --release --target ${{ matrix.target }} -p zvolrescue -p zvoltimeline -p zvolreport -p zvolcarve
+      - run: cargo build --release --target ${{ matrix.target }} -p zvolrescue -p zvoltimeline -p zvolreport -p zvolcarve -p zvolfiles
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
       - name: Package
         run: |
           v=$(printf '%s' "$TAG" | sed 's/^[vV]\.*//')
-          for b in zvolrescue zvoltimeline zvolreport zvolcarve; do
+          for b in zvolrescue zvoltimeline zvolreport zvolcarve zvolfiles; do
             cp "target/${{ matrix.target }}/release/$b" "$b-$v-${{ matrix.name }}"
           done
       - uses: actions/upload-artifact@v4
@@ -75,15 +75,16 @@ jobs:
           usesh: true
           prepare: pkg install -y rust
           run: |
-            cargo build --release -p zvolrescue -p zvoltimeline -p zvolreport -p zvolcarve
+            cargo build --release -p zvolrescue -p zvoltimeline -p zvolreport -p zvolcarve -p zvolfiles
             ./target/release/zvolrescue --version
             ./target/release/zvoltimeline --version
             ./target/release/zvolreport --version
             ./target/release/zvolcarve --version
+            ./target/release/zvolfiles --version
       - name: Package
         run: |
           v=$(printf '%s' "$TAG" | sed 's/^[vV]\.*//')
-          for b in zvolrescue zvoltimeline zvolreport zvolcarve; do
+          for b in zvolrescue zvoltimeline zvolreport zvolcarve zvolfiles; do
             cp "target/release/$b" "$b-$v-amd64-freebsd"
           done
       - uses: actions/upload-artifact@v4
@@ -112,6 +113,7 @@ jobs:
           ./zvoltimeline-*-x86_64-linux-musl --version
           ./zvolreport-*-x86_64-linux-musl --version
           ./zvolcarve-*-x86_64-linux-musl --version
+          ./zvolfiles-*-x86_64-linux-musl --version
           sha256sum zvol* > SHA256SUMS
           cat SHA256SUMS
       - name: Release notes
@@ -142,6 +144,7 @@ jobs:
             echo "| \`zvoltimeline-$v-*\` | the same three | the pool's history from its transaction groups |"
             echo "| \`zvolreport-$v-*\` | the same three | the evidence logs as one checkable document |"
             echo "| \`zvolcarve-$v-*\` | the same three | volumes no uberblock points at any more |"
+            echo "| \`zvolfiles-$v-*\` | the same three | files out of filesystem datasets |"
             echo "| \`SHA256SUMS\` | — | \`sha256sum -c SHA256SUMS\` |"
             echo
             echo "No installation: \`chmod +x\` and run. Nothing is ever written to the pool members."

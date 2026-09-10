@@ -335,6 +335,58 @@ jobs:
           sha256sum /tmp/cv/member0.img /tmp/cv/member1.img > /tmp/cv.sums
           sha256sum -c /tmp/cv.sums
           if ./target/release/zvolcarve -q scan /tmp/cv/member0.img -o /tmp/cv/member0.img; then echo "must refuse"; exit 1; else test $? = 5; fi
+      - name: Files out of a filesystem dataset (COMPANIONS §5.4)
+        run: |
+          ./target/release/zvolfiles --version
+          cargo run -q -p zfs-read --example mkfixture -- /tmp/zp mirror 12 zpl
+          ./target/release/zvolfiles list tank/fs /tmp/zp/member0.img /tmp/zp/member1.img -R
+          ./target/release/zvolfiles -f json list tank/fs /tmp/zp/member0.img /tmp/zp/member1.img -R > /tmp/zp/list.json
+          python3 - <<'EOF'
+          import json
+          d = json.load(open("/tmp/zp/list.json"))
+          by = {f["path"]: f for f in d["files"]}
+          assert list(by) == ["hello.txt", "link", "sub", "sub/deep.txt"], list(by)
+          # Z-02: metadata out of the system attributes, not guessed at.
+          assert by["hello.txt"]["type"] == "-" and by["hello.txt"]["mode"] == "0644", by
+          assert by["hello.txt"]["size"] == 38, by
+          assert by["sub"]["type"] == "d" and by["sub"]["mode"] == "0755", by
+          assert by["sub/deep.txt"]["mode"] == "0600", by
+          # Z-03: a symlink whose target lives in the attributes.
+          assert by["link"]["type"] == "l" and by["link"]["target"] == "sub/deep.txt", by
+          assert all("error" not in f for f in d["files"]), d["files"]
+          EOF
+          # Z-03, Z-05: the tree out, with a manifest that hashes it.
+          rm -rf /tmp/zp/out
+          ./target/release/zvolfiles extract tank/fs /tmp/zp/member0.img /tmp/zp/member1.img -o /tmp/zp/out
+          test "$(cat /tmp/zp/out/hello.txt)" = "hello from a dataset nobody can mount"
+          echo "d67c656e01756650d77717b0839985a056ec28ffe174601d690fc407a2ceffca  /tmp/zp/out/sub/deep.txt" | sha256sum -c -
+          test "$(stat -c %a /tmp/zp/out/sub/deep.txt)" = 600
+          python3 -c 'import json; m=json.load(open("/tmp/zp/out/manifest.json")); f={x["path"]:x for x in m["files"]}; assert f["sub/deep.txt"]["sha256"] == "d67c656e01756650d77717b0839985a056ec28ffe174601d690fc407a2ceffca", f; assert m["incomplete"] == 0 and m["failed"] == 0, m'
+          # One path, not the whole tree.
+          rm -rf /tmp/zp/one
+          ./target/release/zvolfiles -q extract tank/fs /tmp/zp/member0.img -o /tmp/zp/one --path sub
+          test -f /tmp/zp/one/sub/deep.txt && test ! -e /tmp/zp/one/hello.txt
+          # Z-08: with the root directory ZAP zeroed on every member, the
+          # walk cannot work and the objects still come out whole.
+          cp /tmp/zp/member0.img /tmp/zp/bad0.img
+          cp /tmp/zp/member1.img /tmp/zp/bad1.img
+          python3 - <<'EOF'
+          for path in ("/tmp/zp/bad0.img", "/tmp/zp/bad1.img"):
+              data = bytearray(open(path, "rb").read())
+              i = data.find(b"hello.txt")
+              assert i > 0, path
+              start = (i // 4096) * 4096
+              data[start:start + 4096] = b"\x00" * 4096
+              open(path, "wb").write(bytes(data))
+          EOF
+          if ./target/release/zvolfiles -q list tank/fs /tmp/zp/bad0.img /tmp/zp/bad1.img -R; then echo "the walk must fail"; exit 1; else test $? = 4; fi
+          rm -rf /tmp/zp/objs
+          ./target/release/zvolfiles -q objects tank/fs /tmp/zp/bad0.img /tmp/zp/bad1.img -o /tmp/zp/objs || test $? = 4
+          cmp /tmp/zp/out/sub/deep.txt /tmp/zp/objs/objects/000009.bin
+          # Never a write to the evidence, and never one onto it.
+          sha256sum /tmp/zp/member0.img /tmp/zp/member1.img > /tmp/zp.sums
+          sha256sum -c /tmp/zp.sums
+          if ./target/release/zvolfiles -q extract tank/fs /tmp/zp/member0.img -o /tmp/zp/member0.img; then echo "must refuse"; exit 1; else test $? = 5; fi
       - name: End-to-end on a raidz2 fixture (missing and corrupted members)
         run: |
           cargo run -p zfs-read --example mkfixture -- /tmp/rz raidz2 12

@@ -349,6 +349,35 @@ xattrs and hard links, destroyed after a snapshot of its hashes:
 hashes and metadata; `objects` produces the same file contents when the
 root directory ZAP is deliberately zeroed.
 
+*Status: Z-01…Z-03, Z-05, Z-06 and Z-08 are implemented, and that second
+half of the acceptance is a CI step: the fixture's tree is listed with
+its modes, sizes, times and symlink target out of the system attributes,
+extracted with a manifest that hashes every file, and — with the root
+directory ZAP zeroed on every member — `list` fails while `objects`
+still produces `sub/deep.txt` byte for byte.
+
+Two deviations from the CLI above, both deliberate. `PATH` is `--path`,
+because the member list is variable-length and a bare path after it
+cannot be told from another member. And a symbolic link is written as a
+file holding its target rather than as a link: a link out of a recovered
+tree would point at whatever is at that path on the machine doing the
+recovery.
+
+The fixture is synthetic, which is a real limit here and worth stating:
+unlike the volume path, no `ztest` pool exercises this code, because
+ztest makes no populated ZPL datasets. The decoding is written and read
+by the same workspace, so a byte-order mistake in both would not show.
+`objects` and the manifest are what a recovery would lean on until a
+real filesystem has been tried, which
+[REALWORLD-TESTS.md](REALWORLD-TESTS.md) is where that will be recorded.
+
+Not implemented: extended attributes (Z-04), hard links restored as hard
+links (Z-07), `casesensitivity`/`normalization` in path matching (Z-09,
+the properties are reported), and the feature-flag extensions to the SA
+layout (Z-10). Sparse regions come out as the holes they are, since a
+hole is a hole in the tree; a file whose tail was never written is
+extracted to the length the attributes give.*
+
 ---
 
 ## 6. Delivery

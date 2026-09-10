@@ -97,6 +97,9 @@ C-тулчейна і системних бібліотек, **без лінку
 - `crates/zvolcarve` — третій супутник: скан сирого простору vdev по
   dnode-ах, на які вже не вказує жоден уберблок, профіль пошуку і
   видобування через ту саму трубу, що й `zvolrescue dump` (COMPANIONS §3).
+- `crates/zvolfiles` — четвертий супутник: ZFS POSIX layer (майстер-нода,
+  каталоги, системні атрибути), видобування дерева з маніфестом і
+  запасний дамп по об'єктах (COMPANIONS §5).
 - `tests/crosscheck-ztest.sh` — звірка з OpenZFS userland; ключ шифрування
   ztest — рядок `abcdefghijklmnopqrstuvwxyz012345` (keyformat raw).
 
