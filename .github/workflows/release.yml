@@ -47,13 +47,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - run: cargo build --release --target ${{ matrix.target }} -p zvolrescue -p zvoltimeline
+      - run: cargo build --release --target ${{ matrix.target }} -p zvolrescue -p zvoltimeline -p zvolreport
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
       - name: Package
         run: |
           v=$(printf '%s' "$TAG" | sed 's/^[vV]\.*//')
-          for b in zvolrescue zvoltimeline; do
+          for b in zvolrescue zvoltimeline zvolreport; do
             cp "target/${{ matrix.target }}/release/$b" "$b-$v-${{ matrix.name }}"
           done
       - uses: actions/upload-artifact@v4
@@ -75,13 +75,14 @@ jobs:
           usesh: true
           prepare: pkg install -y rust
           run: |
-            cargo build --release -p zvolrescue -p zvoltimeline
+            cargo build --release -p zvolrescue -p zvoltimeline -p zvolreport
             ./target/release/zvolrescue --version
             ./target/release/zvoltimeline --version
+            ./target/release/zvolreport --version
       - name: Package
         run: |
           v=$(printf '%s' "$TAG" | sed 's/^[vV]\.*//')
-          for b in zvolrescue zvoltimeline; do
+          for b in zvolrescue zvoltimeline zvolreport; do
             cp "target/release/$b" "$b-$v-amd64-freebsd"
           done
       - uses: actions/upload-artifact@v4
@@ -108,6 +109,7 @@ jobs:
           chmod +x zvol*
           ./zvolrescue-*-x86_64-linux-musl --version
           ./zvoltimeline-*-x86_64-linux-musl --version
+          ./zvolreport-*-x86_64-linux-musl --version
           sha256sum zvol* > SHA256SUMS
           cat SHA256SUMS
       - name: Release notes
@@ -136,6 +138,7 @@ jobs:
             echo "| \`zvolrescue-$v-aarch64-linux-musl\` | Linux aarch64 | static |"
             echo "| \`zvolrescue-$v-amd64-freebsd\` | FreeBSD 14.x amd64 | built on 14.2; works on mfsBSD |"
             echo "| \`zvoltimeline-$v-*\` | the same three | the pool's history from its transaction groups |"
+            echo "| \`zvolreport-$v-*\` | the same three | the evidence logs as one checkable document |"
             echo "| \`SHA256SUMS\` | — | \`sha256sum -c SHA256SUMS\` |"
             echo
             echo "No installation: \`chmod +x\` and run. Nothing is ever written to the pool members."

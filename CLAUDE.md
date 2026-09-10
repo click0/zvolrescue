@@ -92,6 +92,8 @@ C-тулчейна і системних бібліотек, **без лінку
   відкриття членів і вибір пулу, лог evidence, формат часу.
 - `crates/zvoltimeline` — перший супутник: історія пулу з транзакційних
   груп, що вціліли (COMPANIONS §2).
+- `crates/zvolreport` — другий супутник: логи evidence, зведені в один
+  документ із ланцюжком SHA-256, і його перевірка (COMPANIONS §4).
 - `tests/crosscheck-ztest.sh` — звірка з OpenZFS userland; ключ шифрування
   ztest — рядок `abcdefghijklmnopqrstuvwxyz012345` (keyformat raw).
 

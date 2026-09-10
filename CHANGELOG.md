@@ -22,8 +22,28 @@ in CI; what was tried on real environments is logged in
   back — with this run's own `--hints`, `--image` and `--assume-member`
   carried over, so it works where the timeline worked. `--from`/`--to`,
   `--dataset` by name or GUID, `-f json`, `--evidence-log`.
-* Releases now carry `zvoltimeline` for the same three platforms as
-  `zvolrescue`.
+* **`zvolreport` — one document a third party can check (COMPANIONS
+  §4).** Every tool appends what it did to an evidence log;
+  `zvolreport build` consolidates those logs into a report — the case,
+  the evidence with its sizes and hashes and which tools read it, the
+  tool versions, every command in the order it ran with its exit code,
+  the pool and the transaction-group window the scan recorded, what was
+  extracted, and every file that was written. It is a function of the
+  logs: nothing in it comes from the clock, and two builds of the same
+  log are byte-identical. `zvolreport verify` recomputes the SHA-256 of
+  everything the report has a hash for and prints a PASS/FAIL table,
+  exiting 4 on any file that changed or went missing;
+  `--evidence-root`/`--outputs-root` re-base the paths for a machine
+  where the disks are mounted somewhere else. `--md` renders the whole
+  thing for a ticket or a case file.
+* **The evidence log is the record COMPANIONS §1.3 specifies.** It now
+  carries the format version, the tool and its version separately, the
+  host, the evidence read, the files written and the exit code — not
+  just the command line and the result. Every file written carries its
+  SHA-256; inputs are hashed only under the new `--hash-inputs`, because
+  a shelf of disk images takes hours to read through.
+* Releases now carry `zvoltimeline` and `zvolreport` for the same three
+  platforms as `zvolrescue`.
 
 ### Fixed
 * A dataset is no longer called a clone because its origin is non-zero.

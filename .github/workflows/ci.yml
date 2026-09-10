@@ -221,6 +221,53 @@ jobs:
           sha256sum /tmp/fx/member0.img /tmp/fx/member1.img > /tmp/fx.sums
           ./target/release/zvoltimeline /tmp/fx/member0.img /tmp/fx/member1.img -o /tmp/tl.txt
           sha256sum -c /tmp/fx.sums
+      - name: The case file, and checking it back (COMPANIONS R-01…R-06)
+        run: |
+          ./target/release/zvolreport --version
+          rm -rf /tmp/case && mkdir -p /tmp/case && cd /tmp/case
+          B="$GITHUB_WORKSPACE/target/release"
+          # UC-1 end to end, every step appending to one evidence log.
+          "$B/zvolrescue" -q --hash-inputs scan /tmp/fx/member0.img /tmp/fx/member1.img --evidence-log case.jsonl
+          "$B/zvoltimeline" /tmp/fx/member0.img /tmp/fx/member1.img -o timeline.txt --evidence-log case.jsonl
+          "$B/zvolrescue" -q dump tank/vm/disk0 /tmp/fx/member0.img /tmp/fx/member1.img --txg 4816229 -o disk0.img --evidence-log case.jsonl
+          "$B/zvolreport" build case.jsonl -o report.json --md report.md --case 42 --examiner "CI" --note "fixture pool"
+          python3 - <<'EOF'
+          import json
+          r = json.load(open("/tmp/case/report.json"))
+          assert r["case"] == "42" and r["examiner"] == "CI", r
+          assert [t["tool"] for t in r["tools"]] == ["zvolrescue", "zvoltimeline"], r["tools"]
+          # Every command, in the order it ran, with its exit code.
+          assert [c["status"] for c in r["commands"]] == [0, 0, 0], r["commands"]
+          assert len(r["commands"]) == 3, r["commands"]
+          # --hash-inputs was given, so the evidence carries hashes.
+          assert all(e["sha256"] for e in r["evidence"]), r["evidence"]
+          assert r["pools"][0]["name"] == "tank", r["pools"]
+          assert r["pools"][0]["txg_window"] == [4816228, 4816230], r["pools"]
+          e = r["extractions"][0]
+          assert e["dataset"] == "tank/vm/disk0" and e["txg"] == 4816229, e
+          assert e["sha256"] == "d6d58af862ec2761bf43158f7ee2b2b0f4628fa6ca8095544493f9d698d7b80d", e
+          assert e["errors"] == 0 and not e["aborted"], e
+          assert r.get("warnings", []) == [], r["warnings"]
+          assert "tank/vm/disk0" in open("/tmp/case/report.md").read()
+          EOF
+          # R-03: the same log and flags, byte for byte.
+          "$B/zvolreport" build case.jsonl -o again.json --case 42 --examiner "CI" --note "fixture pool" >/dev/null
+          cmp report.json again.json
+          # R-04: everything still matches what was recorded.
+          "$B/zvolreport" verify report.json
+          # One byte of the extracted image, and it does not.
+          printf '\xff' | dd of=disk0.img bs=1 seek=4096 conv=notrunc status=none
+          if "$B/zvolreport" verify report.json; then echo "must fail"; exit 1; else test $? = 4; fi
+          "$B/zvolreport" -f json verify report.json | python3 -c 'import json,sys; d=json.load(sys.stdin); bad=[c for c in d["checked"] if c["status"] == "fail"]; assert len(bad) == 1 and bad[0]["path"].endswith("disk0.img"), d'
+          # A file that is gone breaks the chain as surely as one that changed.
+          rm disk0.img
+          if "$B/zvolreport" verify report.json; then echo "must fail"; exit 1; else test $? = 4; fi
+          # R-01: a record format this build does not read is refused, not skipped.
+          sed 's/"v":1/"v":2/' case.jsonl > future.jsonl
+          if "$B/zvolreport" build future.jsonl -o no.json; then echo "must fail"; exit 1; else test $? = 2; fi
+          echo '{"hello":1}' > junk.jsonl
+          if "$B/zvolreport" build junk.jsonl -o no.json; then echo "must fail"; exit 1; else test $? = 2; fi
+          cd "$GITHUB_WORKSPACE"
       - name: End-to-end on a raidz2 fixture (missing and corrupted members)
         run: |
           cargo run -p zfs-read --example mkfixture -- /tmp/rz raidz2 12

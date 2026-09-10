@@ -260,6 +260,14 @@ Run UC-1 end-to-end with `--evidence-log`; `zvolreport build` lists every
 command and hash; modifying one byte of the extracted image makes
 `zvolreport verify` fail with exit 4 naming that file.
 
+*Status: R-01…R-06 are implemented and that acceptance run is a CI step
+on the mirror fixture — `scan`, `zvoltimeline` and `dump` into one log,
+then `build`, then `verify` before and after a byte is changed, and
+again with the image removed. `build` is checked to be byte-identical on
+a second run (R-03); a record whose format version is not 1 fails the
+build rather than being skipped (R-01). Not implemented: the ed25519
+signature (R-07).*
+
 ---
 
 ## 5. `zvolfiles` — files out of filesystem datasets

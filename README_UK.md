@@ -99,6 +99,22 @@ zvoltimeline /dev/ada0p3 /dev/ada1p3 --dataset pool/vm/disk0
 `--hints`, `--image` та `--assume-member` цього ж запуску, тож вона
 спрацює там, де спрацювала сама історія.
 
+```
+zvolreport build  LOG... -o report.json [--md report.md] [--case ID] [--examiner NAME]
+zvolreport verify report.json [--evidence-root DIR] [--outputs-root DIR]
+                                                           логи evidence як один документ — і перевірка цього документа
+```
+
+```sh
+# Кожен інструмент дописує в один лог; звіт зводить їх докупи.
+zvolrescue --hash-inputs --evidence-log case42.jsonl scan /dev/ada0p3 /dev/ada1p3
+zvolrescue --evidence-log case42.jsonl dump pool/vm/disk0 /dev/ada0p3 /dev/ada1p3 -o disk0.img
+zvolreport build case42.jsonl -o report.json --md report.md --case 42 --examiner "…"
+
+# Згодом, на іншій машині: чи все ще те, що каже звіт?
+zvolreport verify report.json --outputs-root /mnt/case42
+```
+
 ### Супутні інструменти (окремі бінарники в тому ж workspace)
 
 Описані в [docs/COMPANIONS.uk.md](docs/COMPANIONS.uk.md).
@@ -107,7 +123,7 @@ zvoltimeline /dev/ada0p3 /dev/ada1p3 --dataset pool/vm/disk0
 |---|---|
 | `zvoltimeline` | **уже є** — TXG ↔ час ↔ створення/знищення dataset-ів |
 | `zvolcarve` | знайти від'єднані zvol, чиї uberblock-и вже зникли, і передати їх у `dump` |
-| `zvolreport` | зведений forensic-звіт із ланцюжком SHA-256 |
+| `zvolreport` | **уже є** — зведений звіт із ланцюжком SHA-256 |
 | `zvolfiles` | файлове відновлення з файлових dataset-ів |
 
 ## Дорожня карта
@@ -134,6 +150,7 @@ docs/research/              аналізи схожих інструментів
 Cargo.toml                  cargo workspace
 crates/zvolrescue/          основний бінарник (scan / list / dump)
 crates/zvoltimeline/        історія пулу з його транзакційних груп
+crates/zvolreport/          логи evidence, зведені в один перевірюваний документ
 crates/zvol*/               решта супутніх бінарників, по одному crate (етапи 3–4)
 crates/zvol-common/         спільна CLI-обв'язка (лог evidence, коди виходу, POOLSPEC)
 crates/zvolrescue-io/       read-only доступ до пристроїв/образів (єдиний crate з `unsafe`)
@@ -149,7 +166,8 @@ tests/                      інтеграційні тести на fixture-п�
 Кожен тегований реліз містить статичні бінарники без залежностей (див.
 [Releases](https://github.com/click0/zvolrescue/releases)):
 `zvolrescue-<версія>-x86_64-linux-musl`, `…-aarch64-linux-musl`,
-`…-amd64-freebsd`, ті самі три для `zvoltimeline`, а також `SHA256SUMS`. Скопіюйте бінарник на
+`…-amd64-freebsd`, ті самі три для `zvoltimeline` і `zvolreport`, а також
+`SHA256SUMS`. Скопіюйте бінарник на
 рятувальний носій і запускайте; встановлювати нічого не треба. Перевірка:
 `sha256sum -c SHA256SUMS`. Передрелізи (`-alpha`, `-beta`) перевірено лише
 на userland-пулах OpenZFS; що саме покриває кожен, описано в
