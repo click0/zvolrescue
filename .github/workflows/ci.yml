@@ -358,7 +358,13 @@ jobs:
           import json
           d = json.load(open("/tmp/zp/list.json"))
           by = {f["path"]: f for f in d["files"]}
-          assert list(by) == ["hello.txt", "link", "sub", "sub/deep.txt"], list(by)
+          assert list(by) == ["hardlink.txt", "hello.txt", "link", "sub", "sub/deep.txt"], list(by)
+          # Z-04: extended attributes out of the system attributes.
+          assert by["hello.txt"]["xattrs"] == ["user.case", "user.note"], by["hello.txt"]
+          assert "xattrs" not in by["sub/deep.txt"], by["sub/deep.txt"]
+          # Z-07: two names, one object.
+          assert by["hardlink.txt"]["object"] == by["hello.txt"]["object"], by
+          assert by["hello.txt"]["links"] == 2, by
           # Z-02: metadata out of the system attributes, not guessed at.
           assert by["hello.txt"]["type"] == "-" and by["hello.txt"]["mode"] == "0644", by
           assert by["hello.txt"]["size"] == 38, by
@@ -374,7 +380,23 @@ jobs:
           test "$(cat /tmp/zp/out/hello.txt)" = "hello from a dataset nobody can mount"
           echo "d67c656e01756650d77717b0839985a056ec28ffe174601d690fc407a2ceffca  /tmp/zp/out/sub/deep.txt" | sha256sum -c -
           test "$(stat -c %a /tmp/zp/out/sub/deep.txt)" = 600
-          python3 -c 'import json; m=json.load(open("/tmp/zp/out/manifest.json")); f={x["path"]:x for x in m["files"]}; assert f["sub/deep.txt"]["sha256"] == "d67c656e01756650d77717b0839985a056ec28ffe174601d690fc407a2ceffca", f; assert m["incomplete"] == 0 and m["failed"] == 0, m'
+          python3 - <<'EOF'
+          import json, os
+          m = json.load(open("/tmp/zp/out/manifest.json"))
+          f = {x["path"]: x for x in m["files"]}
+          assert f["sub/deep.txt"]["sha256"] == "d67c656e01756650d77717b0839985a056ec28ffe174601d690fc407a2ceffca", f
+          assert m["incomplete"] == 0 and m["failed"] == 0, m
+          # Z-07: the second name is a hard link on disk, not a copy.
+          assert m["hardlinks"] == 1, m
+          assert f["hello.txt"]["hardlink_to"] == "hardlink.txt", f["hello.txt"]
+          a = os.stat("/tmp/zp/out/hello.txt")
+          b = os.stat("/tmp/zp/out/hardlink.txt")
+          assert (a.st_ino, a.st_nlink) == (b.st_ino, 2), (a, b)
+          # Z-04: attributes recorded with their values, since applying
+          # them would need the platform's own call.
+          x = {v["name"]: v["value"] for v in f["hello.txt"]["xattrs"]}
+          assert x == {"user.case": "42", "user.note": "kept in the attributes"}, x
+          EOF
           # One path, not the whole tree.
           rm -rf /tmp/zp/one
           ./target/release/zvolfiles -q extract tank/fs /tmp/zp/member0.img -o /tmp/zp/one --path sub

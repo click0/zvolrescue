@@ -212,7 +212,14 @@ impl Filesystem<'_, '_> {
             .and_then(|n| by_num.get(n))
             .filter(|b| !b.is_empty())
             .cloned();
+        let dxattr = self
+            .attr_num
+            .get(attr::DXATTR)
+            .and_then(|n| by_num.get(n))
+            .filter(|b| !b.is_empty())
+            .cloned();
         Ok(Znode {
+            dxattr,
             mode: word(attr::MODE),
             size: word(attr::SIZE),
             links: word(attr::LINKS),
@@ -251,6 +258,10 @@ impl Filesystem<'_, '_> {
     }
 
     /// Resolve a slash-separated path from the root.
+    ///
+    /// An exact match always wins. Only where the dataset says names are
+    /// matched without regard to case does a case-folded match count,
+    /// and then only when nothing matched exactly (Z-09).
     pub fn lookup(&self, path: &str) -> Result<u64, ReadError> {
         let mut at = self.root;
         for part in path.split('/').filter(|p| !p.is_empty() && *p != ".") {
@@ -258,6 +269,10 @@ impl Filesystem<'_, '_> {
             let found = entries
                 .iter()
                 .find(|e| e.name == part)
+                .or_else(|| {
+                    self.case_insensitive()
+                        .then(|| entries.iter().find(|e| e.name.eq_ignore_ascii_case(part)))?
+                })
                 .ok_or_else(|| ReadError::Io(format!("{path}: no such file or directory")))?;
             at = found.object;
         }
@@ -267,6 +282,65 @@ impl Filesystem<'_, '_> {
     /// An object's contents as a reader.
     pub fn object(&self, object: u64) -> Result<ObjectReader<'_, '_>, ReadError> {
         self.objects.object(object)
+    }
+
+    /// The extended attributes of one object (Z-04).
+    ///
+    /// Two places, and both are looked in. `xattr=sa` packs them into
+    /// the system attributes as an nvlist, which is where a small
+    /// attribute lives on any modern pool. `xattr=on` gives the object
+    /// its own hidden directory, whose entries are the attribute names
+    /// and whose objects hold the values; that form survives attributes
+    /// too large for a bonus buffer.
+    pub fn xattrs(&self, z: &Znode) -> Vec<(String, Vec<u8>)> {
+        let mut out: Vec<(String, Vec<u8>)> = Vec::new();
+        if let Some(packed) = &z.dxattr {
+            match zfs_ondisk::nvlist::parse_packed(packed) {
+                Ok(nv) => {
+                    for (name, value) in &nv.pairs {
+                        let bytes = match value {
+                            zfs_ondisk::nvlist::Value::Bytes(b) => b.clone(),
+                            other => format!("{other:?}").into_bytes(),
+                        };
+                        out.push((name.to_string(), bytes));
+                    }
+                }
+                Err(e) => trace!("zpl", "packed xattrs unreadable: {e}"),
+            }
+        }
+        if z.xattr != 0 {
+            match self.read_dir(z.xattr) {
+                Ok(entries) => {
+                    for e in entries {
+                        // The value is the object's contents; a large one
+                        // is read whole because an attribute is small by
+                        // construction.
+                        let value = self
+                            .znode(e.object)
+                            .ok()
+                            .and_then(|vz| {
+                                let len = vz.size.min(64 * 1024) as usize;
+                                self.objects.object(e.object).ok()?.read_range(0, len).ok()
+                            })
+                            .unwrap_or_default();
+                        out.push((e.name, value));
+                    }
+                }
+                Err(e) => trace!("zpl", "xattr directory {} unreadable: {e}", z.xattr),
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out.dedup_by(|a, b| a.0 == b.0);
+        out
+    }
+
+    /// Whether names in this dataset are matched without regard to case.
+    ///
+    /// `casesensitivity` is 0 for sensitive, 1 for insensitive and 2 for
+    /// mixed; mixed means both forms are stored, so an exact match still
+    /// works and a case-folded one is the fallback (Z-09).
+    pub fn case_insensitive(&self) -> bool {
+        matches!(self.properties.get("casesensitivity"), Some(1 | 2))
     }
 
     /// The target of a symbolic link, wherever it is kept.
@@ -419,24 +493,27 @@ mod tests {
             assert_eq!(fs.properties.get("VERSION"), Some(&5));
             let entries = walk(fs, fs.root, "", true);
             let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
-            assert_eq!(paths, ["hello.txt", "link", "sub", "sub/deep.txt"]);
+            assert_eq!(
+                paths,
+                ["hardlink.txt", "hello.txt", "link", "sub", "sub/deep.txt"]
+            );
             assert!(entries.iter().all(|e| e.error.is_none()), "{entries:?}");
 
             // Z-02: the metadata comes out of the system attributes.
-            let z = entries[0].znode.as_ref().expect("znode");
+            let z = entries[1].znode.as_ref().expect("znode");
             assert_eq!(z.file_type(), FileType::Regular);
             assert_eq!(z.permissions(), 0o644);
             assert_eq!(z.size, zpl_hello().len() as u64);
-            assert_eq!(z.links, 1);
+            assert_eq!(z.links, 2);
             assert_eq!(z.mtime, 1_757_100_001);
             assert_eq!(z.parent, 3);
 
-            let dir = entries[2].znode.as_ref().expect("znode");
+            let dir = entries[3].znode.as_ref().expect("znode");
             assert_eq!(dir.file_type(), FileType::Dir);
             assert_eq!(dir.permissions(), 0o755);
 
             // Z-03: a symlink whose target lives in the attributes.
-            let link = &entries[1];
+            let link = &entries[2];
             let lz = link.znode.as_ref().expect("znode");
             assert_eq!(lz.file_type(), FileType::Symlink);
             assert_eq!(
@@ -445,7 +522,7 @@ mod tests {
             );
 
             // Z-03: the file's own bytes, through the pool, checksums and all.
-            let deep = fs.object(entries[3].object).expect("object");
+            let deep = fs.object(entries[4].object).expect("object");
             let want = zpl_deep();
             assert_eq!(deep.read_range(0, want.len()).expect("read"), want);
         });
@@ -463,6 +540,45 @@ mod tests {
         });
     }
 
+    /// Z-04: extended attributes, packed into the system attributes.
+    #[test]
+    fn extended_attributes_come_out_of_the_system_attributes() {
+        with_fs(|fs| {
+            let obj = fs.lookup("hello.txt").expect("lookup");
+            let z = fs.znode(obj).expect("znode");
+            let xattrs = fs.xattrs(&z);
+            let names: Vec<&str> = xattrs.iter().map(|(n, _)| n.as_str()).collect();
+            assert_eq!(names, ["user.case", "user.note"]);
+            assert_eq!(xattrs[1].1, b"kept in the attributes");
+            // A file without any says so by having none, not by failing.
+            let plain = fs
+                .znode(fs.lookup("sub/deep.txt").expect("lookup"))
+                .expect("znode");
+            assert!(fs.xattrs(&plain).is_empty());
+        });
+    }
+
+    /// Z-07: two names for one object are one object.
+    #[test]
+    fn a_hard_link_is_the_same_object_under_two_names() {
+        with_fs(|fs| {
+            let a = fs.lookup("hello.txt").expect("lookup");
+            let b = fs.lookup("hardlink.txt").expect("lookup");
+            assert_eq!(a, b);
+            assert_eq!(fs.znode(a).expect("znode").links, 2);
+        });
+    }
+
+    /// Z-09: an exact match always wins; case folding only where the
+    /// dataset says names are matched that way.
+    #[test]
+    fn case_folding_follows_the_dataset_property() {
+        with_fs(|fs| {
+            assert!(!fs.case_insensitive());
+            assert!(fs.lookup("HELLO.TXT").is_err());
+        });
+    }
+
     /// One directory, not the whole tree, when that is what was asked.
     #[test]
     fn a_walk_that_is_not_recursive_stops_at_one_directory() {
@@ -471,7 +587,7 @@ mod tests {
                 .into_iter()
                 .map(|e| e.path)
                 .collect();
-            assert_eq!(paths, ["hello.txt", "link", "sub"]);
+            assert_eq!(paths, ["hardlink.txt", "hello.txt", "link", "sub"]);
         });
     }
 }

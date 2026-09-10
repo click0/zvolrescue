@@ -108,6 +108,18 @@ in CI; what was tried on real environments is logged in
 * Releases now carry `zvoltimeline`, `zvolreport`, `zvolcarve` and
   `zvolfiles` for the same three platforms as `zvolrescue`.
 
+* **`zvolfiles` reads extended attributes and keeps hard links
+  (COMPANIONS Z-04, Z-07, Z-09).** Attributes are read from both places
+  they live — packed into the system attributes as an nvlist
+  (`xattr=sa`) and in an object's own hidden directory (`xattr=on`) —
+  and recorded in `manifest.json` with their values rather than applied,
+  because setting one needs the platform's own call and this workspace
+  links no system libraries. An object met under a second name is
+  written as a hard link to the first rather than copied, so the
+  extracted tree keeps the shape it had. A path is matched exactly
+  first, and case-folded only where the dataset's `casesensitivity` says
+  names are matched that way.
+
 ### Fixed
 * A dnode with no block pointers but a bonus buffer is recognised as one.
   Requiring at least one block made every DSL dataset and directory

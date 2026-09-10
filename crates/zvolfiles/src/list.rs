@@ -28,6 +28,9 @@ struct FileOut {
     mtime: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     target: Option<String>,
+    /// Extended attributes, in name order (Z-04).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    xattrs: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
@@ -44,7 +47,7 @@ struct ListOut {
 }
 
 /// Turn one walked entry into the report's shape.
-fn describe(e: &Entry, target: Option<String>) -> FileOut {
+fn describe(e: &Entry, target: Option<String>, xattrs: Vec<String>) -> FileOut {
     let z = e.znode.as_ref();
     FileOut {
         path: e.path.clone(),
@@ -59,6 +62,7 @@ fn describe(e: &Entry, target: Option<String>) -> FileOut {
         gid: z.map(|z| z.gid),
         mtime: z.map(|z| iso8601(z.mtime)),
         target,
+        xattrs,
         error: e.error.clone(),
     }
 }
@@ -94,7 +98,12 @@ pub fn run(
                             .ok()
                             .map(|t| String::from_utf8_lossy(&t).into_owned())
                     });
-                describe(e, target)
+                let xattrs = e
+                    .znode
+                    .as_ref()
+                    .map(|z| fs.xattrs(z).into_iter().map(|(n, _)| n).collect())
+                    .unwrap_or_default();
+                describe(e, target, xattrs)
             })
             .collect();
         let unreadable = files.iter().filter(|f| f.error.is_some()).count();
@@ -144,6 +153,9 @@ pub fn run(
                         .as_ref()
                         .map_or(String::new(), |t| format!(" -> {t}"))
                 );
+                if !f.xattrs.is_empty() {
+                    println!("       xattrs: {}", f.xattrs.join(", "));
+                }
                 if let Some(e) = &f.error {
                     println!("       {e}");
                 }

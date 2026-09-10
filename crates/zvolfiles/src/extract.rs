@@ -43,10 +43,25 @@ pub struct Extracted {
     pub sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
+    /// The earlier path this one is a hard link to (Z-07).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hardlink_to: Option<String>,
+    /// Extended attributes, recorded rather than applied (Z-04).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub xattrs: Vec<Xattr>,
     /// Blocks that could not be read and were written as zeros.
     pub errors: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// One extended attribute, as the manifest records it.
+#[derive(Debug, Serialize)]
+pub struct Xattr {
+    pub name: String,
+    /// The value as text when it is text, and as hex when it is not.
+    pub value: String,
+    pub bytes: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -60,6 +75,8 @@ struct ManifestOut {
     incomplete: usize,
     /// Entries that could not be written at all.
     failed: usize,
+    /// Files written as hard links to an earlier path.
+    hardlinks: usize,
 }
 
 /// A path from the dataset, made safe to join onto the output directory.
@@ -154,13 +171,25 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
 
         let mut files = Vec::new();
         let mut directories = 0usize;
+        // Z-07: an object already written under another name is linked
+        // to rather than copied, so the tree keeps the shape it had.
+        let mut written_objects: std::collections::BTreeMap<u64, String> =
+            std::collections::BTreeMap::new();
         for (obj, prefix) in roots {
             // A path that names a file rather than a directory is
             // extracted on its own.
             let z = fs.znode(obj).ok();
             if z.as_ref().map(|z| z.file_type()) == Some(FileType::Dir) {
                 for e in walk(fs, obj, &prefix, true) {
-                    extract_entry(fs, &e, opts, &preserve, &mut files, &mut directories);
+                    extract_entry(
+                        fs,
+                        &e,
+                        opts,
+                        &preserve,
+                        &mut files,
+                        &mut directories,
+                        &mut written_objects,
+                    );
                 }
             } else {
                 let e = zfs_read::zpl::Entry {
@@ -169,11 +198,20 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
                     znode: z,
                     error: None,
                 };
-                extract_entry(fs, &e, opts, &preserve, &mut files, &mut directories);
+                extract_entry(
+                    fs,
+                    &e,
+                    opts,
+                    &preserve,
+                    &mut files,
+                    &mut directories,
+                    &mut written_objects,
+                );
             }
         }
         let incomplete = files.iter().filter(|f| f.errors > 0).count();
         let failed = files.iter().filter(|f| f.error.is_some()).count();
+        let hardlinks = files.iter().filter(|f| f.hardlink_to.is_some()).count();
         Ok((
             ManifestOut {
                 dataset: dataset.to_string(),
@@ -183,6 +221,7 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
                 directories,
                 incomplete,
                 failed,
+                hardlinks,
             },
             opened.members.paths.clone(),
         ))
@@ -222,6 +261,9 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
             if out.failed > 0 {
                 println!("  {} entr(y|ies) could not be written", out.failed);
             }
+            if out.hardlinks > 0 {
+                println!("  {} hard link(s)", out.hardlinks);
+            }
             println!("  manifest: {}", manifest.display());
         }
     }
@@ -237,6 +279,7 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
 }
 
 /// Write one entry out and record what happened to it.
+#[allow(clippy::too_many_arguments)]
 fn extract_entry(
     fs: &Filesystem<'_, '_>,
     e: &zfs_read::zpl::Entry,
@@ -244,6 +287,7 @@ fn extract_entry(
     preserve: &[&str],
     files: &mut Vec<Extracted>,
     directories: &mut usize,
+    written_objects: &mut std::collections::BTreeMap<u64, String>,
 ) {
     let Some(z) = &e.znode else {
         files.push(failed(e, "metadata unreadable"));
@@ -264,6 +308,8 @@ fn extract_entry(
         mtime: z.mtime,
         sha256: None,
         target: None,
+        hardlink_to: None,
+        xattrs: xattrs_of(fs, z),
         errors: 0,
         error: None,
     };
@@ -290,6 +336,26 @@ fn extract_entry(
         FileType::Regular => {
             if let Some(parent) = to.parent() {
                 let _ = std::fs::create_dir_all(parent);
+            }
+            // The same object under a second name is a hard link, and
+            // reading its blocks again would only prove that twice.
+            if z.links > 1 {
+                if let Some(first) = written_objects.get(&e.object) {
+                    let from = opts.output.join(first);
+                    match std::fs::hard_link(&from, &to) {
+                        Ok(()) => {
+                            record.hardlink_to = Some(first.clone());
+                            record.sha256 = files
+                                .iter()
+                                .find(|f| &f.path == first)
+                                .and_then(|f| f.sha256.clone());
+                        }
+                        Err(err) => record.error = Some(err.to_string()),
+                    }
+                    files.push(record);
+                    return;
+                }
+                written_objects.insert(e.object, e.path.clone());
             }
             match copy_file(fs, e.object, z.size, &to, opts.strict) {
                 Ok((hash, errors)) => {
@@ -321,6 +387,8 @@ fn failed(e: &zfs_read::zpl::Entry, why: &str) -> Extracted {
         mtime: 0,
         sha256: None,
         target: None,
+        hardlink_to: None,
+        xattrs: Vec::new(),
         errors: 0,
         error: Some(why.to_string()),
     }
@@ -335,3 +403,26 @@ fn set_mode(path: &Path, mode: u32) {
 
 #[cfg(not(unix))]
 fn set_mode(_path: &Path, _mode: u32) {}
+
+/// Extended attributes as the manifest records them (Z-04).
+///
+/// Recorded, not applied: setting an extended attribute needs the
+/// platform's own call, and this workspace links no system libraries.
+/// The manifest is where a recovery reads them back from, and a value
+/// that is text is written as text so it can be read at all.
+fn xattrs_of(fs: &Filesystem<'_, '_>, z: &zfs_ondisk::zpl::Znode) -> Vec<Xattr> {
+    fs.xattrs(z)
+        .into_iter()
+        .map(|(name, bytes)| {
+            let value = match std::str::from_utf8(&bytes) {
+                Ok(t) if !t.contains('\0') => t.to_string(),
+                _ => bytes.iter().map(|b| format!("{b:02x}")).collect(),
+            };
+            Xattr {
+                name,
+                value,
+                bytes: bytes.len(),
+            }
+        })
+        .collect()
+}

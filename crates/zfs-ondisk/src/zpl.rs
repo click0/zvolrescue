@@ -134,6 +134,9 @@ pub struct Znode {
     pub parent: u64,
     /// Target of a symbolic link stored inside the attributes.
     pub symlink: Option<Vec<u8>>,
+    /// Extended attributes packed into the system attributes
+    /// (`xattr=sa`), as the nvlist they are stored as.
+    pub dxattr: Option<Vec<u8>>,
 }
 
 impl Znode {
@@ -175,6 +178,7 @@ pub fn parse_znode_phys(bonus: &[u8], endian: Endian) -> Result<Znode, ParseErro
         uid: at(128),
         gid: at(136),
         symlink: None,
+        dxattr: None,
     })
 }
 

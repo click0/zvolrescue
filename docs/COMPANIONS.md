@@ -388,12 +388,21 @@ by the same workspace, so a byte-order mistake in both would not show.
 real filesystem has been tried, which
 [REALWORLD-TESTS.md](REALWORLD-TESTS.md) is where that will be recorded.
 
-Not implemented: extended attributes (Z-04), hard links restored as hard
-links (Z-07), `casesensitivity`/`normalization` in path matching (Z-09,
-the properties are reported), and the feature-flag extensions to the SA
-layout (Z-10). Sparse regions come out as the holes they are, since a
-hole is a hole in the tree; a file whose tail was never written is
-extracted to the length the attributes give.*
+Z-04, Z-07 and Z-09 are implemented and covered in the same step.
+Extended attributes are read from both places they live — packed into
+the system attributes as an nvlist (`xattr=sa`) and in an object's own
+hidden directory (`xattr=on`) — and *recorded in the manifest with their
+values rather than applied*, because setting one needs the platform's
+own call and this workspace links no system libraries. An object met
+under a second name is written as a hard link to the first rather than
+copied, so the tree keeps the shape it had. A path is matched exactly
+first and case-folded only where the dataset's `casesensitivity` says so.
+
+Not implemented: `normalization` and `utf8only` in path matching (both
+are reported), and the feature-flag extensions to the SA layout (Z-10).
+Sparse regions come out as the holes they are, since a hole is a hole in
+the tree; a file whose tail was never written is extracted to the length
+the attributes give.*
 
 ---
 

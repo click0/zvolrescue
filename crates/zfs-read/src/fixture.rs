@@ -716,9 +716,10 @@ mod zpl_attr {
     pub const UID: u16 = 12;
     pub const GID: u16 = 13;
     pub const SYMLINK: u16 = 17;
+    pub const DXATTR: u16 = 19;
 
     /// `(name, number, fixed length)`; a length of 0 means variable.
-    pub const REGISTRY: [(&str, u16, u16); 11] = [
+    pub const REGISTRY: [(&str, u16, u16); 12] = [
         ("ZPL_ATIME", ATIME, 16),
         ("ZPL_MTIME", MTIME, 16),
         ("ZPL_CTIME", CTIME, 16),
@@ -730,6 +731,7 @@ mod zpl_attr {
         ("ZPL_UID", UID, 8),
         ("ZPL_GID", GID, 8),
         ("ZPL_SYMLINK", SYMLINK, 0),
+        ("ZPL_DXATTR", DXATTR, 0),
     ];
 
     /// The layout every file and directory in the fixture uses.
@@ -739,6 +741,10 @@ mod zpl_attr {
     /// The same, plus the target of a symbolic link.
     pub const WITH_SYMLINK: [u16; 11] = [
         ATIME, MTIME, CTIME, CRTIME, MODE, SIZE, PARENT, LINKS, UID, GID, SYMLINK,
+    ];
+    /// The same, plus system-attribute extended attributes.
+    pub const WITH_XATTR: [u16; 11] = [
+        ATIME, MTIME, CTIME, CRTIME, MODE, SIZE, PARENT, LINKS, UID, GID, DXATTR,
     ];
 }
 
@@ -890,12 +896,13 @@ fn build_zpl_objset(m: &mut [Vec<u8>], a: &mut Alloc) -> [u8; blkptr::SIZE] {
     // arrays, so this one has to be a fatzap.
     let as_bytes =
         |nums: &[u16]| -> Vec<u8> { nums.iter().flat_map(|n| n.to_be_bytes()).collect() };
-    let hdr = zfs_ondisk::zap::encode::fat_header(4096, 1, 2);
+    let hdr = zfs_ondisk::zap::encode::fat_header(4096, 1, 3);
     let leaf = zfs_ondisk::zap::encode::leaf(
         4096,
         &[
             ("2", 2, as_bytes(&zpl_attr::PLAIN)),
             ("3", 2, as_bytes(&zpl_attr::WITH_SYMLINK)),
+            ("4", 2, as_bytes(&zpl_attr::WITH_XATTR)),
         ],
     );
     let b0 = a.put(m, &hdr, ot::SA, 0, 100);
@@ -914,6 +921,8 @@ fn build_zpl_objset(m: &mut [Vec<u8>], a: &mut Alloc) -> [u8; blkptr::SIZE] {
 
     // 3: the root directory.
     let root_entries = [
+        // Two names for one object: a hard link (Z-07).
+        ("hardlink.txt", dirent_value(6, 8)),
         ("hello.txt", dirent_value(6, 8)),
         ("link", dirent_value(8, 10)),
         ("sub", dirent_value(7, 4)),
@@ -931,21 +940,31 @@ fn build_zpl_objset(m: &mut [Vec<u8>], a: &mut Alloc) -> [u8; blkptr::SIZE] {
             object_type: ot::DIRECTORY_CONTENTS,
             datablksz: 4096,
             bonus_type: ot::SA,
-            bonus: sa_bonus(2, &meta(0o40755, 3, 3, 3), &[]),
+            bonus: sa_bonus(2, &meta(0o40755, 4, 3, 3), &[]),
             blkptrs: vec![root_blk],
             ..DnodeSpec::default()
         }
         .build(),
     );
-    // 6: a regular file.
+    // 6: a regular file with two names and two extended attributes
+    // stored in the system attributes (`xattr=sa`).
     let hello = zpl_hello();
+    let xattrs = pack(&list(vec![
+        (
+            "user.note",
+            Value::Bytes(b"kept in the attributes".to_vec()),
+        ),
+        ("user.case", Value::Bytes(b"42".to_vec())),
+    ]));
+    let mut hello_fields = meta(0o100644, hello.len() as u64, 3, 2);
+    hello_fields.push((zpl_attr::DXATTR, xattrs));
     put(
         6,
         file(
             a,
             m,
             &hello,
-            sa_bonus(2, &meta(0o100644, hello.len() as u64, 3, 1), &[]),
+            sa_bonus(4, &hello_fields, &[zpl_attr::DXATTR]),
         ),
     );
     // 7: a subdirectory.
