@@ -25,6 +25,7 @@ pub mod skein;
 pub mod uberblock;
 pub mod zap;
 pub mod zeropoint;
+pub mod zpl;
 
 pub use error::ParseError;
 

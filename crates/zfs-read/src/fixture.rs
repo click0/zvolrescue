@@ -701,3 +701,400 @@ pub fn carved_zvol_members(pool: &mut Pool, size: u64) -> Vec<Vec<u8>> {
     }
     members
 }
+
+/// Attribute numbers of the standard ZPL system-attribute set, in the
+/// order OpenZFS registers them.
+mod zpl_attr {
+    pub const ATIME: u16 = 0;
+    pub const MTIME: u16 = 1;
+    pub const CTIME: u16 = 2;
+    pub const CRTIME: u16 = 3;
+    pub const MODE: u16 = 5;
+    pub const SIZE: u16 = 6;
+    pub const PARENT: u16 = 7;
+    pub const LINKS: u16 = 8;
+    pub const UID: u16 = 12;
+    pub const GID: u16 = 13;
+    pub const SYMLINK: u16 = 17;
+
+    /// `(name, number, fixed length)`; a length of 0 means variable.
+    pub const REGISTRY: [(&str, u16, u16); 11] = [
+        ("ZPL_ATIME", ATIME, 16),
+        ("ZPL_MTIME", MTIME, 16),
+        ("ZPL_CTIME", CTIME, 16),
+        ("ZPL_CRTIME", CRTIME, 16),
+        ("ZPL_MODE", MODE, 8),
+        ("ZPL_SIZE", SIZE, 8),
+        ("ZPL_PARENT", PARENT, 8),
+        ("ZPL_LINKS", LINKS, 8),
+        ("ZPL_UID", UID, 8),
+        ("ZPL_GID", GID, 8),
+        ("ZPL_SYMLINK", SYMLINK, 0),
+    ];
+
+    /// The layout every file and directory in the fixture uses.
+    pub const PLAIN: [u16; 10] = [
+        ATIME, MTIME, CTIME, CRTIME, MODE, SIZE, PARENT, LINKS, UID, GID,
+    ];
+    /// The same, plus the target of a symbolic link.
+    pub const WITH_SYMLINK: [u16; 11] = [
+        ATIME, MTIME, CTIME, CRTIME, MODE, SIZE, PARENT, LINKS, UID, GID, SYMLINK,
+    ];
+}
+
+/// The registry value OpenZFS encodes for one attribute.
+fn registry_value(num: u16, length: u16) -> u64 {
+    (u64::from(length) << 24) | (u64::from(num) << 8)
+}
+
+/// A system-attribute bonus buffer in `layout`.
+///
+/// The header is the magic, the layout number with the header size in
+/// eight-byte units above it, and one 16-bit size per variable-length
+/// attribute. Fixed attributes take the length the registry gives.
+fn sa_bonus(layout: u16, fields: &[(u16, Vec<u8>)], variable: &[u16]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&zfs_ondisk::zpl::SA_MAGIC.to_le_bytes());
+    let info: u16 = layout | (1 << 10); // one eight-byte header chunk
+    out.extend_from_slice(&info.to_le_bytes());
+    // Sizes of the variable-length attributes, in layout order; the
+    // header is padded to eight bytes whether or not any are used.
+    let mut sizes = Vec::new();
+    for num in variable {
+        let len = fields
+            .iter()
+            .find(|(n, _)| n == num)
+            .map_or(0, |(_, v)| v.len()) as u16;
+        sizes.extend_from_slice(&len.to_le_bytes());
+    }
+    sizes.resize(2, 0);
+    out.extend_from_slice(&sizes[..2]);
+    for (_, v) in fields {
+        out.extend_from_slice(v);
+    }
+    out
+}
+
+/// The eight-byte value of a fixed attribute.
+fn sa_u64(v: u64) -> Vec<u8> {
+    v.to_le_bytes().to_vec()
+}
+
+/// A timestamp attribute: seconds and nanoseconds.
+fn sa_time(secs: u64) -> Vec<u8> {
+    let mut v = secs.to_le_bytes().to_vec();
+    v.extend_from_slice(&0u64.to_le_bytes());
+    v
+}
+
+/// A directory entry's value: the object number with the POSIX file
+/// type in its top four bits.
+fn dirent_value(obj: u64, dt: u64) -> u64 {
+    (dt << 60) | obj
+}
+
+/// The contents of `hello.txt` in the ZPL fixture.
+pub fn zpl_hello() -> Vec<u8> {
+    b"hello from a dataset nobody can mount\n".to_vec()
+}
+
+/// The contents of `sub/deep.txt`: one block of a repeating pattern, so
+/// its hash is worth asserting and its blocks are worth verifying.
+pub fn zpl_deep() -> Vec<u8> {
+    (0..4096u32).map(|i| (i % 251) as u8).collect()
+}
+
+/// Build a filesystem objset with a small POSIX tree, and return its
+/// block pointer (COMPANIONS §5.4).
+///
+/// ```text
+/// hello.txt        a regular file
+/// link             a symbolic link to sub/deep.txt, target in the
+///                  system attributes rather than in a block
+/// sub/             a directory
+/// sub/deep.txt     one block of pattern
+/// ```
+fn build_zpl_objset(m: &mut [Vec<u8>], a: &mut Alloc) -> [u8; blkptr::SIZE] {
+    let mut dnodes = vec![0u8; 16384];
+    let mut put = |obj: u64, bytes: Vec<u8>| {
+        let at = obj as usize * DNODE_SIZE;
+        dnodes[at..at + bytes.len()].copy_from_slice(&bytes);
+    };
+    // A ZAP object of `otype` holding `entries`.
+    let zap = |a: &mut Alloc, m: &mut [Vec<u8>], otype: u8, entries: &[(&str, u64)]| {
+        let blk = a.put(m, &micro(4096, entries), otype, 0, 100);
+        DnodeSpec {
+            object_type: otype,
+            datablksz: 4096,
+            blkptrs: vec![blk],
+            ..DnodeSpec::default()
+        }
+        .build()
+    };
+    // A file object holding `data` in one block.
+    let file = |a: &mut Alloc, m: &mut [Vec<u8>], data: &[u8], bonus: Vec<u8>| {
+        let mut block = data.to_vec();
+        block.resize(4096, 0);
+        let blk = a.put(m, &block, ot::PLAIN_FILE_CONTENTS, 0, 100);
+        DnodeSpec {
+            object_type: ot::PLAIN_FILE_CONTENTS,
+            datablksz: 4096,
+            bonus_type: ot::SA,
+            bonus,
+            blkptrs: vec![blk],
+            ..DnodeSpec::default()
+        }
+        .build()
+    };
+    let meta = |mode: u64, size: u64, parent: u64, links: u64| -> Vec<(u16, Vec<u8>)> {
+        vec![
+            (zpl_attr::ATIME, sa_time(1_757_100_000)),
+            (zpl_attr::MTIME, sa_time(1_757_100_001)),
+            (zpl_attr::CTIME, sa_time(1_757_100_002)),
+            (zpl_attr::CRTIME, sa_time(1_757_100_003)),
+            (zpl_attr::MODE, sa_u64(mode)),
+            (zpl_attr::SIZE, sa_u64(size)),
+            (zpl_attr::PARENT, sa_u64(parent)),
+            (zpl_attr::LINKS, sa_u64(links)),
+            (zpl_attr::UID, sa_u64(0)),
+            (zpl_attr::GID, sa_u64(0)),
+        ]
+    };
+
+    // 1: the master node, which names everything else.
+    put(
+        1,
+        zap(
+            a,
+            m,
+            ot::MASTER_NODE,
+            &[
+                ("VERSION", 5),
+                ("ROOT", 3),
+                ("SA_ATTRS", 2),
+                ("casesensitivity", 0),
+                ("normalization", 0),
+                ("utf8only", 0),
+            ],
+        ),
+    );
+    // 2: where the system-attribute registry and layouts live.
+    put(2, zap(a, m, ot::SA, &[("REGISTRY", 4), ("LAYOUTS", 5)]));
+    // 4: what each attribute is called, what number it has, how long it is.
+    let registry: Vec<(&str, u64)> = zpl_attr::REGISTRY
+        .iter()
+        .map(|(name, num, len)| (*name, registry_value(*num, *len)))
+        .collect();
+    put(4, zap(a, m, ot::SA, &registry));
+    // 5: which attributes each layout holds, in order. Sixteen-bit
+    // arrays, so this one has to be a fatzap.
+    let as_bytes =
+        |nums: &[u16]| -> Vec<u8> { nums.iter().flat_map(|n| n.to_be_bytes()).collect() };
+    let hdr = zfs_ondisk::zap::encode::fat_header(4096, 1, 2);
+    let leaf = zfs_ondisk::zap::encode::leaf(
+        4096,
+        &[
+            ("2", 2, as_bytes(&zpl_attr::PLAIN)),
+            ("3", 2, as_bytes(&zpl_attr::WITH_SYMLINK)),
+        ],
+    );
+    let b0 = a.put(m, &hdr, ot::SA, 0, 100);
+    let b1 = a.put(m, &leaf, ot::SA, 0, 100);
+    put(
+        5,
+        DnodeSpec {
+            object_type: ot::SA,
+            datablksz: 4096,
+            maxblkid: 1,
+            blkptrs: vec![b0, b1],
+            ..DnodeSpec::default()
+        }
+        .build(),
+    );
+
+    // 3: the root directory.
+    let root_entries = [
+        ("hello.txt", dirent_value(6, 8)),
+        ("link", dirent_value(8, 10)),
+        ("sub", dirent_value(7, 4)),
+    ];
+    let root_blk = a.put(
+        m,
+        &micro(4096, &root_entries),
+        ot::DIRECTORY_CONTENTS,
+        0,
+        100,
+    );
+    put(
+        3,
+        DnodeSpec {
+            object_type: ot::DIRECTORY_CONTENTS,
+            datablksz: 4096,
+            bonus_type: ot::SA,
+            bonus: sa_bonus(2, &meta(0o40755, 3, 3, 3), &[]),
+            blkptrs: vec![root_blk],
+            ..DnodeSpec::default()
+        }
+        .build(),
+    );
+    // 6: a regular file.
+    let hello = zpl_hello();
+    put(
+        6,
+        file(
+            a,
+            m,
+            &hello,
+            sa_bonus(2, &meta(0o100644, hello.len() as u64, 3, 1), &[]),
+        ),
+    );
+    // 7: a subdirectory.
+    let sub_blk = a.put(
+        m,
+        &micro(4096, &[("deep.txt", dirent_value(9, 8))]),
+        ot::DIRECTORY_CONTENTS,
+        0,
+        100,
+    );
+    put(
+        7,
+        DnodeSpec {
+            object_type: ot::DIRECTORY_CONTENTS,
+            datablksz: 4096,
+            bonus_type: ot::SA,
+            bonus: sa_bonus(2, &meta(0o40755, 1, 3, 2), &[]),
+            blkptrs: vec![sub_blk],
+            ..DnodeSpec::default()
+        }
+        .build(),
+    );
+    // 8: a symbolic link whose target is in the attributes, not a block.
+    let target = b"sub/deep.txt".to_vec();
+    let mut symlink_fields = meta(0o120777, target.len() as u64, 3, 1);
+    symlink_fields.push((zpl_attr::SYMLINK, target.clone()));
+    put(
+        8,
+        DnodeSpec {
+            object_type: ot::PLAIN_FILE_CONTENTS,
+            datablksz: 4096,
+            bonus_type: ot::SA,
+            bonus: sa_bonus(3, &symlink_fields, &[zpl_attr::SYMLINK]),
+            blkptrs: vec![[0u8; blkptr::SIZE]],
+            ..DnodeSpec::default()
+        }
+        .build(),
+    );
+    // 9: a file under the subdirectory.
+    let deep = zpl_deep();
+    put(
+        9,
+        file(
+            a,
+            m,
+            &deep,
+            sa_bonus(2, &meta(0o100600, deep.len() as u64, 7, 1), &[]),
+        ),
+    );
+
+    let dnode_blk = a.put(m, &dnodes, ot::DNODE, 0, 100);
+    let meta_dnode = DnodeSpec {
+        object_type: ot::DNODE,
+        datablksz: 16384,
+        blkptrs: vec![dnode_blk],
+        ..DnodeSpec::default()
+    }
+    .build();
+    a.put(m, &objset(&meta_dnode, 2), ot::OBJSET, 0, 100)
+}
+
+/// A pool with one filesystem dataset, `tank/fs`, holding a small POSIX
+/// tree — the fixture `zvolfiles` is accepted against (COMPANIONS §5.4).
+///
+/// Kept apart from the volume fixture on purpose: that one's dataset
+/// list is asserted in several places, and a recovery tool's tests are
+/// worth more when each fixture says one thing.
+pub fn zpl_members(pool: &mut Pool, size: u64) -> Vec<Vec<u8>> {
+    let n = pool.members.len();
+    let mut members: Vec<Vec<u8>> = (0..n).map(|_| vec![0u8; size as usize]).collect();
+    let layout = match pool.nparity {
+        Some(p) if pool.kind == "raidz" => Layout::Raidz {
+            ashift: pool.ashift,
+            nparity: p,
+        },
+        _ => Layout::Mirror,
+    };
+    let mut a = Alloc::with_layout(0x20_0000, layout);
+    let m = &mut members[..];
+    let os_zpl = build_zpl_objset(m, &mut a);
+    let empty_meta = DnodeSpec {
+        object_type: ot::DNODE,
+        ..DnodeSpec::default()
+    }
+    .build();
+    let os_empty = a.put(m, &objset(&empty_meta, 2), ot::OBJSET, 0, 100);
+
+    let mut dnodes = vec![0u8; 16384];
+    let mut put = |obj: u64, bytes: Vec<u8>| {
+        let at = obj as usize * DNODE_SIZE;
+        dnodes[at..at + bytes.len()].copy_from_slice(&bytes);
+    };
+    let zap_obj = |a: &mut Alloc, m: &mut [Vec<u8>], entries: &[(&str, u64)]| {
+        let blk = a.put(m, &micro(4096, entries), ot::DSL_DIR_CHILD_MAP, 0, 100);
+        DnodeSpec {
+            object_type: ot::DSL_DIR_CHILD_MAP,
+            datablksz: 4096,
+            blkptrs: vec![blk],
+            ..DnodeSpec::default()
+        }
+        .build()
+    };
+    let dir_obj = |head: u64, children: u64, parent: u64| {
+        DnodeSpec {
+            object_type: ot::DSL_DIR,
+            bonus_type: ot::DSL_DIR,
+            bonus: dsl_dir(&DslDirPhys {
+                head_dataset_obj: head,
+                child_dir_zapobj: children,
+                parent_obj: parent,
+                ..Default::default()
+            }),
+            ..DnodeSpec::default()
+        }
+        .build()
+    };
+    let ds_obj = |d: &DslDatasetPhys| {
+        DnodeSpec {
+            object_type: ot::DSL_DATASET,
+            bonus_type: ot::DSL_DATASET,
+            bonus: dsl_dataset(d),
+            ..DnodeSpec::default()
+        }
+        .build()
+    };
+    put(
+        1,
+        zap_obj(&mut a, m, &[("root_dataset", 2), ("config", 11)]),
+    );
+    put(2, dir_obj(3, 4, 0));
+    put(3, ds_obj(&dataset_phys(2, 0, &os_empty, 4, 0xb1, 0)));
+    put(4, zap_obj(&mut a, m, &[("fs", 5)]));
+    put(5, dir_obj(6, 7, 2));
+    put(6, ds_obj(&dataset_phys(5, 0, &os_zpl, 20, 0xb2, 0)));
+    put(7, zap_obj(&mut a, m, &[]));
+
+    let dnode_blk = a.put(m, &dnodes, ot::DNODE, 0, 100);
+    let meta = DnodeSpec {
+        object_type: ot::DNODE,
+        datablksz: 16384,
+        blkptrs: vec![dnode_blk],
+        ..DnodeSpec::default()
+    }
+    .build();
+    let root = a.put(m, &objset(&meta, 1), ot::OBJSET, 0, 100);
+    pool.rootbp = Some(root);
+    pool.rootbp_by_txg = Vec::new();
+    for (i, img) in members.iter_mut().enumerate() {
+        pool.write_labels(i, img);
+    }
+    members
+}

@@ -22,4 +22,5 @@ pub mod vdev;
 pub mod zap;
 pub mod zeropoint;
 pub mod zio;
+pub mod zpl;
 pub mod zvol;
