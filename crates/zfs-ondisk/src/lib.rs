@@ -10,6 +10,7 @@
 //! `include/sys/spa.h`).
 
 pub mod blkptr;
+pub mod carve;
 pub mod checksum;
 pub mod compress;
 pub mod dmu;
