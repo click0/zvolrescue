@@ -76,6 +76,35 @@ jobs:
           ./target/release/zvolrescue -f json list -r /tmp/moved-intact.img --txg 4816229 | python3 -c 'import json,sys; d=json.load(sys.stdin); names=[x["name"] for x in d["datasets"]]; assert names == ["tank","tank/vm","tank/vm/disk0","tank/vm/disk0@before"], names'
           ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/moved-intact.img -o /tmp/moved.img --txg 4816229
           cmp /tmp/disk0.img /tmp/moved.img
+      - name: Bulk extraction and resume
+        run: |
+          ./target/release/zvolrescue -q dump -r tank /tmp/fx/member0.img /tmp/fx/member1.img -o /tmp/bulk --txg 4816229
+          python3 -c 'import json; m=json.load(open("/tmp/bulk/manifest.json")); assert [v["dataset"] for v in m["volumes"]] == ["tank/vm/disk0"], m; assert m["volumes"][0]["sha256"] == "d6d58af862ec2761bf43158f7ee2b2b0f4628fa6ca8095544493f9d698d7b80d"'
+          cmp /tmp/disk0.img /tmp/bulk/tank_vm_disk0.img
+          # Resume: pretend a run stopped after block 2 (16 KiB written), continue, same hash.
+          head -c 16384 /tmp/disk0.img > /tmp/resume.img
+          printf '{"version":1,"dataset":"tank/vm/disk0","dataset_guid":"0x00000000000000a3","txg":4816229,"volsize":33554432,"blocksize":8192,"blocks_done":2}' > /tmp/resume.img.resume.json
+          ./target/release/zvolrescue -f json dump tank/vm/disk0 /tmp/fx/member0.img /tmp/fx/member1.img -o /tmp/resume.img --resume | python3 -c 'import json,sys; d=json.load(sys.stdin)["volumes"][0]; assert d["resumed_from_block"] == 2, d; assert d["blocks_read"] == 1, d; assert d["sha256"] == "d6d58af862ec2761bf43158f7ee2b2b0f4628fa6ca8095544493f9d698d7b80d"'
+          cmp /tmp/disk0.img /tmp/resume.img
+          test ! -e /tmp/resume.img.resume.json
+      - name: End-to-end on a raidz2 fixture (missing and corrupted members)
+        run: |
+          cargo run -p zfs-read --example mkfixture -- /tmp/rz raidz2 12
+          ./target/release/zvolrescue scan /tmp/rz/member0.img /tmp/rz/member1.img /tmp/rz/member2.img /tmp/rz/member3.img
+          # All four members: same image as the mirror fixture.
+          ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/rz/member0.img /tmp/rz/member1.img /tmp/rz/member2.img /tmp/rz/member3.img -o /tmp/rz-all.img
+          cmp /tmp/disk0.img /tmp/rz-all.img
+          # Two members missing: rebuilt from parity.
+          ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/rz/member1.img /tmp/rz/member3.img -o /tmp/rz-2miss.img
+          cmp /tmp/disk0.img /tmp/rz-2miss.img
+          # One missing and one silently corrupted across the stripe area: found by checksum.
+          cp /tmp/rz/member0.img /tmp/rz-bad0.img
+          python3 -c 'p="/tmp/rz-bad0.img"; b=bytearray(open(p,"rb").read()); s=4*1024*1024+0x200000//4; b[s:s+(1<<20)]=bytes(x^0xa5 for x in b[s:s+(1<<20)]); open(p,"wb").write(b)'
+          ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/rz-bad0.img /tmp/rz/member1.img /tmp/rz/member3.img -o /tmp/rz-mix.img
+          cmp /tmp/disk0.img /tmp/rz-mix.img
+          # Three missing: beyond raidz2, exit 3.
+          if ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/rz/member2.img -o /tmp/rz-3miss.img; then echo "must fail"; exit 1; else test $? = 3; fi
+
       - name: A member whose labels are gone, bound to the leaf its siblings name (SPEC F-62)
         run: |
           python3 - <<'EOF'
@@ -118,34 +147,6 @@ jobs:
           # Refusals: not a member of this run, and no leaf is missing.
           if ./target/release/zvolrescue -q list /tmp/rz/member2.img /tmp/rz/member3.img --assume-member /tmp/elsewhere.img; then exit 1; else test $? = 1; fi
           if ./target/release/zvolrescue -q list /tmp/fx/member0.img /tmp/fx/member1.img --assume-member /tmp/fx/member0.img; then exit 1; else test $? = 1; fi
-      - name: Bulk extraction and resume
-        run: |
-          ./target/release/zvolrescue -q dump -r tank /tmp/fx/member0.img /tmp/fx/member1.img -o /tmp/bulk --txg 4816229
-          python3 -c 'import json; m=json.load(open("/tmp/bulk/manifest.json")); assert [v["dataset"] for v in m["volumes"]] == ["tank/vm/disk0"], m; assert m["volumes"][0]["sha256"] == "d6d58af862ec2761bf43158f7ee2b2b0f4628fa6ca8095544493f9d698d7b80d"'
-          cmp /tmp/disk0.img /tmp/bulk/tank_vm_disk0.img
-          # Resume: pretend a run stopped after block 2 (16 KiB written), continue, same hash.
-          head -c 16384 /tmp/disk0.img > /tmp/resume.img
-          printf '{"version":1,"dataset":"tank/vm/disk0","dataset_guid":"0x00000000000000a3","txg":4816229,"volsize":33554432,"blocksize":8192,"blocks_done":2}' > /tmp/resume.img.resume.json
-          ./target/release/zvolrescue -f json dump tank/vm/disk0 /tmp/fx/member0.img /tmp/fx/member1.img -o /tmp/resume.img --resume | python3 -c 'import json,sys; d=json.load(sys.stdin)["volumes"][0]; assert d["resumed_from_block"] == 2, d; assert d["blocks_read"] == 1, d; assert d["sha256"] == "d6d58af862ec2761bf43158f7ee2b2b0f4628fa6ca8095544493f9d698d7b80d"'
-          cmp /tmp/disk0.img /tmp/resume.img
-          test ! -e /tmp/resume.img.resume.json
-      - name: End-to-end on a raidz2 fixture (missing and corrupted members)
-        run: |
-          cargo run -p zfs-read --example mkfixture -- /tmp/rz raidz2 12
-          ./target/release/zvolrescue scan /tmp/rz/member0.img /tmp/rz/member1.img /tmp/rz/member2.img /tmp/rz/member3.img
-          # All four members: same image as the mirror fixture.
-          ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/rz/member0.img /tmp/rz/member1.img /tmp/rz/member2.img /tmp/rz/member3.img -o /tmp/rz-all.img
-          cmp /tmp/disk0.img /tmp/rz-all.img
-          # Two members missing: rebuilt from parity.
-          ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/rz/member1.img /tmp/rz/member3.img -o /tmp/rz-2miss.img
-          cmp /tmp/disk0.img /tmp/rz-2miss.img
-          # One missing and one silently corrupted across the stripe area: found by checksum.
-          cp /tmp/rz/member0.img /tmp/rz-bad0.img
-          python3 -c 'p="/tmp/rz-bad0.img"; b=bytearray(open(p,"rb").read()); s=4*1024*1024+0x200000//4; b[s:s+(1<<20)]=bytes(x^0xa5 for x in b[s:s+(1<<20)]); open(p,"wb").write(b)'
-          ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/rz-bad0.img /tmp/rz/member1.img /tmp/rz/member3.img -o /tmp/rz-mix.img
-          cmp /tmp/disk0.img /tmp/rz-mix.img
-          # Three missing: beyond raidz2, exit 3.
-          if ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/rz/member2.img -o /tmp/rz-3miss.img; then echo "must fail"; exit 1; else test $? = 3; fi
 
   crosscheck:
     name: Cross-check against OpenZFS userland (ztest + zdb)
