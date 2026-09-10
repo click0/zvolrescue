@@ -48,6 +48,130 @@ def size(s):
     return int(m.group(1)) * UNITS[m.group(2) or ""]
 
 
+LABEL_SIZE = 256 << 10          # sizeof(vdev_label_t)
+VDEV_PHYS_OFFSET = 16 << 10     # nvlist inside a label
+VDEV_PHYS_SIZE = 112 << 10
+UBERBLOCK_OFFSET = 128 << 10    # uberblock ring inside a label
+UBERBLOCK_SIZE = 128 << 10
+
+
+def label_offsets(length):
+    """Where ZFS puts L0..L3 in a member of `length` bytes: the two front
+    labels at the start, the two rear ones measured from the size rounded
+    *down* to a whole label, which is not the same as the end of the file."""
+    psize = (length // LABEL_SIZE) * LABEL_SIZE
+    return [0, LABEL_SIZE, psize - 2 * LABEL_SIZE, psize - LABEL_SIZE]
+
+
+def label_ranges(spec, length):
+    """`label:L0,L1` / `label:all` / `label:all/vdev_phys` / `label:L2/rings`."""
+    which, _, part = spec.partition("/")
+    names = ["L0", "L1", "L2", "L3"] if which in ("all", "") else which.split(",")
+    offsets = label_offsets(length)
+    out = []
+    for name in names:
+        base = offsets[["L0", "L1", "L2", "L3"].index(name.strip())]
+        if base < 0 or base >= length:
+            continue
+        if part in ("", "whole"):
+            out.append((base, min(LABEL_SIZE, length - base)))
+        elif part == "vdev_phys":
+            out.append((base + VDEV_PHYS_OFFSET, VDEV_PHYS_SIZE))
+        elif part in ("rings", "uberblocks"):
+            out.append((base + UBERBLOCK_OFFSET, UBERBLOCK_SIZE))
+        else:
+            raise ValueError(f"unknown label part {part!r}")
+    if not out:
+        raise Unresolved(f"label range {spec!r} falls outside a {length}-byte member")
+    return out
+
+
+def allocated_extents(path):
+    """The written parts of a sparse member, label areas excluded, so that
+    `data:` damage lands where ZFS actually put something."""
+    length = os.path.getsize(path)
+    head = 4 << 20                       # boot block and the front labels
+    tail = (length // LABEL_SIZE) * LABEL_SIZE - 2 * LABEL_SIZE
+    out, pos = [], head
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        while pos < tail:
+            try:
+                start = os.lseek(fd, pos, os.SEEK_DATA)
+            except OSError:
+                break
+            if start >= tail:
+                break
+            try:
+                stop = min(os.lseek(fd, start, os.SEEK_HOLE), tail)
+            except OSError:
+                stop = tail
+            if stop > start:
+                out.append((start, stop))
+            pos = max(stop, start + 1)
+    finally:
+        os.close(fd)
+    return out
+
+
+def data_ranges(spec, path):
+    """`data:20%..40%` — that slice of the member's written space."""
+    extents = allocated_extents(path)
+    total = sum(b - a for a, b in extents)
+    if not total:
+        raise Unresolved("member has no written space outside the labels")
+    a, _, b = spec.partition("..")
+    frm = int(round(float(a.rstrip("%")) / 100 * total))
+    to = int(round(float(b.rstrip("%")) / 100 * total)) if b else total
+    out, seen = [], 0
+    for start, stop in extents:
+        n = stop - start
+        lo, hi = max(frm - seen, 0), min(to - seen, n)
+        if hi > lo:
+            out.append((start + lo, hi - lo))
+        seen += n
+    if not out:
+        raise Unresolved(f"data range {spec!r} selected nothing")
+    return out
+
+
+def span_ranges(spec, length):
+    """`span:5%..25%` — that slice of the member's data area (everything
+    between the boot block and front labels and the rear labels). Unlike
+    `data:` this is the same byte range on every member, which is what a
+    test of "the same place on two members" needs."""
+    head = 4 << 20
+    tail = (length // LABEL_SIZE) * LABEL_SIZE - 2 * LABEL_SIZE
+    if tail <= head:
+        raise Unresolved("member too small to have a data area")
+    a, _, b = spec.partition("..")
+    total = tail - head
+    frm = head + int(round(float(a.rstrip("%")) / 100 * total))
+    to = head + int(round(float(b.rstrip("%")) / 100 * total)) if b else tail
+    return [(frm, max(to - frm, 0))]
+
+
+def ranges_for(spec, path, length, reference=None):
+    """`reference` is the smallest member of the image: `span:` percentages
+    are measured against it so that the same span means the same bytes on
+    every member, whatever their individual sizes."""
+    if spec.startswith("label:"):
+        return label_ranges(spec[len("label:"):], length)
+    if spec.startswith("data:"):
+        return data_ranges(spec[len("data:"):], path)
+    if spec.startswith("span:"):
+        out = []
+        for off, n in span_ranges(spec[len("span:"):], reference or length):
+            n = min(n, max(length - off, 0))
+            if n:
+                out.append((off, n))
+        if not out:
+            raise Unresolved(f"span {spec!r} falls outside a {length}-byte member")
+        return out
+    start, end = parse_range(spec, length)
+    return [(start, end - start)]
+
+
 def parse_range(spec, length):
     a, b = spec.split("..")
     start = size(a) if a else 0
@@ -111,6 +235,12 @@ class Oracle:
 
     def path(self, role):
         return os.path.join(self.image, self.layout["members"][role]["file"])
+
+    @property
+    def min_length(self):
+        if not hasattr(self, "_min_length"):
+            self._min_length = min(os.path.getsize(self.path(r)) for r in self.roles)
+        return self._min_length
 
     def resolve(self, spec):
         """A member reference: a role name, or {kind=…, leaf=N, top=N}."""
@@ -201,9 +331,10 @@ def apply_damage(oracle, manifest, work, rng):
         if pat == "missing":
             missing.add(role)
             continue
-        length = os.path.getsize(paths[role])
-        start, end = parse_range(d.get("range", "0.."), length)
-        plans.setdefault(role, []).append((start, end - start, pat))
+        src = paths[role]
+        for off, length in ranges_for(d.get("range", "0.."), src, os.path.getsize(src),
+                                      reference=oracle.min_length):
+            plans.setdefault(role, []).append((off, length, pat))
     for role, plan in plans.items():
         if role in missing:
             continue
@@ -259,7 +390,7 @@ def judge_dump(args, oracle, manifest, members, work):
         redundancy |= bool(REDUNDANCY.search(trace))
         if proc.returncode == 0 and os.path.exists(out):
             outcomes[vol] = "ok" if sha256_file(out) == oracle.volumes[vol] else "hash mismatch"
-        elif proc.returncode == 3:
+        elif proc.returncode in (2, 3):
             outcomes[vol] = "refused"
         else:
             outcomes[vol] = f"exit {proc.returncode}: {proc.stderr.strip()[:160]}"
@@ -274,7 +405,9 @@ def judge_walk(args, oracle, members, work):
         env["ZR_KEY"] = oracle.key
     proc = subprocess.run([args.tool, "-f", "json", "list", "-r", *members],
                           capture_output=True, text=True)
-    if proc.returncode == 3:
+    if proc.returncode in (2, 3):
+        # 2: the members given are not readable as a pool at all.
+        # 3: the pool is there but cannot be recovered at that TXG.
         return {"pool": "refused"}, False
     if proc.returncode != 0:
         return {"pool": f"list exit {proc.returncode}: {proc.stderr.strip()[:160]}"}, False
@@ -341,7 +474,12 @@ def run_case(args, oracle, manifest, rng):
     # A manifest may name several acceptable outcomes when the damage does
     # not deterministically hit live data (scattered bit flips, say).
     accepted = [expected] if isinstance(expected, str) else list(expected)
-    expected = " | ".join(accepted)
+    # `recovered` = the data came back, whether or not redundancy had to be
+    # engaged visibly. Which of the two happens depends on member order and
+    # on where the damage landed, and neither is a property worth pinning.
+    if "recovered" in accepted:
+        accepted = [a for a in accepted if a != "recovered"] + ["bit-exact", "reconstructed"]
+    expected = " | ".join(dict.fromkeys(accepted))
     result = {"id": mid, "description": manifest.get("description", ""),
               "expected": expected, "notes": []}
     try:
@@ -351,6 +489,13 @@ def run_case(args, oracle, manifest, rng):
             result.update(actual="n/a", verdict="n/a", notes=[str(e)])
             return result
         result["notes"] = notes
+        if not members:
+            # The combination took every member away: there is nothing to
+            # read, and refusing is the only correct answer.
+            result.update(actual="refused", outcomes={"pool": "refused"},
+                          inputs_unchanged=True)
+            result["verdict"] = "pass" if "refused" in accepted else "unexpected"
+            return result
         before = {p: sha256_file(p) for p in members}
         if oracle.has_volumes:
             outcomes, redundancy = judge_dump(args, oracle, manifest, members, work)
