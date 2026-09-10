@@ -193,9 +193,14 @@ labels are gone can be bound to a leaf its siblings' configuration names
 but no scanned device carries, through `--assume-member PATH[=GUID]`.
 The assertion buys nothing but a slot — every block read through it is
 still checksum-verified, so a wrong binding is refused rather than
-believed. What is left of F-62 is making that binding *automatic*:
-trying each vacant leaf and letting the checksums pick the one that
-works. Supplying a whole topology by hand is F-65.
+believed. Without a GUID the binding is worked out
+automatically: each vacant leaf is tried, siblings of that top are
+withheld as far as redundancy allows so the walk has to lean on the
+candidate, and a device of zeros in the same slot separates "this slot
+must be occupied" from "this member's contents are what read". Where the
+evidence does not choose — several leaves of one mirror hold the same
+bytes, and a wide enough vdev can reconstruct around a wrong slot — the
+tool says so and asks for a GUID instead of guessing. Supplying a whole topology by hand is F-65.
 
 Two regimes follow:
 

@@ -177,6 +177,9 @@ pub struct PoolReader<'a> {
     /// its uberblocks (SPEC F-61) goes here.
     bases: Vec<u64>,
     tops: BTreeMap<u32, Node>,
+    /// How many leaf reads each device has served. Used when deciding
+    /// whether a member really contributed to what was read (F-62).
+    reads: RefCell<Vec<u64>>,
     /// Pool checksum salt once the MOS object directory has been read.
     salt: Cell<Option<Salt>>,
     /// Keys of the encrypted dataset currently being read, if any.
@@ -274,9 +277,11 @@ impl<'a> PoolReader<'a> {
             })
             .collect();
         let bases = vec![0u64; devices.len()];
+        let reads = RefCell::new(vec![0u64; devices.len()]);
         PoolReader {
             devices,
             bases,
+            reads,
             tops,
             salt: Cell::new(None),
             keys: RefCell::new(None),
@@ -298,6 +303,11 @@ impl<'a> PoolReader<'a> {
             }
         }
         self
+    }
+
+    /// How many leaf reads device `index` has served.
+    pub fn reads_of(&self, index: usize) -> u64 {
+        self.reads.borrow().get(index).copied().unwrap_or(0)
     }
 
     /// Record the pool checksum salt (from `org.illumos:checksum_salt` in
@@ -345,6 +355,9 @@ impl<'a> PoolReader<'a> {
             .flatten()
             .ok_or(ReadError::NoMember)?;
         let base = self.bases.get(index).copied().unwrap_or(0);
+        if let Some(n) = self.reads.borrow_mut().get_mut(index) {
+            *n += 1;
+        }
         let mut buf = vec![0u8; size];
         dev.read_at(base + LABEL_START_SIZE + offset, &mut buf)
             .map(|()| buf)

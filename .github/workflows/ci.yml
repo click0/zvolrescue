@@ -97,6 +97,24 @@ jobs:
           # Swapped: the assertion is wrong, the checksums say so, and
           # nothing is handed back as if it were the volume.
           if ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/rz/nolabel0.img /tmp/rz/nolabel1.img /tmp/rz/member2.img --assume-member /tmp/rz/nolabel0.img=$G1 --assume-member /tmp/rz/nolabel1.img=$G0 --txg 4816229 -o /tmp/rz-swapped.img; then echo "a swapped binding must not succeed"; exit 1; else test $? = 3; fi
+          # Without a GUID, when several leaves are missing, the tool
+          # works out which one this member is by reading through it —
+          # and says so plainly when the evidence does not choose.
+          python3 - <<'EOF'
+          LABEL, PHYS_OFF, PHYS = 256*1024, 16*1024, 112*1024
+          b = bytearray(open("/tmp/fx/member0.img", "rb").read())
+          aligned = len(b) & ~(LABEL-1)
+          for off in (0, LABEL, aligned-2*LABEL, aligned-LABEL):
+              b[off+PHYS_OFF:off+PHYS_OFF+PHYS] = b"\0" * PHYS
+          open("/tmp/fx/nolabel0.img", "wb").write(bytes(b))
+          EOF
+          # A mirror leaf: its sibling is withheld for the trial, so the
+          # walk leans on it entirely and the answer is not a guess.
+          ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/fx/nolabel0.img /tmp/fx/member1.img --assume-member /tmp/fx/nolabel0.img --txg 4816229 -o /tmp/fx-bound.img
+          cmp /tmp/disk0.img /tmp/fx-bound.img
+          # A device that is not this pool's data reads as no leaf at all.
+          python3 -c 'b=bytearray(open("/tmp/fx/nolabel0.img","rb").read()); s=4*1024*1024; b[s:]=bytes(x^0xa5 for x in b[s:]); open("/tmp/fx/garbage.img","wb").write(bytes(b))'
+          if ./target/release/zvolrescue -q list /tmp/fx/garbage.img /tmp/fx/member1.img --assume-member /tmp/fx/garbage.img; then echo "garbage must not bind"; exit 1; else test $? = 1; fi
           # Refusals: not a member of this run, and no leaf is missing.
           if ./target/release/zvolrescue -q list /tmp/rz/member2.img /tmp/rz/member3.img --assume-member /tmp/elsewhere.img; then exit 1; else test $? = 1; fi
           if ./target/release/zvolrescue -q list /tmp/fx/member0.img /tmp/fx/member1.img --assume-member /tmp/fx/member0.img; then exit 1; else test $? = 1; fi

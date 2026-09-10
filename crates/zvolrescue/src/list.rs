@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 use zfs_ondisk::dmu::ObjsetType;
+use zfs_read::bind::{bind_by_reading, Verdict};
 use zfs_read::dsl::{open_mos, walk, Dataset, DatasetTree};
 use zfs_read::pool::{assemble, select_uberblock, uberblock_candidates, PoolAssembly, TxgSelect};
 use zfs_read::vdev::DeviceScan;
@@ -251,7 +252,14 @@ impl Members {
 
 /// Apply every `--assume-member`: put a member whose labels are gone into
 /// a leaf slot the configuration leaves vacant (SPEC F-62).
-fn bind_assumed(spec: &PoolSpec, paths: &[PathBuf], pools: &mut [PoolAssembly]) -> Result<(), u8> {
+fn bind_assumed(
+    spec: &PoolSpec,
+    paths: &[PathBuf],
+    pools: &mut [PoolAssembly],
+    scans: &[Option<DeviceScan>],
+    devices: &[Option<&dyn BlockSource>],
+    bases: &[u64],
+) -> Result<(), u8> {
     let assumed = spec.assumed().map_err(|e| {
         eprintln!("zvolrescue: {e}");
         exit::USAGE
@@ -289,6 +297,50 @@ fn bind_assumed(spec: &PoolSpec, paths: &[PathBuf], pools: &mut [PoolAssembly]) 
                 return Err(exit::USAGE);
             }
         };
+        // Several leaves vacant and no name given: try each of them and
+        // let the checksums say which one this member is (SPEC F-62).
+        // No GUID given: work out which leaf this member is by reading
+        // through it. A named leaf is the user's assertion and stands as
+        // given — every block read through it is checksum-verified all
+        // the same.
+        if guid.is_none() {
+            match bind_by_reading(&mut pools[pool], scans, devices, bases, device) {
+                Verdict::Bound(b, fitting) => {
+                    eprintln!(
+                        "zvolrescue: {}: read as leaf {:#018x} of {} — the metadata walk verifies through it{}",
+                        path.display(),
+                        b.guid,
+                        pools[pool].tops[b.top].name,
+                        if fitting > 1 {
+                            format!(" ({fitting} leaves of that mirror fit; they hold the same bytes)")
+                        } else {
+                            String::new()
+                        }
+                    );
+                    continue;
+                }
+                Verdict::Ambiguous(fits) => {
+                    eprintln!(
+                        "zvolrescue: --assume-member {}: {} leaves read equally well; name the right one with =GUID:",
+                        path.display(),
+                        fits.len()
+                    );
+                    for b in fits {
+                        eprintln!("  {:#018x}  {}", b.guid, pools[pool].tops[b.top].name);
+                    }
+                    return Err(exit::USAGE);
+                }
+                Verdict::Nothing => {
+                    eprintln!(
+                        "zvolrescue: --assume-member {}: nothing reads through this member — it is not one of the {} leaves pool {:?} is missing. Name one with =GUID to assert it anyway.",
+                        path.display(),
+                        pools[pool].vacant_leaves().len(),
+                        pools[pool].name
+                    );
+                    return Err(exit::USAGE);
+                }
+            }
+        }
         match pools[pool].bind_member(device, guid) {
             Ok(g) => eprintln!(
                 "zvolrescue: {}: assumed to be leaf {g:#018x} of pool {:?}; its blocks are still verified by checksum",
@@ -340,7 +392,16 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
         return Err(exit::EVIDENCE);
     }
     let mut pools = assemble(&scans);
-    bind_assumed(spec, &paths, &mut pools)?;
+    let devices: Vec<Option<&dyn BlockSource>> = sources
+        .iter()
+        .map(|s| s.as_ref().map(|s| s as &dyn BlockSource))
+        .collect();
+    let bases: Vec<u64> = scans
+        .iter()
+        .map(|s| s.as_ref().map_or(0, |s| s.base))
+        .collect();
+    bind_assumed(spec, &paths, &mut pools, &scans, &devices, &bases)?;
+    drop(devices);
     Ok(Members {
         sources,
         scans,

@@ -38,6 +38,17 @@ in CI; what was tried on real environments is logged in
   fixture with two label-less members and a third member left out, the
   correct binding returns the volume bit-exact while a swapped one fails
   every checksum and exits 3 instead of handing back plausible garbage.
+* **`--assume-member PATH` works out *which* leaf on its own.** Without a
+  GUID the tool tries the member in each vacant leaf and reads the pool
+  through it: as many siblings of that top are withheld as the redundancy
+  can spare, so the walk leans on the candidate, and a device of zeros is
+  then put in its place to tell a slot that merely needs to be occupied
+  from one whose contents matter. A leaf is taken when its contents made
+  the difference, or when it is the only one that reads at all. Several
+  leaves of the same mirror are interchangeable and any is reported;
+  several that are not says so and asks for a GUID rather than guessing. A
+  device that does not hold this pool's data reads as no leaf and is
+  refused.
 
 ## v0.1.0-alpha.1 — 2026-09-08
 

@@ -10,6 +10,7 @@
 //! surviving uberblocks when its labels are gone. [`fixture`] builds
 //! synthetic members for tests.
 
+pub mod bind;
 pub mod crypt;
 pub mod dmu;
 pub mod dsl;
