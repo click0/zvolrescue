@@ -23,7 +23,14 @@
    git tag -a vX.Y.Z <commit> -m "zvolrescue vX.Y.Z" && git push origin vX.Y.Z
    ```
 
-4. `.github/workflows/release.yml` builds static binaries
+4. If the release page already exists (created by hand), the workflow
+   attaches the files to it and then refreshes the title and notes. The
+   second part can be refused — a protected tag pattern (Settings → Tags)
+   or immutable releases (Settings → General) both block editing a
+   release even when the token has `contents: write`. The job warns and
+   still leaves a complete release; the notes are then yours to paste.
+
+5. `.github/workflows/release.yml` builds static binaries
    (`x86_64-linux-musl`, `aarch64-linux-musl`, `amd64-freebsd`), writes
    `SHA256SUMS`, takes the tag's section of `CHANGELOG.md` as the release
    notes and publishes a GitHub release — marked pre-release when the tag

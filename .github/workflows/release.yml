@@ -134,10 +134,30 @@ jobs:
             echo "::error::CHANGELOG.md has no '## v$v' section; nothing to say about this release"
             exit 1
           fi
-      - uses: softprops/action-gh-release@v2
-        with:
-          name: zvolrescue ${{ github.ref_name }}
-          files: dist/*
-          body_path: notes.md
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          fail_on_unmatched_files: true
+      # Publishing is deliberately split: uploading the files is what
+      # matters, and it goes through the assets API. Editing the title and
+      # notes is a separate call that a protected tag or an immutable
+      # release can refuse — when it does, the release still gets its
+      # binaries and the job says what to look at instead of failing with
+      # a bare 403.
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          title="zvolrescue $tag"
+          case "$tag" in *-*) pre="--prerelease" ;; *) pre="" ;; esac
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "release $tag exists: uploading files, then refreshing the notes"
+            gh release upload "$tag" dist/* --clobber
+            if ! gh release edit "$tag" --title "$title" --notes-file notes.md $pre; then
+              echo "::warning::the files are attached, but the release notes could not be updated."
+              echo "::warning::check Settings → Tags (a protected tag pattern such as v* blocks this)"
+              echo "::warning::and Settings → General → Immutable releases."
+            fi
+          else
+            echo "release $tag does not exist: creating it"
+            gh release create "$tag" dist/* --title "$title" --notes-file notes.md $pre
+          fi
+          gh release view "$tag" --json name,isDraft,isPrerelease,assets \
+            --jq '"published \(.name) (draft=\(.isDraft) prerelease=\(.isPrerelease)) with \(.assets | length) file(s): " + (.assets | map(.name) | join(", "))'
