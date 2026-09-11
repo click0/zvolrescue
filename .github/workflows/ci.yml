@@ -225,7 +225,7 @@ jobs:
           sha256sum /tmp/fx/member0.img /tmp/fx/member1.img > /tmp/fx.sums
           ./target/release/zvoltimeline /tmp/fx/member0.img /tmp/fx/member1.img -o /tmp/tl.txt
           sha256sum -c /tmp/fx.sums
-      - name: The case file, and checking it back (COMPANIONS R-01…R-06)
+      - name: The case file, and checking it back (COMPANIONS R-01…R-07)
         run: |
           ./target/release/zvolreport --version
           rm -rf /tmp/case && mkdir -p /tmp/case && cd /tmp/case
@@ -259,6 +259,34 @@ jobs:
           cmp report.json again.json
           # R-04: everything still matches what was recorded.
           "$B/zvolreport" verify report.json
+          # R-07: a signature over the exact bytes of report.json, in a
+          # form somebody without this tool can check. openssl is the
+          # oracle in both directions: it reads the key we wrote, we read
+          # the key it wrote, it verifies our signature and we verify its.
+          "$B/zvolreport" keygen -o case.key
+          test "$(stat -c %a case.key)" = 600
+          openssl pkey -in case.key -pubout -out ours-by-openssl.pub
+          cmp ours-by-openssl.pub case.key.pub
+          openssl genpkey -algorithm ed25519 -out theirs.key
+          openssl pkey -in theirs.key -pubout -out theirs.pub
+          "$B/zvolreport" build case.jsonl -o signed.json --case 42 --examiner "CI" --note "fixture pool" --sign theirs.key >/dev/null
+          # Signing says nothing new about the document: R-03 still holds.
+          cmp report.json signed.json
+          openssl pkeyutl -verify -pubin -inkey theirs.pub -rawin -in signed.json -sigfile signed.json.sig
+          "$B/zvolreport" verify signed.json --key theirs.pub
+          openssl pkeyutl -sign -inkey theirs.key -rawin -in signed.json -out openssl.sig
+          "$B/zvolreport" verify signed.json --key theirs.pub --signature openssl.sig
+          # The wrong key, an edited value, a byte appended, and no
+          # signature at all: each of them exits 4.
+          "$B/zvolreport" build case.jsonl -o mine.json --case 42 --sign case.key >/dev/null
+          if "$B/zvolreport" verify mine.json --key theirs.pub; then echo "must fail"; exit 1; else test $? = 4; fi
+          sed 's/"case": "42"/"case": "43"/' signed.json > edited.json
+          cp signed.json.sig edited.json.sig
+          if "$B/zvolreport" verify edited.json --key theirs.pub; then echo "must fail"; exit 1; else test $? = 4; fi
+          printf 'x' >> edited.json
+          if "$B/zvolreport" verify edited.json --key theirs.pub; then echo "must fail"; exit 1; else test $? = 4; fi
+          rm -f mine.json.sig
+          if "$B/zvolreport" verify mine.json --key case.key.pub; then echo "must fail"; exit 1; else test $? = 4; fi
           # One byte of the extracted image, and it does not.
           printf '\xff' | dd of=disk0.img bs=1 seek=4096 conv=notrunc status=none
           if "$B/zvolreport" verify report.json; then echo "must fail"; exit 1; else test $? = 4; fi

@@ -11,6 +11,7 @@
 mod build;
 mod markdown;
 mod model;
+mod sign;
 mod verify;
 
 use std::path::PathBuf;
@@ -52,6 +53,14 @@ enum Command {
         /// A note to carry in the report (repeatable).
         #[arg(long, value_name = "TEXT")]
         note: Vec<String>,
+        /// Sign the report with this Ed25519 private key (unencrypted
+        /// PKCS#8, the form `openssl genpkey -algorithm ed25519`
+        /// writes), leaving the raw 64-byte signature beside it (R-07).
+        #[arg(long, value_name = "KEYFILE")]
+        sign: Option<PathBuf>,
+        /// Write the signature here instead of next to the report.
+        #[arg(long, value_name = "report.json.sig")]
+        signature: Option<PathBuf>,
     },
     /// Recompute the hashes a report recorded and say what still matches.
     Verify {
@@ -65,6 +74,23 @@ enum Command {
         /// Look for the extracted files under this directory.
         #[arg(long, value_name = "DIR")]
         outputs_root: Option<PathBuf>,
+        /// Also check the report's signature against this Ed25519
+        /// public key (SubjectPublicKeyInfo, the form
+        /// `openssl pkey -pubout` writes).
+        #[arg(long, value_name = "KEYFILE")]
+        key: Option<PathBuf>,
+        /// Read the signature here instead of next to the report.
+        #[arg(long, value_name = "report.json.sig")]
+        signature: Option<PathBuf>,
+    },
+    /// Write a new Ed25519 key pair to sign reports with.
+    Keygen {
+        /// Write the private key here, and the public key at `KEY.pub`.
+        #[arg(short, long, value_name = "KEY")]
+        output: PathBuf,
+        /// Write the public key here instead of at `KEY.pub`.
+        #[arg(long, value_name = "KEY.pub")]
+        public: Option<PathBuf>,
     },
 }
 
@@ -81,6 +107,8 @@ fn main() -> ExitCode {
             case,
             examiner,
             note,
+            sign,
+            signature,
         } => build::run(
             &cli.global,
             &build::Options {
@@ -90,22 +118,60 @@ fn main() -> ExitCode {
                 case,
                 examiner,
                 notes: note,
+                sign,
+                signature,
             },
         ),
         Command::Verify {
             report,
             evidence_root,
             outputs_root,
+            key,
+            signature,
         } => verify::run(
             &cli.global,
             &verify::Options {
                 report,
                 evidence_root,
                 outputs_root,
+                key,
+                signature,
             },
         ),
+        Command::Keygen { output, public } => keygen(&cli.global, &output, public),
     };
     ExitCode::from(code)
+}
+
+/// Write a key pair, and say where it went.
+fn keygen(g: &Global, private: &std::path::Path, public: Option<PathBuf>) -> u8 {
+    let public = public.unwrap_or_else(|| {
+        let mut p = private.as_os_str().to_os_string();
+        p.push(".pub");
+        PathBuf::from(p)
+    });
+    match sign::keygen(private, &public) {
+        Err(e) => {
+            eprintln!("zvolreport: {e}");
+            exit::USAGE
+        }
+        Ok(key) => {
+            match g.format {
+                zvol_common::Format::Json => println!(
+                    "{}",
+                    serde_json::json!({
+                        "private": private, "public": public,
+                        "public_key_pem": sign::public_pem(&key),
+                    })
+                ),
+                zvol_common::Format::Text => {
+                    println!("wrote {} (mode 0600)", private.display());
+                    println!("wrote {}", public.display());
+                }
+            }
+            0
+        }
+    }
 }
 
 /// Kept for the same reason the main binary keeps it: so a build that

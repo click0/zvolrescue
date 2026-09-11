@@ -17,6 +17,8 @@ pub struct Options {
     pub case: Option<String>,
     pub examiner: Option<String>,
     pub notes: Vec<String>,
+    pub sign: Option<PathBuf>,
+    pub signature: Option<PathBuf>,
 }
 
 /// Read one evidence log.
@@ -342,6 +344,31 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
             return exit::USAGE;
         }
     }
+    // The signature covers `report.json` and nothing else. The Markdown
+    // is a rendering of it, not a second document to be trusted on its
+    // own, and R-03 is what lets a doubter re-render it themselves.
+    let mut signed = None;
+    if let Some(keyfile) = &opts.sign {
+        let key = match crate::sign::read_private(keyfile) {
+            Ok(k) => k,
+            Err(e) => {
+                eprintln!("zvolreport: {e}");
+                return exit::USAGE;
+            }
+        };
+        let to = opts
+            .signature
+            .clone()
+            .unwrap_or_else(|| crate::sign::beside(&opts.output));
+        if let Err(e) = crate::sign::write_signature(&key, json.as_bytes(), &to) {
+            eprintln!("zvolreport: {e}");
+            return exit::USAGE;
+        }
+        signed = Some(to);
+    } else if opts.signature.is_some() {
+        eprintln!("zvolreport: --signature says where to write one; --sign says what with");
+        return exit::USAGE;
+    }
     match g.format {
         Format::Json => print!("{json}"),
         Format::Text => {
@@ -359,6 +386,9 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
             println!("wrote {}", opts.output.display());
             if let Some(md) = &opts.md {
                 println!("wrote {}", md.display());
+            }
+            if let Some(sig) = &signed {
+                println!("wrote {}", sig.display());
             }
         }
     }
@@ -378,6 +408,8 @@ mod tests {
             case: Some("42".into()),
             examiner: None,
             notes: Vec::new(),
+            sign: None,
+            signature: None,
         }
     }
 

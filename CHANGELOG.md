@@ -28,6 +28,19 @@ in CI; what was tried on real environments is logged in
   recognised without one, because a guess with no number is honest and
   an invented number is not. `dump` prefers `--size`, then the size the
   contents state, then what the dnode implies, and says which it used.
+* **A report can be signed, and checked without this tool (COMPANIONS
+  R-07).** `zvolreport build --sign KEY` signs the exact bytes of
+  `report.json` with Ed25519 and leaves the raw 64 bytes beside it;
+  `zvolreport verify --key KEY.pub` checks them, and `zvolreport keygen`
+  writes a pair. The keys are the form OpenSSL writes and reads —
+  unencrypted PKCS#8 and SubjectPublicKeyInfo, PEM or bare DER — so a
+  third party with no copy of `zvolrescue` can check a report with
+  `openssl pkeyutl -verify -pubin -inkey key.pub -rawin -in report.json
+  -sigfile report.json.sig`. CI checks both directions against OpenSSL.
+  The signature is checked before the document is parsed, because an
+  edited report often stops being JSON and "not a report" is a poor way
+  to say "this was changed"; a wrong key, an edited value, an appended
+  byte and a missing signature each exit 4.
 * **`zvolcarve` tries four compressions, not one (COMPANIONS C-10).**
   Metadata is stored compressed, and a pool made before the
   `lz4_compress` feature stores it in lzjb — so a scan that tries lz4

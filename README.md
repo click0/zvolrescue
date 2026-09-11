@@ -147,7 +147,9 @@ zvolfiles objects pool/home /dev/ada0p3 -o /mnt/rescue/objects
 
 ```
 zvolreport build  LOG... -o report.json [--md report.md] [--case ID] [--examiner NAME]
-zvolreport verify report.json [--evidence-root DIR] [--outputs-root DIR]
+                                                             [--sign KEYFILE]
+zvolreport verify report.json [--evidence-root DIR] [--outputs-root DIR] [--key KEYFILE]
+zvolreport keygen -o KEY
                                                            the evidence logs as one document, and that document checked back
 ```
 
@@ -155,10 +157,15 @@ zvolreport verify report.json [--evidence-root DIR] [--outputs-root DIR]
 # Every tool appends to one log; the report consolidates them.
 zvolrescue --hash-inputs --evidence-log case42.jsonl scan /dev/ada0p3 /dev/ada1p3
 zvolrescue --evidence-log case42.jsonl dump pool/vm/disk0 /dev/ada0p3 /dev/ada1p3 -o disk0.img
-zvolreport build case42.jsonl -o report.json --md report.md --case 42 --examiner "…"
+zvolreport build case42.jsonl -o report.json --md report.md --case 42 --examiner "…" \
+    --sign case42.key
 
 # Later, on another machine: is everything still what the report says?
-zvolreport verify report.json --outputs-root /mnt/case42
+zvolreport verify report.json --outputs-root /mnt/case42 --key case42.key.pub
+
+# …and anyone can check the signature without this tool at all:
+openssl pkeyutl -verify -pubin -inkey case42.key.pub -rawin \
+    -in report.json -sigfile report.json.sig
 ```
 
 ### Companion tools (separate binaries in the same workspace)
@@ -169,7 +176,7 @@ Specified in [docs/COMPANIONS.md](docs/COMPANIONS.md).
 |---|---|
 | `zvoltimeline` | **shipping** — TXG ↔ time ↔ dataset created/destroyed |
 | `zvolcarve` | **shipping** — find volumes whose uberblocks are gone, and extract them |
-| `zvolreport` | **shipping** — consolidated report with a SHA-256 chain of custody |
+| `zvolreport` | **shipping** — consolidated report with a SHA-256 chain of custody and an Ed25519 signature |
 | `zvolfiles` | **shipping** — file-level recovery from filesystem datasets |
 
 ## Roadmap

@@ -349,8 +349,10 @@ file still matches its recorded hash.
 
 ```
 zvolreport build   LOG... -o report.json [--md report.md] [--case ID] [--examiner NAME]
-                          [--note TEXT]...
+                          [--note TEXT]... [--sign KEYFILE] [--signature report.json.sig]
 zvolreport verify  report.json [--evidence-root DIR] [--outputs-root DIR]
+                          [--key KEYFILE] [--signature report.json.sig]
+zvolreport keygen  -o KEY [--public KEY.pub]
 ```
 
 ### 4.3 Requirements
@@ -371,13 +373,40 @@ Run UC-1 end-to-end with `--evidence-log`; `zvolreport build` lists every
 command and hash; modifying one byte of the extracted image makes
 `zvolreport verify` fail with exit 4 naming that file.
 
-*Status: R-01…R-06 are implemented and that acceptance run is a CI step
+*Status: R-01…R-07 are implemented and that acceptance run is a CI step
 on the mirror fixture — `scan`, `zvoltimeline` and `dump` into one log,
 then `build`, then `verify` before and after a byte is changed, and
 again with the image removed. `build` is checked to be byte-identical on
 a second run (R-03); a record whose format version is not 1 fails the
-build rather than being skipped (R-01). Not implemented: the ed25519
-signature (R-07).*
+build rather than being skipped (R-01).
+
+R-07 is implemented, and the point of it is that the signature outlives
+this tool. `build --sign KEY` signs the exact bytes of `report.json` with
+Ed25519 and leaves the raw 64 bytes beside it; `verify --key KEY.pub`
+checks them. The keys are in the form OpenSSL writes and reads —
+unencrypted PKCS#8 for the private half, SubjectPublicKeyInfo for the
+public one, both PEM or bare DER — so a third party with no copy of
+`zvolrescue` can check the report with
+
+```
+openssl pkeyutl -verify -pubin -inkey key.pub -rawin \
+    -in report.json -sigfile report.json.sig
+```
+
+and `keygen` writes a pair OpenSSL reads back as its own. That is what
+CI checks, in both directions: OpenSSL verifies a signature this tool
+wrote, this tool verifies one OpenSSL wrote, and the public key each
+derives from the other's private key is byte-identical. A signature only
+its author's tool can check is not a chain of custody, it is a habit.
+
+The signature is checked before the document is parsed, because it is
+over bytes and needs no parse — and because a report somebody edited
+often stops being JSON at all, where "not a report" would be a poor way
+to say "this was changed". A wrong key, an edited value, an appended
+byte and a missing signature file each exit 4, the same code a broken
+hash gets, since all four are the same failure: what is here cannot be
+shown to be what was written. The Markdown rendering is not signed; it
+is a rendering, and R-03 is what lets a doubter make it again.*
 
 ---
 

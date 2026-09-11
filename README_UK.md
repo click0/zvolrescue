@@ -148,7 +148,9 @@ zvolfiles objects pool/home /dev/ada0p3 -o /mnt/rescue/objects
 
 ```
 zvolreport build  LOG... -o report.json [--md report.md] [--case ID] [--examiner NAME]
-zvolreport verify report.json [--evidence-root DIR] [--outputs-root DIR]
+                                                             [--sign KEYFILE]
+zvolreport verify report.json [--evidence-root DIR] [--outputs-root DIR] [--key KEYFILE]
+zvolreport keygen -o KEY
                                                            логи evidence як один документ — і перевірка цього документа
 ```
 
@@ -156,10 +158,15 @@ zvolreport verify report.json [--evidence-root DIR] [--outputs-root DIR]
 # Кожен інструмент дописує в один лог; звіт зводить їх докупи.
 zvolrescue --hash-inputs --evidence-log case42.jsonl scan /dev/ada0p3 /dev/ada1p3
 zvolrescue --evidence-log case42.jsonl dump pool/vm/disk0 /dev/ada0p3 /dev/ada1p3 -o disk0.img
-zvolreport build case42.jsonl -o report.json --md report.md --case 42 --examiner "…"
+zvolreport build case42.jsonl -o report.json --md report.md --case 42 --examiner "…" \
+    --sign case42.key
 
 # Згодом, на іншій машині: чи все ще те, що каже звіт?
-zvolreport verify report.json --outputs-root /mnt/case42
+zvolreport verify report.json --outputs-root /mnt/case42 --key case42.key.pub
+
+# …а підпис будь-хто перевірить і взагалі без цього інструмента:
+openssl pkeyutl -verify -pubin -inkey case42.key.pub -rawin \
+    -in report.json -sigfile report.json.sig
 ```
 
 ### Супутні інструменти (окремі бінарники в тому ж workspace)
@@ -170,7 +177,7 @@ zvolreport verify report.json --outputs-root /mnt/case42
 |---|---|
 | `zvoltimeline` | **уже є** — TXG ↔ час ↔ створення/знищення dataset-ів |
 | `zvolcarve` | **уже є** — знайти томи, чиї uberblock-и вже зникли, і видобути їх |
-| `zvolreport` | **уже є** — зведений звіт із ланцюжком SHA-256 |
+| `zvolreport` | **уже є** — зведений звіт із ланцюжком SHA-256 і підписом Ed25519 |
 | `zvolfiles` | **уже є** — файлове відновлення з файлових dataset-ів |
 
 ## Дорожня карта
