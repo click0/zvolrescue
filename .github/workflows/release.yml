@@ -117,6 +117,8 @@ jobs:
           sha256sum zvol* > SHA256SUMS
           cat SHA256SUMS
       - name: Release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           tag="$TAG"
           # A tag is `vX.Y.Z`; accept `v.X.Y.Z` and `VX.Y.Z` too rather
@@ -127,28 +129,23 @@ jobs:
           if [ "$tag" != "v$v" ]; then
             echo "::warning::tag $tag is not vX.Y.Z; releasing version $v"
           fi
-          # The version's section of CHANGELOG.md: from its heading to
-          # the next "## ".
-          section=$(awk -v want="v$v" '
-            $0 ~ "^## " want { p=1; next }
-            /^## / && p { exit }
-            p { print }' CHANGELOG.md)
-          # An empty section means the CHANGELOG has no heading for this
-          # version: publishing notes that say nothing is worse than
+          # What these binaries actually are: this version's section of
+          # the CHANGELOG, plus every older one that never became a
+          # release of its own, plus whatever `## Unreleased` still held
+          # when the tag was made. A tag lands on the head of `main`, so
+          # a version overtaken before anyone tagged it ships inside the
+          # next one that is — and notes that print one section describe
+          # a fraction of what is in the files.
+          #
+          # Which versions already had a release is asked of GitHub
+          # rather than assumed, so this stays right when one is deleted.
+          python3 .github/changelog-notes.py --self-test
+          gh release list --limit 200 --json tagName --jq '.[].tagName' > released.txt
+          echo "releases that already exist: $(tr '\n' ' ' < released.txt)"
+          # The script refuses a version with no section, and one whose
+          # section says nothing: publishing empty notes is worse than
           # failing here, where it can still be fixed.
-          if ! printf '%s\n' "$section" | grep -q "^### "; then
-            echo "::error::CHANGELOG.md has no '## v$v' section; nothing to say about this release"
-            exit 1
-          fi
-          # Whatever `## Unreleased` still held at this tag shipped in it
-          # too. A tag is made on the head of `main`, so anything the
-          # CHANGELOG had not got round to filing under a version is in
-          # these binaries all the same, and notes that leave it out
-          # describe a release that does not exist.
-          unreleased=$(awk '
-            /^## Unreleased/ { p=1; next }
-            /^## / && p { exit }
-            p { print }' CHANGELOG.md)
+          python3 .github/changelog-notes.py "$v" CHANGELOG.md released.txt > section.md
           # The programs, in the order they are meant to be read, and
           # what each is for. Checked against what the build actually
           # produced: a release that ships a binary its own notes never
@@ -202,15 +199,7 @@ jobs:
             echo
             echo "## What is in $tag"
             echo
-            printf '%s\n' "$section"
-            if printf '%s\n' "$unreleased" | grep -q "^\* "; then
-              echo
-              echo "### Also in this tag, filed under no version yet"
-              echo
-              # One level down, so its Added and Fixed read as belonging
-              # to this heading and not as two more of the version's own.
-              printf '%s\n' "$unreleased" | sed 's/^### /#### /'
-            fi
+            cat section.md
             echo
             echo "Full history: [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/$tag/CHANGELOG.md)."
           } > notes.md
@@ -220,8 +209,7 @@ jobs:
           # number alone. Decided here, where the section is still in
           # hand, and handed to the next step in a file; a section with
           # no lead line falls back to the number.
-          headline=$(printf '%s\n' "$section" |
-            sed -n 's/^\*\*\([^*]*\)\*\*.*/\1/p' | head -1 | sed 's/[.:]$//')
+          headline=$(sed -n 's/^\*\*\([^*]*\)\*\*.*/\1/p' section.md | head -1 | sed 's/[.:]$//')
           if [ -n "$headline" ]; then
             printf '%s' "zvolrescue $tag — $headline" > title.txt
           else

@@ -6,16 +6,17 @@ fix. Every 0.x release is validated against OpenZFS **userland** pools
 (`ztest` + `zdb`, no kernel) in CI; what was tried on real environments
 is logged in [docs/REALWORLD-TESTS.md](docs/REALWORLD-TESTS.md).
 
-`v0.2.0` through `v0.6.0` never got tags of their own. A tag here is made
-from the GitHub web interface, which can only tag the head of a branch,
-so those five are development milestones that name what changed when —
-the sections below are their record — and `v0.7.0` is the release that
-carries all of them.
+`v0.2.0` through `v0.7.0` never got releases of their own. A tag here is
+made from the GitHub web interface, which can only tag the head of a
+branch, so a version overtaken before anyone tagged it stays a
+development milestone that names what changed when — the sections below
+are their record — and ships inside the next version that does get
+tagged. `v0.7.1` is the release that carries those six.
 
 ## v0.7.1 — 2026-09-11
 
 **A closed pipe is not a failure.** One fix, found by running the
-published v0.7.0 binaries rather than the ones in `target/`.
+binaries a release actually hands out rather than the ones in `target/`.
 
 ### Fixed
 * A closed pipe stopped being a crash. `zvolcarve list DIR | head -4`
@@ -26,8 +27,8 @@ published v0.7.0 binaries rather than the ones in `target/`.
   now ends the run with 0 and says nothing, in all five programs. Every
   other panic still reaches stderr with its message; the check that
   tells them apart is on the errno rather than on the words beside it,
-  which belong to whatever locale is set. Found by running the
-  published v0.7.0 binaries, which have it.
+  which belong to whatever locale is set. Found by downloading the
+  v0.7.0 build and running it, which nothing in CI had done.
 
 ## v0.7.0 — 2026-09-11
 
