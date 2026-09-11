@@ -332,6 +332,20 @@ jobs:
           assert best["dataset_guid"] == "0x00000000000000a3", best
           assert best["dataset_creation_txg"] == 30, best
           EOF
+          # C-06 on a pool whose configuration says where its metaslabs
+          # are but whose MOS has no such object: the space has to come
+          # back unaccounted for, by name, never as free. "We could not
+          # look" and "it is free" are opposite answers for a recovery.
+          python3 - <<'EOF'
+          import json
+          i = json.load(open("/tmp/carve/candidates.json"))
+          space = i["space"]
+          assert space["vdevs_read"] == 0, space
+          assert space["skipped"], space
+          a = i["candidates"][0]["assessment"]
+          assert a["blocks_free"] == 0 and a["blocks_allocated"] == 0, a
+          assert a["blocks_unknown"] > 0, a
+          EOF
           # C-19: with --sample, what is on the disk instead of a filter.
           rm -rf /tmp/carve-s
           ./target/release/zvolcarve -f json scan /tmp/cv/member0.img -o /tmp/carve-s --sample 50 | python3 -c 'import json,sys; h=json.load(sys.stdin)["histograms"]; assert h["sampled"] > 0, h; assert h["volblocksize"] and h["levels"] and h["dnode_type"], h; assert "8192" in [b["value"] for b in h["volblocksize"]], h["volblocksize"]'
