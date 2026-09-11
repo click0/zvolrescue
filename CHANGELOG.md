@@ -24,6 +24,12 @@ in CI; what was tried on real environments is logged in
   disagreement is this reader's fault rather than the pool's.
 
 ### Fixed
+* A deadlist's total now follows the block-pointer objects filed under
+  its own. `bpo_bytes` covers only the pointers an object holds itself;
+  one that has swallowed another — which is how deadlists are merged —
+  keeps that other's space in its own header, so stopping at the parent
+  undercounts. Caught by the check above on the first `ztest` pool that
+  produced the case, and pinned by a fixture that fails without it.
 * A deadlist named by more than one dataset is counted once. Nothing in
   CI had produced that case; the check above is what would have caught
   it.

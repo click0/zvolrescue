@@ -66,6 +66,10 @@ pub mod ot {
     pub const ZVOL_PROP: u8 = 24;
     /// System attributes.
     pub const SA: u8 = 44;
+    /// Block-pointer object: blocks ZFS has finished with.
+    pub const BPOBJ: u8 = 42;
+    /// The array of object numbers a bpobj has swallowed.
+    pub const BPOBJ_SUBOBJ: u8 = 43;
     /// Deadlist.
     pub const DEADLIST: u8 = 50;
 

@@ -1026,6 +1026,63 @@ fn build_zpl_objset(m: &mut [Vec<u8>], a: &mut Alloc) -> [u8; blkptr::SIZE] {
     a.put(m, &objset(&meta_dnode, 2), ot::OBJSET, 0, 100)
 }
 
+/// Bytes the parent block-pointer object of the ZPL fixture's deadlist
+/// holds itself.
+pub const ZPL_BPOBJ_PARENT_BYTES: u64 = 1000;
+/// Bytes the object it swallowed holds.
+pub const ZPL_BPOBJ_CHILD_BYTES: u64 = 500;
+/// What the deadlist's own header therefore says.
+pub const ZPL_DEADLIST_BYTES: u64 = ZPL_BPOBJ_PARENT_BYTES + ZPL_BPOBJ_CHILD_BYTES;
+
+/// A block-pointer object: everything it says is in its bonus.
+fn bpobj_obj(bytes: u64, subobjs: u64, num_subobjs: u64) -> Vec<u8> {
+    let mut bonus = vec![0u8; 48];
+    let mut put = |o: usize, v: u64| bonus[o..o + 8].copy_from_slice(&v.to_le_bytes());
+    put(8, bytes); // bpo_bytes
+    put(32, subobjs);
+    put(40, num_subobjs);
+    DnodeSpec {
+        object_type: ot::BPOBJ,
+        bonus_type: ot::BPOBJ,
+        bonus,
+        ..DnodeSpec::default()
+    }
+    .build()
+}
+
+/// An object holding an array of object numbers.
+fn u64_array_obj(a: &mut Alloc, m: &mut [Vec<u8>], values: &[u64]) -> Vec<u8> {
+    let mut block = vec![0u8; 4096];
+    for (i, v) in values.iter().enumerate() {
+        block[i * 8..i * 8 + 8].copy_from_slice(&v.to_le_bytes());
+    }
+    let blk = a.put(m, &block, ot::BPOBJ_SUBOBJ, 0, 100);
+    DnodeSpec {
+        object_type: ot::BPOBJ_SUBOBJ,
+        datablksz: 4096,
+        blkptrs: vec![blk],
+        ..DnodeSpec::default()
+    }
+    .build()
+}
+
+/// A deadlist: a ZAP of transaction group to block-pointer object, with
+/// its running total in the bonus.
+fn deadlist_obj(a: &mut Alloc, m: &mut [Vec<u8>], used: u64, entries: &[(&str, u64)]) -> Vec<u8> {
+    let blk = a.put(m, &micro(4096, entries), ot::DEADLIST, 0, 100);
+    let mut bonus = vec![0u8; 320];
+    bonus[0..8].copy_from_slice(&used.to_le_bytes());
+    DnodeSpec {
+        object_type: ot::DEADLIST,
+        datablksz: 4096,
+        bonus_type: ot::DEADLIST,
+        bonus,
+        blkptrs: vec![blk],
+        ..DnodeSpec::default()
+    }
+    .build()
+}
+
 /// A pool with one filesystem dataset, `tank/fs`, holding a small POSIX
 /// tree — the fixture `zvolfiles` is accepted against (COMPANIONS §5.4).
 ///
@@ -1098,8 +1155,18 @@ pub fn zpl_members(pool: &mut Pool, size: u64) -> Vec<Vec<u8>> {
     put(3, ds_obj(&dataset_phys(2, 0, &os_empty, 4, 0xb1, 0)));
     put(4, zap_obj(&mut a, m, &[("fs", 5)]));
     put(5, dir_obj(6, 7, 2));
-    put(6, ds_obj(&dataset_phys(5, 0, &os_zpl, 20, 0xb2, 0)));
+    // tank/fs carries a deadlist (object 12) whose entry is a
+    // block-pointer object that has swallowed another (COMPANIONS
+    // T-07): the parent's header counts only its own pointers, so the
+    // deadlist's total only adds up if the child is followed.
+    let mut fs_ds = dataset_phys(5, 0, &os_zpl, 20, 0xb2, 0);
+    fs_ds.deadlist_obj = 12;
+    put(6, ds_obj(&fs_ds));
     put(7, zap_obj(&mut a, m, &[]));
+    put(8, bpobj_obj(ZPL_BPOBJ_PARENT_BYTES, 10, 1));
+    put(9, bpobj_obj(ZPL_BPOBJ_CHILD_BYTES, 0, 0));
+    put(10, u64_array_obj(&mut a, m, &[9]));
+    put(12, deadlist_obj(&mut a, m, ZPL_DEADLIST_BYTES, &[("0", 8)]));
 
     let dnode_blk = a.put(m, &dnodes, ot::DNODE, 0, 100);
     let meta = DnodeSpec {

@@ -891,13 +891,10 @@ pub fn pending(mos: &DnodeArray<'_, '_>, datasets: &[Dataset]) -> Pending {
                 }
             }
         }
+        let mut seen_objects = BTreeSet::new();
         let mut theirs = 0u64;
         for o in objects {
-            if let Ok(b) = mos.get(o) {
-                if let Ok(p) = BpobjPhys::parse(&b.bonus, mos.endian()) {
-                    theirs = theirs.saturating_add(p.bytes);
-                }
-            }
+            theirs = theirs.saturating_add(bpobj_bytes(mos, o, &mut seen_objects, 0));
         }
         out.bpobj_bytes = out.bpobj_bytes.saturating_add(theirs);
         if theirs != dl.used {
@@ -911,4 +908,112 @@ pub fn pending(mos: &DnodeArray<'_, '_>, datasets: &[Dataset]) -> Pending {
         }
     }
     out
+}
+
+/// How much space a block-pointer object accounts for, with everything
+/// filed under it.
+///
+/// `bpo_bytes` covers the pointers a bpobj holds itself. A bpobj can
+/// also swallow whole others — that is how a deadlist is merged into
+/// another — and their space is in *their* headers, not in the parent's.
+/// Stopping at the parent therefore undercounts, which is exactly what
+/// a deadlist's own total will not agree with.
+fn bpobj_bytes(
+    mos: &DnodeArray<'_, '_>,
+    object: u64,
+    seen: &mut BTreeSet<u64>,
+    depth: usize,
+) -> u64 {
+    // A bpobj tree is shallow in practice; the cap is against a cycle in
+    // damaged metadata, and the set against counting one twice.
+    if depth > 32 || object == 0 || !seen.insert(object) {
+        return 0;
+    }
+    let Ok(d) = mos.get(object) else {
+        return 0;
+    };
+    let Ok(p) = BpobjPhys::parse(&d.bonus, mos.endian()) else {
+        return 0;
+    };
+    let mut total = p.bytes;
+    if p.subobjs == 0 || p.num_subobjs == 0 {
+        return total;
+    }
+    // The subobjs object is an array of object numbers, num_subobjs long.
+    let Ok(obj) = mos.object(p.subobjs) else {
+        return total;
+    };
+    let want = (p.num_subobjs.saturating_mul(8)).min(obj.logical_size()) as usize;
+    let Ok(raw) = obj.read_range(0, want) else {
+        return total;
+    };
+    let endian = mos.endian();
+    for c in raw.chunks_exact(8) {
+        let b: [u8; 8] = c.try_into().expect("8 bytes");
+        let sub = match endian {
+            zfs_ondisk::Endian::Little => u64::from_le_bytes(b),
+            zfs_ondisk::Endian::Big => u64::from_be_bytes(b),
+        };
+        total = total.saturating_add(bpobj_bytes(mos, sub, seen, depth + 1));
+    }
+    total
+}
+
+#[cfg(test)]
+mod pending_tests {
+    use super::*;
+    use crate::fixture::{
+        zpl_members, Pool, ZPL_BPOBJ_CHILD_BYTES, ZPL_BPOBJ_PARENT_BYTES, ZPL_DEADLIST_BYTES,
+    };
+    use crate::pool::{assemble, uberblock_candidates};
+    use crate::vdev::scan_device;
+    use crate::zio::PoolReader;
+    use zvolrescue_io::{BlockSource, MemSource};
+
+    /// T-07: a deadlist's total only adds up when the objects filed
+    /// under its own are followed.
+    ///
+    /// `bpo_bytes` covers the pointers a block-pointer object holds
+    /// itself; one that has swallowed another keeps that other's space
+    /// in *its* header. Stopping at the parent undercounts, and the
+    /// deadlist's running total is what catches it.
+    #[test]
+    fn a_deadlist_adds_up_through_the_objects_filed_under_its_own() {
+        let mut pool = Pool::mirror("tank", 0x5eed_0000_0000_0004, 12)
+            .txgs(&[(4816228, 1757100000), (4816229, 1757100005)]);
+        let members = zpl_members(&mut pool, 64 * 1024 * 1024);
+        let sources: Vec<MemSource> = members.into_iter().map(MemSource::new).collect();
+        let scans: Vec<_> = sources
+            .iter()
+            .map(|s| Some(scan_device(s).expect("scan")))
+            .collect();
+        let assembled = assemble(&scans);
+        let pool = assembled.first().expect("a pool");
+        let devices: Vec<Option<&dyn BlockSource>> = sources
+            .iter()
+            .map(|s| Some(s as &dyn BlockSource))
+            .collect();
+        let reader = PoolReader::new(pool, devices);
+        let ub = uberblock_candidates(&scans, pool)
+            .into_iter()
+            .next()
+            .expect("an uberblock")
+            .ub;
+        let mos = open_mos(&reader, &ub).expect("mos");
+        let tree = walk(&mos, "tank").expect("walk");
+
+        let p = pending(&mos, &tree.datasets);
+        assert_eq!(p.deadlists, 1, "{p:?}");
+        assert_eq!(p.deadlist_bytes, ZPL_DEADLIST_BYTES);
+        assert_eq!(p.bpobj_bytes, ZPL_DEADLIST_BYTES, "{p:?}");
+        assert_eq!(p.inconsistent, 0, "{p:?}");
+        assert_eq!(p.unreadable, 0, "{p:?}");
+        // And the child really is the difference: without following it
+        // the parent alone would be short by exactly its share.
+        assert_eq!(
+            ZPL_DEADLIST_BYTES - ZPL_BPOBJ_PARENT_BYTES,
+            ZPL_BPOBJ_CHILD_BYTES
+        );
+        assert_eq!(p.total(), ZPL_DEADLIST_BYTES);
+    }
 }
