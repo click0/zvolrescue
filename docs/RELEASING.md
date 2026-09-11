@@ -11,10 +11,8 @@ moment of tagging, and everything below follows from that:
   has already been built on is not a release any more; it stays a
   milestone in the CHANGELOG and ships inside the next version that does
   get tagged. `v0.2.0` … `v0.7.0` went this way, and `v0.7.1` is the tag
-  that carries them. The notes say so on their own: they print every
-  section down to the first version that already has a release, asked of
-  GitHub rather than assumed, so a deleted release puts its section back
-  into the next one's notes instead of leaving it unannounced.
+  that carries them. A release announces what its own version changed —
+  the whole story is the CHANGELOG, which the notes link.
 * Nothing lands on `main` between "CI is green" and the tag.
 
 1. Update `version` in the workspace `Cargo.toml` and add a section
@@ -85,10 +83,6 @@ moment of tagging, and everything below follows from that:
    it does not match the binaries the build actually produced — a new
    companion tool means a new line there, not a release that ships a
    binary its own notes never mention.
-
-   `.github/changelog-notes.py` decides which CHANGELOG sections a
-   release announces. It has a self-test that the release job runs
-   before it uses it.
 
 Version numbers follow SemVer. The first cut was `v0.1.0-alpha.1`; from
 then on every release is a plain minor bump — `v0.2.0`, `v0.3.0`, … — with

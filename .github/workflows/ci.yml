@@ -39,11 +39,6 @@ jobs:
           awk -v want="v$v" '$0 ~ "^## " want { p=1; next } /^## / && p { exit } p { print }' CHANGELOG.md |
             grep -q '^\*\*' || { echo "::error::the v$v section has no **lead line** for the release title"; exit 1; }
           test "$(./target/release/zvolrescue --version)" = "zvolrescue $v"
-          # What a release announces is decided by this, so it is
-          # checked here and not only when a tag is already pushed.
-          python3 .github/changelog-notes.py --self-test
-          printf 'v0.0.0\n' > /tmp/released.txt
-          python3 .github/changelog-notes.py "$v" CHANGELOG.md /tmp/released.txt > /dev/null
       - name: End-to-end on fixture members (scan, list, dump)
         run: |
           cargo run -p zfs-read --example mkfixture -- /tmp/fx mirror 12
