@@ -151,7 +151,7 @@ what is left, which is why the copies exist.
 
 | ID | Pri | Requirement |
 |---|---|---|
-| F-68 | S | **Say what the evidence is.** Every run reports, per input, whether it is a block device or a regular file, and warns once when any input is a block device: not because this tool will write to it, but because the next one might. The distinction goes into the evidence record so a report can show that a recovery was done against images. *Not implemented.* |
+| F-68 | S | **Say what the evidence is.** Every run records, per input, whether it is a device or a regular file, and warns once when any input is a device: not because this tool will write to it, but because the next one might. The distinction goes into the evidence record, and `zvolreport` carries it into the report and warns there too, so a reader can tell whether the work was done against copies or against the disks. On FreeBSD a raw disk is a character device and counts the same. |
 
 ## 5. Functional requirements
 

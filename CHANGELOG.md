@@ -32,6 +32,17 @@ tagged. `v0.7.1` is the release that carries those six.
   --release`, and the suite passes there. CI had been pinned to 14.2,
   which has been out of support for some time.
 
+### Added
+* **A device is not an image, and the record now says which (SPEC
+  F-68).** Every run records, per input, whether it was a regular file
+  or a device, and says once when any input is a device — not because
+  anything here writes to one, but because the next tool the operator
+  reaches for does. `zvolreport` carries it into the report and warns
+  there too, so a reader can tell whether a recovery was done against
+  copies or against the disks themselves. On FreeBSD a raw disk is a
+  character device and counts the same. Checked in CI against a real
+  read-only loop device, not only against a fixture.
+
 ### Documented
 * **SPEC §4.1: what the operator has to do, which the tool cannot do for
   them.** Being read-only by construction is worth little on its own,

@@ -515,6 +515,29 @@ jobs:
           sha256sum /tmp/zp/member0.img /tmp/zp/member1.img > /tmp/zp.sums
           sha256sum -c /tmp/zp.sums
           if ./target/release/zvolfiles -q extract tank/fs /tmp/zp/member0.img -o /tmp/zp/member0.img; then echo "must refuse"; exit 1; else test $? = 5; fi
+      - name: A device is not an image, and the record says which (SPEC F-68)
+        run: |
+          rm -rf /tmp/f68 && mkdir -p /tmp/f68
+          # An image: nothing to warn about, and the record says so.
+          ./target/release/zvolrescue -q --evidence-log /tmp/f68/img.jsonl \
+            list /tmp/fx/member0.img /tmp/fx/member1.img >/dev/null 2>/tmp/f68/img.err
+          test ! -s /tmp/f68/img.err || { echo "an image should say nothing:"; cat /tmp/f68/img.err; exit 1; }
+          python3 -c 'import json; r=json.loads(open("/tmp/f68/img.jsonl").read().splitlines()[-1]); k=[i["kind"] for i in r["inputs"]]; assert k == ["file","file"], k'
+          # The same member through a read-only loop device: the tool
+          # still only reads, and says once that the next tool might not.
+          LOOP=$(sudo losetup --show -rf /tmp/fx/member0.img)
+          echo "attached $LOOP"
+          sudo ./target/release/zvolrescue -q --evidence-log /tmp/f68/dev.jsonl \
+            list "$LOOP" >/dev/null 2>/tmp/f68/dev.err || { sudo losetup -d "$LOOP"; cat /tmp/f68/dev.err; exit 1; }
+          sudo losetup -d "$LOOP"
+          cat /tmp/f68/dev.err
+          grep -q "devices, not images" /tmp/f68/dev.err
+          sudo python3 -c 'import json; r=json.loads(open("/tmp/f68/dev.jsonl").read().splitlines()[-1]); k=[i["kind"] for i in r["inputs"]]; assert k == ["device"], k'
+          # And a report built from that log says so too, so a reader
+          # knows the work was done against the evidence itself.
+          sudo chmod a+r /tmp/f68/dev.jsonl
+          ./target/release/zvolreport -q build /tmp/f68/dev.jsonl -o /tmp/f68/report.json >/dev/null
+          python3 -c 'import json; d=json.load(open("/tmp/f68/report.json")); assert any("read as a device" in w for w in d["warnings"]), d["warnings"]; assert d["evidence"][0]["kind"] == "device", d["evidence"]'
       - name: Every ashift, not just the one the fixtures happen to use (SPEC §9)
         run: |
           # ashift sets the stride of every DVA offset and of the RAIDZ

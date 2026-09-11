@@ -17,7 +17,7 @@ use zfs_read::vdev::DeviceScan;
 use zfs_read::zeropoint::scan_with_recovered_base;
 use zvolrescue_io::{BlockSource, FileSource};
 
-use crate::{exit, hints, PoolSpec};
+use crate::{evidence, exit, hints, PoolSpec};
 
 /// The members of a POOLSPEC after opening and scanning.
 pub struct Members {
@@ -235,6 +235,21 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
         eprintln!("zvolrescue: {e}");
         exit::USAGE
     })?;
+    // F-68: this tool reads a device and a copy of one the same way,
+    // and writes to neither. The next tool the operator reaches for —
+    // `zpool import -F`, a filesystem repair — does write, so it is
+    // worth saying once which of the two is on the table (SPEC §4.1).
+    let devices = paths
+        .iter()
+        .filter(|p| evidence::Kind::of(p).is_device())
+        .count();
+    if devices > 0 {
+        eprintln!(
+            "zvolrescue: {devices} of {} input(s) are devices, not images. \
+             Nothing here writes to them; the next tool might.",
+            paths.len()
+        );
+    }
     let mut sources = Vec::with_capacity(paths.len());
     let mut scans = Vec::with_capacity(paths.len());
     for p in &paths {

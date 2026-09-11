@@ -21,6 +21,14 @@ pub const FORMAT_VERSION: u32 = 1;
 pub struct FileRef {
     /// Path as the command named it.
     pub path: PathBuf,
+    /// What the path is: a regular file, or a device (SPEC F-68).
+    ///
+    /// Not a detail of this tool, which reads either the same way, but
+    /// of the recovery: a report that says the work was done against
+    /// images says something a report that cannot tell does not.
+    /// Absent from records written before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<Kind>,
     /// Size in bytes at the time of the run, or 0 if it could not be read.
     pub size: u64,
     /// Hex SHA-256, when it is known.
@@ -32,11 +40,53 @@ pub struct FileRef {
     pub sha256: Option<String>,
 }
 
+/// What a path turned out to be (SPEC F-68).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Kind {
+    /// A regular file: an image, or an extracted volume.
+    File,
+    /// A block device — the evidence itself, not a copy of it.
+    Device,
+    /// Something else, or something that could not be stat'ed.
+    Other,
+}
+
+impl Kind {
+    /// What `path` is, without opening it.
+    pub fn of(path: &Path) -> Kind {
+        let Ok(meta) = std::fs::metadata(path) else {
+            return Kind::Other;
+        };
+        if meta.is_file() {
+            return Kind::File;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileTypeExt;
+            // A raw disk is a block device everywhere this runs; on
+            // FreeBSD it is a character device, and both are the
+            // evidence rather than a copy of it.
+            let ft = meta.file_type();
+            if ft.is_block_device() || ft.is_char_device() {
+                return Kind::Device;
+            }
+        }
+        Kind::Other
+    }
+
+    /// Whether this is the evidence itself rather than a copy.
+    pub fn is_device(self) -> bool {
+        self == Kind::Device
+    }
+}
+
 impl FileRef {
     /// Describe a file without reading its contents.
     pub fn stat(path: &Path) -> FileRef {
         FileRef {
             path: path.to_path_buf(),
+            kind: Some(Kind::of(path)),
             size: std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
             sha256: None,
         }

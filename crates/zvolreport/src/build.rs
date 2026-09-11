@@ -183,6 +183,7 @@ pub fn assemble(records: &[(LogRef, Vec<Record>)], opts: &Options) -> Report {
                 .or_insert_with(|| Evidence {
                     file: FileRef {
                         path: i.path.clone(),
+                        kind: i.kind,
                         size: i.size,
                         sha256: i.sha256.clone(),
                     },
@@ -211,12 +212,25 @@ pub fn assemble(records: &[(LogRef, Vec<Record>)], opts: &Options) -> Report {
             if !e.read_by.contains(&r.tool) {
                 e.read_by.push(r.tool.clone());
             }
+            // F-68: worth saying in the report, because a reader
+            // deciding what this document is worth cares whether the
+            // work was done against copies or against the disks.
+            if i.kind.is_some_and(zvol_common::evidence::Kind::is_device) {
+                let note = format!(
+                    "{}: read as a device, not as an image: this recovery was done against the evidence itself",
+                    i.path.display()
+                );
+                if !warnings.contains(&note) {
+                    warnings.push(note);
+                }
+            }
         }
         for o in &r.outputs {
             outputs.insert(
                 o.path.clone(),
                 FileRef {
                     path: o.path.clone(),
+                    kind: o.kind,
                     size: o.size,
                     sha256: o.sha256.clone(),
                 },
@@ -423,6 +437,10 @@ mod tests {
             argv: vec![tool.into()],
             inputs: vec![EvFileRef {
                 path: PathBuf::from("/dev/sda1"),
+                // None on purpose: a record written before F-68 existed
+                // says nothing about what it read, and the build must
+                // not invent an answer for it.
+                kind: None,
                 size: 100,
                 sha256: None,
             }],
@@ -575,6 +593,51 @@ mod tests {
             "{:?}",
             r.warnings
         );
+    }
+
+    /// F-68: a reader deciding what a report is worth cares whether the
+    /// work was done against copies or against the disks themselves, so
+    /// the report says which — once per piece of evidence, however many
+    /// runs read it.
+    #[test]
+    fn a_recovery_done_against_the_disks_is_said_so_in_the_report() {
+        let on_a_device = |tool: &str, ts: u64| {
+            let mut r = record(tool, ts, 0, serde_json::json!({}));
+            r.inputs[0].kind = Some(zvol_common::evidence::Kind::Device);
+            r
+        };
+        let logs = log(vec![
+            on_a_device("zvolrescue", 10),
+            on_a_device("zvoltimeline", 11),
+        ]);
+        let report = assemble(&logs, &opts());
+        let said: Vec<&String> = report
+            .warnings
+            .iter()
+            .filter(|w| w.contains("read as a device"))
+            .collect();
+        assert_eq!(said.len(), 1, "{:?}", report.warnings);
+        assert!(said[0].contains("/dev/sda1"), "{:?}", said);
+        assert_eq!(
+            report.evidence[0].file.kind,
+            Some(zvol_common::evidence::Kind::Device)
+        );
+
+        // An image says nothing, and neither does a record from before
+        // the field existed.
+        for kind in [Some(zvol_common::evidence::Kind::File), None] {
+            let mut r = record("zvolrescue", 10, 0, serde_json::json!({}));
+            r.inputs[0].kind = kind;
+            let quiet = assemble(&log(vec![r]), &opts());
+            assert!(
+                !quiet
+                    .warnings
+                    .iter()
+                    .any(|w| w.contains("read as a device")),
+                "{kind:?}: {:?}",
+                quiet.warnings
+            );
+        }
     }
 
     #[test]

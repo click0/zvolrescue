@@ -33,6 +33,10 @@ pub struct ToolRef {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileRef {
     pub path: PathBuf,
+    /// `file` or `device`, as the run that read it recorded (F-68).
+    /// Absent from evidence logs written before that was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<zvol_common::evidence::Kind>,
     pub size: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
