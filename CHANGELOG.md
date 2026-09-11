@@ -6,9 +6,21 @@ validated against OpenZFS **userland** pools (`ztest` + `zdb`, no kernel)
 in CI; what was tried on real environments is logged in
 [docs/REALWORLD-TESTS.md](docs/REALWORLD-TESTS.md).
 
-## Unreleased
+Only `v0.1.0-alpha.1` and `v0.7.0` are tags. A tag here is made from the
+GitHub web interface, which can only tag the head of a branch, so
+`v0.2.0` through `v0.6.0` are development milestones that name what
+changed when — the sections below are their record — and `v0.7.0` is the
+release that carries all of them.
+
+## v0.7.0 — 2026-09-11
+
+**Everything the companion spec asked for.** Every requirement
+COMPANIONS marks as worth having is implemented, and the numbers to
+check them by are in CI. Nothing in the companion tables is left
+outstanding but two rows marked *could*.
 
 ### Added
+
 * **`zvolcarve` asks the allocator (COMPANIONS C-06).** Every metaslab's
   space map is replayed into a set of ranges, and each block a candidate
   claims is asked about: the space is either still given out or
@@ -66,24 +78,6 @@ in CI; what was tried on real environments is logged in
   objects come to, and says whether that agrees with the running total
   the deadlist keeps. The pool maintains the two independently, so a
   disagreement is this reader's fault rather than the pool's.
-
-### Fixed
-* A deadlist's total now follows the block-pointer objects filed under
-  its own. `bpo_bytes` covers only the pointers an object holds itself;
-  one that has swallowed another — which is how deadlists are merged —
-  keeps that other's space in its own header, so stopping at the parent
-  undercounts. Caught by the check above on the first `ztest` pool that
-  produced the case, and pinned by a fixture that fails without it.
-* A deadlist named by more than one dataset is counted once. Nothing in
-  CI had produced that case; the check above is what would have caught
-  it.
-
-## v0.7.0 — 2026-09-10
-
-**Everything the companion spec asked for.** The last of what
-COMPANIONS marks worth having, and the numbers to check it by.
-
-### Added
 * **`zvolfiles` reads extended attributes and keeps hard links
   (COMPANIONS Z-04, Z-07, Z-09).** Attributes are read from both places
   they live — packed into the system attributes as an nvlist
@@ -106,6 +100,16 @@ COMPANIONS marks worth having, and the numbers to check it by.
   `ztest` pool in CI.
 
 ### Fixed
+
+* A deadlist's total now follows the block-pointer objects filed under
+  its own. `bpo_bytes` covers only the pointers an object holds itself;
+  one that has swallowed another — which is how deadlists are merged —
+  keeps that other's space in its own header, so stopping at the parent
+  undercounts. Caught by the check above on the first `ztest` pool that
+  produced the case, and pinned by a fixture that fails without it.
+* A deadlist named by more than one dataset is counted once. Nothing in
+  CI had produced that case; the check above is what would have caught
+  it.
 * A dnode with no block pointers but a bonus buffer is recognised as one.
   Requiring at least one block made every DSL dataset and directory
   invisible to a carve — objects that own no data and say everything in

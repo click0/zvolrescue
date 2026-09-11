@@ -1,15 +1,37 @@
 # Releasing
 
+**The tag lands on the head of `main`.** Tags here are made from the
+GitHub web interface, which cannot tag an arbitrary commit — it tags a
+branch, and takes its head. So the release is whatever `main` is at the
+moment of tagging, and everything below follows from that:
+
+* The version bump and the closed `## vX.Y.Z` section must be in the
+  **last commit before the tag**, not in some earlier one.
+* There is no tagging a milestone after the fact. A version whose commit
+  has already been built on is not a release any more; give the work
+  that followed it the same version, or wait and give the next number to
+  the lot. `v0.2.0` … `v0.6.0` went this way: they name what changed
+  when, and `v0.7.0` is the tag that carries them.
+* Nothing lands on `main` between "CI is green" and the tag.
+
 1. Update `version` in the workspace `Cargo.toml` and add a section
-   `## vX.Y.Z — date` to `CHANGELOG.md` (and `CHANGELOG.uk.md`).
-2. Make sure CI is green on `main`.
-3. Tag and push. The tag is `vX.Y.Z` — no dot after the `v`, which is
-   what the release is named and linked by:
+   `## vX.Y.Z — date` to `CHANGELOG.md` (and `CHANGELOG.uk.md`). Fold
+   whatever `## Unreleased` holds into it: after the tag it is released,
+   whether or not the section said so.
+2. Make sure CI is green on `main`, and that nothing has been pushed
+   since the run that went green.
+3. Tag. From the web: **Releases → Draft a new release → Choose a tag →**
+   type `vX.Y.Z` **→ Create new tag on publish**, target `main`, then
+   publish — the tag is created on `main`'s head and the release workflow
+   takes it from there. From a checkout, the same thing explicitly:
 
    ```sh
    git tag -a vX.Y.Z -m "zvolrescue vX.Y.Z"
    git push origin vX.Y.Z
    ```
+
+   The tag is `vX.Y.Z` — no dot after the `v`, which is what the release
+   is named and linked by.
 
    A mistyped tag (`v.X.Y.Z`, `VX.Y.Z`) still releases the right version:
    the workflow normalises it for the file names and the CHANGELOG

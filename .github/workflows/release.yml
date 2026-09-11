@@ -127,6 +127,28 @@ jobs:
           if [ "$tag" != "v$v" ]; then
             echo "::warning::tag $tag is not vX.Y.Z; releasing version $v"
           fi
+          # The version's section of CHANGELOG.md: from its heading to
+          # the next "## ".
+          section=$(awk -v want="v$v" '
+            $0 ~ "^## " want { p=1; next }
+            /^## / && p { exit }
+            p { print }' CHANGELOG.md)
+          # An empty section means the CHANGELOG has no heading for this
+          # version: publishing notes that say nothing is worse than
+          # failing here, where it can still be fixed.
+          if ! printf '%s\n' "$section" | grep -q "^### "; then
+            echo "::error::CHANGELOG.md has no '## v$v' section; nothing to say about this release"
+            exit 1
+          fi
+          # Whatever `## Unreleased` still held at this tag shipped in it
+          # too. A tag is made on the head of `main`, so anything the
+          # CHANGELOG had not got round to filing under a version is in
+          # these binaries all the same, and notes that leave it out
+          # describe a release that does not exist.
+          unreleased=$(awk '
+            /^## Unreleased/ { p=1; next }
+            /^## / && p { exit }
+            p { print }' CHANGELOG.md)
           {
             echo "**zvolrescue $tag** — read-only extraction of zvols from ZFS pools that no longer import: labels, uberblocks, mirror/RAIDZ/dRAID reconstruction, every checksum and compression, encrypted datasets with a key."
             echo
@@ -151,23 +173,17 @@ jobs:
             echo
             echo "## What is in $tag"
             echo
-            # The version's section of CHANGELOG.md: from its heading to
-            # the next "## ".
-            awk -v want="v$v" '
-              $0 ~ "^## " want { p=1; next }
-              /^## / && p { exit }
-              p { print }' CHANGELOG.md
+            printf '%s\n' "$section"
+            if printf '%s\n' "$unreleased" | grep -q "^\* "; then
+              echo
+              echo "### Also in this tag, filed under no version yet"
+              echo
+              printf '%s\n' "$unreleased"
+            fi
             echo
             echo "Full history: [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/$tag/CHANGELOG.md)."
           } > notes.md
           cat notes.md
-          # An empty section means the CHANGELOG has no heading for this
-          # version: publishing notes that say nothing is worse than
-          # failing here, where it can still be fixed.
-          if ! grep -q "^### " notes.md; then
-            echo "::error::CHANGELOG.md has no '## v$v' section; nothing to say about this release"
-            exit 1
-          fi
       # The release is assembled as a draft and published only once it
       # carries every file. That order is right either way, and it is
       # the only one that works when release immutability is on
