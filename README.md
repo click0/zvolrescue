@@ -241,7 +241,11 @@ and no system libraries are required: the whole decode stack is pure Rust.
 
 ## Platforms
 
-FreeBSD 13.x–15.x are first-class targets. Linux is a supported build and
+FreeBSD 15.x is the first-class target; 14.x is best-effort (it builds and
+the suite passes, but a failure there does not hold a release, and the
+published FreeBSD binary is a 15.x binary — on 14.x, `pkg install rust &&
+cargo build --release`). 13.x is out of support and dropped. Linux is a
+supported build and
 test platform. macOS is best-effort.
 
 ## Contributing

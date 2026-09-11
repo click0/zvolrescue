@@ -15,6 +15,23 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ## Unreleased
 
+### Changed
+* **FreeBSD 15.x is the first-class target; 14.x is best-effort; 13.x is
+  dropped.** CI's blocking FreeBSD job now builds and tests on the
+  newest 15.x, and a second job does the same on 14.x without being
+  allowed to hold anything up — `stable/14` is supported upstream until
+  November 2028, so a break there should be visible, not fatal. 13.x
+  left support in April 2026. Both jobs ask for `15` and `14` rather
+  than a point release, so a new one does not need this repository
+  edited; a branch the runner does not ship fails the job instead of
+  quietly falling back.
+* **The published FreeBSD binary is a 15.x binary.** FreeBSD keeps its
+  ABI within a major branch and changes it between majors, so one file
+  cannot be both. It is built on 15.x and the release notes say so; on
+  14.x the build from source is `pkg install rust && cargo build
+  --release`, and the suite passes there. CI had been pinned to 14.2,
+  which has been out of support for some time.
+
 ### Documented
 * **SPEC §4.1: what the operator has to do, which the tool cannot do for
   them.** Being read-only by construction is worth little on its own,

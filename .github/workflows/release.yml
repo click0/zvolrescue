@@ -71,7 +71,10 @@ jobs:
           ref: ${{ github.event.inputs.tag || github.ref_name }}
       - uses: vmactions/freebsd-vm@v1
         with:
-          release: "14.2"
+          # 15.x is the first-class target (N-06), and FreeBSD's ABI
+          # changes between major branches, so this file is the 15.x
+          # file. On 14.x the tool is built from source.
+          release: "15"
           usesh: true
           prepare: pkg install -y rust
           run: |
@@ -188,7 +191,7 @@ jobs:
             echo "|---|---|---|"
             echo "| Linux x86_64 | \`x86_64-linux-musl\` | static; runs on any distribution, and on a rescue medium |"
             echo "| Linux aarch64 | \`aarch64-linux-musl\` | static |"
-            echo "| FreeBSD 14.x amd64 | \`amd64-freebsd\` | built on 14.2; runs on mfsBSD |"
+            echo "| FreeBSD 15.x amd64 | \`amd64-freebsd\` | built on 15.x. FreeBSD changes its ABI between major branches, so on 14.x build from source: \`pkg install rust && cargo build --release\` |"
             echo
             echo "So the carver for Linux x86_64 is \`zvolcarve-$v-x86_64-linux-musl\`, and the FreeBSD main binary is \`zvolrescue-$v-amd64-freebsd\`."
             echo

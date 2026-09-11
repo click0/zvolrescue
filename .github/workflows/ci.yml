@@ -626,14 +626,37 @@ jobs:
       - run: cargo build --release && cargo build --release -p zfs-read --examples
       - run: tests/crosscheck-ztest.sh ./target/release/zvolrescue /tmp/crosscheck ./target/release/examples/walk-objects ./target/release/examples/unwrap-key ./target/release/zvoltimeline ./target/release/examples/space
 
+  # 15.x is the first-class target (N-06): this one blocks.
   freebsd:
-    name: FreeBSD 14 (ports rust)
+    name: FreeBSD 15 (ports rust)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: vmactions/freebsd-vm@v1
         with:
-          release: "14.2"
+          # The newest 15.x the action ships, so a point release does not
+          # need this file edited — and a release that does not exist
+          # fails the job rather than quietly falling back to another.
+          release: "15"
+          usesh: true
+          prepare: pkg install -y rust
+          run: |
+            cargo test --all-targets
+            cargo build --release
+            ./target/release/zvolrescue --version
+
+  # 14.x on a best-effort footing (N-06): built and tested so a break is
+  # visible, allowed to fail so it does not hold anything up. stable/14
+  # is supported by the project until November 2028.
+  freebsd14:
+    name: FreeBSD 14 (best effort)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - uses: vmactions/freebsd-vm@v1
+        with:
+          release: "14"
           usesh: true
           prepare: pkg install -y rust
           run: |
