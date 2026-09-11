@@ -826,10 +826,21 @@ pub fn zpl_deep() -> Vec<u8> {
     (0..4096u32).map(|i| (i % 251) as u8).collect()
 }
 
+/// The name of the fixture's one file whose name is not UTF-8:
+/// `café.txt` as a Latin-1 machine wrote it, which is a name a dataset
+/// with `utf8only=off` is allowed to hold (Z-09).
+pub const ZPL_LATIN1_NAME: &[u8] = b"caf\xe9.txt";
+
+/// The contents of that file.
+pub fn zpl_latin1() -> Vec<u8> {
+    b"a name is bytes, not text\n".to_vec()
+}
+
 /// Build a filesystem objset with a small POSIX tree, and return its
 /// block pointer (COMPANIONS §5.4).
 ///
 /// ```text
+/// caf\xe9.txt      a regular file whose name is not UTF-8
 /// hello.txt        a regular file
 /// link             a symbolic link to sub/deep.txt, target in the
 ///                  system attributes rather than in a block
@@ -936,16 +947,18 @@ fn build_zpl_objset(m: &mut [Vec<u8>], a: &mut Alloc) -> [u8; blkptr::SIZE] {
     );
 
     // 3: the root directory.
-    let root_entries = [
+    let root_entries: [(&[u8], u64); 5] = [
+        // A name no dataset with utf8only=on could hold (Z-09).
+        (ZPL_LATIN1_NAME, dirent_value(10, 8)),
         // Two names for one object: a hard link (Z-07).
-        ("hardlink.txt", dirent_value(6, 8)),
-        ("hello.txt", dirent_value(6, 8)),
-        ("link", dirent_value(8, 10)),
-        ("sub", dirent_value(7, 4)),
+        (b"hardlink.txt", dirent_value(6, 8)),
+        (b"hello.txt", dirent_value(6, 8)),
+        (b"link", dirent_value(8, 10)),
+        (b"sub", dirent_value(7, 4)),
     ];
     let root_blk = a.put(
         m,
-        &micro(4096, &root_entries),
+        &zfs_ondisk::zap::encode::micro_bytes(4096, &root_entries),
         ot::DIRECTORY_CONTENTS,
         0,
         100,
@@ -956,7 +969,7 @@ fn build_zpl_objset(m: &mut [Vec<u8>], a: &mut Alloc) -> [u8; blkptr::SIZE] {
             object_type: ot::DIRECTORY_CONTENTS,
             datablksz: 4096,
             bonus_type: ot::SA,
-            bonus: sa_bonus(2, &meta(0o40755, 4, 3, 3), &[]),
+            bonus: sa_bonus(2, &meta(0o40755, 5, 3, 3), &[]),
             blkptrs: vec![root_blk],
             ..DnodeSpec::default()
         }
@@ -1028,6 +1041,17 @@ fn build_zpl_objset(m: &mut [Vec<u8>], a: &mut Alloc) -> [u8; blkptr::SIZE] {
             m,
             &deep,
             sa_bonus(2, &meta(0o100600, deep.len() as u64, 7, 1), &[]),
+        ),
+    );
+    // 10: the file whose name is not text.
+    let latin1 = zpl_latin1();
+    put(
+        10,
+        file(
+            a,
+            m,
+            &latin1,
+            sa_bonus(2, &meta(0o100644, latin1.len() as u64, 3, 1), &[]),
         ),
     );
 

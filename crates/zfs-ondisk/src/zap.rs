@@ -104,12 +104,28 @@ impl Value {
 /// One name/value pair.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
-    /// Entry name.
+    /// Entry name, as text.
+    ///
+    /// A dataset with `utf8only=off` may hold names that are not UTF-8
+    /// at all — on Linux a file name is any byte string without `/` or
+    /// NUL — and this field replaces what it cannot decode. Use it to
+    /// print and to compare loosely; use [`Entry::raw`] for anything
+    /// that has to give the name back unchanged.
     pub name: String,
+    /// Entry name, as the bytes on disk, with the trailing NUL stripped.
+    pub raw: Vec<u8>,
     /// Entry value.
     pub value: Value,
     /// Collision differentiator.
     pub cd: u32,
+}
+
+impl Entry {
+    /// Whether the name on disk is valid UTF-8 — that is, whether
+    /// [`Entry::name`] gives it back exactly.
+    pub fn name_is_text(&self) -> bool {
+        self.name.as_bytes() == self.raw
+    }
 }
 
 /// Parse a microzap block into its non-empty entries.
@@ -130,6 +146,7 @@ pub fn parse_micro(buf: &[u8], endian: Endian) -> Result<Vec<Entry>, ParseError>
         let cd_bytes: [u8; 4] = chunk[8..12].try_into().expect("4 bytes");
         out.push(Entry {
             name: String::from_utf8_lossy(&name[..end]).into_owned(),
+            raw: name[..end].to_vec(),
             value: Value::U64(endian.u64_at(chunk, 0).expect("64-byte chunk")),
             cd: match endian {
                 Endian::Little => u32::from_le_bytes(cd_bytes),
@@ -316,10 +333,11 @@ pub fn parse_leaf(buf: &[u8], endian: Endian) -> Result<Vec<Entry>, ParseError> 
             .position(|&b| b == 0)
             .unwrap_or(name_bytes.len());
         let name = String::from_utf8_lossy(&name_bytes[..end]).into_owned();
-        let raw = read_array(value_chunk, intlen * value_numints)?;
+        let raw = name_bytes[..end].to_vec();
+        let bytes = read_array(value_chunk, intlen * value_numints)?;
         let value = match intlen {
             8 => {
-                let ints: Vec<u64> = raw
+                let ints: Vec<u64> = bytes
                     .chunks_exact(8)
                     .map(|c| u64::from_be_bytes(c.try_into().expect("8 bytes")))
                     .collect();
@@ -329,13 +347,18 @@ pub fn parse_leaf(buf: &[u8], endian: Endian) -> Result<Vec<Entry>, ParseError> 
                     Value::U64Array(ints)
                 }
             }
-            1 => Value::Bytes(raw),
+            1 => Value::Bytes(bytes),
             _ => Value::Ints {
                 intlen: intlen as u8,
-                raw,
+                raw: bytes,
             },
         };
-        out.push(Entry { name, value, cd });
+        out.push(Entry {
+            name,
+            raw,
+            value,
+            cd,
+        });
     }
     Ok(out)
 }
@@ -346,13 +369,22 @@ pub mod encode {
 
     /// Build a microzap block of `size` bytes from `(name, value)` pairs.
     pub fn micro(size: usize, entries: &[(&str, u64)]) -> Vec<u8> {
+        let bytes: Vec<(&[u8], u64)> = entries.iter().map(|(n, v)| (n.as_bytes(), *v)).collect();
+        micro_bytes(size, &bytes)
+    }
+
+    /// The same, for names that are not text.
+    ///
+    /// A dataset with `utf8only=off` can hold any byte string but `/`
+    /// and NUL, so a fixture has to be able to write one.
+    pub fn micro_bytes(size: usize, entries: &[(&[u8], u64)]) -> Vec<u8> {
         let mut b = vec![0u8; size];
         b[..8].copy_from_slice(&ZBT_MICRO.to_le_bytes());
         for (i, (name, value)) in entries.iter().enumerate() {
             let at = MZAP_ENT_SIZE * (1 + i);
             assert!(at + MZAP_ENT_SIZE <= size && name.len() < MZAP_NAME_LEN);
             b[at..at + 8].copy_from_slice(&value.to_le_bytes());
-            b[at + 14..at + 14 + name.len()].copy_from_slice(name.as_bytes());
+            b[at + 14..at + 14 + name.len()].copy_from_slice(name);
         }
         b
     }

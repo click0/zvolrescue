@@ -2,15 +2,19 @@
 
 use serde::Serialize;
 use zfs_ondisk::zpl::Znode;
-use zfs_read::zpl::{walk, Entry};
+use zfs_read::zpl::{walk_from, Entry};
 use zvol_common::timefmt::iso8601;
 use zvol_common::{exit, Format, Global, PoolSpec};
 
-use crate::common::{with_dataset, AtArgs};
+use crate::common::{os_bytes, with_dataset, AtArgs};
 
 #[derive(Debug, Serialize)]
 struct FileOut {
     path: String,
+    /// The path's exact bytes as hex, present only when the name is not
+    /// UTF-8 and `path` therefore shows something else (Z-09).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path_hex: Option<String>,
     object: u64,
     #[serde(rename = "type")]
     kind: String,
@@ -51,6 +55,8 @@ fn describe(e: &Entry, target: Option<String>, xattrs: Vec<String>) -> FileOut {
     let z = e.znode.as_ref();
     FileOut {
         path: e.path.clone(),
+        path_hex: (!e.path_is_text())
+            .then(|| e.raw_path.iter().map(|b| format!("{b:02x}")).collect()),
         object: e.object,
         kind: e
             .file_type()
@@ -73,19 +79,25 @@ pub fn run(
     spec: &PoolSpec,
     dataset: &str,
     at: &AtArgs,
-    path: Option<&str>,
+    path: Option<&std::ffi::OsStr>,
     recursive: bool,
 ) -> u8 {
+    let asked = path.map(os_bytes).unwrap_or_default();
     let result = with_dataset(spec, dataset, at, |fs, opened| {
         let from = match path {
             None => fs.root,
-            Some(p) => fs.lookup(p).map_err(|e| {
-                eprintln!("zvolfiles: {p}: {e}");
+            Some(p) => fs.lookup_bytes(&asked).map_err(|e| {
+                eprintln!("zvolfiles: {}: {e}", p.to_string_lossy());
                 exit::UNRECOVERABLE
             })?,
         };
-        let prefix = path.unwrap_or("").trim_matches('/').to_string();
-        let entries = walk(fs, from, &prefix, recursive);
+        let raw_prefix: Vec<u8> = asked
+            .split(|&b| b == b'/')
+            .filter(|p| !p.is_empty())
+            .collect::<Vec<_>>()
+            .join(&b'/');
+        let prefix = String::from_utf8_lossy(&raw_prefix).into_owned();
+        let entries = walk_from(fs, from, &prefix, &raw_prefix, recursive);
         let files: Vec<FileOut> = entries
             .iter()
             .map(|e| {
@@ -112,7 +124,7 @@ pub fn run(
                 dataset: dataset.to_string(),
                 txg: opened.txg,
                 root: fs.root,
-                path: path.map(str::to_string),
+                path: path.map(|p| p.to_string_lossy().into_owned()),
                 properties: fs.properties.clone(),
                 files,
             },

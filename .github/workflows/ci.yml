@@ -418,7 +418,11 @@ jobs:
           import json
           d = json.load(open("/tmp/zp/list.json"))
           by = {f["path"]: f for f in d["files"]}
-          assert list(by) == ["hardlink.txt", "hello.txt", "link", "sub", "sub/deep.txt"], list(by)
+          assert list(by) == ["caf\ufffd.txt", "hardlink.txt", "hello.txt", "link", "sub", "sub/deep.txt"], list(by)
+          # Z-09: a name that is not UTF-8 prints as best it can and
+          # carries its exact bytes alongside; the others carry none.
+          assert by["caf\ufffd.txt"]["path_hex"] == "636166e92e747874", by["caf\ufffd.txt"]
+          assert all("path_hex" not in f for p, f in by.items() if p != "caf\ufffd.txt"), by
           # Z-04: extended attributes out of the system attributes.
           assert by["hello.txt"]["xattrs"] == ["user.case", "user.note"], by["hello.txt"]
           assert "xattrs" not in by["sub/deep.txt"], by["sub/deep.txt"]
@@ -452,6 +456,12 @@ jobs:
           a = os.stat("/tmp/zp/out/hello.txt")
           b = os.stat("/tmp/zp/out/hardlink.txt")
           assert (a.st_ino, a.st_nlink) == (b.st_ino, 2), (a, b)
+          # Z-09: the file is on disk under the bytes it had, not under
+          # the replacement characters its name prints as.
+          names = sorted(n for n in os.listdir(b"/tmp/zp/out") if not n.isascii())
+          assert names == [b"caf\xe9.txt"], names
+          assert open(b"/tmp/zp/out/caf\xe9.txt", "rb").read() == b"a name is bytes, not text\n"
+          assert f["caf\ufffd.txt"]["path_hex"] == "636166e92e747874", f
           # Z-04: attributes recorded with their values, since applying
           # them would need the platform's own call.
           x = {v["name"]: v["value"] for v in f["hello.txt"]["xattrs"]}
@@ -461,6 +471,12 @@ jobs:
           rm -rf /tmp/zp/one
           ./target/release/zvolfiles -q extract tank/fs /tmp/zp/member0.img -o /tmp/zp/one --path sub
           test -f /tmp/zp/one/sub/deep.txt && test ! -e /tmp/zp/one/hello.txt
+          # Z-09: and that path can itself be a name that is not text.
+          rm -rf /tmp/zp/latin1
+          ./target/release/zvolfiles -q extract tank/fs /tmp/zp/member0.img -o /tmp/zp/latin1 --path "$(printf 'caf\xe9.txt')"
+          test "$(cat "$(printf '/tmp/zp/latin1/caf\xe9.txt')")" = "a name is bytes, not text"
+          # The text it prints as is not a name any file has.
+          if ./target/release/zvolfiles -q extract tank/fs /tmp/zp/member0.img -o /tmp/zp/no --path 'caf.txt'; then echo "must fail"; exit 1; else test $? = 3; fi
           # Z-08: with the root directory ZAP zeroed on every member, the
           # walk cannot work and the objects still come out whole.
           cp /tmp/zp/member0.img /tmp/zp/bad0.img

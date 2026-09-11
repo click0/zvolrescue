@@ -480,11 +480,26 @@ hidden directory (`xattr=on`) — and *recorded in the manifest with their
 values rather than applied*, because setting one needs the platform's
 own call and this workspace links no system libraries. An object met
 under a second name is written as a hard link to the first rather than
-copied, so the tree keeps the shape it had. A path is matched exactly
-first and case-folded only where the dataset's `casesensitivity` says so.
+copied, so the tree keeps the shape it had.
 
-Not implemented: `normalization` and `utf8only` in path matching (both
-are reported), and the feature-flag extensions to the SA layout (Z-10).
+A name is bytes, not text. A dataset with `utf8only=off` is allowed to
+hold a name that is not UTF-8 — on Linux a file name is any byte string
+without `/` or NUL — and decoding one into replacement characters would
+silently rename a file, which is the one thing a forensic extraction
+must not do. So the bytes are carried from the directory ZAP through the
+walk to the output, and a file comes out called what it was called. What
+is printed and what goes in the JSON is still text, because a terminal
+needs one; alongside it, `path_hex` gives the exact bytes, and it is
+present only where printing lost something. The fixture holds
+`caf\xe9.txt` — `café.txt` as a Latin-1 machine wrote it — and CI checks
+that it is extracted under those bytes, found under those bytes, and
+*not* found under the text it prints as, which is a name no file has.
+
+A path is matched on the bytes first, and case-folded only where the
+dataset's `casesensitivity` says so.
+
+Not implemented: `normalization` in path matching (it is reported), and
+the feature-flag extensions to the SA layout (Z-10).
 Sparse regions come out as the holes they are, since a hole is a hole in
 the tree; a file whose tail was never written is extracted to the length
 the attributes give.*

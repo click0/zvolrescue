@@ -28,6 +28,17 @@ in CI; what was tried on real environments is logged in
   recognised without one, because a guess with no number is honest and
   an invented number is not. `dump` prefers `--size`, then the size the
   contents state, then what the dnode implies, and says which it used.
+* **`zvolfiles` gives a file back the name it had (COMPANIONS Z-09).**
+  A dataset with `utf8only=off` may hold a name that is not UTF-8 — on
+  Linux a file name is any byte string without `/` or NUL — and decoding
+  one into replacement characters silently renames the file, which a
+  forensic extraction must not do. The bytes are now carried from the
+  directory ZAP through the walk to the output, a path is matched on the
+  bytes, and `--path` takes the operating system's own argument rather
+  than text. What is printed stays text, with `path_hex` alongside it
+  wherever printing lost something. The fixture holds `café.txt` as a
+  Latin-1 machine wrote it, and CI checks it comes out under those bytes
+  and is not found under the text it prints as.
 * **A report can be signed, and checked without this tool (COMPANIONS
   R-07).** `zvolreport build --sign KEY` signs the exact bytes of
   `report.json` with Ed25519 and leaves the raw 64 bytes beside it;

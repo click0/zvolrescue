@@ -8,11 +8,11 @@
 use std::io::Write;
 
 use sha2::{Digest, Sha256};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use zfs_ondisk::zpl::FileType;
-use zfs_read::zpl::{walk, Filesystem};
+use zfs_read::zpl::{walk_from, Filesystem};
 use zvol_common::evidence::FileRef;
 use zvol_common::{exit, Format, Global, PoolSpec};
 use zvolrescue_io::refuse_if_evidence;
@@ -21,7 +21,7 @@ use crate::common::{with_dataset, AtArgs};
 
 /// Options of an `extract` run.
 pub struct Options {
-    pub paths: Vec<String>,
+    pub paths: Vec<std::ffi::OsString>,
     pub output: PathBuf,
     pub strict: bool,
     pub preserve: String,
@@ -31,6 +31,11 @@ pub struct Options {
 #[derive(Debug, Serialize)]
 pub struct Extracted {
     pub path: String,
+    /// The path's exact bytes as hex, present only when the name is not
+    /// UTF-8 and `path` therefore shows something else (Z-09). The file
+    /// is written under these bytes either way.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path_hex: Option<String>,
     pub object: u64,
     #[serde(rename = "type")]
     pub kind: String,
@@ -64,6 +69,17 @@ pub struct Xattr {
     pub bytes: usize,
 }
 
+/// The first name an object was written under, so a later name for the
+/// same object becomes a hard link to it rather than a second copy.
+#[derive(Debug, Clone)]
+struct Written {
+    path: String,
+    raw_path: Vec<u8>,
+    sha256: Option<String>,
+}
+
+type WrittenObjects = std::collections::BTreeMap<u64, Written>;
+
 #[derive(Debug, Serialize)]
 struct ManifestOut {
     dataset: String,
@@ -79,20 +95,49 @@ struct ManifestOut {
     hardlinks: usize,
 }
 
+/// One path component, as the operating system spells names.
+///
+/// On Unix a file name is any byte string without `/` or NUL, so the
+/// bytes go through unchanged and a file keeps the name it had, whatever
+/// `utf8only` was set to. Elsewhere a name is text, and one that is not
+/// text cannot be written at all — which is said rather than mangled.
+#[cfg(unix)]
+fn os_component(part: &[u8]) -> Option<std::ffi::OsString> {
+    use std::os::unix::ffi::OsStringExt;
+    Some(std::ffi::OsString::from_vec(part.to_vec()))
+}
+
+#[cfg(not(unix))]
+fn os_component(part: &[u8]) -> Option<std::ffi::OsString> {
+    std::str::from_utf8(part).ok().map(std::ffi::OsString::from)
+}
+
 /// A path from the dataset, made safe to join onto the output directory.
 ///
 /// A name from damaged metadata is not to be trusted with the shape of
 /// the filesystem it is being written into: anything that would climb
 /// out of the output directory, or start from its root, is refused.
-fn safe_join(root: &Path, path: &str) -> Option<PathBuf> {
-    let mut out = root.to_path_buf();
-    for c in Path::new(path).components() {
-        match c {
-            Component::Normal(part) => out.push(part),
-            Component::CurDir => {}
-            _ => return None,
-        }
+///
+/// The path arrives as bytes rather than as text, because that is what
+/// it is on disk (Z-09).
+fn safe_join(root: &Path, path: &[u8]) -> Option<PathBuf> {
+    if path.first() == Some(&b'/') {
+        return None;
     }
+    let mut out = root.to_path_buf();
+    for part in path.split(|&b| b == b'/') {
+        match part {
+            b"" | b"." => continue,
+            b".." => return None,
+            _ => {}
+        }
+        if part.contains(&0) {
+            return None;
+        }
+        out.push(os_component(part)?);
+    }
+    // A component the platform refuses, or a path of nothing but "."
+    // separators, leaves the root unchanged; neither is a file.
     (out != root).then_some(out)
 }
 
@@ -155,16 +200,22 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
         })?;
 
         // Nothing given means the whole dataset.
-        let roots: Vec<(u64, String)> = if opts.paths.is_empty() {
-            vec![(fs.root, String::new())]
+        let roots: Vec<(u64, Vec<u8>)> = if opts.paths.is_empty() {
+            vec![(fs.root, Vec::new())]
         } else {
             let mut v = Vec::new();
             for p in &opts.paths {
-                let obj = fs.lookup(p).map_err(|e| {
-                    eprintln!("zvolfiles: {p}: {e}");
+                let asked = crate::common::os_bytes(p);
+                let obj = fs.lookup_bytes(&asked).map_err(|e| {
+                    eprintln!("zvolfiles: {}: {e}", p.to_string_lossy());
                     exit::UNRECOVERABLE
                 })?;
-                v.push((obj, p.trim_matches('/').to_string()));
+                let trimmed: Vec<u8> = asked
+                    .split(|&b| b == b'/')
+                    .filter(|c| !c.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(&b'/');
+                v.push((obj, trimmed));
             }
             v
         };
@@ -173,14 +224,14 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
         let mut directories = 0usize;
         // Z-07: an object already written under another name is linked
         // to rather than copied, so the tree keeps the shape it had.
-        let mut written_objects: std::collections::BTreeMap<u64, String> =
-            std::collections::BTreeMap::new();
-        for (obj, prefix) in roots {
+        let mut written_objects: WrittenObjects = std::collections::BTreeMap::new();
+        for (obj, raw_prefix) in roots {
+            let prefix = String::from_utf8_lossy(&raw_prefix).into_owned();
             // A path that names a file rather than a directory is
             // extracted on its own.
             let z = fs.znode(obj).ok();
             if z.as_ref().map(|z| z.file_type()) == Some(FileType::Dir) {
-                for e in walk(fs, obj, &prefix, true) {
+                for e in walk_from(fs, obj, &prefix, &raw_prefix, true) {
                     extract_entry(
                         fs,
                         &e,
@@ -193,6 +244,7 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
                 }
             } else {
                 let e = zfs_read::zpl::Entry {
+                    raw_path: raw_prefix.clone(),
                     path: prefix.clone(),
                     object: obj,
                     znode: z,
@@ -287,18 +339,19 @@ fn extract_entry(
     preserve: &[&str],
     files: &mut Vec<Extracted>,
     directories: &mut usize,
-    written_objects: &mut std::collections::BTreeMap<u64, String>,
+    written_objects: &mut WrittenObjects,
 ) {
     let Some(z) = &e.znode else {
         files.push(failed(e, "metadata unreadable"));
         return;
     };
-    let Some(to) = safe_join(&opts.output, &e.path) else {
+    let Some(to) = safe_join(&opts.output, &e.raw_path) else {
         files.push(failed(e, "name would climb out of the output directory"));
         return;
     };
     let mut record = Extracted {
         path: e.path.clone(),
+        path_hex: path_hex(e),
         object: e.object,
         kind: z.file_type().as_char().to_string(),
         mode: format!("{:04o}", z.permissions()),
@@ -339,28 +392,38 @@ fn extract_entry(
             }
             // The same object under a second name is a hard link, and
             // reading its blocks again would only prove that twice.
-            if z.links > 1 {
-                if let Some(first) = written_objects.get(&e.object) {
-                    let from = opts.output.join(first);
-                    match std::fs::hard_link(&from, &to) {
-                        Ok(()) => {
-                            record.hardlink_to = Some(first.clone());
-                            record.sha256 = files
-                                .iter()
-                                .find(|f| &f.path == first)
-                                .and_then(|f| f.sha256.clone());
-                        }
-                        Err(err) => record.error = Some(err.to_string()),
+            if let Some(first) = written_objects.get(&e.object).cloned() {
+                match safe_join(&opts.output, &first.raw_path)
+                    .ok_or_else(|| "the first name is not one this platform can write".to_string())
+                    .and_then(|from| std::fs::hard_link(&from, &to).map_err(|err| err.to_string()))
+                {
+                    Ok(()) => {
+                        record.hardlink_to = Some(first.path.clone());
+                        record.sha256 = first.sha256.clone();
                     }
-                    files.push(record);
-                    return;
+                    Err(err) => record.error = Some(err),
                 }
-                written_objects.insert(e.object, e.path.clone());
+                files.push(record);
+                return;
             }
             match copy_file(fs, e.object, z.size, &to, opts.strict) {
                 Ok((hash, errors)) => {
-                    record.sha256 = Some(hash);
+                    record.sha256 = Some(hash.clone());
                     record.errors = errors;
+                    // Only now, and only for an object that has more
+                    // names to come: the hash is what a later link
+                    // records, and reading the blocks again would prove
+                    // the same thing twice (Z-07).
+                    if z.links > 1 {
+                        written_objects.insert(
+                            e.object,
+                            Written {
+                                path: e.path.clone(),
+                                raw_path: e.raw_path.clone(),
+                                sha256: Some(hash),
+                            },
+                        );
+                    }
                 }
                 Err(err) => record.error = Some(err),
             }
@@ -375,9 +438,16 @@ fn extract_entry(
     files.push(record);
 }
 
+/// The exact bytes of a path, but only where printing them lost
+/// something; a name that is text needs no second spelling.
+fn path_hex(e: &zfs_read::zpl::Entry) -> Option<String> {
+    (!e.path_is_text()).then(|| e.raw_path.iter().map(|b| format!("{b:02x}")).collect())
+}
+
 fn failed(e: &zfs_read::zpl::Entry, why: &str) -> Extracted {
     Extracted {
         path: e.path.clone(),
+        path_hex: path_hex(e),
         object: e.object,
         kind: "?".into(),
         mode: "????".into(),

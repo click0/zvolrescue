@@ -10,6 +10,22 @@ use zfs_read::zpl::{open_filesystem, Filesystem};
 use zvol_common::members::{choose_pool, open_members, Members};
 use zvol_common::{exit, PoolSpec};
 
+/// The bytes of a path as the operating system gave it.
+///
+/// On Unix an argument is bytes and reaches a name that is not UTF-8;
+/// elsewhere it is text and the lossy form is all there is (Z-09).
+#[cfg(unix)]
+pub fn os_bytes(s: &std::ffi::OsStr) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    s.as_bytes().to_vec()
+}
+
+/// The bytes of a path as the operating system gave it.
+#[cfg(not(unix))]
+pub fn os_bytes(s: &std::ffi::OsStr) -> Vec<u8> {
+    s.to_string_lossy().as_bytes().to_vec()
+}
+
 /// Which transaction group to read, and the key if the dataset needs one.
 #[derive(Debug, Args)]
 pub struct AtArgs {

@@ -53,13 +53,28 @@ pub struct Filesystem<'r, 'a> {
 /// One entry of a directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirEntry {
-    /// Entry name, as stored.
+    /// Entry name as text, with anything undecodable replaced.
     pub name: String,
+    /// Entry name as the bytes on disk.
+    ///
+    /// A dataset with `utf8only=off` can hold a name that is not UTF-8:
+    /// on Linux a file name is any byte string without `/` or NUL. The
+    /// name is given back from these bytes, not from [`DirEntry::name`],
+    /// so a file comes out called what it was called (Z-09).
+    pub raw: Vec<u8>,
     /// Object number it points at.
     pub object: u64,
     /// Type from the entry itself, which may be unknown on an old
     /// directory; the znode's mode is the authority.
     pub file_type: FileType,
+}
+
+impl DirEntry {
+    /// Whether the name on disk is valid UTF-8 — that is, whether
+    /// [`DirEntry::name`] gives it back exactly.
+    pub fn name_is_text(&self) -> bool {
+        self.name.as_bytes() == self.raw
+    }
 }
 
 /// Open a filesystem dataset.
@@ -246,34 +261,51 @@ impl Filesystem<'_, '_> {
                 let (obj, kind) = dirent(v);
                 (obj != 0).then(|| DirEntry {
                     name: e.name.clone(),
+                    raw: e.raw.clone(),
                     object: obj,
                     file_type: kind,
                 })
             })
             .collect();
         // Directory order on disk is hash order; a report reads better,
-        // and compares better between runs, in name order.
-        out.sort_by(|a, b| a.name.cmp(&b.name));
+        // and compares better between runs, in name order — by the bytes
+        // rather than by the text, so two names that print alike still
+        // come out in the same order every time.
+        out.sort_by(|a, b| a.raw.cmp(&b.raw));
         Ok(out)
     }
 
     /// Resolve a slash-separated path from the root.
+    pub fn lookup(&self, path: &str) -> Result<u64, ReadError> {
+        self.lookup_bytes(path.as_bytes())
+    }
+
+    /// Resolve a path given as the bytes it is on disk.
     ///
-    /// An exact match always wins. Only where the dataset says names are
+    /// A name is bytes, not text, so a match on the bytes is tried
+    /// first and always wins. Only where the dataset says names are
     /// matched without regard to case does a case-folded match count,
     /// and then only when nothing matched exactly (Z-09).
-    pub fn lookup(&self, path: &str) -> Result<u64, ReadError> {
+    pub fn lookup_bytes(&self, path: &[u8]) -> Result<u64, ReadError> {
+        let shown = String::from_utf8_lossy(path).into_owned();
         let mut at = self.root;
-        for part in path.split('/').filter(|p| !p.is_empty() && *p != ".") {
+        for part in path
+            .split(|&b| b == b'/')
+            .filter(|p| !p.is_empty() && *p != b".")
+        {
             let entries = self.read_dir(at)?;
             let found = entries
                 .iter()
-                .find(|e| e.name == part)
+                .find(|e| e.raw == part)
                 .or_else(|| {
-                    self.case_insensitive()
-                        .then(|| entries.iter().find(|e| e.name.eq_ignore_ascii_case(part)))?
+                    let part = std::str::from_utf8(part).ok()?;
+                    self.case_insensitive().then(|| {
+                        entries
+                            .iter()
+                            .find(|e| e.name.to_lowercase() == part.to_lowercase())
+                    })?
                 })
-                .ok_or_else(|| ReadError::Io(format!("{path}: no such file or directory")))?;
+                .ok_or_else(|| ReadError::Io(format!("{shown}: no such file or directory")))?;
             at = found.object;
         }
         Ok(at)
@@ -360,8 +392,14 @@ impl Filesystem<'_, '_> {
 /// One file met while walking (Z-01, Z-03).
 #[derive(Debug, Clone)]
 pub struct Entry {
-    /// Path from the root of the dataset, without a leading slash.
+    /// Path from the root of the dataset, without a leading slash, as
+    /// text — which is what to print, not what to write.
     pub path: String,
+    /// The same path as the bytes on disk, components joined with `/`.
+    ///
+    /// Equal to `path` on every dataset whose names are UTF-8, and the
+    /// only faithful answer on one whose names are not (Z-09).
+    pub raw_path: Vec<u8>,
     /// Object number.
     pub object: u64,
     /// Metadata, when it could be read.
@@ -375,6 +413,11 @@ impl Entry {
     pub fn file_type(&self) -> Option<FileType> {
         self.znode.as_ref().map(Znode::file_type)
     }
+
+    /// Whether the path is text — whether printing it loses nothing.
+    pub fn path_is_text(&self) -> bool {
+        self.path.as_bytes() == self.raw_path
+    }
 }
 
 /// Walk a directory tree into paths.
@@ -384,16 +427,53 @@ impl Entry {
 /// in damaged metadata — is reported once at each path but walked once,
 /// which is what stops a loop from becoming an infinite tree.
 pub fn walk(fs: &Filesystem<'_, '_>, from: u64, prefix: &str, recursive: bool) -> Vec<Entry> {
+    walk_from(fs, from, prefix, prefix.as_bytes(), recursive)
+}
+
+/// Walk from a prefix whose bytes are not its text.
+///
+/// The two forms are carried side by side all the way down, because one
+/// is what a report prints and the other is what a file is called.
+pub fn walk_from(
+    fs: &Filesystem<'_, '_>,
+    from: u64,
+    prefix: &str,
+    raw_prefix: &[u8],
+    recursive: bool,
+) -> Vec<Entry> {
     let mut out = Vec::new();
     let mut seen_dirs = std::collections::BTreeSet::new();
-    walk_into(fs, from, prefix, recursive, 0, &mut seen_dirs, &mut out);
+    walk_into(
+        fs,
+        from,
+        prefix,
+        raw_prefix,
+        recursive,
+        0,
+        &mut seen_dirs,
+        &mut out,
+    );
     out
 }
 
+/// Join one name onto a byte path.
+fn join_raw(prefix: &[u8], name: &[u8]) -> Vec<u8> {
+    if prefix.is_empty() {
+        return name.to_vec();
+    }
+    let mut out = Vec::with_capacity(prefix.len() + 1 + name.len());
+    out.extend_from_slice(prefix);
+    out.push(b'/');
+    out.extend_from_slice(name);
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
 fn walk_into(
     fs: &Filesystem<'_, '_>,
     object: u64,
     prefix: &str,
+    raw_prefix: &[u8],
     recursive: bool,
     depth: usize,
     seen_dirs: &mut std::collections::BTreeSet<u64>,
@@ -407,6 +487,7 @@ fn walk_into(
         Err(e) => {
             out.push(Entry {
                 path: prefix.to_string(),
+                raw_path: raw_prefix.to_vec(),
                 object,
                 znode: None,
                 error: Some(format!("directory: {e}")),
@@ -420,6 +501,7 @@ fn walk_into(
         } else {
             format!("{prefix}/{}", e.name)
         };
+        let raw_path = join_raw(raw_prefix, &e.raw);
         let (znode, error) = match fs.znode(e.object) {
             Ok(z) => (Some(z), None),
             Err(err) => (None, Some(err.to_string())),
@@ -430,12 +512,22 @@ fn walk_into(
             .unwrap_or(e.file_type == FileType::Dir);
         out.push(Entry {
             path: path.clone(),
+            raw_path: raw_path.clone(),
             object: e.object,
             znode,
             error,
         });
         if is_dir && recursive {
-            walk_into(fs, e.object, &path, recursive, depth + 1, seen_dirs, out);
+            walk_into(
+                fs,
+                e.object,
+                &path,
+                &raw_path,
+                recursive,
+                depth + 1,
+                seen_dirs,
+                out,
+            );
         }
     }
 }
@@ -443,7 +535,7 @@ fn walk_into(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fixture::{zpl_deep, zpl_hello, zpl_members, Pool};
+    use crate::fixture::{zpl_deep, zpl_hello, zpl_latin1, zpl_members, Pool, ZPL_LATIN1_NAME};
     use crate::pool::{assemble, uberblock_candidates};
     use crate::vdev::scan_device;
     use zvolrescue_io::{BlockSource, MemSource};
@@ -492,15 +584,27 @@ mod tests {
         with_fs(|fs| {
             assert_eq!(fs.properties.get("VERSION"), Some(&5));
             let entries = walk(fs, fs.root, "", true);
-            let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+            let paths: Vec<&[u8]> = entries.iter().map(|e| e.raw_path.as_slice()).collect();
             assert_eq!(
                 paths,
-                ["hardlink.txt", "hello.txt", "link", "sub", "sub/deep.txt"]
+                [
+                    ZPL_LATIN1_NAME,
+                    b"hardlink.txt",
+                    b"hello.txt",
+                    b"link",
+                    b"sub",
+                    b"sub/deep.txt"
+                ]
             );
             assert!(entries.iter().all(|e| e.error.is_none()), "{entries:?}");
 
+            // Z-09: the one name that is not text says so, and the other
+            // five do not.
+            assert!(!entries[0].path_is_text());
+            assert!(entries[1..].iter().all(Entry::path_is_text));
+
             // Z-02: the metadata comes out of the system attributes.
-            let z = entries[1].znode.as_ref().expect("znode");
+            let z = entries[2].znode.as_ref().expect("znode");
             assert_eq!(z.file_type(), FileType::Regular);
             assert_eq!(z.permissions(), 0o644);
             assert_eq!(z.size, zpl_hello().len() as u64);
@@ -508,12 +612,12 @@ mod tests {
             assert_eq!(z.mtime, 1_757_100_001);
             assert_eq!(z.parent, 3);
 
-            let dir = entries[3].znode.as_ref().expect("znode");
+            let dir = entries[4].znode.as_ref().expect("znode");
             assert_eq!(dir.file_type(), FileType::Dir);
             assert_eq!(dir.permissions(), 0o755);
 
             // Z-03: a symlink whose target lives in the attributes.
-            let link = &entries[2];
+            let link = &entries[3];
             let lz = link.znode.as_ref().expect("znode");
             assert_eq!(lz.file_type(), FileType::Symlink);
             assert_eq!(
@@ -522,7 +626,7 @@ mod tests {
             );
 
             // Z-03: the file's own bytes, through the pool, checksums and all.
-            let deep = fs.object(entries[4].object).expect("object");
+            let deep = fs.object(entries[5].object).expect("object");
             let want = zpl_deep();
             assert_eq!(deep.read_range(0, want.len()).expect("read"), want);
         });
@@ -537,6 +641,28 @@ mod tests {
             assert_eq!(fs.lookup("/sub").expect("lookup"), 7);
             assert_eq!(fs.lookup("").expect("lookup"), fs.root);
             assert!(fs.lookup("sub/missing").is_err());
+        });
+    }
+
+    /// Z-09: a name that is not UTF-8 is found by its bytes, and by
+    /// nothing else — the text it prints as belongs to no file.
+    #[test]
+    fn a_name_that_is_not_text_is_found_by_its_bytes() {
+        with_fs(|fs| {
+            assert_eq!(fs.lookup_bytes(ZPL_LATIN1_NAME).expect("lookup"), 10);
+            let shown = String::from_utf8_lossy(ZPL_LATIN1_NAME).into_owned();
+            assert!(
+                fs.lookup(&shown).is_err(),
+                "{shown:?} is not a name on disk"
+            );
+            let obj = fs.lookup_bytes(ZPL_LATIN1_NAME).expect("lookup");
+            let z = fs.znode(obj).expect("znode");
+            assert_eq!(z.size, zpl_latin1().len() as u64);
+            let read = fs.object(obj).expect("object");
+            assert_eq!(
+                read.read_range(0, zpl_latin1().len()).expect("read"),
+                zpl_latin1()
+            );
         });
     }
 
@@ -587,7 +713,16 @@ mod tests {
                 .into_iter()
                 .map(|e| e.path)
                 .collect();
-            assert_eq!(paths, ["hardlink.txt", "hello.txt", "link", "sub"]);
+            assert_eq!(
+                paths,
+                [
+                    "caf\u{fffd}.txt",
+                    "hardlink.txt",
+                    "hello.txt",
+                    "link",
+                    "sub"
+                ]
+            );
         });
     }
 }

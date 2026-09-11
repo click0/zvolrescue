@@ -47,7 +47,7 @@ enum Command {
         /// variable-length, so a bare path after it could not be told
         /// from another member.
         #[arg(long, value_name = "PATH")]
-        path: Option<String>,
+        path: Option<std::ffi::OsString>,
         /// Descend into subdirectories.
         #[arg(short = 'R', long)]
         recursive: bool,
@@ -67,7 +67,7 @@ enum Command {
         /// variable-length, so a bare path after it could not be told
         /// from another member.
         #[arg(long = "path", value_name = "PATH")]
-        paths: Vec<String>,
+        paths: Vec<std::ffi::OsString>,
         /// Write the tree here.
         #[arg(short, long, value_name = "DIR")]
         output: PathBuf,
