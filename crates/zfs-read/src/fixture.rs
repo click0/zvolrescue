@@ -467,9 +467,25 @@ pub const SAMPLE_ZVOL_BLOCK0_OFFSET: u64 = 0x20_0000 + 4096;
 
 /// Contents of block `blkid` of the sample volume (8 KiB).
 pub fn zvol_pattern(blkid: u64) -> Vec<u8> {
-    (0..8192u64)
+    let mut block: Vec<u8> = (0..8192u64)
         .map(|i| ((blkid * 97 + i * 7) % 251) as u8)
-        .collect()
+        .collect();
+    if blkid == 0 {
+        // A real volume holds a filesystem, and its superblock is what
+        // says how large the volume was made for — the one number a
+        // carved dnode cannot know (COMPANIONS C-12). This one says the
+        // 32 MiB the volume's properties also say, in 8192 blocks of
+        // 4096 bytes.
+        let put = |b: &mut Vec<u8>, at: usize, bytes: &[u8]| {
+            b[at..at + bytes.len()].copy_from_slice(bytes);
+        };
+        put(&mut block, 1024 + 0x38, &0xef53u16.to_le_bytes()); // s_magic
+        put(&mut block, 1024 + 0x18, &2u32.to_le_bytes()); // 1024 << 2
+        put(&mut block, 1024 + 0x04, &8192u32.to_le_bytes()); // s_blocks_count_lo
+        put(&mut block, 1024 + 0x150, &0u32.to_le_bytes()); // s_blocks_count_hi
+        put(&mut block, 1024 + 0x78, b"fixture\0\0\0\0\0\0\0\0\0"); // s_volume_name
+    }
+    block
 }
 
 /// Write a small MOS onto `members` describing `tank` (filesystem),

@@ -102,10 +102,30 @@ pub struct Candidate {
     /// Creation transaction group of that dataset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dataset_creation_txg: Option<u64>,
+    /// What the volume's own contents say it is (C-12). A carved dnode
+    /// says how many blocks it has, which is not how large the volume
+    /// was made; a filesystem superblock inside it usually says that.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contents: Vec<ContentsOut>,
     /// The dnode's own bytes, hex, so `list` and `dump` need not scan
     /// again. What they say is still only a claim: the extraction reads
     /// through the pool and checks every block against its checksum.
     pub dnode_hex: String,
+}
+
+/// One thing recognised inside a candidate.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContentsOut {
+    /// `ext2/3/4`, `swap`, `ntfs`, …
+    pub kind: String,
+    /// Where the signature was, in bytes from the start of the volume.
+    pub at: u64,
+    /// The size that signature says the volume was made for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    /// The volume label, where the format keeps one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 /// The candidate index.

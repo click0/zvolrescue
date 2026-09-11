@@ -789,7 +789,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             r.sha256,
-            "d6d58af862ec2761bf43158f7ee2b2b0f4628fa6ca8095544493f9d698d7b80d"
+            "febfe0108392728dbde89ee63f9f25419a0192ac04420db3ad88b0032a088585"
         );
         // Without the salt the same blocks cannot be verified.
         reader.set_salt(None);

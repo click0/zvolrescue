@@ -1302,7 +1302,7 @@ mod tests {
             // Same image as the mirror fixture produces.
             assert_eq!(
                 sha,
-                "d6d58af862ec2761bf43158f7ee2b2b0f4628fa6ca8095544493f9d698d7b80d"
+                "febfe0108392728dbde89ee63f9f25419a0192ac04420db3ad88b0032a088585"
             );
         }
 
@@ -1318,7 +1318,7 @@ mod tests {
                 let reader = PoolReader::new(&a, devices(&s, &present));
                 let (_, sha) = dump_disk0(&reader, &ub).unwrap();
                 assert_eq!(
-                    sha, "d6d58af862ec2761bf43158f7ee2b2b0f4628fa6ca8095544493f9d698d7b80d",
+                    sha, "febfe0108392728dbde89ee63f9f25419a0192ac04420db3ad88b0032a088585",
                     "{present:?}"
                 );
             }
@@ -1350,7 +1350,7 @@ mod tests {
             let (_, sha) = dump_disk0(&reader, &ub).unwrap();
             assert_eq!(
                 sha,
-                "d6d58af862ec2761bf43158f7ee2b2b0f4628fa6ca8095544493f9d698d7b80d"
+                "febfe0108392728dbde89ee63f9f25419a0192ac04420db3ad88b0032a088585"
             );
             // Two corrupted members: still within raidz2's budget.
             let bytes = s[0].bytes_mut();
@@ -1361,7 +1361,7 @@ mod tests {
             let (_, sha) = dump_disk0(&reader, &ub).unwrap();
             assert_eq!(
                 sha,
-                "d6d58af862ec2761bf43158f7ee2b2b0f4628fa6ca8095544493f9d698d7b80d"
+                "febfe0108392728dbde89ee63f9f25419a0192ac04420db3ad88b0032a088585"
             );
             // Three: beyond the budget, and the failure is a clean error.
             let bytes = s[1].bytes_mut();

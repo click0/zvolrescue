@@ -80,19 +80,31 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     // The dnode says how many blocks it has, not how large the volume
     // was created: the `zvol_prop` ZAP that knew is not reachable from a
     // carved dnode. Say which number is being used.
-    let size = opts.size.unwrap_or(c.implied_size);
+    // Where the size comes from, best first: what was asked for, then
+    // what the volume's own contents say it was made for (C-12), then
+    // what the dnode implies. The last is the weakest — a volume whose
+    // tail was never written has fewer blocks than it had bytes.
+    let from_contents = c.contents.iter().find_map(|f| f.size);
+    let (size, why) = match (opts.size, from_contents) {
+        (Some(s), _) => (s, "as asked".to_string()),
+        (None, Some(s)) => (
+            s,
+            format!(
+                "the {} inside it was made for this",
+                c.contents
+                    .iter()
+                    .find(|f| f.size.is_some())
+                    .map_or("filesystem", |f| f.kind.as_str())
+            ),
+        ),
+        (None, None) => (c.implied_size, "implied by the dnode".to_string()),
+    };
     if !g.quiet {
         eprintln!(
-            "zvolcarve: {}: {} block(s) of {} bytes, {} bytes{}",
+            "zvolcarve: {}: {} block(s) of {} bytes, {size} bytes ({why})",
             c.id,
             c.maxblkid + 1,
             c.volblocksize,
-            size,
-            if opts.size.is_some() {
-                " (as asked)"
-            } else {
-                " implied by the dnode"
-            }
         );
     }
     let mut sink = match SparseFile::create(&opts.output) {

@@ -18,6 +18,16 @@ in CI; what was tried on real environments is logged in
   but not yet rewritten*: data that verifies today and may not tomorrow.
   The answer lags, because the pool keeps recent allocations in log
   space maps not yet flushed into the metaslabs, and the report says so.
+* **`zvolcarve` reads what a volume holds, and takes its size from it
+  (SPEC F-43, COMPANIONS C-12).** A carved dnode says how many blocks an
+  object has, which is not how large the volume was made — a volume
+  whose tail was never written has fewer. What is inside it usually does
+  say: nearly every filesystem writes a superblock near the front
+  carrying the size it was made for. ext2/3/4, swap, XFS, btrfs, NTFS
+  and FAT32 give a size; UFS2, LUKS, a GPT and a nested ZFS label are
+  recognised without one, because a guess with no number is honest and
+  an invented number is not. `dump` prefers `--size`, then the size the
+  contents state, then what the dnode implies, and says which it used.
 * `zvoltimeline --pending` now also reads what each deadlist's own
   objects come to, and says whether that agrees with the running total
   the deadlist keeps. The pool maintains the two independently, so a

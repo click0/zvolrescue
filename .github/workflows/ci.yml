@@ -34,7 +34,7 @@ jobs:
           ./target/release/zvolrescue -f json list -r /tmp/fx/member0.img --diff 4816229 | python3 -c 'import json,sys; d=json.load(sys.stdin); gone=[x["name"] for x in d["diff"]["destroyed_since"]]; assert gone == ["tank/vm/disk0","tank/vm/disk0@before"], gone'
           # dump without --txg must find the last TXG that still had the volume (SPEC F-40).
           ./target/release/zvolrescue -f json dump tank/vm/disk0 /tmp/fx/member0.img /tmp/fx/member1.img -o /tmp/disk0.img --evidence-log /tmp/ev.jsonl | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["volumes"][0]["txg"] == 4816229, d["volumes"]; assert d["txgs_searched"] == [4816230, 4816229], d["txgs_searched"]'
-          echo "d6d58af862ec2761bf43158f7ee2b2b0f4628fa6ca8095544493f9d698d7b80d  /tmp/disk0.img" | sha256sum -c -
+          echo "febfe0108392728dbde89ee63f9f25419a0192ac04420db3ad88b0032a088585  /tmp/disk0.img" | sha256sum -c -
           test "$(stat -c %s /tmp/disk0.img)" = 33554432
           # Damage block 0 on one member: the mirror copy must heal it, a lone damaged member must not.
           cp /tmp/fx/member0.img /tmp/bad.img
@@ -172,12 +172,12 @@ jobs:
       - name: Bulk extraction and resume
         run: |
           ./target/release/zvolrescue -q dump -r tank /tmp/fx/member0.img /tmp/fx/member1.img -o /tmp/bulk --txg 4816229
-          python3 -c 'import json; m=json.load(open("/tmp/bulk/manifest.json")); assert [v["dataset"] for v in m["volumes"]] == ["tank/vm/disk0"], m; assert m["volumes"][0]["sha256"] == "d6d58af862ec2761bf43158f7ee2b2b0f4628fa6ca8095544493f9d698d7b80d"'
+          python3 -c 'import json; m=json.load(open("/tmp/bulk/manifest.json")); assert [v["dataset"] for v in m["volumes"]] == ["tank/vm/disk0"], m; assert m["volumes"][0]["sha256"] == "febfe0108392728dbde89ee63f9f25419a0192ac04420db3ad88b0032a088585"'
           cmp /tmp/disk0.img /tmp/bulk/tank_vm_disk0.img
           # Resume: pretend a run stopped after block 2 (16 KiB written), continue, same hash.
           head -c 16384 /tmp/disk0.img > /tmp/resume.img
           printf '{"version":1,"dataset":"tank/vm/disk0","dataset_guid":"0x00000000000000a3","txg":4816229,"volsize":33554432,"blocksize":8192,"blocks_done":2}' > /tmp/resume.img.resume.json
-          ./target/release/zvolrescue -f json dump tank/vm/disk0 /tmp/fx/member0.img /tmp/fx/member1.img -o /tmp/resume.img --resume | python3 -c 'import json,sys; d=json.load(sys.stdin)["volumes"][0]; assert d["resumed_from_block"] == 2, d; assert d["blocks_read"] == 1, d; assert d["sha256"] == "d6d58af862ec2761bf43158f7ee2b2b0f4628fa6ca8095544493f9d698d7b80d"'
+          ./target/release/zvolrescue -f json dump tank/vm/disk0 /tmp/fx/member0.img /tmp/fx/member1.img -o /tmp/resume.img --resume | python3 -c 'import json,sys; d=json.load(sys.stdin)["volumes"][0]; assert d["resumed_from_block"] == 2, d; assert d["blocks_read"] == 1, d; assert d["sha256"] == "febfe0108392728dbde89ee63f9f25419a0192ac04420db3ad88b0032a088585"'
           cmp /tmp/disk0.img /tmp/resume.img
           test ! -e /tmp/resume.img.resume.json
       - name: The pool's history from its transaction groups (COMPANIONS T-01…T-05, T-10)
@@ -249,7 +249,7 @@ jobs:
           assert r["pools"][0]["txg_window"] == [4816228, 4816230], r["pools"]
           e = r["extractions"][0]
           assert e["dataset"] == "tank/vm/disk0" and e["txg"] == 4816229, e
-          assert e["sha256"] == "d6d58af862ec2761bf43158f7ee2b2b0f4628fa6ca8095544493f9d698d7b80d", e
+          assert e["sha256"] == "febfe0108392728dbde89ee63f9f25419a0192ac04420db3ad88b0032a088585", e
           assert e["errors"] == 0 and not e["aborted"], e
           assert r.get("warnings", []) == [], r["warnings"]
           assert "tank/vm/disk0" in open("/tmp/case/report.md").read()
@@ -299,9 +299,15 @@ jobs:
           assert min(matched) > 0.5 > max(missed, default=0.0), (matched, missed)
           open("/tmp/carve/best", "w").write(best["id"])
           EOF
-          # And it comes out byte for byte what the walked extraction gives.
-          ./target/release/zvolcarve dump /tmp/carve "$(cat /tmp/carve/best)" /tmp/cv/member0.img /tmp/cv/member1.img -o /tmp/carved.img --size 33554432
-          echo "d6d58af862ec2761bf43158f7ee2b2b0f4628fa6ca8095544493f9d698d7b80d  /tmp/carved.img" | sha256sum -c -
+          # C-12: the dnode says four blocks of 8 KiB, and the volume was
+          # made for 32 MiB. Only what is inside it knows that, and it is
+          # the number `dump` must use when none is given.
+          python3 -c 'import json; c=json.load(open("/tmp/carve/candidates.json"))["candidates"][0]; f=c["contents"][0]; assert f["kind"] == "ext2/3/4", c["contents"]; assert f["size"] == 33554432, f; assert f["label"] == "fixture", f; assert c["implied_size"] == 32768, c'
+          # And it comes out byte for byte what the walked extraction
+          # gives — with no size given at all.
+          ./target/release/zvolcarve dump /tmp/carve "$(cat /tmp/carve/best)" /tmp/cv/member0.img /tmp/cv/member1.img -o /tmp/carved.img
+          test "$(stat -c %s /tmp/carved.img)" = 33554432
+          echo "febfe0108392728dbde89ee63f9f25419a0192ac04420db3ad88b0032a088585  /tmp/carved.img" | sha256sum -c -
           cmp /tmp/disk0.img /tmp/carved.img
           # C-09: the same on raidz2. A dnode is 512 bytes and lies whole
           # inside one allocation sector on one column, so recognition
@@ -317,10 +323,10 @@ jobs:
           assert best["assessment"]["agreement"] == 1.0, best
           open("/tmp/carvez/best", "w").write(best["id"])
           EOF
-          ./target/release/zvolcarve -q dump /tmp/carvez "$(cat /tmp/carvez/best)" /tmp/cvz/member0.img /tmp/cvz/member1.img /tmp/cvz/member2.img /tmp/cvz/member3.img -o /tmp/carvedz.img --size 33554432
+          ./target/release/zvolcarve -q dump /tmp/carvez "$(cat /tmp/carvez/best)" /tmp/cvz/member0.img /tmp/cvz/member1.img /tmp/cvz/member2.img /tmp/cvz/member3.img -o /tmp/carvedz.img
           cmp /tmp/disk0.img /tmp/carvedz.img
           # Two of four members gone: rebuilt from parity, same bytes.
-          ./target/release/zvolcarve -q dump /tmp/carvez "$(cat /tmp/carvez/best)" /tmp/cvz/member1.img /tmp/cvz/member3.img -o /tmp/carvedz2.img --size 33554432
+          ./target/release/zvolcarve -q dump /tmp/carvez "$(cat /tmp/carvez/best)" /tmp/cvz/member1.img /tmp/cvz/member3.img -o /tmp/carvedz2.img
           cmp /tmp/disk0.img /tmp/carvedz2.img
           # C-11: a candidate is named by a dataset dnode the scan met,
           # since names themselves live in the MOS a carve cannot reach.
@@ -440,6 +446,22 @@ jobs:
           sha256sum /tmp/zp/member0.img /tmp/zp/member1.img > /tmp/zp.sums
           sha256sum -c /tmp/zp.sums
           if ./target/release/zvolfiles -q extract tank/fs /tmp/zp/member0.img -o /tmp/zp/member0.img; then echo "must refuse"; exit 1; else test $? = 5; fi
+      - name: Filesystem signatures, against filesystems really made (SPEC F-43)
+        run: |
+          # The one place this can be checked against something other
+          # than our own opinion: make the filesystems and read them back.
+          truncate -s 64M /tmp/sig-ext4.img
+          mkfs.ext4 -q -F -L zvoltest /tmp/sig-ext4.img
+          truncate -s 16M /tmp/sig-swap.img
+          mkswap -L swaptest /tmp/sig-swap.img >/dev/null
+          cargo run -q -p zfs-read --example signatures -- /tmp/sig-ext4.img /tmp/sig-swap.img > /tmp/sig.txt
+          cat /tmp/sig.txt
+          grep -q 'sig-ext4.img: ext2/3/4 at 1024 (67108864 byte(s)) label "zvoltest"' /tmp/sig.txt
+          grep -q 'sig-swap.img: swap at 4086 (16777216 byte(s)) label "swaptest"' /tmp/sig.txt
+          # A member of a pool is a ZFS label, and empty space is nothing.
+          cargo run -q -p zfs-read --example signatures -- /tmp/fx/member0.img | grep -q 'zfs at 16384'
+          head -c 1048576 /dev/zero > /tmp/sig-blank.img
+          if cargo run -q -p zfs-read --example signatures -- /tmp/sig-blank.img | grep -q 'nothing recognised'; then :; else echo "zeros must be nothing"; exit 1; fi
       - name: End-to-end on a raidz2 fixture (missing and corrupted members)
         run: |
           cargo run -p zfs-read --example mkfixture -- /tmp/rz raidz2 12

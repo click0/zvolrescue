@@ -134,6 +134,17 @@ pub fn print(index: &Index) {
             c.slot,
             c.found
         );
+        for f in &c.contents {
+            println!(
+                "         holds {}{}{}",
+                f.kind,
+                f.size
+                    .map_or(String::new(), |s| format!(", made for {}", size(s))),
+                f.label
+                    .as_ref()
+                    .map_or(String::new(), |l| format!(", label {l:?}"))
+            );
+        }
         if let Some(a) = &c.assessment {
             if a.blocks_allocated + a.blocks_free + a.blocks_unknown > 0 {
                 println!(

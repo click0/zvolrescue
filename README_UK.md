@@ -115,8 +115,13 @@ zvolcarve dump    DIR CANDIDATE POOLSPEC -o OUT.img [--size BYTES] [--strict]
 # Його блоків це не стосується: шукаємо їх у сирому просторі.
 zvolcarve scan /dev/ada0p3 /dev/ada1p3 -o /case42/carve --like pool/vm/disk1
 zvolcarve list /case42/carve
-zvolcarve dump /case42/carve c0001 /dev/ada0p3 /dev/ada1p3 -o disk0.img --size 34359738368
+zvolcarve dump /case42/carve c0001 /dev/ada0p3 /dev/ada1p3 -o disk0.img
 ```
+
+Викарбуваний dnode знає, скільки в нього було блоків, а не на який
+розмір зроблено том. Те, що всередині, зазвичай знає: `list` показує
+знайдену файлову систему і розмір, на який її зробили, а `dump` бере
+його, коли `--size` не задано.
 
 Профіль — це фільтр, а не припущення: кандидат, який збігся з усім, про
 що просили, має оцінку вище 0.5, а той, що ні, — нижче; порожній перелік

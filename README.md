@@ -114,8 +114,13 @@ zvolcarve dump    DIR CANDIDATE POOLSPEC -o OUT.img [--size BYTES] [--strict]
 # Its blocks are not. Scan raw space for them, describing what was lost.
 zvolcarve scan /dev/ada0p3 /dev/ada1p3 -o /case42/carve --like pool/vm/disk1
 zvolcarve list /case42/carve
-zvolcarve dump /case42/carve c0001 /dev/ada0p3 /dev/ada1p3 -o disk0.img --size 34359738368
+zvolcarve dump /case42/carve c0001 /dev/ada0p3 /dev/ada1p3 -o disk0.img
 ```
+
+A carved dnode knows how many blocks it had, not how large the volume
+was made. What is inside it usually does: `list` reports the filesystem
+it finds and the size that filesystem was made for, and `dump` uses that
+when no `--size` is given.
 
 The profile is a filter, never an assumption: a candidate that matched
 everything asked for ranks above 0.5 and one that did not ranks below

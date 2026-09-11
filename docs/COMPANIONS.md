@@ -296,8 +296,26 @@ independently of the log it keeps: `smp_alloc` in each map's header.
 Replaying every metaslab of every `ztest` pool comes to the byte that
 zdb reads out of those headers.
 
-Not implemented: compressed metadata other than lz4 (C-10), and
-signature carving inside candidate data (C-12).*
+C-12 is implemented, and it answers the question a carve otherwise
+cannot. A dnode says how many blocks an object has, which is not how
+large the volume was made: a volume whose tail was never written has
+fewer. What is *inside* it usually does say — nearly every filesystem
+writes a superblock at a fixed offset near the front, carrying the size
+it was made for. ext2/3/4, swap, XFS, btrfs, NTFS, FAT32 give a size;
+UFS2, LUKS, a GPT and a nested ZFS label are recognised without one,
+because a guess with no number is honest and an invented number is not.
+
+`dump` takes its size from `--size` first, then from what the volume
+holds, then from what the dnode implies — and says which. On the
+fixture, whose volume carries an ext4 superblock made for 32 MiB while
+its dnode has four 8 KiB blocks, a carve with no size given produces the
+same image as the walked extraction, byte for byte.
+
+The signatures are checked in CI against filesystems the runner really
+makes with `mkfs.ext4` and `mkswap`, which is the one place this can be
+checked against something other than our own opinion.
+
+Not implemented: compressed metadata other than lz4 (C-10).*
 
 ---
 

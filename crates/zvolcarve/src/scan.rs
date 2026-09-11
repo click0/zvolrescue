@@ -17,8 +17,8 @@ use zvol_common::{exit, Format, Global, PoolSpec};
 use zvolrescue_io::BlockSource;
 
 use crate::model::{
-    to_hex, AssessmentOut, Bucket, Candidate, Histograms, Index, ProfileOut, Rejection, SpaceOut,
-    State, INDEX, INDEX_VERSION, STATE,
+    to_hex, AssessmentOut, Bucket, Candidate, ContentsOut, Histograms, Index, ProfileOut,
+    Rejection, SpaceOut, State, INDEX, INDEX_VERSION, STATE,
 };
 
 /// The search profile, on the command line (C-13, C-16, C-17, C-18).
@@ -367,6 +367,15 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             let named = reader
                 .as_ref()
                 .and_then(|r| name_from_datasets(r, &scan.datasets, hit));
+            // C-12: what is inside usually says how large the volume was
+            // made, which the dnode cannot.
+            let contents = reader
+                .as_ref()
+                .map(|r| {
+                    let obj = ObjectReader::new(r, hit.dnode.clone(), Endian::Little);
+                    contents_of(&obj)
+                })
+                .unwrap_or_default();
             let id = format!("c{:04}", candidates.len() + 1);
             candidates.push(Candidate {
                 id,
@@ -396,6 +405,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                     blocks_unknown: a.blocks_unknown,
                     agreement: a.agreement(),
                 }),
+                contents,
                 dataset_guid: named.map(|(g, _)| format!("{g:#018x}")),
                 dataset_creation_txg: named.map(|(_, t)| t),
                 dnode_hex: to_hex(&dnode_bytes(&hit.dnode)),
@@ -635,4 +645,23 @@ fn name_from_datasets(
     }
     found.sort_by_key(|(_, txg)| std::cmp::Reverse(*txg));
     found.first().copied()
+}
+
+/// What a candidate's own bytes say it holds (C-12).
+///
+/// The reads go through the pool like any other, so a block that does
+/// not verify is not offered as a signature. Nothing here is trusted:
+/// it bounds a guess about the size, and `dump` still verifies every
+/// block it writes.
+fn contents_of(obj: &ObjectReader<'_, '_>) -> Vec<ContentsOut> {
+    let read = |at: u64, len: usize| -> Option<Vec<u8>> { obj.read_range(at, len).ok() };
+    zfs_ondisk::signature::identify(&read)
+        .into_iter()
+        .map(|f| ContentsOut {
+            kind: f.kind.as_str().to_string(),
+            at: f.at,
+            size: f.size,
+            label: f.label,
+        })
+        .collect()
 }
