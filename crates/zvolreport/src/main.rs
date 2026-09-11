@@ -95,6 +95,7 @@ enum Command {
 }
 
 fn main() -> ExitCode {
+    zvol_common::quiet_broken_pipe();
     let cli = Cli::parse();
     if let Err(code) = cli.global.enable_tracing("zvolreport") {
         return ExitCode::from(code);

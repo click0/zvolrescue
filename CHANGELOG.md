@@ -12,6 +12,20 @@ GitHub web interface, which can only tag the head of a branch, so
 changed when — the sections below are their record — and `v0.7.0` is the
 release that carries all of them.
 
+## Unreleased
+
+### Fixed
+* A closed pipe stopped being a crash. `zvolcarve list DIR | head -4`
+  closes the pipe while the tool is still writing, and Rust turns the
+  `EPIPE` into a panic: a backtrace on stderr and exit 101, for an
+  operator who did nothing wrong — quitting `less` half way down a
+  candidate list did the same. A write that fails for that one reason
+  now ends the run with 0 and says nothing, in all five programs. Every
+  other panic still reaches stderr with its message; the check that
+  tells them apart is on the errno rather than on the words beside it,
+  which belong to whatever locale is set. Found by running the
+  published v0.7.0 binaries, which have it.
+
 ## v0.7.0 — 2026-09-11
 
 **Everything the companion spec asked for.** Every requirement

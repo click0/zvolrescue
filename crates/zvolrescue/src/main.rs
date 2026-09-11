@@ -118,6 +118,7 @@ enum Cmd {
 }
 
 fn main() -> ExitCode {
+    zvol_common::quiet_broken_pipe();
     let cli = Cli::parse();
     if cli.global.debug || cli.global.debug_log.is_some() {
         let file = match &cli.global.debug_log {

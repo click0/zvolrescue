@@ -498,6 +498,30 @@ jobs:
           sha256sum /tmp/zp/member0.img /tmp/zp/member1.img > /tmp/zp.sums
           sha256sum -c /tmp/zp.sums
           if ./target/release/zvolfiles -q extract tank/fs /tmp/zp/member0.img -o /tmp/zp/member0.img; then echo "must refuse"; exit 1; else test $? = 5; fi
+      - name: A closed pipe is not a failure
+        run: |
+          # `zvolcarve list DIR | head -4` closes the pipe while the
+          # tool is still writing. Rust turns the EPIPE into a panic —
+          # a backtrace and exit 101 — unless the hook is in place, and
+          # an operator quitting `less` has done nothing wrong. The
+          # carve listing is long enough that head really does close it.
+          set -o pipefail || true
+          for cmd in \
+            "./target/release/zvolcarve list /tmp/carve" \
+            "./target/release/zvolrescue -f json list /tmp/fx/member0.img /tmp/fx/member1.img" \
+            "./target/release/zvoltimeline /tmp/fx/member0.img /tmp/fx/member1.img" \
+            "./target/release/zvolfiles list tank/fs /tmp/zp/member0.img -R"; do
+            $cmd 2>/tmp/pipe-err.txt | head -2 >/dev/null
+            code=${PIPESTATUS[0]}
+            if [ "$code" != 0 ] || [ -s /tmp/pipe-err.txt ]; then
+              echo "$cmd exited $code with:"; cat /tmp/pipe-err.txt; exit 1
+            fi
+          done
+          # And a panic that is not a closed pipe still reaches stderr:
+          # a missing workspace is an error, not an exit 0.
+          if ./target/release/zvolcarve list /tmp/there-is-no-such-workspace; then
+            echo "a missing workspace must fail"; exit 1
+          fi
       - name: Filesystem signatures, against filesystems really made (SPEC F-43)
         run: |
           # The one place this can be checked against something other

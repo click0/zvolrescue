@@ -76,6 +76,80 @@ pub struct Global {
     pub debug_log: Option<PathBuf>,
 }
 
+/// Leave a pipeline quietly when the far end has gone away.
+///
+/// `zvolcarve list DIR | head -4` closes the pipe as soon as it has its
+/// four lines, and the writes that follow fail with `EPIPE`. Rust turns
+/// that into a panic: a backtrace on stderr and exit 101, for an
+/// operator who did nothing wrong. `head` is not an error, and neither
+/// is quitting `less` half way down a candidate list — so a write that
+/// fails for that one reason ends the run with 0 and says nothing.
+///
+/// It is a panic hook rather than the usual `signal(SIGPIPE, SIG_DFL)`
+/// because this workspace forbids `unsafe` and links no system
+/// libraries. Nothing else is caught: every other panic reaches the
+/// hook that was there before, message and all.
+///
+/// Call it first thing in `main`, before anything can print.
+pub fn quiet_broken_pipe() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let payload = info.payload();
+        let message = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or_default();
+        if is_broken_pipe_panic(message) {
+            std::process::exit(0);
+        }
+        previous(info);
+    }));
+}
+
+/// Whether a panic message is std's "the reader has gone" and nothing
+/// else.
+///
+/// The message std raises is `failed printing to stdout: {e}`. The errno
+/// is what is matched and not the text beside it: 32 is `EPIPE` on Linux
+/// and on FreeBSD alike, while the words `strerror` puts there belong to
+/// whatever locale happens to be set.
+fn is_broken_pipe_panic(message: &str) -> bool {
+    message.starts_with("failed printing to std") && message.contains("os error 32")
+}
+
+#[cfg(test)]
+mod broken_pipe_tests {
+    use super::is_broken_pipe_panic;
+
+    /// The message the runtime actually produced when `zvolcarve list`
+    /// was piped into `head -4`, kept verbatim.
+    #[test]
+    fn the_message_a_closed_pipe_really_gives() {
+        assert!(is_broken_pipe_panic(
+            "failed printing to stdout: Broken pipe (os error 32)"
+        ));
+        assert!(is_broken_pipe_panic(
+            "failed printing to stderr: Broken pipe (os error 32)"
+        ));
+    }
+
+    /// Everything else is somebody else's panic and must be left alone:
+    /// swallowing one would turn a real fault into a silent exit 0.
+    #[test]
+    fn nothing_else_is_swallowed() {
+        for other in [
+            "",
+            "a full disk is not a closed pipe",
+            "failed printing to stdout: No space left on device (os error 28)",
+            "called `Option::unwrap()` on a `None` value",
+            "assertion failed: os error 32",
+        ] {
+            assert!(!is_broken_pipe_panic(other), "{other:?}");
+        }
+    }
+}
+
 impl Global {
     /// Turn on the read trace when `--debug`/`--debug-log` asked for it.
     ///
