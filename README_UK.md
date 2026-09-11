@@ -105,6 +105,7 @@ zvoltimeline /dev/ada0p3 /dev/ada1p3 --pending
 ```
 zvolcarve scan    POOLSPEC -o DIR [--volblocksize BYTES] [--levels N] [--txg FROM..TO]
                                   [--size MIN..MAX] [--like DATASET] [--strict-profile] [--resume]
+                                  [--compressed lz4,lzjb,gzip,zstd|none]
 zvolcarve list    DIR
 zvolcarve dump    DIR CANDIDATE POOLSPEC -o OUT.img [--size BYTES] [--strict]
                                                            томи, на які вже не вказує жоден uberblock

@@ -352,6 +352,14 @@ jobs:
           assert a["blocks_free"] == 0 and a["blocks_allocated"] == 0, a
           assert a["blocks_unknown"] > 0, a
           EOF
+          # C-10: the compressions tried are the operator's to choose, and
+          # dropping the one a pool used finds nothing at all. The
+          # fixture's metadata is plaintext, so the plaintext pass alone
+          # must still find the volume — and every codec named must be
+          # one this build knows.
+          rm -rf /tmp/carve-plain
+          ./target/release/zvolcarve -f json scan /tmp/cv/member0.img -o /tmp/carve-plain --compressed none | python3 -c 'import json,sys; d=json.load(sys.stdin); z=[c for c in d["candidates"] if c["dnode_type_code"] == 23]; assert z, d["rejected"]; assert all(c["found"] == "plaintext" for c in d["candidates"]), d["candidates"][:2]'
+          if ./target/release/zvolcarve -q scan /tmp/cv/member0.img -o /tmp/carve-plain --compressed lz4,nope; then echo "must fail"; exit 1; else test $? = 1; fi
           # C-19: with --sample, what is on the disk instead of a filter.
           rm -rf /tmp/carve-s
           ./target/release/zvolcarve -f json scan /tmp/cv/member0.img -o /tmp/carve-s --sample 50 | python3 -c 'import json,sys; h=json.load(sys.stdin)["histograms"]; assert h["sampled"] > 0, h; assert h["volblocksize"] and h["levels"] and h["dnode_type"], h; assert "8192" in [b["value"] for b in h["volblocksize"]], h["volblocksize"]'

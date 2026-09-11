@@ -61,6 +61,13 @@ enum Command {
         /// so a profile can be picked from the disk (C-19).
         #[arg(long, value_name = "N")]
         sample: Option<usize>,
+        /// Compressions to try at each allocation-aligned offset:
+        /// `lz4,lzjb,gzip,zstd` (the default), a subset, or `none` for
+        /// the plaintext pass alone. Metadata is lz4 on any modern pool
+        /// and lzjb on one made before the `lz4_compress` feature; each
+        /// one costs a pass, and dropping the wrong one finds nothing.
+        #[arg(long, value_name = "LIST", default_value = "lz4,lzjb,gzip,zstd")]
+        compressed: String,
     },
     /// Show the candidates a previous scan found.
     List {
@@ -105,6 +112,7 @@ fn main() -> ExitCode {
             full_assess,
             max_hits,
             sample,
+            compressed,
         } => scan::run(
             &cli.global,
             &pool,
@@ -116,6 +124,7 @@ fn main() -> ExitCode {
                 full_assess,
                 max_hits,
                 sample,
+                compressed,
             },
         ),
         Command::List { dir } => list::run(&cli.global, &dir),

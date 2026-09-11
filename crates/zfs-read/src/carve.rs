@@ -23,7 +23,7 @@
 use std::collections::BTreeMap;
 
 use zfs_ondisk::blkptr;
-use zfs_ondisk::carve::{plausible_dnode, plausible_head, Profile, Reject, MAX_BLOCKSIZE};
+use zfs_ondisk::carve::{plausible_dnode, plausible_head, Profile, Reject};
 use zfs_ondisk::compress;
 use zfs_ondisk::dmu::{DnodePhys, DNODE_SIZE};
 use zfs_ondisk::Endian;
@@ -34,8 +34,8 @@ use zvolrescue_io::{trace, BlockSource};
 pub enum Found {
     /// The dnode was on disk as it is in memory.
     Plaintext,
-    /// It came out of an lz4-compressed block at this offset.
-    Lz4,
+    /// It came out of a compressed block at this offset.
+    Compressed(Codec),
 }
 
 impl Found {
@@ -43,7 +43,95 @@ impl Found {
     pub fn as_str(self) -> &'static str {
         match self {
             Found::Plaintext => "plaintext",
-            Found::Lz4 => "lz4",
+            Found::Compressed(c) => c.as_str(),
+        }
+    }
+}
+
+/// A compression a metadata block may have been written with.
+///
+/// lz4 is what OpenZFS has used for metadata since the `lz4_compress`
+/// feature; a pool made before it used lzjb, and a pool whose datasets
+/// were given `compression=gzip` or `zstd` can carry those too. Which
+/// ones are worth trying is the operator's call, because each one costs
+/// a pass over every allocation-aligned offset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Codec {
+    /// `lz4`, the default for metadata on any modern pool.
+    Lz4,
+    /// `lzjb`, the default before lz4.
+    Lzjb,
+    /// `gzip-N`, a zlib stream.
+    Gzip,
+    /// `zstd`, as OpenZFS frames it.
+    Zstd,
+}
+
+impl Codec {
+    /// Stable name, as written on the command line and in the report.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Codec::Lz4 => "lz4",
+            Codec::Lzjb => "lzjb",
+            Codec::Gzip => "gzip",
+            Codec::Zstd => "zstd",
+        }
+    }
+
+    /// From the name, for the command line.
+    pub fn named(name: &str) -> Option<Codec> {
+        match name {
+            "lz4" => Some(Codec::Lz4),
+            "lzjb" => Some(Codec::Lzjb),
+            "gzip" => Some(Codec::Gzip),
+            "zstd" => Some(Codec::Zstd),
+            _ => None,
+        }
+    }
+
+    /// Every one this build knows, in the order they are tried.
+    pub const ALL: [Codec; 4] = [Codec::Lz4, Codec::Lzjb, Codec::Gzip, Codec::Zstd];
+
+    /// Whether a block starting here could be this compression, judged
+    /// on its first bytes alone.
+    ///
+    /// This is what keeps the pass affordable: three of the four frame
+    /// themselves in a way that settles nearly every offset without
+    /// decompressing anything. lzjb does not, which is why it costs what
+    /// it costs and is not tried unless asked for.
+    fn could_start(self, buf: &[u8], lsize: u64) -> bool {
+        match self {
+            Codec::Lz4 => {
+                let Some(head) = buf.get(0..4) else {
+                    return false;
+                };
+                let clen = u64::from(u32::from_be_bytes(head.try_into().expect("4 bytes")));
+                // A compressed block is never as long as what it
+                // decompresses to, and never longer than the buffer.
+                clen > 0 && clen < lsize && (clen as usize) + 4 <= buf.len()
+            }
+            // A zlib stream: the low nibble of the first byte is the
+            // method (8 = deflate) and the two bytes are a multiple of 31.
+            Codec::Gzip => match buf.get(0..2) {
+                Some([a, b]) => a & 0x0f == 8 && (u16::from(*a) * 256 + u16::from(*b)) % 31 == 0,
+                _ => false,
+            },
+            // OpenZFS puts the decompressed size and the level in front
+            // of a magicless zstd frame.
+            Codec::Zstd => compress::zstd_header(buf)
+                .is_some_and(|(_, size)| u64::from(size) > 0 && u64::from(size) <= lsize),
+            // lzjb has no header at all: every offset has to be tried.
+            Codec::Lzjb => true,
+        }
+    }
+
+    /// Decompress `buf` to exactly `lsize` bytes.
+    fn decompress(self, buf: &[u8], lsize: usize) -> Option<Vec<u8>> {
+        match self {
+            Codec::Lz4 => compress::lz4(buf, lsize).ok(),
+            Codec::Lzjb => compress::lzjb(buf, lsize).ok(),
+            Codec::Gzip => compress::gzip(buf, lsize).ok(),
+            Codec::Zstd => compress::zstd(buf, lsize).ok(),
         }
     }
 }
@@ -106,10 +194,11 @@ pub struct Options {
     pub strict_profile: bool,
     /// Byte range of the member to read; the whole member when absent.
     pub range: Option<(u64, u64)>,
-    /// Also try to decompress each block-aligned offset as lz4 (C-10).
-    pub lz4: bool,
+    /// Compressions to try at each allocation-aligned offset (C-10).
+    /// Empty means the plaintext pass only.
+    pub codecs: Vec<Codec>,
     /// Block sizes to try when decompressing, largest first.
-    pub lz4_sizes: Vec<u64>,
+    pub block_sizes: Vec<u64>,
     /// Stop after this many hits, so a wide search can be bounded.
     pub max_hits: usize,
     /// Read this many bytes at a time.
@@ -122,11 +211,19 @@ impl Default for Options {
             profile: Profile::default(),
             strict_profile: false,
             range: None,
-            lz4: true,
+            // All of them by default. lz4 is what metadata is written
+            // with on any modern pool, but a pool made before the
+            // `lz4_compress` feature used lzjb, and for such a pool an
+            // lz4-only scan finds nothing at all — a silent, total
+            // failure for exactly the operators most likely to need
+            // this. On a ztest pool the other three cost about a
+            // quarter again on top of lz4, which is the cheaper
+            // mistake.
+            codecs: Codec::ALL.to_vec(),
             // The sizes a dnode block is written at: `dnodesize` blocks
             // are 16 KiB by default, 32 KiB and 128 KiB for large dnodes
             // and busy objsets.
-            lz4_sizes: vec![16384, 32768, 131072],
+            block_sizes: vec![16384, 32768, 131072],
             max_hits: 100_000,
             chunk: 4 << 20,
         }
@@ -238,41 +335,54 @@ fn plaintext_pass(scan: &mut Scan, opts: &Options, device: usize, base: u64, buf
 /// OpenZFS frames lz4 with a big-endian four-byte compressed length, so
 /// a length that does not fit the block is settled without decompressing
 /// anything — which is what keeps this pass affordable.
-fn lz4_pass(scan: &mut Scan, opts: &Options, device: usize, base: u64, buf: &[u8], at: usize) {
-    let Some(head) = buf.get(at..at + 4) else {
+fn compressed_pass(
+    scan: &mut Scan,
+    opts: &Options,
+    device: usize,
+    base: u64,
+    buf: &[u8],
+    at: usize,
+) {
+    let Some(here) = buf.get(at..) else {
         return;
     };
-    let clen = u32::from_be_bytes(head.try_into().expect("4 bytes")) as usize;
-    if clen == 0 || clen as u64 > MAX_BLOCKSIZE {
-        return;
-    }
-    if at + 4 + clen > buf.len() {
-        return;
-    }
-    for lsize in &opts.lz4_sizes {
-        // A compressed block never claims to be larger than what it
-        // decompresses to.
-        if clen as u64 >= *lsize {
-            continue;
-        }
-        let Ok(out) = compress::lz4(&buf[at..], *lsize as usize) else {
-            continue;
-        };
-        let mut slot = 0u64;
-        let mut off = 0usize;
-        while off + DNODE_SIZE <= out.len() {
-            scan.slots_examined += 1;
-            if plausible_head(&out[off..]).is_ok() {
-                if let Ok(d) = DnodePhys::parse(&out[off..], Endian::Little) {
-                    consider(scan, opts, device, base + at as u64, slot, Found::Lz4, d);
-                }
+    for codec in &opts.codecs {
+        for lsize in &opts.block_sizes {
+            if !codec.could_start(here, *lsize) {
+                continue;
             }
-            off += DNODE_SIZE;
-            slot += 1;
+            let Some(out) = codec.decompress(here, *lsize as usize) else {
+                continue;
+            };
+            let mut slot = 0u64;
+            let mut off = 0usize;
+            while off + DNODE_SIZE <= out.len() {
+                scan.slots_examined += 1;
+                // Counted the same way as a slot read in plaintext: a
+                // rejection reason for every slot looked at is what
+                // makes an empty result readable (C-15).
+                match plausible_head(&out[off..]) {
+                    Err(r) => scan.counts.bump(r),
+                    Ok(()) => match DnodePhys::parse(&out[off..], Endian::Little) {
+                        Ok(d) => consider(
+                            scan,
+                            opts,
+                            device,
+                            base + at as u64,
+                            slot,
+                            Found::Compressed(*codec),
+                            d,
+                        ),
+                        Err(_) => scan.counts.bump(Reject::BonusLen),
+                    },
+                }
+                off += DNODE_SIZE;
+                slot += 1;
+            }
+            // One size that decompressed cleanly is enough; trying the
+            // rest would report the same block again under another name.
+            break;
         }
-        // One size that decompressed cleanly is enough; trying the rest
-        // would report the same block again under another name.
-        break;
     }
 }
 
@@ -301,7 +411,7 @@ pub fn scan_member(
     // largest block ZFS can write: an overlap of 16 MiB on a 4 MiB chunk
     // would read every byte of the member five times.
     let overlap = opts
-        .lz4_sizes
+        .block_sizes
         .iter()
         .copied()
         .max()
@@ -333,10 +443,10 @@ pub fn scan_member(
         // overlap belongs to the next one.
         let own = (opts.chunk).min((end - at) as usize);
         plaintext_pass(&mut scan, opts, device, at, &window[..own.min(readable)]);
-        if opts.lz4 {
+        if !opts.codecs.is_empty() {
             let mut off = 0usize;
             while off < own && off < readable {
-                lz4_pass(&mut scan, opts, device, at, window, off);
+                compressed_pass(&mut scan, opts, device, at, window, off);
                 off += step as usize;
             }
         }

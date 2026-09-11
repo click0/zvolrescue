@@ -8,7 +8,7 @@ use clap::Args;
 use zfs_ondisk::carve::{Profile, Reject};
 use zfs_ondisk::dmu::{object_type_name, ot, DnodePhys};
 use zfs_ondisk::Endian;
-use zfs_read::carve::{assess_against, rank, scan_member, Options as ScanOptions};
+use zfs_read::carve::{assess_against, rank, scan_member, Codec, Options as ScanOptions};
 use zfs_read::dmu::ObjectReader;
 use zfs_read::zio::PoolReader;
 use zvol_common::evidence::FileRef;
@@ -62,6 +62,7 @@ pub struct Options {
     pub full_assess: bool,
     pub max_hits: usize,
     pub sample: Option<usize>,
+    pub compressed: String,
 }
 
 /// `FROM..TO`, both optional around the dots.
@@ -232,6 +233,23 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         profile = Profile::default();
         profile_out = ProfileOut::default();
     }
+    let codecs: Vec<Codec> = if opts.compressed == "none" {
+        Vec::new()
+    } else {
+        let mut v = Vec::new();
+        for name in opts.compressed.split(',').map(str::trim) {
+            match Codec::named(name) {
+                Some(c) => v.push(c),
+                None => {
+                    eprintln!(
+                        "zvolcarve: --compressed {name}: not a compression this build knows (lz4, lzjb, gzip, zstd, none)"
+                    );
+                    return exit::USAGE;
+                }
+            }
+        }
+        v
+    };
     let range = match &opts.range {
         Some(s) => match byte_range(s) {
             Ok(r) => Some(r),
@@ -333,6 +351,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 profile: profile.clone(),
                 strict_profile: opts.profile.strict_profile,
                 range: member_range,
+                codecs: codecs.clone(),
                 max_hits: opts.sample.unwrap_or(opts.max_hits),
                 ..ScanOptions::default()
             },

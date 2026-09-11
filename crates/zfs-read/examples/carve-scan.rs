@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 
 use zfs_ondisk::carve::Profile;
-use zfs_read::carve::{scan_member, score, Options};
+use zfs_read::carve::{scan_member, score, Codec, Options};
 use zvolrescue_io::FileSource;
 
 fn main() {
@@ -15,13 +15,25 @@ fn main() {
             .expect("usage: carve-scan MEMBER [ashift] [type]"),
     );
     let ashift: u32 = args.next().map_or(12, |a| a.parse().expect("ashift"));
-    let dnode_type: Option<u8> = args.next().map(|t| t.parse().expect("type"));
+    let dnode_type: Option<u8> = args
+        .next()
+        .filter(|t| !t.is_empty() && t != "any")
+        .map(|t| t.parse().expect("type"));
+    let codecs: Vec<Codec> = match args.next() {
+        None => vec![Codec::Lz4],
+        Some(list) if list == "none" => Vec::new(),
+        Some(list) => list
+            .split(',')
+            .map(|n| Codec::named(n).expect("codec"))
+            .collect(),
+    };
     let src = FileSource::open(&path).expect("open");
     let opts = Options {
         profile: Profile {
             dnode_type,
             ..Profile::default()
         },
+        codecs,
         ..Options::default()
     };
     let scan = scan_member(&src, 0, ashift, &opts).expect("scan");
@@ -39,9 +51,12 @@ fn main() {
     let lz4 = scan
         .hits
         .iter()
-        .filter(|h| h.found == zfs_read::carve::Found::Lz4)
+        .filter(|h| h.found != zfs_read::carve::Found::Plaintext)
         .count();
-    println!("  {} plaintext, {lz4} from lz4", scan.hits.len() - lz4);
+    println!(
+        "  {} plaintext, {lz4} from a compressed block",
+        scan.hits.len() - lz4
+    );
     for (t, n) in &by_type {
         println!("  {n:>6} {t}");
     }

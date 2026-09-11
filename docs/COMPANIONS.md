@@ -231,7 +231,7 @@ zero candidates *and* a non-zero rejection count for the field at fault.
 The extracted image is bit-identical in every case, because the profile
 never touches what `dump` verifies.
 
-*Status: C-01…C-05, C-07, C-08, C-10 (lz4) and C-13…C-18 are
+*Status: C-01…C-05, C-07, C-08, C-10 and C-13…C-18 are
 implemented, and the acceptance run is a CI step on a fixture where the
 volume is on the members and no uberblock mentions it at any
 transaction group: `zvolrescue list` shows only `tank` and `tank/vm`,
@@ -315,7 +315,24 @@ The signatures are checked in CI against filesystems the runner really
 makes with `mkfs.ext4` and `mkswap`, which is the one place this can be
 checked against something other than our own opinion.
 
-Not implemented: compressed metadata other than lz4 (C-10).*
+C-10 is implemented for all four codecs, and the reason it is not
+lz4 alone is that the failure of an lz4-only scan is silent. A pool made
+before the `lz4_compress` feature stores its metadata in lzjb; a scan
+that tries lz4 and nothing else finds no dnodes on it at all — which
+looks exactly like a member that never held any. So `scan` tries lz4,
+lzjb, gzip and zstd by default, and `--compressed` names which of them
+to try: a subset when the pool's history is known, `none` for the
+plaintext pass alone. An unrecognised name is refused with exit 1 rather
+than quietly dropped, because a typo that silently disables a codec is
+the same silent failure again.
+
+Each codec is first asked whether the bytes could be its own — lz4's
+four-byte big-endian length, gzip's method-and-check byte pair, zstd's
+magic — so only lzjb, which has no header, pays a full decompression
+attempt at every slot. Over 100 MB of a `ztest` member the plaintext
+pass alone takes 0.02 s, lz4 adds 0.9 s, lzjb 0.2 s, gzip 0.03 s and
+zstd 0.15 s; all four together 1.15 s. That is the price of not having
+to know in advance what wrote the pool.*
 
 ---
 

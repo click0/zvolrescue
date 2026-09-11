@@ -28,6 +28,16 @@ in CI; what was tried on real environments is logged in
   recognised without one, because a guess with no number is honest and
   an invented number is not. `dump` prefers `--size`, then the size the
   contents state, then what the dnode implies, and says which it used.
+* **`zvolcarve` tries four compressions, not one (COMPANIONS C-10).**
+  Metadata is stored compressed, and a pool made before the
+  `lz4_compress` feature stores it in lzjb — so a scan that tries lz4
+  and nothing else finds no dnodes on such a pool at all, which looks
+  exactly like a member that never held any. `scan` now tries lz4, lzjb,
+  gzip and zstd by default; `--compressed` takes a subset, or `none` for
+  the plaintext pass alone, and refuses an unrecognised name with exit 1
+  rather than quietly dropping it. Each codec is asked first whether the
+  bytes could be its own, so only lzjb — which has no header — pays a
+  full decompression attempt at every offset.
 * `zvoltimeline --pending` now also reads what each deadlist's own
   objects come to, and says whether that agrees with the running total
   the deadlist keeps. The pool maintains the two independently, so a
