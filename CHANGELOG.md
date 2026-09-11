@@ -48,13 +48,17 @@ tagged. `v0.7.1` is the release that carries those six.
   copies attached, not near the originals. F-68 asks the tool to say
   whether each input is a device or an image, and to record it; not
   implemented yet.
-* **SPEC §9: `ashift` is a test axis.** It sets the stride of every DVA
-  offset and of the RAIDZ column layout, so an error there is the
-  difference between reading the right sector and a neighbour's — and
-  every fixture in CI is built at 12. The mirror fixture at 9 and at 13
-  was run by hand and gave the same image byte for byte, so this is a
-  hole in the coverage rather than a known defect; the spec says so
-  rather than leaving it unsaid.
+* **`ashift` is a test axis, and now a covered one (SPEC §9).** It sets
+  the stride of every DVA offset and of the RAIDZ column layout, so an
+  error there is the difference between reading the right sector and a
+  neighbour's — and every fixture in CI was built at 12. CI now builds
+  the mirror and raidz2 fixtures at 9 and 13 as well, requires the label
+  to report the `ashift` the pool was made with (an image that came out
+  right while the number was read wrong would mean the number is not
+  being used), and extracts from a raidz2 at 9 with two of four members
+  absent, where the column stride has to be right for parity to
+  reconstruct anything. All five produce the image the walked extraction
+  pins.
 
 ## v0.7.1 — 2026-09-11
 

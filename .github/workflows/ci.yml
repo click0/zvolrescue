@@ -515,6 +515,38 @@ jobs:
           sha256sum /tmp/zp/member0.img /tmp/zp/member1.img > /tmp/zp.sums
           sha256sum -c /tmp/zp.sums
           if ./target/release/zvolfiles -q extract tank/fs /tmp/zp/member0.img -o /tmp/zp/member0.img; then echo "must refuse"; exit 1; else test $? = 5; fi
+      - name: Every ashift, not just the one the fixtures happen to use (SPEC §9)
+        run: |
+          # ashift sets the stride of every DVA offset and of the RAIDZ
+          # column layout, so being wrong about it is the difference
+          # between the right sector and a neighbour's. Every other
+          # fixture here is built at 12; these are the ends of the range
+          # — 9 is a 512-byte disk, 13 an 8 KiB one.
+          golden=febfe0108392728dbde89ee63f9f25419a0192ac04420db3ad88b0032a088585
+          for topology in mirror raidz2; do
+            for a in 9 13; do
+              d=/tmp/ax-$topology-$a
+              rm -rf "$d"
+              cargo run -q -p zfs-read --example mkfixture -- "$d" "$topology" "$a" >/dev/null
+              members=$(echo "$d"/member*.img)
+              # The label must say what the pool was made with: a
+              # fixture read at the wrong ashift that still produced the
+              # right image would mean the number is not being used.
+              ./target/release/zvolrescue -f json scan $members |
+                python3 -c "import json,sys; g=json.load(sys.stdin)['devices'][0]['config']['ashift']; assert g == $a, f'reported ashift {g}, built $a'"
+              ./target/release/zvolrescue -q dump tank/vm/disk0 $members --txg 4816229 -o /tmp/ax.img
+              echo "$golden  /tmp/ax.img" | sha256sum -c - >/dev/null
+              echo "  $topology ashift=$a: image matches"
+            done
+          done
+          # Where ashift bites hardest: RAIDZ parity reconstruction has
+          # to walk the columns with the right stride. Two of four
+          # members, at 512-byte sectors.
+          ./target/release/zvolrescue -q dump tank/vm/disk0 \
+            /tmp/ax-raidz2-9/member0.img /tmp/ax-raidz2-9/member1.img \
+            --txg 4816229 -o /tmp/ax-degraded.img
+          echo "$golden  /tmp/ax-degraded.img" | sha256sum -c -
+          rm -rf /tmp/ax-* /tmp/ax.img
       - name: A closed pipe is not a failure
         run: |
           # `zvolcarve list DIR | head -4` closes the pipe while the

@@ -478,10 +478,12 @@ on in-memory fixtures and portable.
   * datasets: zvols with known pseudo-random content and every compression/checksum combination, sparse zvols, encrypted zvols, deduplicated zvols, snapshots and clones;
   * scenarios: `zfs destroy` then recover at older TXG; `zpool destroy` then recover; one member missing; one member zeroed at the labels; random 1 MiB corruption in data; random corruption in metadata.
   * assertion: SHA-256 of extracted image equals the SHA-256 recorded before destruction.
-  * *Today every fixture in CI is built at `ashift=12`. The mirror
-    fixture at 9 and at 13 was run by hand and produced the same image
-    byte for byte, so this is a gap in coverage rather than a known
-    defect — but nothing holds it.*
+  * CI builds the mirror and raidz2 fixtures at 9 and at 13 as well as
+    at 12, checks that the label reports the `ashift` the pool was made
+    with — an image that came out right while the number was read wrong
+    would mean the number is not being used — and extracts the volume
+    from a raidz2 at 9 with two of four members absent, where the column
+    stride has to be right for parity to reconstruct anything.
 * **Cross-check**: on hosts with OpenZFS userland, compare `zvolrescue scan -v`/`list` output with `zdb -l`/`zdb -u`/`zdb -d`.
 * **Fuzzing**: `cargo fuzz` targets for the nvlist, blkptr, dnode and ZAP parsers, run for a bounded time in CI on every push.
 * **Static analysis**: `cargo clippy -D warnings`, `cargo fmt --check`, `cargo deny` (licences, advisories, banned crates); Miri on the `zfs-ondisk` unit tests.
