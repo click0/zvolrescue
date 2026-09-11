@@ -522,16 +522,27 @@ jobs:
           # a backtrace and exit 101 — unless the hook is in place, and
           # an operator quitting `less` has done nothing wrong. The
           # carve listing is long enough that head really does close it.
-          set -o pipefail || true
+          # No `pipefail`: the pipeline's own status is `head`'s, which
+          # is always 0, and the step runs under `bash -e`. With
+          # pipefail on, a tool exiting non-zero killed the step at this
+          # line — before the `if` below could say which command it was
+          # or print the stderr it had just captured to a file. That is
+          # how this step failed once and explained nothing.
           for cmd in \
             "./target/release/zvolcarve list /tmp/carve" \
             "./target/release/zvolrescue -f json list /tmp/fx/member0.img /tmp/fx/member1.img" \
             "./target/release/zvoltimeline /tmp/fx/member0.img /tmp/fx/member1.img" \
             "./target/release/zvolfiles list tank/fs /tmp/zp/member0.img -R"; do
+            set -- $cmd
+            test -x "$1" || { echo "no such binary: $1"; exit 1; }
             $cmd 2>/tmp/pipe-err.txt | head -2 >/dev/null
             code=${PIPESTATUS[0]}
             if [ "$code" != 0 ] || [ -s /tmp/pipe-err.txt ]; then
-              echo "$cmd exited $code with:"; cat /tmp/pipe-err.txt; exit 1
+              echo "FAILED: $cmd"
+              echo "  exit $code, stderr follows:"
+              sed 's/^/  | /' /tmp/pipe-err.txt
+              echo "  (exit 0 with nothing on stderr is what a closed pipe must look like)"
+              exit 1
             fi
           done
           # And a panic that is not a closed pipe still reaches stderr:
