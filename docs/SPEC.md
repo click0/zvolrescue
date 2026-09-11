@@ -91,6 +91,68 @@ binding for every later decision in this document:
 | UC-5 | Operator of bhyve / container hosts | Bulk-export all zvols under a dataset tree from an offline pool to another storage for migration or audit. |
 | UC-6 | Developer / QA | Verify that a test pool's on-disk structures are consistent (every blkptr checksum matches) after a fault-injection run. |
 
+### 4.1 Before the tool runs: what it cannot do for the operator
+
+This tool never writes to the evidence (N-01). That guarantee is worth
+very little on its own, because the operator will reach for other tools —
+`zpool import -F`, a filesystem repair, another recovery program — and
+those do write. What decides whether a recovery is possible is what
+happens before and around this tool, so it belongs here rather than in a
+wiki nobody reads at 3 a.m.
+
+**1. Stop writing to the originals, first, before anything else.** A
+destroyed dataset's blocks are free space, and every write to the pool
+can land on them. Unmount, export, stop the virtual machines and the
+iSCSI targets, take the pool out of service. The clock that matters is
+measured in writes, not in hours: an idle pool loses nothing overnight,
+a busy one can lose the data in a minute.
+
+**2. Take bit-for-bit images and work from the copies.** One image per
+member (`dd`, or `ddrescue` where the disk is failing), verified by
+hash, and then every experiment happens against the images. Reading the
+originals through this tool is safe; leaving them in reach of the next
+tool is not.
+
+**3. When there is no room to image: a write shim.** On FreeBSD 14 and
+later, `gunion(8)` places a writable device over a read-only one: writes
+are intercepted and stored on the upper device, reads that were not
+written fall through to the lower. `zpool import -F` can then be
+attempted against the real disk with every write landing somewhere else.
+
+* `gunion create upper lower` gives `/dev/<upper>-<lower>.union`;
+  `gunion revert` throws the attempt away and `gunion commit` writes it
+  down to the real disk.
+* **Uncommitted changes are discarded when the union is destroyed** —
+  the union metadata lives only while the union does, so commit before
+  destroying or the work is gone.
+* The upper device must be at least the size of the lower. An `md(4)`
+  in vnode mode backs it with a plain file whose size follows what is
+  actually written; swap mode keeps it in memory.
+* Naming a whole labelled disk (`da0`) creates a union for the disk and
+  one for each partition, but only the whole-disk union can commit them
+  all.
+
+On Linux the same shape is a device-mapper `snapshot` target over the
+device with a COW file, or a qcow2 overlay.
+
+**4. Check the three things separately, and believe none of them until
+checked.** Uberblocks, the vdev configuration, and metadata integrity
+fail independently, and a pool that refuses to import rarely tells you
+which. `scan` reports the first two and verifies the third; where it
+recovers a vdev base without a label it names the evidence that
+confirmed it (§5.6, D-5) rather than asserting it.
+
+**5. Experiment in a throwaway environment.** A virtual machine with the
+copies attached as block devices, on whatever infrastructure is to hand:
+an experiment that goes wrong is recreated rather than repaired, and the
+originals were never in the room. This matters most for an alpha tool —
+a reconstruction bug that writes in the wrong place would finish off
+what is left, which is why the copies exist.
+
+| ID | Pri | Requirement |
+|---|---|---|
+| F-68 | S | **Say what the evidence is.** Every run reports, per input, whether it is a block device or a regular file, and warns once when any input is a block device: not because this tool will write to it, but because the next one might. The distinction goes into the evidence record so a report can show that a recovery was done against images. *Not implemented.* |
+
 ## 5. Functional requirements
 
 Priority: **M** = must (v1), **S** = should (v1 if time permits), **C** = could (later).
@@ -407,9 +469,18 @@ on in-memory fixtures and portable.
 * **Unit tests** for every on-disk structure parser using golden byte arrays taken from real pools.
 * **Fixture pools**, generated in CI on a FreeBSD runner (GitHub Actions `vmactions/freebsd-vm`, or a self-hosted FreeBSD host) and on Linux with OpenZFS:
   * topologies: single, mirror-2, raidz1-3, raidz2-4, raidz3-5, draid1;
+  * `ashift` 9, 12 and 13 across those topologies: it sets the stride of
+    every DVA offset and of the RAIDZ column layout, so a mistake in it
+    is not a small mistake — it is the difference between reading the
+    right sector and reading a neighbour's. A tool that is only ever
+    tried at `ashift=12` has not been tried;
   * datasets: zvols with known pseudo-random content and every compression/checksum combination, sparse zvols, encrypted zvols, deduplicated zvols, snapshots and clones;
   * scenarios: `zfs destroy` then recover at older TXG; `zpool destroy` then recover; one member missing; one member zeroed at the labels; random 1 MiB corruption in data; random corruption in metadata.
   * assertion: SHA-256 of extracted image equals the SHA-256 recorded before destruction.
+  * *Today every fixture in CI is built at `ashift=12`. The mirror
+    fixture at 9 and at 13 was run by hand and produced the same image
+    byte for byte, so this is a gap in coverage rather than a known
+    defect — but nothing holds it.*
 * **Cross-check**: on hosts with OpenZFS userland, compare `zvolrescue scan -v`/`list` output with `zdb -l`/`zdb -u`/`zdb -d`.
 * **Fuzzing**: `cargo fuzz` targets for the nvlist, blkptr, dnode and ZAP parsers, run for a bounded time in CI on every push.
 * **Static analysis**: `cargo clippy -D warnings`, `cargo fmt --check`, `cargo deny` (licences, advisories, banned crates); Miri on the `zfs-ondisk` unit tests.

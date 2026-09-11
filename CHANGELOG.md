@@ -13,6 +13,32 @@ development milestone that names what changed when — the sections below
 are their record — and ships inside the next version that does get
 tagged. `v0.7.1` is the release that carries those six.
 
+## Unreleased
+
+### Documented
+* **SPEC §4.1: what the operator has to do, which the tool cannot do for
+  them.** Being read-only by construction is worth little on its own,
+  because the next tool reached for — `zpool import -F`, a filesystem
+  repair — does write. So the spec now carries the procedure: stop
+  writes to the originals first, image them and work from the copies,
+  and where there is no room to image, put a write shim underneath.
+  FreeBSD 14's `gunion(8)` is written up with the part that bites —
+  uncommitted changes are discarded when the union is destroyed, so
+  `commit` comes before `destroy` — with the device-mapper `snapshot`
+  target named as the Linux equivalent. Uberblocks, the vdev
+  configuration and metadata integrity fail independently and are
+  checked separately. Experiments belong in a throwaway machine with the
+  copies attached, not near the originals. F-68 asks the tool to say
+  whether each input is a device or an image, and to record it; not
+  implemented yet.
+* **SPEC §9: `ashift` is a test axis.** It sets the stride of every DVA
+  offset and of the RAIDZ column layout, so an error there is the
+  difference between reading the right sector and a neighbour's — and
+  every fixture in CI is built at 12. The mirror fixture at 9 and at 13
+  was run by hand and gave the same image byte for byte, so this is a
+  hole in the coverage rather than a known defect; the spec says so
+  rather than leaving it unsaid.
+
 ## v0.7.1 — 2026-09-11
 
 **A closed pipe is not a failure.** One fix, found by running the
