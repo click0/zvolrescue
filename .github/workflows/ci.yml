@@ -22,6 +22,23 @@ jobs:
       - run: cargo test --all-targets
       - run: cargo build --release
       - run: ./target/release/zvolrescue --version
+      - name: The version and the CHANGELOG say the same thing
+        run: |
+          # The release workflow takes the tag's CHANGELOG section as
+          # the notes and refuses a tag that has none — but it only
+          # finds out at release time, with the tag already pushed and
+          # nowhere to put the fix. Here it is still a branch.
+          v=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          echo "workspace version: $v"
+          test -n "$v"
+          for f in CHANGELOG.md CHANGELOG.uk.md; do
+            grep -q "^## v$v — " "$f" || { echo "::error::$f has no '## v$v — date' section"; exit 1; }
+          done
+          # The section's lead line becomes the release title, so it has
+          # to be there.
+          awk -v want="v$v" '$0 ~ "^## " want { p=1; next } /^## / && p { exit } p { print }' CHANGELOG.md |
+            grep -q '^\*\*' || { echo "::error::the v$v section has no **lead line** for the release title"; exit 1; }
+          test "$(./target/release/zvolrescue --version)" = "zvolrescue $v"
       - name: End-to-end on fixture members (scan, list, dump)
         run: |
           cargo run -p zfs-read --example mkfixture -- /tmp/fx mirror 12

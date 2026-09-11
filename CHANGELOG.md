@@ -1,18 +1,21 @@
 # Changelog
 
 All notable changes to zvolrescue. Versions: `v0.1.0-alpha.1` first, then
-plain minor bumps (`v0.2.0`, `v0.3.0`, …) until 1.0. Every 0.x release is
-validated against OpenZFS **userland** pools (`ztest` + `zdb`, no kernel)
-in CI; what was tried on real environments is logged in
-[docs/REALWORLD-TESTS.md](docs/REALWORLD-TESTS.md).
+plain minor bumps until 1.0, with a patch where a released minor needs a
+fix. Every 0.x release is validated against OpenZFS **userland** pools
+(`ztest` + `zdb`, no kernel) in CI; what was tried on real environments
+is logged in [docs/REALWORLD-TESTS.md](docs/REALWORLD-TESTS.md).
 
-Only `v0.1.0-alpha.1` and `v0.7.0` are tags. A tag here is made from the
-GitHub web interface, which can only tag the head of a branch, so
-`v0.2.0` through `v0.6.0` are development milestones that name what
-changed when — the sections below are their record — and `v0.7.0` is the
-release that carries all of them.
+`v0.2.0` through `v0.6.0` never got tags of their own. A tag here is made
+from the GitHub web interface, which can only tag the head of a branch,
+so those five are development milestones that name what changed when —
+the sections below are their record — and `v0.7.0` is the release that
+carries all of them.
 
-## Unreleased
+## v0.7.1 — 2026-09-11
+
+**A closed pipe is not a failure.** One fix, found by running the
+published v0.7.0 binaries rather than the ones in `target/`.
 
 ### Fixed
 * A closed pipe stopped being a crash. `zvolcarve list DIR | head -4`
