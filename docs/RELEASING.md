@@ -74,6 +74,15 @@ moment of tagging, and everything below follows from that:
    notes and publishes a GitHub release — marked pre-release when the tag
    carries a suffix (`-alpha.1`, `-rc.1`).
 
+   Two things in it are written by hand and have to be kept up. The
+   release **title** is `zvolrescue vX.Y.Z — <the section's lead line>`,
+   taken from the `**…**` that opens the CHANGELOG section, so give
+   every section one. And the **Downloads** table names each program and
+   what it is for; the list lives in the workflow, and the job fails if
+   it does not match the binaries the build actually produced — a new
+   companion tool means a new line there, not a release that ships a
+   binary its own notes never mention.
+
 Version numbers follow SemVer. The first cut was `v0.1.0-alpha.1`; from
 then on every release is a plain minor bump — `v0.2.0`, `v0.3.0`, … — with
 no pre-release suffix (a suffixed tag is still supported and is marked

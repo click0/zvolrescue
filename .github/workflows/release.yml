@@ -149,6 +149,24 @@ jobs:
             /^## Unreleased/ { p=1; next }
             /^## / && p { exit }
             p { print }' CHANGELOG.md)
+          # The programs, in the order they are meant to be read, and
+          # what each is for. Checked against what the build actually
+          # produced: a release that ships a binary its own notes never
+          # mention is the same failure as notes describing files that
+          # are not there.
+          tools='zvolrescue|the pool, and a volume out of it: what the members hold, and the image of a zvol
+          zvoltimeline|the pool history the transaction groups still carry: when a dataset was made, destroyed, and whether its space is still held
+          zvolcarve|volumes no uberblock points at any more, found by scanning raw vdev space
+          zvolfiles|files out of filesystem datasets: the tree with its metadata, or a raw object dump when the metadata is gone
+          zvolreport|the evidence logs of the others as one document, hashed, signed and checkable by a third party'
+          listed=$(printf '%s\n' "$tools" | cut -d'|' -f1 | sort)
+          built=$(ls dist | sed -n "s/^\(zvol[a-z]*\)-$v-.*/\1/p" | sort -u)
+          if [ "$listed" != "$built" ]; then
+            echo "::error::the notes name [$(echo $listed)] but the build produced [$(echo $built)]"
+            exit 1
+          fi
+          ntools=$(printf '%s\n' "$listed" | wc -l | tr -d ' ')
+          nbins=$(ls dist | grep -c '^zvol')
           {
             echo "**zvolrescue $tag** — read-only extraction of zvols from ZFS pools that no longer import: labels, uberblocks, mirror/RAIDZ/dRAID reconstruction, every checksum and compression, encrypted datasets with a key."
             echo
@@ -158,18 +176,29 @@ jobs:
             esac
             echo "## Downloads"
             echo
-            echo "| File | Platform | Notes |"
-            echo "|---|---|---|"
-            echo "| \`zvolrescue-$v-x86_64-linux-musl\` | Linux x86_64 | static, runs on any distro or rescue medium |"
-            echo "| \`zvolrescue-$v-aarch64-linux-musl\` | Linux aarch64 | static |"
-            echo "| \`zvolrescue-$v-amd64-freebsd\` | FreeBSD 14.x amd64 | built on 14.2; works on mfsBSD |"
-            echo "| \`zvoltimeline-$v-*\` | the same three | the pool's history from its transaction groups |"
-            echo "| \`zvolreport-$v-*\` | the same three | the evidence logs as one checkable document |"
-            echo "| \`zvolcarve-$v-*\` | the same three | volumes no uberblock points at any more |"
-            echo "| \`zvolfiles-$v-*\` | the same three | files out of filesystem datasets |"
-            echo "| \`SHA256SUMS\` | — | \`sha256sum -c SHA256SUMS\` |"
+            echo "$nbins binaries: $ntools programs, each built for the same three platforms. The name is always **\`<program>-$v-<platform>\`**."
             echo
-            echo "No installation: \`chmod +x\` and run. Nothing is ever written to the pool members."
+            echo "| Program | What it is for |"
+            echo "|---|---|"
+            printf '%s\n' "$tools" | while IFS='|' read -r name what; do
+              echo "| \`$name\` | $what |"
+            done
+            echo
+            echo "| Platform | \`<platform>\` | Notes |"
+            echo "|---|---|---|"
+            echo "| Linux x86_64 | \`x86_64-linux-musl\` | static; runs on any distribution, and on a rescue medium |"
+            echo "| Linux aarch64 | \`aarch64-linux-musl\` | static |"
+            echo "| FreeBSD 14.x amd64 | \`amd64-freebsd\` | built on 14.2; runs on mfsBSD |"
+            echo
+            echo "So the carver for Linux x86_64 is \`zvolcarve-$v-x86_64-linux-musl\`, and the FreeBSD main binary is \`zvolrescue-$v-amd64-freebsd\`."
+            echo
+            echo "\`SHA256SUMS\` covers all $nbins of them:"
+            echo
+            echo '```sh'
+            echo "sha256sum -c SHA256SUMS   # or, on FreeBSD: sha256 -c SHA256SUMS"
+            echo '```'
+            echo
+            echo "No installation: \`chmod +x\` and run. Every program opens the members read-only and never writes to the pool."
             echo
             echo "## What is in $tag"
             echo
@@ -184,6 +213,19 @@ jobs:
             echo "Full history: [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/$tag/CHANGELOG.md)."
           } > notes.md
           cat notes.md
+          # The release title carries the CHANGELOG section's own lead
+          # line, so a release is named by what it did and not by its
+          # number alone. Decided here, where the section is still in
+          # hand, and handed to the next step in a file; a section with
+          # no lead line falls back to the number.
+          headline=$(printf '%s\n' "$section" |
+            sed -n 's/^\*\*\([^*]*\)\*\*.*/\1/p' | head -1 | sed 's/[.:]$//')
+          if [ -n "$headline" ]; then
+            printf '%s' "zvolrescue $tag — $headline" > title.txt
+          else
+            printf '%s' "zvolrescue $tag" > title.txt
+          fi
+          cat title.txt; echo
       # The release is assembled as a draft and published only once it
       # carries every file. That order is right either way, and it is
       # the only one that works when release immutability is on
@@ -197,7 +239,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="$TAG"
-          title="zvolrescue $tag"
+          title=$(cat title.txt)
           case "$tag" in *-*) pre="--prerelease" ;; *) pre="" ;; esac
           want=$(ls dist | wc -l)
 
