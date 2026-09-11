@@ -207,7 +207,9 @@ jobs:
               echo
               echo "### Also in this tag, filed under no version yet"
               echo
-              printf '%s\n' "$unreleased"
+              # One level down, so its Added and Fixed read as belonging
+              # to this heading and not as two more of the version's own.
+              printf '%s\n' "$unreleased" | sed 's/^### /#### /'
             fi
             echo
             echo "Full history: [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/$tag/CHANGELOG.md)."
