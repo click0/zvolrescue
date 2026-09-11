@@ -123,6 +123,10 @@ pub struct VdevNode {
     pub ashift: Option<u64>,
     /// `asize` (top-level vdevs).
     pub asize: Option<u64>,
+    /// `metaslab_array`: the MOS object listing this vdev's space maps.
+    pub metaslab_array: Option<u64>,
+    /// `metaslab_shift`: how big each metaslab is, as a power of two.
+    pub metaslab_shift: Option<u64>,
     /// `nparity` for raidz/draid.
     pub nparity: Option<u64>,
     /// `draid_ndata`: data columns per dRAID group.
@@ -147,6 +151,8 @@ impl VdevNode {
             path: nv.str("path").map(str::to_string),
             ashift: nv.u64("ashift"),
             asize: nv.u64("asize"),
+            metaslab_array: nv.u64("metaslab_array"),
+            metaslab_shift: nv.u64("metaslab_shift"),
             nparity: nv.u64("nparity"),
             draid_ndata: nv.u64("draid_ndata"),
             draid_nspares: nv.u64("draid_nspares"),

@@ -274,17 +274,30 @@ reports what the first N hits actually look like — object types, block
 sizes, tree depths and birth transaction groups — so a profile can be
 picked from the disk rather than from memory.
 
-C-06 is not implemented, and what it would add is worth stating: the
-outcome it exists to report is already reported, because ranking reads
-every block a candidate claims and checks it against its own checksum, so
-a candidate whose blocks were rewritten scores low on its own. What the
-space map would add is the difference between *rewritten* and *freed but
-not yet rewritten* — data that verifies today and may not tomorrow — and
-a much cheaper way of noticing it than reading everything.
+C-06 is implemented. Every metaslab's space map is replayed into a set
+of ranges, and each block a candidate claims is asked about: the space is
+either still given out or released. Neither is a verdict on the data —
+the checksum is, and ranking already reads every block — so it does not
+move a candidate's score. What it adds is the difference between
+*rewritten* and *freed but not yet rewritten*: data that verifies today
+and may not tomorrow, which is the difference between a recovery worth
+starting now and one that is already too late.
 
-Not implemented: overwrite detection against the space map (C-06),
-compressed metadata other than lz4 (C-10), and signature carving inside
-candidate data (C-12).*
+Two things to know about the answer. It lags: the pool keeps recent
+allocations in log space maps that have not been flushed into the
+metaslabs, so space given out in the last few transaction groups can
+still read as free — the error is one-directional and the report says so
+(`may_lag`). And a vdev whose configuration does not say where its
+metaslabs are — a layout given by hand — is skipped by name, with its
+blocks reported as unaccounted for rather than as free.
+
+The decoder is checked in CI against the one number ZFS maintains
+independently of the log it keeps: `smp_alloc` in each map's header.
+Replaying every metaslab of every `ztest` pool comes to the byte that
+zdb reads out of those headers.
+
+Not implemented: compressed metadata other than lz4 (C-10), and
+signature carving inside candidate data (C-12).*
 
 ---
 

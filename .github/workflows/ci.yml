@@ -495,7 +495,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends zfsutils-linux zfs-test
       - run: cargo build --release && cargo build --release -p zfs-read --examples
-      - run: tests/crosscheck-ztest.sh ./target/release/zvolrescue /tmp/crosscheck ./target/release/examples/walk-objects ./target/release/examples/unwrap-key ./target/release/zvoltimeline
+      - run: tests/crosscheck-ztest.sh ./target/release/zvolrescue /tmp/crosscheck ./target/release/examples/walk-objects ./target/release/examples/unwrap-key ./target/release/zvoltimeline ./target/release/examples/space
 
   freebsd:
     name: FreeBSD 14 (ports rust)

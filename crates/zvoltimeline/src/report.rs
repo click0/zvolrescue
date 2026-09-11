@@ -188,7 +188,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 object: None,
                 guid: 0,
                 details: format!(
-                    "{} byte(s) not yet freed: {} in the pool's free list ({} block pointer(s)), {} in {} deadlist(s){}",
+                    "{} byte(s) not yet freed: {} in the pool's free list ({} block pointer(s)), {} in {} deadlist(s){}{}",
                     p.total(),
                     p.free_bpobj_bytes,
                     p.free_bpobj_blkptrs,
@@ -198,6 +198,17 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                         format!(", {} unreadable", p.unreadable)
                     } else {
                         String::new()
+                    },
+                    // The deadlists' own objects come to the same total
+                    // when this reader has them right; saying so is how
+                    // anyone can tell the number is not invented.
+                    if p.inconsistent > 0 {
+                        format!(
+                            "; {} deadlist(s) disagree with their own objects ({} byte(s) there)",
+                            p.inconsistent, p.bpobj_bytes
+                        )
+                    } else {
+                        format!("; the deadlists' own objects agree ({})", p.bpobj_bytes)
                     }
                 ),
                 last_seen_txg: None,

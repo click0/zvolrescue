@@ -463,6 +463,15 @@ pub struct Assessment {
     pub blocks_failed: u64,
     /// Oldest and newest birth transaction group met in the tree.
     pub birth: Option<(u64, u64)>,
+    /// Blocks whose space the allocator still has given out (C-06): the
+    /// candidate is either live somewhere or its space went to something
+    /// else.
+    pub blocks_allocated: u64,
+    /// Blocks whose space has been released. The likeliest state for
+    /// something destroyed, and the one a recovery is racing.
+    pub blocks_free: u64,
+    /// Blocks the space maps say nothing about.
+    pub blocks_unknown: u64,
     /// The walk stopped before the end of the tree.
     pub sampled: bool,
 }
@@ -487,6 +496,22 @@ impl Assessment {
 /// front, because the front of an overwritten volume is the part most
 /// likely to still look intact.
 pub fn assess(obj: &crate::dmu::ObjectReader<'_, '_>, sample: u64) -> Assessment {
+    assess_against(obj, sample, None)
+}
+
+/// Like [`assess`], and also asking the space maps about each block it
+/// finds (C-06).
+///
+/// The space maps say whether the allocator still has that space given
+/// out. They are not a verdict on the data — the checksum is — but they
+/// tell "released, and still there until something overwrites it" from
+/// "handed to something else", which is the difference between a
+/// recovery worth starting now and one that is already too late.
+pub fn assess_against(
+    obj: &crate::dmu::ObjectReader<'_, '_>,
+    sample: u64,
+    space: Option<&crate::spacemap::Space>,
+) -> Assessment {
     let d = obj.dnode();
     let total = d.maxblkid.saturating_add(1);
     let step = if sample == 0 || total <= sample {
@@ -505,6 +530,14 @@ pub fn assess(obj: &crate::dmu::ObjectReader<'_, '_>, sample: u64) -> Assessment
             Err(_) => a.blocks_failed += 1,
             Ok(None) => a.blocks_holes += 1,
             Ok(Some(bp)) => {
+                if let Some(space) = space {
+                    let dva = &bp.dva[0];
+                    match space.allocated(dva.vdev.into(), dva.offset, dva.asize) {
+                        Some(true) => a.blocks_allocated += 1,
+                        Some(false) => a.blocks_free += 1,
+                        None => a.blocks_unknown += 1,
+                    }
+                }
                 a.birth = Some(match a.birth {
                     None => (bp.birth, bp.birth),
                     Some((lo, hi)) => (lo.min(bp.birth), hi.max(bp.birth)),

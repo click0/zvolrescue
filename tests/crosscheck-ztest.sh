@@ -3,7 +3,7 @@
 # ztest (no kernel module needed), then compare `zvolrescue list -r` with
 # `zdb -d`, and `zvolrescue -vv scan` with `zdb -l`.
 #
-#   tests/crosscheck-ztest.sh [ZVOLRESCUE] [WORKDIR] [WALK-OBJECTS] [UNWRAP-KEY] [ZVOLTIMELINE]
+#   tests/crosscheck-ztest.sh [ZVOLRESCUE] [WORKDIR] [WALK-OBJECTS] [UNWRAP-KEY] [ZVOLTIMELINE] [SPACE]
 #
 # Pools: mirror, raidz2, raidz1-of-mirrors, draid1 (4d:6c:1s), draid2
 # (5d:9c:2s). Steps 4-8 need the walk-objects and unwrap-key examples.
@@ -22,6 +22,7 @@ WORK=${2:-/tmp/zvolrescue-crosscheck}
 WALK=${3:-./target/release/examples/walk-objects}
 UNWRAP=${4:-$(dirname "$WALK")/unwrap-key}
 TIMELINE=${5:-$(dirname "$ZR")/zvoltimeline}
+SPACE=${6:-$(dirname "$WALK")/space}
 rm -rf "$WORK"; mkdir -p "$WORK"
 fail=0
 
@@ -380,66 +381,105 @@ if listed != oracle:
         fi
     fi
 
-    # 13. space ZFS has finished with but has not freed: zvoltimeline
-    #     --pending against zdb's own bpobj accounting. The deadlists a
-    #     dataset carries are what stands between a destroyed dataset and
-    #     an unrecoverable one, so the number has to be the right one.
+    # 13. the space maps: replaying every metaslab's log must come to
+    #     the same allocated total that zdb reads out of the same maps'
+    #     headers. This is the one number in the carve path that ZFS
+    #     itself maintains independently of the log we replay, so it is
+    #     the only way to find out whether the entry decoder is right.
+    if [ -x "$SPACE" ]; then
+        if $SPACE $members > "$dir/space.txt" 2>"$dir/space.err"; then
+            zdb -e -p "$dir" -mm ztest 2>/dev/null > "$dir/metaslabs.txt" || :
+            if python3 - "$dir/space.txt" "$dir/metaslabs.txt" <<'EOF'
+import re, sys
+ours = {}
+for line in open(sys.argv[1]):
+    m = re.match(r"vdev (\d+): .* replayed (\d+) byte\(s\), declared (\d+) byte\(s\)(.*)", line)
+    if m:
+        ours[int(m.group(1))] = (int(m.group(2)), int(m.group(3)), "agree" in m.group(4))
+    elif line.startswith("skipped"):
+        print(line.rstrip())
+if not ours:
+    print("no vdev read")
+    sys.exit(1)
+for vdev, (replayed, declared, agree) in sorted(ours.items()):
+    if not agree:
+        print(f"vdev {vdev}: replaying the logs gives {replayed}, the maps declare {declared}")
+        sys.exit(1)
+
+# zdb prints one smp_alloc per space map, and more of them than there
+# are metaslabs: the pool's unflushed log space maps have headers too,
+# and they come after the metaslabs. Only a header that follows a
+# `metaslab N ... spacemap M` line with a non-zero M is a metaslab's — a
+# metaslab with no space map prints no header at all, and taking the
+# next one would read a log's total as a metaslab's.
+theirs = {}
+vdev = None
+expect = False
+for line in open(sys.argv[2]):
+    if line.startswith("Log Space Maps in Pool"):
+        break
+    m = re.match(r"\s+vdev\s+(\d+)", line)
+    if m:
+        vdev = int(m.group(1))
+        expect = False
+        continue
+    m = re.match(r"\s+metaslab\s+\d+\s+offset\s+\S+\s+spacemap\s+(\d+)", line)
+    if m:
+        expect = m.group(1) != "0"
+        continue
+    m = re.match(r"\s+smp_alloc = (0x[0-9a-f]+)", line)
+    if m and expect and vdev is not None:
+        # smp_alloc is signed: a map condensed before its frees were
+        # flushed reads negative, and zdb prints the two's complement.
+        v = int(m.group(1), 16)
+        if v >= 1 << 63:
+            v -= 1 << 64
+        theirs[vdev] = theirs.get(vdev, 0) + v
+        expect = False
+for vdev, total in sorted(theirs.items()):
+    if vdev not in ours:
+        continue
+    if ours[vdev][0] != total:
+        print(f"vdev {vdev}: we replay {ours[vdev][0]} byte(s), zdb's metaslabs add up to {total}")
+        sys.exit(1)
+checked = sorted(set(theirs) & set(ours))
+if not checked:
+    print("no vdev could be compared with zdb")
+    sys.exit(1)
+print(f"   space maps: vdev(s) {checked} replay to the byte that zdb reads from their headers")
+EOF
+            then :; else echo "   space maps: FAILED"; fail=1; fi
+        else
+            echo "   space maps: FAILED"; tail -3 "$dir/space.err"; fail=1
+        fi
+    fi
+
+    # 14. space ZFS has finished with but has not freed. There is no
+    #     oracle for this in zdb — it never prints a deadlist's header —
+    #     but the pool keeps the number twice: once as each deadlist's
+    #     running total, and once in the block-pointer objects the
+    #     deadlist names. `--pending` reads both and says whether they
+    #     agree, which is a stronger check than reading zdb's text: it
+    #     covers every deadlist rather than the ones a dump happened to
+    #     print, and it cannot be fooled by a parse.
     if [ -x "$TIMELINE" ]; then
         if $TIMELINE -f json --pending $members > "$dir/pending.json" 2>"$dir/pending.err"; then
-            if python3 - "$dir/pending.json" "$dir/objects.txt" <<'EOF'
+            if python3 - "$dir/pending.json" <<'EOF'
 import json, re, sys
 report = json.load(open(sys.argv[1]))
 pending = [e for e in report["events"] if e["event"] == "pending"]
 if not pending:
     print("no pending event")
     sys.exit(1)
-# The newest transaction group's reading is the one zdb also describes.
-newest = max(pending, key=lambda e: e["txg"])
-ours = int(re.search(r"^(\d+) byte", newest["details"]).group(1))
-
-SCALE = {"": 1, "K": 1 << 10, "M": 1 << 20, "G": 1 << 30, "T": 1 << 40}
-
-def interval(text):
-    """What a number zdb printed could have been.
-
-    zdb rounds to whatever fits in five characters, so `808K` means
-    anything from 807.5K to 808.5K. Comparing against the midpoint would
-    fail by a few dozen bytes on a pool with a dozen bpobjs; comparing
-    against the range the printing allows is exact."""
-    m = re.fullmatch(r"(\d+)(?:\.(\d+))?([KMGT]?)", text)
-    if not m:
-        return None
-    digits = m.group(2) or ""
-    value = float(m.group(1) + ("." + digits if digits else ""))
-    scale = SCALE[m.group(3)]
-    if not m.group(3):
-        return (int(value), int(value))
-    half = 0.5 * (10 ** -len(digits))
-    return ((value - half) * scale, (value + half) * scale)
-
-# Every bpobj zdb dumped, and how much space it still accounts for. The
-# pool's free bpobj and every deadlist's bpobjs are all in here, which is
-# the same set our total covers.
-lo = hi = 0.0
-seen = 0
-current = None
-for line in open(sys.argv[2]):
-    obj = re.match(r"\s+(\d+)\s+\d+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+(.+)$", line)
-    if obj:
-        current = obj.group(2).strip()
-    m = re.match(r"\s+bytes = (\S+)$", line)
-    if m and current == "bpobj":
-        span = interval(m.group(1))
-        if span is None:
-            print(f"cannot read zdb's {m.group(1)!r}")
-            sys.exit(1)
-        lo += span[0]
-        hi += span[1]
-        seen += 1
-if not (lo <= ours <= hi):
-    print(f"pending says {ours} byte(s); zdb's {seen} bpobj(s) allow {lo:.0f}..{hi:.0f}")
+bad = [e for e in pending if "disagree" in e["details"]]
+if bad:
+    print(bad[0]["details"])
     sys.exit(1)
-print(f"   pending: {ours} byte(s) still held, inside what zdb's {seen} bpobj(s) allow")
+newest = max(pending, key=lambda e: e["txg"])
+held = int(re.match(r"(\d+) byte", newest["details"]).group(1))
+lists = int(re.search(r"in (\d+) deadlist", newest["details"]).group(1))
+print(f"   pending: {held} byte(s) still held in {lists} deadlist(s), "
+      f"and their own objects come to the same")
 EOF
             then :; else echo "   pending: FAILED"; fail=1; fi
         else

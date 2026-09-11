@@ -822,10 +822,20 @@ pub struct Pending {
     pub free_bpobj_bytes: u64,
     /// Block pointers it holds.
     pub free_bpobj_blkptrs: u64,
-    /// Bytes all readable deadlists account for.
+    /// Bytes all readable deadlists account for, from their headers.
     pub deadlist_bytes: u64,
+    /// The same, added up from the block-pointer objects those
+    /// deadlists actually name.
+    ///
+    /// ZFS maintains the two independently — the header total is kept
+    /// as entries are added, the objects hold the entries — so they
+    /// have to agree, and a disagreement is this reader's fault rather
+    /// than the pool's.
+    pub bpobj_bytes: u64,
     /// How many deadlists were read.
     pub deadlists: usize,
+    /// Deadlists whose header total and whose objects disagree.
+    pub inconsistent: usize,
     /// Datasets whose deadlist could not be read.
     pub unreadable: usize,
 }
@@ -850,19 +860,54 @@ pub fn pending(mos: &DnodeArray<'_, '_>, datasets: &[Dataset]) -> Pending {
             }
         }
     }
+    // A deadlist object can be named by more than one dataset's chain,
+    // and counting it twice would overstate what is still held.
+    let mut seen = BTreeSet::new();
     for ds in datasets {
-        if ds.phys.deadlist_obj == 0 {
+        if ds.phys.deadlist_obj == 0 || !seen.insert(ds.phys.deadlist_obj) {
             continue;
         }
-        match mos.get(ds.phys.deadlist_obj) {
-            Ok(d) => match DeadlistPhys::parse(&d.bonus, mos.endian()) {
-                Ok(dl) => {
-                    out.deadlist_bytes = out.deadlist_bytes.saturating_add(dl.used);
-                    out.deadlists += 1;
+        let Ok(d) = mos.get(ds.phys.deadlist_obj) else {
+            out.unreadable += 1;
+            continue;
+        };
+        let Ok(dl) = DeadlistPhys::parse(&d.bonus, mos.endian()) else {
+            out.unreadable += 1;
+            continue;
+        };
+        out.deadlist_bytes = out.deadlist_bytes.saturating_add(dl.used);
+        out.deadlists += 1;
+        // What the deadlist's own entries come to. Each entry is a
+        // transaction group naming a block-pointer object; one object
+        // can appear under several transaction groups, and is space
+        // once.
+        let mut objects = BTreeSet::new();
+        if let Ok(obj) = mos.object(ds.phys.deadlist_obj) {
+            if let Ok(entries) = read_zap(&obj) {
+                for e in entries {
+                    if let Some(v) = e.value.as_u64() {
+                        objects.insert(v);
+                    }
                 }
-                Err(_) => out.unreadable += 1,
-            },
-            Err(_) => out.unreadable += 1,
+            }
+        }
+        let mut theirs = 0u64;
+        for o in objects {
+            if let Ok(b) = mos.get(o) {
+                if let Ok(p) = BpobjPhys::parse(&b.bonus, mos.endian()) {
+                    theirs = theirs.saturating_add(p.bytes);
+                }
+            }
+        }
+        out.bpobj_bytes = out.bpobj_bytes.saturating_add(theirs);
+        if theirs != dl.used {
+            trace!(
+                "dsl",
+                "deadlist {}: header says {} byte(s), its objects come to {theirs}",
+                ds.phys.deadlist_obj,
+                dl.used
+            );
+            out.inconsistent += 1;
         }
     }
     out

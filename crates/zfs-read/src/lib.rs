@@ -18,6 +18,7 @@ pub mod dsl;
 pub mod fixture;
 pub mod hints;
 pub mod pool;
+pub mod spacemap;
 pub mod vdev;
 pub mod zap;
 pub mod zeropoint;

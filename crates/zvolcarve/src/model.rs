@@ -46,6 +46,16 @@ pub struct AssessmentOut {
     pub birth: Option<[u64; 2]>,
     /// Only a sample of the tree was walked.
     pub sampled: bool,
+    /// Blocks whose space the allocator still has given out (C-06).
+    #[serde(default)]
+    pub blocks_allocated: u64,
+    /// Blocks whose space has been released — still there, and racing
+    /// whatever gets written next.
+    #[serde(default)]
+    pub blocks_free: u64,
+    /// Blocks the space maps say nothing about.
+    #[serde(default)]
+    pub blocks_unknown: u64,
     /// Share of blocks that verified or are honest holes.
     pub agreement: f64,
 }
@@ -116,6 +126,9 @@ pub struct Index {
     /// Dataset dnodes the scan met, which is what can name a candidate.
     #[serde(default)]
     pub datasets_met: usize,
+    /// What the pool's space maps said, when they could be read (C-06).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space: Option<SpaceOut>,
     /// What the disk actually holds, when `--sample` asked (C-19).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub histograms: Option<Histograms>,
@@ -145,6 +158,21 @@ pub struct Bucket {
     pub value: String,
     /// How many hits fell in it.
     pub count: u64,
+}
+
+/// What the space maps said about the pool.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpaceOut {
+    /// Top-level vdevs whose metaslab logs were read whole and agree
+    /// with what the maps declare they have given out.
+    pub vdevs_read: usize,
+    /// Bytes the allocator has given out across those vdevs.
+    pub allocated_bytes: u64,
+    /// Vdevs that could not be read, and why.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<String>,
+    /// Whether recent allocations may not be in these maps yet.
+    pub may_lag: bool,
 }
 
 /// One reason, and how much it accounted for.

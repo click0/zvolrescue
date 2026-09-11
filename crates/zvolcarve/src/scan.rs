@@ -8,7 +8,7 @@ use clap::Args;
 use zfs_ondisk::carve::{Profile, Reject};
 use zfs_ondisk::dmu::{object_type_name, ot, DnodePhys};
 use zfs_ondisk::Endian;
-use zfs_read::carve::{assess, rank, scan_member, Options as ScanOptions};
+use zfs_read::carve::{assess_against, rank, scan_member, Options as ScanOptions};
 use zfs_read::dmu::ObjectReader;
 use zfs_read::zio::PoolReader;
 use zvol_common::evidence::FileRef;
@@ -17,8 +17,8 @@ use zvol_common::{exit, Format, Global, PoolSpec};
 use zvolrescue_io::BlockSource;
 
 use crate::model::{
-    to_hex, AssessmentOut, Bucket, Candidate, Histograms, Index, ProfileOut, Rejection, State,
-    INDEX, INDEX_VERSION, STATE,
+    to_hex, AssessmentOut, Bucket, Candidate, Histograms, Index, ProfileOut, Rejection, SpaceOut,
+    State, INDEX, INDEX_VERSION, STATE,
 };
 
 /// The search profile, on the command line (C-13, C-16, C-17, C-18).
@@ -271,6 +271,24 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     } else {
         None
     };
+    // What the allocator has given out, read once: a candidate whose
+    // space is free is a race worth running, and one whose space went
+    // elsewhere is not (C-06).
+    let space = pool.as_ref().and_then(|p| {
+        let reader = PoolReader::new(p, members.devices()).with_base_offsets(&members.bases());
+        let ub = zfs_read::pool::uberblock_candidates(&members.scans, p)
+            .into_iter()
+            .next()?
+            .ub;
+        let mos = zfs_read::dsl::open_mos(&reader, &ub).ok()?;
+        Some(zfs_read::spacemap::read(&reader, p, &mos))
+    });
+    if !g.quiet {
+        for w in space.iter().flat_map(|s| &s.skipped) {
+            eprintln!("zvolcarve: {w}");
+        }
+    }
+
     let mut candidates: Vec<Candidate> = earlier
         .as_ref()
         .map(|i| i.candidates.clone())
@@ -344,7 +362,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         for hit in &scan.hits {
             let assessed = reader.as_ref().map(|r| {
                 let obj = ObjectReader::new(r, hit.dnode.clone(), Endian::Little);
-                assess(&obj, if opts.full_assess { 0 } else { 256 })
+                assess_against(&obj, if opts.full_assess { 0 } else { 256 }, space.as_ref())
             });
             let named = reader
                 .as_ref()
@@ -373,6 +391,9 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                     blocks_failed: a.blocks_failed,
                     birth: a.birth.map(|(x, y)| [x, y]),
                     sampled: a.sampled,
+                    blocks_allocated: a.blocks_allocated,
+                    blocks_free: a.blocks_free,
+                    blocks_unknown: a.blocks_unknown,
                     agreement: a.agreement(),
                 }),
                 dataset_guid: named.map(|(g, _)| format!("{g:#018x}")),
@@ -426,6 +447,12 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         bytes_read,
         slots_examined: slots,
         datasets_met,
+        space: space.as_ref().map(|s| SpaceOut {
+            vdevs_read: s.trustworthy(),
+            allocated_bytes: s.vdevs.values().map(|v| v.allocated.bytes()).sum(),
+            skipped: s.skipped.clone(),
+            may_lag: s.may_lag,
+        }),
         histograms,
         candidates,
     };

@@ -38,6 +38,25 @@ pub fn print(index: &Index) {
             index.rejected_by_profile
         );
     }
+    // C-06: what the allocator says about the space, which is about
+    // what happens next rather than about what is there now.
+    if let Some(sp) = &index.space {
+        if sp.vdevs_read > 0 {
+            println!(
+                "  space maps: {} vdev(s) read, {} byte(s) still given out{}",
+                sp.vdevs_read,
+                sp.allocated_bytes,
+                if sp.may_lag {
+                    " (recent allocations may not be in them yet)"
+                } else {
+                    ""
+                }
+            );
+        }
+        for w in &sp.skipped {
+            println!("  space maps: {w}");
+        }
+    }
     if index.datasets_met > 0 {
         println!(
             "  {} dataset dnode(s) met, which is what can name a candidate",
@@ -115,6 +134,20 @@ pub fn print(index: &Index) {
             c.slot,
             c.found
         );
+        if let Some(a) = &c.assessment {
+            if a.blocks_allocated + a.blocks_free + a.blocks_unknown > 0 {
+                println!(
+                    "         space: {} block(s) still given out, {} released{}",
+                    a.blocks_allocated,
+                    a.blocks_free,
+                    if a.blocks_unknown > 0 {
+                        format!(", {} unaccounted for", a.blocks_unknown)
+                    } else {
+                        String::new()
+                    }
+                );
+            }
+        }
         if let Some(g) = &c.dataset_guid {
             println!(
                 "         belonged to dataset {g}{}",

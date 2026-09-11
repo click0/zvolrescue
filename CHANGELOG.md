@@ -6,6 +6,28 @@ validated against OpenZFS **userland** pools (`ztest` + `zdb`, no kernel)
 in CI; what was tried on real environments is logged in
 [docs/REALWORLD-TESTS.md](docs/REALWORLD-TESTS.md).
 
+## Unreleased
+
+### Added
+* **`zvolcarve` asks the allocator (COMPANIONS C-06).** Every metaslab's
+  space map is replayed into a set of ranges, and each block a candidate
+  claims is asked about: the space is either still given out or
+  released. Neither is a verdict on the data — the checksum is, and
+  ranking already reads every block — so it does not move a candidate's
+  score. What it adds is the difference between *rewritten* and *freed
+  but not yet rewritten*: data that verifies today and may not tomorrow.
+  The answer lags, because the pool keeps recent allocations in log
+  space maps not yet flushed into the metaslabs, and the report says so.
+* `zvoltimeline --pending` now also reads what each deadlist's own
+  objects come to, and says whether that agrees with the running total
+  the deadlist keeps. The pool maintains the two independently, so a
+  disagreement is this reader's fault rather than the pool's.
+
+### Fixed
+* A deadlist named by more than one dataset is counted once. Nothing in
+  CI had produced that case; the check above is what would have caught
+  it.
+
 ## v0.7.0 — 2026-09-10
 
 **Everything the companion spec asked for.** The last of what

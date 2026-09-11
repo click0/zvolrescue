@@ -22,6 +22,7 @@ pub mod nvlist;
 pub mod part;
 pub mod raidz;
 pub mod skein;
+pub mod spacemap;
 pub mod uberblock;
 pub mod zap;
 pub mod zeropoint;
