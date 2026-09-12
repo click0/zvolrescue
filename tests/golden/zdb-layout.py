@@ -56,6 +56,36 @@ def kind_of(node):
     return k
 
 
+# A member slot that currently holds more than one device: the disk being
+# replaced and the one replacing it, or a disk and the spare standing in
+# for it. The slot is one member of its group, not a group of its own.
+SLOT_TYPES = ("spare", "replacing")
+
+
+def is_leaf(node):
+    """Whether this node is one member of its group.
+
+    A plain device is. So is a slot under replacement: `spare(f, dspare)`
+    is still the third disk of a raidz, not a two-way group beside it —
+    reading that as a group is how a 16-wide dRAID came to be described
+    as a pool of two spares, with the other fifteen members dropped."""
+    return not node.get("children") or node.get("type") in SLOT_TYPES
+
+
+def device_of(node):
+    """The file to read for a member.
+
+    For a slot, the first real device under it: a dRAID distributed spare
+    has a `path` (`draid1-0-0`) that is not a file at all, and taking it
+    at face value leaves the whole pool unreadable."""
+    if node.get("type") not in SLOT_TYPES:
+        return node
+    for c in node.get("children", []):
+        if c.get("type") != "dspare" and c.get("is_spare") != "1":
+            return c
+    return node.get("children", [node])[0]
+
+
 def groups(node):
     """[(group node, [leaf, ...])] — every innermost group of a top-level
     vdev with the leaves directly under it. `mirror(raidz2(f,f,f,f))` has one
@@ -63,7 +93,7 @@ def groups(node):
     children = node.get("children", [])
     if not children:
         return []
-    if all(not c.get("children") for c in children):
+    if all(is_leaf(c) for c in children):
         return [(node, children)]
     out = []
     for c in children:
@@ -92,9 +122,10 @@ def main():
             for i, leaf in enumerate(leaf_nodes):
                 role = f"t{top_index}-{gk}-{i}" if len(gs) == 1 else f"t{top_index}g{g_index}-{gk}-{i}"
                 names.append(role)
+                device = device_of(leaf)
                 members[role] = {
-                    "file": leaf.get("path", "").rsplit("/", 1)[-1],
-                    "guid": leaf.get("guid", "0"),
+                    "file": device.get("path", "").rsplit("/", 1)[-1],
+                    "guid": device.get("guid", "0"),
                     "top": top_index,
                     "group": g_index,
                     "group_kind": gk,

@@ -264,6 +264,27 @@ class Oracle:
                 return role
         raise Unresolved(f"no member matching {spec}")
 
+    def a_dataset(self):
+        """A dataset of this pool to aim at, chosen from the capture
+        rather than named in the manifest.
+
+        `ztest` creates and destroys datasets as it runs, so which names
+        survive into a given build is not something a manifest can know;
+        naming one makes the case skip on every image where that build
+        went differently. Picked for the most block-pointer copies — that
+        is what a "one copy destroyed" case needs to mean anything — and
+        then by name, so the same image always yields the same choice.
+        """
+        best = None
+        for m in re.finditer(rf"^Dataset ({re.escape(self.pool)}/\S+) .*?rootbp (.*)$", self.zdb, re.M):
+            name, raw = m.group(1), m.group(2)
+            copies = len(re.findall(r"DVA\[\d\]=<", raw))
+            if best is None or (-copies, name) < (-best[1], best[0]):
+                best = (name, copies)
+        if best is None:
+            raise Unresolved("no dataset with a block pointer in this capture")
+        return best[0]
+
     def resolve_target(self, target):
         """(role, offset, length) for the chosen DVA copies of a structure,
         located from the oracle's zdb capture."""
@@ -273,11 +294,19 @@ class Oracle:
             raw = m.group(1) if m else ""
         else:
             ds, what = obj.rsplit(":", 1)
-            name = ds if ds.startswith(self.pool) else f"{self.pool}/{ds}"
+            if what != "objset":
+                # `dnode-block` and `crypto-key` are documented shapes that
+                # this harness cannot locate yet. Saying so is the point:
+                # resolving them to the objset's own block pointer, which
+                # is what the first version of this did, made a manifest
+                # claim to damage something it never touched.
+                raise Unresolved(f"target {obj}: only objset is located from this capture")
+            if ds == "any":
+                name = self.a_dataset()
+            else:
+                name = ds if ds.startswith(self.pool) else f"{self.pool}/{ds}"
             m = re.search(rf"^Dataset {re.escape(name)} .*?rootbp (.*)$", self.zdb, re.M)
             raw = m.group(1) if m else ""
-            if what not in ("objset", "dnode-block"):
-                raise Unresolved(f"target {obj}: only objset/dnode-block are located from zdb")
         dvas = re.findall(r"DVA\[(\d)\]=<(\d+):([0-9a-f]+):([0-9a-f]+)>", raw)
         if not dvas:
             raise Unresolved(f"target {obj} not found in the zdb capture")
@@ -375,6 +404,36 @@ def apply_damage(oracle, manifest, work, rng):
     return ordered, notes, paths
 
 
+# Why a block could not be produced, in the words `ReadError` uses in
+# crates/zfs-read/src/zio.rs. Each of these is the tool saying "I cannot
+# give you this block, and here is why", which is what damage is supposed
+# to produce.
+#
+# The list used to be four guesses, and every honest reason it had not
+# guessed read as a tool defect: a pool that lost a whole top-level vdev
+# reported `DVA names unknown top-level vdev 0` for the blocks that lived
+# there, which is exactly right, and the matrix called it breakage.
+# check-read-errors.py holds this list against the enum, so a new variant
+# has to be classified here instead of quietly becoming a defect.
+CLEAN_REASONS = (
+    "DVA names unknown top-level vdev",   # UnknownVdev: no member for that top
+    "no present member holds this copy",  # NoMember
+    "not supported yet",                  # Unsupported, ChecksumUnsupported
+    "gang block: header checksum",        # Gang: every copy of the header bad
+    "gang block: nesting deeper than",    # Gang: the chain is malformed
+    "not recoverable",                    # Unrecoverable
+    "I/O error",                          # Io: a short or truncated member
+    "every copy failed its checksum",     # AllCopiesBad
+    "block pointer is a hole",            # Hole
+    "encrypted block: no key",            # Encrypted
+)
+
+# Deliberately not clean. Both are reached only after a checksum agreed,
+# so the bytes are the bytes ZFS wrote: failing to make sense of them
+# afterwards is this reader's fault and not the damage's.
+UNCLEAN_VARIANTS = ("Decompress", "Crypt")
+
+
 def judge_dump(args, oracle, manifest, members, work, assume=()):
     want = manifest["expect"].get("volumes", "all")
     volumes = list(oracle.volumes) if want == "all" else list(want)
@@ -438,12 +497,11 @@ def judge_walk(args, oracle, members, work, assume=()):
                 redundancy = True
         wproc.wait()
     text = open(walk_out, errors="replace").read()
-    # Lines the walker prints for blocks it could not produce. A failure is
-    # *clean* when the tool said why and offered nothing: redundancy
-    # exhausted, every copy bad, no key. Anything else (a parse error, a
-    # decompression failure, a panic) means the tool broke.
-    CLEAN = re.compile(r"not recoverable|every copy failed|no present member|"
-                       r"no key|not supported yet|block pointer is a hole")
+    # Lines the walker prints for blocks it could not produce. A failure
+    # is *clean* when the tool named a reason and offered nothing: that is
+    # the correct answer to damage, not a defect. Anything else — a parse
+    # error, a decompression failure, a panic — means the tool broke.
+    CLEAN = re.compile("|".join(re.escape(r) for r in CLEAN_REASONS))
     failures = [l.strip() for l in text.splitlines()
                 if re.search(r"ERROR|Mismatch|dnode:|locate:|objset \S+:", l)]
     unclean = [l for l in failures if not CLEAN.search(l)]

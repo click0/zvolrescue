@@ -39,6 +39,15 @@ jobs:
           awk -v want="v$v" '$0 ~ "^## " want { p=1; next } /^## / && p { exit } p { print }' CHANGELOG.md |
             grep -q '^\*\*' || { echo "::error::the v$v section has no **lead line** for the release title"; exit 1; }
           test "$(./target/release/zvolrescue --version)" = "zvolrescue $v"
+      - name: Every way a read can fail is classified (tests/golden)
+        run: |
+          # The damage matrix decides whether a failed block is the tool
+          # answering damage honestly or the tool breaking, and it decides
+          # it from the text the error prints. That list drifted once and
+          # six correct results were recorded as defects. It is held
+          # against the enum here, where a new variant is still on a
+          # branch.
+          python3 tests/golden/check-read-errors.py
       - name: End-to-end on fixture members (scan, list, dump)
         run: |
           cargo run -p zfs-read --example mkfixture -- /tmp/fx mirror 12
