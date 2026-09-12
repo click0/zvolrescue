@@ -329,6 +329,13 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         Format::Text => print_text(&out, &mut sink),
     };
     if let Err(e) = written {
+        // The reader left — `| head`, or `less` quit part way down. The
+        // run did nothing wrong and there is nothing left to say to a
+        // pipe nobody is reading, so it ends the way a `println!` into a
+        // closed pipe now does: quietly, with 0.
+        if zvol_common::is_broken_pipe(&e) {
+            return 0;
+        }
         eprintln!("zvoltimeline: writing the report: {e}");
         return exit::USAGE;
     }

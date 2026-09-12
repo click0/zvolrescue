@@ -74,6 +74,23 @@ tagged. `v0.7.1` is the release that carries those six.
 ## Unreleased
 
 ### Fixed
+* **A closed pipe was still a failure where the report is written into
+  a sink.** The panic hook added in v0.7.1 covers `println!`, which is
+  how four of the five programs write. `zvoltimeline` builds its report
+  into an explicit writer, so a closed pipe arrived as an `Err` and came
+  out as `zvoltimeline: writing the report: Broken pipe (os error 32)`
+  with exit 1 — the same lie in a different shape. It ends quietly with
+  0 now, like the others.
+
+  Two things about how this was found are worth keeping. CI's check
+  piped into `head -2`, which is a race: when the tool finished writing
+  before `head` left, no `EPIPE` happened and the case proved nothing.
+  It now also uses a reader that leaves at once, which makes the failure
+  certain rather than occasional. And the one earlier red run whose
+  cause was never established was this: the check was written so that a
+  failure killed the step before it could say what failed, which is
+  fixed too.
+
 * **`--assume-member` said nothing was missing when a whole top-level
   vdev was.** A leaf slot exists to be filled because some present
   member's configuration names it; a top-level vdev that nothing present

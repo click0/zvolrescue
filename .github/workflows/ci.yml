@@ -609,6 +609,27 @@ jobs:
               exit 1
             fi
           done
+          # `head -2` is a race: if the tool finishes writing before head
+          # exits, no EPIPE happens and the case proves nothing. That is
+          # how a tool writing its report into an explicit sink — where a
+          # closed pipe arrives as an `Err` and not as a panic — passed
+          # here for weeks and then failed once. A reader that leaves at
+          # once makes it certain.
+          for cmd in \
+            "./target/release/zvolcarve list /tmp/carve" \
+            "./target/release/zvolrescue -f json list /tmp/fx/member0.img /tmp/fx/member1.img" \
+            "./target/release/zvoltimeline /tmp/fx/member0.img /tmp/fx/member1.img" \
+            "./target/release/zvoltimeline -f json /tmp/fx/member0.img /tmp/fx/member1.img" \
+            "./target/release/zvolfiles list tank/fs /tmp/zp/member0.img -R"; do
+            $cmd 2>/tmp/pipe-err.txt | true
+            code=${PIPESTATUS[0]}
+            if [ "$code" != 0 ] || [ -s /tmp/pipe-err.txt ]; then
+              echo "FAILED (reader left at once): $cmd"
+              echo "  exit $code, stderr follows:"
+              sed 's/^/  | /' /tmp/pipe-err.txt
+              exit 1
+            fi
+          done
           # And a panic that is not a closed pipe still reaches stderr:
           # a missing workspace is an error, not an exit 0.
           if ./target/release/zvolcarve list /tmp/there-is-no-such-workspace; then

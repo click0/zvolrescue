@@ -107,6 +107,17 @@ pub fn quiet_broken_pipe() {
     }));
 }
 
+/// Whether an I/O error is the reader on the other end having gone away.
+///
+/// The companion to [`quiet_broken_pipe`], for the writes that do not go
+/// through `println!`. A tool that builds its report into an explicit
+/// sink gets an `Err` rather than a panic, and turning that into "writing
+/// the report failed" is the same lie in a different shape: `head` closing
+/// the pipe is not a failed run.
+pub fn is_broken_pipe(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::BrokenPipe
+}
+
 /// Whether a panic message is std's "the reader has gone" and nothing
 /// else.
 ///
@@ -132,6 +143,25 @@ mod broken_pipe_tests {
         assert!(is_broken_pipe_panic(
             "failed printing to stderr: Broken pipe (os error 32)"
         ));
+    }
+
+    /// The other half of the same story: a write that returns an error
+    /// rather than panicking. `zvoltimeline` builds its report into an
+    /// explicit sink, so a closed pipe reached it as `Err` and was
+    /// reported as "writing the report failed" with exit 1 — which is
+    /// what the CI step caught after it was made to say what it saw.
+    #[test]
+    fn a_closed_pipe_is_recognised_as_an_error_too() {
+        use std::io::{Error, ErrorKind};
+        assert!(super::is_broken_pipe(&Error::from(ErrorKind::BrokenPipe)));
+        for other in [
+            ErrorKind::NotFound,
+            ErrorKind::PermissionDenied,
+            ErrorKind::WriteZero,
+            ErrorKind::UnexpectedEof,
+        ] {
+            assert!(!super::is_broken_pipe(&Error::from(other)), "{other:?}");
+        }
     }
 
     /// Everything else is somebody else's panic and must be left alone:
