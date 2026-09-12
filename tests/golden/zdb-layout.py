@@ -75,15 +75,32 @@ def is_leaf(node):
 def device_of(node):
     """The file to read for a member.
 
-    For a slot, the first real device under it: a dRAID distributed spare
-    has a `path` (`draid1-0-0`) that is not a file at all, and taking it
-    at face value leaves the whole pool unreadable."""
+    For a slot, the first real device under it. Two reasons for "first":
+    a dRAID distributed spare has a `path` (`draid1-0-0`) that is not a
+    file at all, and under `replacing(old, new)` the first child is the
+    disk that was already there — the one whose content is complete,
+    where the replacement may be half resilvered."""
     if node.get("type") not in SLOT_TYPES:
         return node
     for c in node.get("children", []):
         if c.get("type") != "dspare" and c.get("is_spare") != "1":
             return c
     return node.get("children", [node])[0]
+
+
+def skip_reason(top):
+    """Why this top-level entry is not a pool member, or None.
+
+    The docstring above has always promised that log, cache and spare
+    devices are skipped, and only the log ever was. A pool with a cache
+    device would have had it listed as a member and damaged as one."""
+    if top.get("is_log") == "1":
+        return "log"
+    if top.get("is_spare") == "1" or top.get("type") == "spare":
+        return "spare"
+    if top.get("is_l2cache") == "1" or top.get("type") in ("l2cache", "cache"):
+        return "cache"
+    return None
 
 
 def groups(node):
@@ -111,9 +128,14 @@ def main():
     root = parse(sys.stdin.read())
     ashift = None
     tops, members = [], {}
-    for top_index, top in enumerate(root.get("children", [])):
-        if top.get("is_log") == "1":
+    for position, top in enumerate(root.get("children", [])):
+        if skip_reason(top):
             continue
+        # A DVA names a top-level vdev by its `id`, which is what the
+        # matrix matches against. Position in the list agrees with it
+        # today, but only because nothing has ever been removed from a
+        # pool in these images.
+        top_index = int(top.get("id", position))
         ashift = ashift or top.get("ashift")
         gs = groups(top)
         names = []

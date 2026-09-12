@@ -324,6 +324,14 @@ class Oracle:
         if not tops:
             return []
         top = tops[0]
+        if len(top["groups"]) != 1:
+            # `roles` below is every member of the top, while the column
+            # arithmetic is one group wide. With two groups the two
+            # disagree and the answer is quietly wrong — which is worse
+            # than no answer, so there is no answer.
+            raise Unresolved(
+                f"top-level vdev {vdev} has {len(top['groups'])} groups; "
+                "this harness maps a DVA only inside a single-group top")
         group = top["groups"][0]
         kind, ashift = group["kind"], self.layout.get("ashift", 12)
         roles = top["members"]
@@ -342,7 +350,16 @@ class Oracle:
                 coff = o + (unit if f + c >= dcols else 0)
                 out.append((roles[col], LABEL_START + coff, rows * unit))
             return out
-        return []  # draid: a later version of this harness
+        # dRAID places a block's columns through a permutation table
+        # derived from the pool, so which child holds which column is not
+        # arithmetic the way raidz is. Reimplementing that here, in the
+        # thing that is supposed to be the oracle, is how a harness comes
+        # to be confidently wrong; until it can be checked against
+        # something, a dRAID pool skips the cases that aim at a structure.
+        raise Unresolved(
+            f"top-level vdev {vdev} is {kind}: this harness does not map a DVA "
+            "through the dRAID permutation, so structure-targeted damage is "
+            "not placed on it")
 
 
 def apply_damage(oracle, manifest, work, rng):
