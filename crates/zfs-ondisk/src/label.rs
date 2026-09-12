@@ -109,7 +109,11 @@ pub fn pool_state_name(state: u64) -> &'static str {
 
 /// One node of the `vdev_tree` stored in a label: the top-level vdev this
 /// device belongs to, with its children down to the leaves.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Default` is an empty node, which is not a shape any label holds; it
+/// exists so a test can build the one field it cares about without
+/// spelling out fourteen it does not.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct VdevNode {
     /// `type`: `disk`, `file`, `mirror`, `raidz`, `draid`, `root`, …
     pub kind: String,

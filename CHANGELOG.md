@@ -71,6 +71,26 @@ tagged. `v0.7.1` is the release that carries those six.
   reconstruct anything. All five produce the image the walked extraction
   pins.
 
+## Unreleased
+
+### Fixed
+* **`--assume-member` said nothing was missing when a whole top-level
+  vdev was.** A leaf slot exists to be filled because some present
+  member's configuration names it; a top-level vdev that nothing present
+  describes has no slots at all, so a member cannot be asserted into one
+  — its geometry is unknown and there is nothing to check the assertion
+  against. Refusing is right; "no scanned pool is missing a member" was
+  not, and the labels contradict it, since they carry `vdev_children`.
+  The refusal now names the vdev and points at what does help: a member
+  of it whose labels survive, or `--hints` (SPEC F-65). It also exits 2
+  rather than 1 — the command line was well formed and the operator's
+  assertion was sound; what is short is the evidence. `scan` already
+  printed the unaccounted vdev on its own line, and still does.
+
+  Found by the damage matrix in
+  [zvolrescue-testdata](https://github.com/click0/zvolrescue-testdata),
+  which had no other way to say what was wrong with that case.
+
 ## v0.7.1 — 2026-09-11
 
 **A closed pipe is not a failure.** One fix, found by running the

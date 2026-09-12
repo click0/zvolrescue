@@ -145,6 +145,32 @@ fn bind_assumed(
                 return Err(exit::EVIDENCE);
             }
             0 => {
+                // "No pool is missing a member" is only true when no pool
+                // is missing a whole top-level vdev either. A leaf slot
+                // exists to be filled because some present member's
+                // configuration describes it; a vdev nothing describes
+                // has no slots at all, and saying nothing is missing is
+                // the one answer that is certainly wrong — the labels
+                // carry `vdev_children`, so the count is known.
+                if let Some((name, tops)) = pool_missing_a_whole_top(pools) {
+                    let which = tops
+                        .iter()
+                        .map(|id| format!("#{id}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    eprintln!(
+                        "zvolrescue: --assume-member {}: pool \"{name}\" is missing top-level vdev {which} entirely, not a member of one",
+                        path.display()
+                    );
+                    eprintln!(
+                        "zvolrescue: nothing present describes that vdev, so there is no leaf to place this member in. Give a member whose labels survive from it, or describe it with --hints (SPEC F-65)."
+                    );
+                    // The same reasoning as the branch above: the
+                    // operator's assertion is sound and the command line
+                    // is well formed. What is short is the evidence, so
+                    // this is exit 2 and not a usage error.
+                    return Err(exit::EVIDENCE);
+                }
                 eprintln!(
                     "zvolrescue: --assume-member {}: no scanned pool is missing a member",
                     path.display()
@@ -227,6 +253,21 @@ fn bind_assumed(
         }
     }
     Ok(())
+}
+
+/// The first assembled pool that is short of a whole top-level vdev,
+/// with the ids of the ones nothing describes.
+///
+/// The difference this draws is the whole of the message it feeds. A
+/// *leaf* slot exists because some present member's configuration names
+/// it, so a member can be asserted into it (SPEC F-62). A top-level vdev
+/// that nothing present describes has no slots at all — and the labels
+/// carry `vdev_children`, so "nothing is missing" is knowably false.
+fn pool_missing_a_whole_top(pools: &[PoolAssembly]) -> Option<(String, Vec<u64>)> {
+    pools.iter().find_map(|p| {
+        let tops = p.missing_tops();
+        (!tops.is_empty()).then(|| (p.name.clone(), tops))
+    })
 }
 
 /// Open every member named in `spec`, scan it, and assemble pools.
@@ -364,5 +405,77 @@ pub fn choose_pool(pools: Vec<PoolAssembly>, guid: Option<&str>) -> Result<PoolA
                 Err(exit::USAGE)
             }
         },
+    }
+}
+
+#[cfg(test)]
+mod assume_member_tests {
+    use super::pool_missing_a_whole_top;
+    use zfs_read::pool::PoolAssembly;
+
+    fn pool(name: &str, children: Option<u64>, tops_present: &[u64]) -> PoolAssembly {
+        PoolAssembly {
+            name: name.into(),
+            guid: 1,
+            state: None,
+            txg: None,
+            vdev_children: children,
+            tops: tops_present
+                .iter()
+                .map(|id| zfs_read::pool::TopVdev {
+                    id: *id,
+                    guid: 0,
+                    name: format!("mirror-{id}"),
+                    kind: "mirror".into(),
+                    nparity: None,
+                    ashift: Some(12),
+                    members: Vec::new(),
+                    tree: Default::default(),
+                })
+                .collect(),
+            hosts: Vec::new(),
+            devices: Vec::new(),
+            stale: Vec::new(),
+        }
+    }
+
+    /// The case the damage matrix found: a pool whose labels say it has
+    /// two top-level vdevs, with members for one. Answering "no pool is
+    /// missing a member" there is knowably false — the count is in the
+    /// labels that were read.
+    #[test]
+    fn a_pool_short_of_a_whole_top_is_named() {
+        let pools = [pool("tank", Some(2), &[1])];
+        assert_eq!(
+            pool_missing_a_whole_top(&pools),
+            Some(("tank".to_string(), vec![0]))
+        );
+    }
+
+    /// A pool with every top accounted for says nothing, whatever is
+    /// wrong inside those tops: that is a vacant *leaf*, which is a
+    /// different message and a different answer.
+    #[test]
+    fn a_pool_with_every_top_present_is_not_named() {
+        let pools = [pool("tank", Some(2), &[0, 1])];
+        assert_eq!(pool_missing_a_whole_top(&pools), None);
+    }
+
+    /// Labels that do not carry `vdev_children` cannot say anything is
+    /// missing, and must not pretend to.
+    #[test]
+    fn without_a_count_nothing_is_claimed() {
+        let pools = [pool("tank", None, &[0])];
+        assert_eq!(pool_missing_a_whole_top(&pools), None);
+    }
+
+    /// With several pools the one that is short is the one named.
+    #[test]
+    fn the_pool_that_is_short_is_the_one_named() {
+        let pools = [pool("whole", Some(1), &[0]), pool("short", Some(3), &[2])];
+        assert_eq!(
+            pool_missing_a_whole_top(&pools),
+            Some(("short".to_string(), vec![0, 1]))
+        );
     }
 }

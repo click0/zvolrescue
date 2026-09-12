@@ -270,7 +270,21 @@ candidate, and a device of zeros in the same slot separates "this slot
 must be occupied" from "this member's contents are what read". Where the
 evidence does not choose — several leaves of one mirror hold the same
 bytes, and a wide enough vdev can reconstruct around a wrong slot — the
-tool says so and asks for a GUID instead of guessing. F-65, F-66 and F-67 are in the tool as well: `--hints FILE`
+tool says so and asks for a GUID instead of guessing.
+
+There is one shape `--assume-member` cannot answer, and it now says which
+one. A leaf slot exists to be filled because some present member's
+configuration names it; a *top-level vdev* that nothing present describes
+has no slots at all, and a member cannot be asserted into it — its
+geometry is unknown, so there is nothing to check the assertion against.
+The refusal names the vdev and points at the two things that do help: a
+member of that vdev whose labels survive, or `--hints` (F-65). It used to
+answer "no scanned pool is missing a member", which the labels themselves
+contradict: they carry `vdev_children`, so the count is known, and
+`scan` has always printed the unaccounted vdev on its own line. Found by
+the damage matrix, which had no other way to say what was wrong.
+
+F-65, F-66 and F-67 are in the tool as well: `--hints FILE`
 describes the layout the way a `vdev_phys` template would and is used
 exactly as a label is; `--search-order` enumerates the member orders the
 template leaves open and keeps the one no block has to be repaired
