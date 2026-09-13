@@ -13,7 +13,17 @@ development milestone that names what changed when — the sections below
 are their record — and ships inside the next version that does get
 tagged. `v0.7.1` is the release that carries those six.
 
-## Unreleased
+## v0.7.5 — 2026-09-13
+
+**What it cannot read, it no longer guesses at.** Extended attributes
+that lived in a spill block were lost without a word; the second slot of
+a large dnode could be read as an object that was never there; the
+manifest wrote text and hex into one field and could not say which; and
+`--assume-member` reported nothing missing when a whole top-level vdev
+was. Every one of those was a plausible answer. Each is now either read
+properly or refused by name. FreeBSD 15.x becomes the first-class
+target, and the damage matrix runs on every push instead of when someone
+remembers it.
 
 ### Changed
 * **FreeBSD 15.x is the first-class target; 14.x is best-effort; 13.x is
