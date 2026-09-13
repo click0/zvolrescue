@@ -79,6 +79,8 @@ binding for every later decision in this document:
 * Recovery of pools whose encryption keys are unavailable (encrypted data is extracted as ciphertext with metadata only).
 * A GUI. A TUI is a possible later addition (see §10).
 * Generating `zfs send` streams (possible later phase).
+* Following the indirect mapping of a **removed** top-level vdev
+  (`device_removal`); see F-69 for what happens instead.
 
 ## 4. Users and use cases
 
@@ -179,6 +181,7 @@ Priority: **M** = must (v1), **S** = should (v1 if time permits), **C** = could 
 | F-13 | M | Diff dataset lists between two TXGs to show what was created or destroyed in between. |
 | F-14 | S | Read dataset properties (ZAP) including user properties. |
 | F-15 | S ◇ | List pending deletions (`dp_free_bpobj`, deadlists) so the user can judge whether destroyed data is still on disk. |
+| F-69 | C | **A pool a vdev was removed from.** `device_removal` copies a top-level vdev's blocks elsewhere and leaves an `indirect` vdev holding a mapping from the old DVAs to the new ones. Read that mapping (`vdev_indirect_mapping`, and `obsolete_counts` where the feature is enabled) and translate through it. Until then the DVAs that still name the removed vdev are refused by name — `DVA names unknown top-level vdev N` — because no member describes it and nothing present says where its blocks went. The rest of the pool reads normally: the refusal is per block, not per pool. |
 
 ### 5.3 Data extraction
 

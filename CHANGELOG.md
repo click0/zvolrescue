@@ -13,6 +13,21 @@ development milestone that names what changed when — the sections below
 are their record — and ships inside the next version that does get
 tagged. `v0.7.1` is the release that carries those six.
 
+## Unreleased
+
+### Documented
+* **A pool a vdev was removed from reads only in part, and now the spec
+  says so (SPEC F-69).** `device_removal` copies a top-level vdev's
+  blocks elsewhere and leaves an `indirect` vdev holding the mapping
+  from the old DVAs to the new ones. That mapping is not read, so a
+  block still named by an old DVA is refused — `DVA names unknown
+  top-level vdev N` — which is the honest answer and was nowhere
+  written down. It came up three times in one afternoon, on three
+  `ztest` images that happened to have had a vdev removed during the
+  run, and each time it had to be worked out again from first
+  principles. The refusal is per block: the rest of the pool reads
+  normally.
+
 ## v0.7.5 — 2026-09-13
 
 **What it cannot read, it no longer guesses at.** Extended attributes
@@ -99,8 +114,8 @@ remembers it.
   configuration and metadata integrity fail independently and are
   checked separately. Experiments belong in a throwaway machine with the
   copies attached, not near the originals. F-68 asks the tool to say
-  whether each input is a device or an image, and to record it; not
-  implemented yet.
+  whether each input is a device or an image, and to record it; it is
+  implemented in this same release, above.
 * **`ashift` is a test axis, and now a covered one (SPEC §9).** It sets
   the stride of every DVA offset and of the RAIDZ column layout, so an
   error there is the difference between reading the right sector and a
