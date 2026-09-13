@@ -299,8 +299,17 @@ impl Filesystem<'_, '_> {
             .and_then(|n| by_num.get(n))
             .filter(|b| !b.is_empty())
             .cloned();
+        // Absent where the dataset has no `project_quota` feature, and
+        // zero where it has one and nothing was set: two different
+        // answers, kept apart (Z-10).
+        let projid = self
+            .attr_num
+            .get(attr::PROJID)
+            .and_then(|n| by_num.get(n))
+            .and_then(|b| zpl::attr_u64(b, self.endian));
         Ok(Znode {
             dxattr,
+            projid,
             mode: word(attr::MODE),
             size: word(attr::SIZE),
             links: word(attr::LINKS),
@@ -705,8 +714,8 @@ mod tests {
     use crate::fixture::{
         zpl_big_dnode, zpl_big_dnode_value, zpl_deep, zpl_hello, zpl_latin1, zpl_members_with,
         zpl_spilled, zpl_spilled_value, Matching, Pool, Spill, ZPL_BIG_DNODE_TRAP,
-        ZPL_BIG_DNODE_XATTR, ZPL_COMPOSED_NAME, ZPL_DECOMPOSED_NAME, ZPL_LATIN1_NAME,
-        ZPL_SPILLED_XATTR,
+        ZPL_BIG_DNODE_XATTR, ZPL_COMPOSED_NAME, ZPL_DECOMPOSED_NAME, ZPL_DEEP_PROJID,
+        ZPL_LATIN1_NAME, ZPL_SPILLED_XATTR,
     };
     use crate::pool::{assemble, uberblock_candidates};
     use crate::vdev::scan_device;
@@ -958,6 +967,22 @@ mod tests {
                 xattrs[0].1.len() > 512,
                 "the value has to be one no bonus buffer could hold"
             );
+        });
+    }
+
+    /// Z-10: a project id is read where the dataset keeps one, and its
+    /// absence is not reported as project zero.
+    #[test]
+    fn a_project_id_is_read_where_there_is_one_and_not_invented_where_there_is_not() {
+        with_fs(|fs| {
+            let deep = fs.lookup("sub/deep.txt").expect("lookup");
+            assert_eq!(fs.znode(deep).expect("znode").projid, Some(ZPL_DEEP_PROJID));
+            // The other files are in a layout that has no project id.
+            // A dataset without the feature has none either, and zero is
+            // a project a file can really be in — so the two must not be
+            // reported as the same thing.
+            let plain = fs.lookup("hello.txt").expect("lookup");
+            assert_eq!(fs.znode(plain).expect("znode").projid, None);
         });
     }
 

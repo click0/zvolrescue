@@ -43,6 +43,9 @@ pub struct Extracted {
     pub size: u64,
     pub uid: u64,
     pub gid: u64,
+    /// Project id, present only where the dataset keeps one (Z-10).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub projid: Option<u64>,
     pub mtime: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
@@ -378,6 +381,7 @@ fn extract_entry(
         size: z.size,
         uid: z.uid,
         gid: z.gid,
+        projid: z.projid,
         mtime: z.mtime,
         sha256: None,
         target: None,
@@ -474,6 +478,8 @@ fn failed(e: &zfs_read::zpl::Entry, why: &str) -> Extracted {
         size: 0,
         uid: 0,
         gid: 0,
+        // Nothing was read, so nothing is claimed about a project.
+        projid: None,
         mtime: 0,
         sha256: None,
         target: None,

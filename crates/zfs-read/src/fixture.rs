@@ -718,8 +718,13 @@ pub fn carved_zvol_members(pool: &mut Pool, size: u64) -> Vec<Vec<u8>> {
     members
 }
 
-/// Attribute numbers of the standard ZPL system-attribute set, in the
-/// order OpenZFS registers them.
+/// Attribute numbers this fixture registers.
+///
+/// The numbers are the fixture's own and are not claimed to match any
+/// particular OpenZFS build. They do not need to: an attribute's number
+/// is whatever that dataset's registry ZAP says it is, and the reader
+/// resolves every attribute through that registry by name, which is how
+/// ZFS itself works. What is under test is the lookup, not the number.
 mod zpl_attr {
     pub const ATIME: u16 = 0;
     pub const MTIME: u16 = 1;
@@ -733,9 +738,10 @@ mod zpl_attr {
     pub const GID: u16 = 13;
     pub const SYMLINK: u16 = 17;
     pub const DXATTR: u16 = 19;
+    pub const PROJID: u16 = 20;
 
     /// `(name, number, fixed length)`; a length of 0 means variable.
-    pub const REGISTRY: [(&str, u16, u16); 12] = [
+    pub const REGISTRY: [(&str, u16, u16); 13] = [
         ("ZPL_ATIME", ATIME, 16),
         ("ZPL_MTIME", MTIME, 16),
         ("ZPL_CTIME", CTIME, 16),
@@ -748,6 +754,7 @@ mod zpl_attr {
         ("ZPL_GID", GID, 8),
         ("ZPL_SYMLINK", SYMLINK, 0),
         ("ZPL_DXATTR", DXATTR, 0),
+        ("ZPL_PROJID", PROJID, 8),
     ];
 
     /// The layout every file and directory in the fixture uses.
@@ -761,6 +768,11 @@ mod zpl_attr {
     /// The same, plus system-attribute extended attributes.
     pub const WITH_XATTR: [u16; 11] = [
         ATIME, MTIME, CTIME, CRTIME, MODE, SIZE, PARENT, LINKS, UID, GID, DXATTR,
+    ];
+    /// The plain set plus a project id, which a dataset has only where
+    /// the `project_quota` feature is enabled (Z-10).
+    pub const WITH_PROJID: [u16; 11] = [
+        ATIME, MTIME, CTIME, CRTIME, MODE, SIZE, PARENT, LINKS, UID, GID, PROJID,
     ];
     /// What a spill block holds when the extended attributes did not fit
     /// beside the rest: the overflowing attribute, and only it. The
@@ -830,6 +842,11 @@ pub fn zpl_hello() -> Vec<u8> {
 pub fn zpl_deep() -> Vec<u8> {
     (0..4096u32).map(|i| (i % 251) as u8).collect()
 }
+
+/// The project id of `sub/deep.txt` (Z-10). Every other file in the
+/// fixture is in a layout with no project id at all, which is the case
+/// a dataset without the `project_quota` feature presents.
+pub const ZPL_DEEP_PROJID: u64 = 42;
 
 /// The contents of `spilled.txt`, the file whose extended attribute
 /// does not fit in its bonus buffer (Z-10).
@@ -1051,6 +1068,7 @@ fn build_zpl_objset(
             ("3", 2, as_bytes(&zpl_attr::WITH_SYMLINK)),
             ("4", 2, as_bytes(&zpl_attr::WITH_XATTR)),
             ("6", 2, as_bytes(&zpl_attr::SPILLED)),
+            ("7", 2, as_bytes(&zpl_attr::WITH_PROJID)),
         ],
     );
     let b0 = a.put(m, &hdr, ot::SA, 0, 100);
@@ -1167,15 +1185,9 @@ fn build_zpl_objset(
     );
     // 9: a file under the subdirectory.
     let deep = zpl_deep();
-    put(
-        9,
-        file(
-            a,
-            m,
-            &deep,
-            sa_bonus(2, &meta(0o100600, deep.len() as u64, 7, 1), &[]),
-        ),
-    );
+    let mut deep_fields = meta(0o100600, deep.len() as u64, 7, 1);
+    deep_fields.push((zpl_attr::PROJID, sa_u64(ZPL_DEEP_PROJID)));
+    put(9, file(a, m, &deep, sa_bonus(7, &deep_fields, &[])));
     // 10: the file whose name is not text.
     let latin1 = zpl_latin1();
     put(

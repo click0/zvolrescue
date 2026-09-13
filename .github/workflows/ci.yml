@@ -519,6 +519,11 @@ jobs:
           # Both files look complete without them, which is the point.
           assert by["spilled.txt"]["xattrs"] == ["user.spilled"], by["spilled.txt"]
           assert by["bigdnode.txt"]["xattrs"] == ["user.wide"], by["bigdnode.txt"]
+          # Z-10: a project id where the dataset keeps one, and no key at
+          # all where it does not. Absent is not project zero: zero is a
+          # project a file can really be in.
+          assert by["sub/deep.txt"]["projid"] == 42, by["sub/deep.txt"]
+          assert all("projid" not in f for p, f in by.items() if p != "sub/deep.txt"), by
           # Z-07: two names, one object.
           assert by["hardlink.txt"]["object"] == by["hello.txt"]["object"], by
           assert by["hello.txt"]["links"] == 2, by
@@ -566,6 +571,10 @@ jobs:
           assert x["user.spilled"]["value"].startswith("abcdefghij"), x
           x = {v["name"]: v for v in f["bigdnode.txt"]["xattrs"]}
           assert x["user.wide"]["bytes"] == 400, x
+          # Z-10: the project id reaches the manifest too, and only where
+          # there is one.
+          assert f["sub/deep.txt"]["projid"] == 42, f["sub/deep.txt"]
+          assert "projid" not in f["hello.txt"], f["hello.txt"]
           # Z-04: a value is in `value` or in `value_hex` and never in
           # both, so no reader can take hex for text. This one is not
           # text — sixteen of its bytes are the planted dnode header —

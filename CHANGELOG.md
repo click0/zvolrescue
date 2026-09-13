@@ -16,6 +16,24 @@ tagged. `v0.7.1` is the release that carries those six.
 ## Unreleased
 
 ### Added
+* **A file's project id is reported where the dataset keeps one
+  (COMPANIONS Z-10).** `ZPL_PROJID` is the last of the feature-flag
+  attributes Z-10 named, and the only one still missing. `zvolfiles`
+  now carries it into the listing and the manifest. Absent and zero are
+  kept apart and always will be: a dataset made before the
+  `project_quota` feature has no such attribute at all, while one made
+  after it puts every file in project 0 unless told otherwise, so
+  printing the first as zero would invent a project nobody set. The
+  field is simply not there when there is nothing to say.
+
+  The fixture's attribute numbers, while this was being added, stopped
+  claiming to be OpenZFS's. They never were checked against a header,
+  and they do not need to be: an attribute's number is whatever that
+  dataset's registry ZAP says it is, and this reader resolves every
+  attribute through that registry by name, which is how ZFS itself
+  works. The comment now says that instead of asserting something
+  nobody had verified.
+
 * **`zvolcarve roots`: the MOS when no uberblock survives (SPEC F-64,
   COMPANIONS C-20).** Every other way into a pool starts at an
   uberblock — it carries the root pointer, the root pointer names the

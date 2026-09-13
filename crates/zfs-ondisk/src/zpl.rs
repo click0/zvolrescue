@@ -137,6 +137,14 @@ pub struct Znode {
     /// Extended attributes packed into the system attributes
     /// (`xattr=sa`), as the nvlist they are stored as.
     pub dxattr: Option<Vec<u8>>,
+    /// Project id, where the dataset keeps one (Z-10).
+    ///
+    /// `None` and `Some(0)` are different answers and are kept apart:
+    /// a dataset made before the `project_quota` feature has no such
+    /// attribute at all, while one made after it puts every file in
+    /// project 0 unless told otherwise. Reporting the first as zero
+    /// would invent a project that was never set.
+    pub projid: Option<u64>,
 }
 
 impl Znode {
@@ -179,6 +187,8 @@ pub fn parse_znode_phys(bonus: &[u8], endian: Endian) -> Result<Znode, ParseErro
         gid: at(136),
         symlink: None,
         dxattr: None,
+        // A legacy `znode_phys_t` predates the feature by a decade.
+        projid: None,
     })
 }
 
@@ -216,6 +226,8 @@ pub mod attr {
     pub const SYMLINK: &str = "ZPL_SYMLINK";
     /// System-attribute extended attributes (`xattr=sa`).
     pub const DXATTR: &str = "ZPL_DXATTR";
+    /// Project id, where the dataset has the `project_quota` feature.
+    pub const PROJID: &str = "ZPL_PROJID";
 }
 
 /// One attribute as the registry describes it.

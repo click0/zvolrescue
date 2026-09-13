@@ -28,6 +28,10 @@ struct FileOut {
     uid: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     gid: Option<u64>,
+    /// Project id, present only where the dataset keeps one (Z-10).
+    /// Absent is not the same as project zero, so absent is absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    projid: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     mtime: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -66,6 +70,7 @@ fn describe(e: &Entry, target: Option<String>, xattrs: Vec<String>) -> FileOut {
         links: z.map(|z| z.links),
         uid: z.map(|z| z.uid),
         gid: z.map(|z| z.gid),
+        projid: z.and_then(|z| z.projid),
         mtime: z.map(|z| iso8601(z.mtime)),
         target,
         xattrs,
