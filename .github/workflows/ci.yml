@@ -788,8 +788,9 @@ jobs:
       - run: cargo build --release && cargo build --release -p zfs-read --examples
       - name: Build one pool of the interim golden image
         run: POOLS=mirror RUN_TIME=20 sh tests/golden/build-ztest-image.sh /tmp/golden
-      - name: Ten manifests, one per class and the ones that found bugs
+      - name: Ten manifests — no defect, and nothing written to the evidence
         run: |
+          rc=0
           python3 tests/golden/run-matrix.py \
             --image /tmp/golden/pools/mirror --oracle /tmp/golden/oracle/mirror \
             --manifests testdata/manifests --out /tmp/golden/report --label mirror \
@@ -803,30 +804,65 @@ jobs:
               metadata-objset-one-copy \
               partition-start-shifted \
               combo-vdev-phys-gone-and-member-missing \
-              combo-labels-plus-data
-          # The script itself fails only on `defect`. Here every one of
-          # the ten has to be a `pass`: `unexpected` means the tool no
-          # longer does what the redundancy guarantees, and `n/a` means a
-          # case quietly stopped applying and took its coverage with it.
-          # Both are the kind of silent loss this whole subset exists to
-          # prevent.
+              combo-labels-plus-data || rc=$?
+          # `run-matrix.py` exits 1 on a `defect`, and under `bash -e`
+          # that killed this step before the block below printed a word
+          # about which case defected or why. A check that fails without
+          # saying why is the one thing this job exists to prevent, so
+          # its exit is captured and judged below with everything else.
+          echo "run-matrix.py exit ${rc:-0}"
+          # What this job may assert, and what it may not.
+          #
+          # It builds its own pool with `ztest` on every push, and a
+          # freshly built ztest pool is a different experiment each time:
+          # ztest attaches and detaches devices as it runs, so the
+          # "mirror" comes out two, three or four leaves wide; it removes
+          # vdevs, leaving an `indirect` top behind; and it makes datasets
+          # with `checksum=off`, where damage is undetectable by
+          # construction. A manifest's expected outcome states what ZFS
+          # redundancy guarantees — two copies gone means refused, one
+          # copy gone means recovered — and that cannot be judged against
+          # a pool whose redundancy was chosen at random. An earlier
+          # version of this step demanded ten passes and got three
+          # different answers from three identical commits.
+          #
+          # So the redundancy verdicts are printed and not enforced here;
+          # they are enforced by the full matrix, which runs against the
+          # published image whose layout is known and recorded. What is
+          # true whatever shape the pool came out is enforced: the tool
+          # never produced a failure the harness cannot account for
+          # (`defect`), and it never wrote to the evidence it was reading.
           python3 - <<'EOF'
-          import json, sys
+          import json
           want = 10
           rs = json.load(open("/tmp/golden/report/report-mirror.json"))
           assert len(rs) == want, f"ran {len(rs)} of {want} manifests: {[r['id'] for r in rs]}"
-          bad = [r for r in rs if r["verdict"] != "pass"]
-          for r in bad:
-              print(f"{r['id']}: {r['verdict']} — expected {r['expected']}, actual {r['actual']}")
-              for n in r.get("notes", []):
-                  print(f"    {n}")
-              for k, v in (r.get("outcomes") or {}).items():
-                  if v != "ok":
-                      print(f"    {k}: {v}")
-          assert not bad, f"{len(bad)} of {want} did not pass"
-          assert all(r.get("inputs_unchanged") for r in rs), "a run modified its inputs"
-          print(f"all {want} passed, and every damaged copy is unchanged after the run")
+          for r in rs:
+              print(f"{r['verdict']:10} {r['id']:42} expected {r['expected']}, actual {r['actual']}")
+              if r["verdict"] != "pass":
+                  for n in r.get("notes", []):
+                      print(f"    {n}")
+                  for k, v in (r.get("outcomes") or {}).items():
+                      if v != "ok":
+                          print(f"    {k}: {v}")
+          defects = [r["id"] for r in rs if r["actual"] == "defect"]
+          assert not defects, f"the tool failed in a way the harness cannot account for: {defects}"
+          wrote = [r["id"] for r in rs if not r.get("inputs_unchanged")]
+          assert not wrote, f"a run modified its own evidence: {wrote}"
+          print(f"{want} manifests: no defect, every damaged copy unchanged after the run")
           EOF
+          # Belt as well as braces: the script's own exit is honoured
+          # after the report has had its say, never instead of it.
+          test "${rc:-0}" = 0 || { echo "::error::run-matrix.py exited ${rc}"; exit 1; }
+      # The report is the only place the reasons are written down, and a
+      # failing run is exactly when they are wanted.
+      - name: The report, whatever the verdict was
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: damage-matrix-mirror
+          path: /tmp/golden/report
+          if-no-files-found: warn
 
   # 15.x is the first-class target (N-06): this one blocks.
   freebsd:

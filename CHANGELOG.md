@@ -130,13 +130,32 @@ remembers it.
   defects — built and judged in about five minutes. The full matrix over
   three geometries stays a manual run.
 
-  Every one of the ten must *pass*, which is stricter than the script
-  itself: it fails only on a defect, while `unexpected` means the tool no
-  longer does what the redundancy guarantees and `n/a` means a case
-  quietly stopped applying and took its coverage with it. Both were
-  checked by causing them — a renamed manifest and a changed expectation
-  each fail the job. `tests/golden/build-ztest-image.sh` takes `POOLS` so
-  the build can be one geometry instead of three.
+  It asserts what is true whatever shape the pool came out: that the tool
+  never failed in a way the harness cannot account for, and never wrote
+  to the evidence it was reading. It does *not* judge the redundancy
+  verdicts, because it builds its own pool and a freshly built `ztest`
+  pool is a different experiment every time — ztest attaches and detaches
+  devices as it runs, so a two-way mirror comes out two, three or four
+  leaves wide; it removes vdevs, leaving an `indirect` top whose blocks
+  no member describes; and it makes datasets with `checksum=off`. Three
+  identical commits got three different answers out of the same manifest
+  before this was understood, and all three were the tool behaving
+  correctly. Those verdicts belong to the full matrix, which runs against
+  the published image whose layout is recorded beside it.
+  `tests/golden/build-ztest-image.sh` takes `POOLS` so the build can be
+  one geometry instead of three.
+
+  Two things the first version of this job got wrong are fixed with it.
+  `run-matrix.py` exits non-zero on a defect, and under `bash -e` that
+  killed the step before anything printed *which* case defected or why —
+  a check that fails without saying why is the one thing this job exists
+  to prevent; its exit is now captured and judged after the report has
+  had its say, and the report is uploaded whatever the verdict. And a
+  failed decompression is no longer called a tool defect when the block
+  had `checksum=off`: that classification rested on "reached only after a
+  checksum agreed", which is not true when ZFS was told not to keep one.
+  Damage there is undetectable by construction and failing to decompress
+  is the only signal there can be.
 
 * **`normalization` is applied when matching a path (COMPANIONS
   Z-09).** A dataset created with `normalization=formD` matches a name

@@ -450,6 +450,16 @@ CLEAN_REASONS = (
 # afterwards is this reader's fault and not the damage's.
 UNCLEAN_VARIANTS = ("Decompress", "Crypt")
 
+# — except when there was no checksum to agree. A dataset with
+# `checksum=off` has nothing to verify against, so damaged bytes go
+# straight to the decompressor and the failure to decompress them is the
+# only signal there can be. `ztest` makes such datasets (a run's own
+# histogram counts them under `off: NotChecked`), and calling that a tool
+# defect blames the reader for an absence ZFS was told to allow. The
+# walker prefixes every outcome with the checksum it used, so the two
+# cases are told apart by reading that prefix rather than by guessing.
+CHECKSUMLESS = re.compile(r"\boff(?: encrypted)?(?: gang)?: ERROR")
+
 
 def judge_dump(args, oracle, manifest, members, work, assume=()):
     want = manifest["expect"].get("volumes", "all")
@@ -521,7 +531,8 @@ def judge_walk(args, oracle, members, work, assume=()):
     CLEAN = re.compile("|".join(re.escape(r) for r in CLEAN_REASONS))
     failures = [l.strip() for l in text.splitlines()
                 if re.search(r"ERROR|Mismatch|dnode:|locate:|objset \S+:", l)]
-    unclean = [l for l in failures if not CLEAN.search(l)]
+    unclean = [l for l in failures
+               if not CLEAN.search(l) and not CHECKSUMLESS.search(l)]
     if unclean:
         outcomes["blocks"] = "; ".join(unclean[:3])
     elif failures:
