@@ -39,6 +39,11 @@ jobs:
           awk -v want="v$v" '$0 ~ "^## " want { p=1; next } /^## / && p { exit } p { print }' CHANGELOG.md |
             grep -q '^\*\*' || { echo "::error::the v$v section has no **lead line** for the release title"; exit 1; }
           test "$(./target/release/zvolrescue --version)" = "zvolrescue $v"
+          # The READMEs carry the version in their status line and were
+          # the one place that quietly went stale: they still said v0.7.0
+          # after v0.7.1 shipped, and then v0.7.0 stopped existing at all.
+          grep -q "\*\*Status:\*\* v$v " README.md || { echo "::error::README.md's status line is not v$v"; exit 1; }
+          grep -q "\*\*Статус:\*\* v$v " README_UK.md || { echo "::error::README_UK.md's status line is not v$v"; exit 1; }
       - name: Every way a read can fail is classified (tests/golden)
         run: |
           # The damage matrix decides whether a failed block is the tool
