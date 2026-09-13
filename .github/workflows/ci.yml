@@ -847,7 +847,9 @@ jobs:
                           print(f"    {k}: {v}")
           defects = [r["id"] for r in rs if r["actual"] == "defect"]
           assert not defects, f"the tool failed in a way the harness cannot account for: {defects}"
-          wrote = [r["id"] for r in rs if not r.get("inputs_unchanged")]
+          # `is False`, not falsy: a case that never ran has no answer to
+          # give, and absent is not the same as "it wrote".
+          wrote = [r["id"] for r in rs if r.get("inputs_unchanged") is False]
           assert not wrote, f"a run modified its own evidence: {wrote}"
           print(f"{want} manifests: no defect, every damaged copy unchanged after the run")
           EOF

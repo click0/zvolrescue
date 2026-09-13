@@ -575,7 +575,13 @@ def run_case(args, oracle, manifest, rng):
         try:
             members, notes, paths = apply_damage(oracle, manifest, work, rng)
         except Unresolved as e:
-            result.update(actual="n/a", verdict="n/a", notes=[str(e)])
+            # Nothing was copied and nothing was damaged, so the evidence
+            # is untouched by construction. Saying so rather than leaving
+            # the field absent: a caller reading it as "did this run write
+            # to its inputs" would otherwise read an unrun case as a run
+            # that did.
+            result.update(actual="n/a", verdict="n/a", notes=[str(e)],
+                          inputs_unchanged=True)
             return result
         result["notes"] = notes
         if not members:
