@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 use zfs_ondisk::blkptr;
 use zfs_ondisk::carve::{plausible_dnode, plausible_head, Profile, Reject};
 use zfs_ondisk::compress;
-use zfs_ondisk::dmu::{DnodePhys, DNODE_SIZE};
+use zfs_ondisk::dmu::{ot, DnodePhys, ObjsetPhys, ObjsetType, DNODE_SIZE};
 use zfs_ondisk::Endian;
 use zvolrescue_io::{trace, BlockSource};
 
@@ -250,6 +250,77 @@ pub struct Scan {
     /// disk can be named from these, and a search for volumes would
     /// otherwise throw them away.
     pub datasets: Vec<Hit>,
+    /// Object-set headers of the MOS met along the way (SPEC F-64), for
+    /// a pool whose uberblock rings are gone and which therefore has no
+    /// root pointer to follow.
+    pub roots: Vec<RootHit>,
+    /// More headers were found than [`MAX_ROOTS`] and the rest were
+    /// dropped. Said rather than left to be inferred from a round number.
+    pub roots_truncated: bool,
+}
+
+/// An object-set header found in raw space (SPEC F-64).
+#[derive(Debug, Clone)]
+pub struct RootHit {
+    /// Index of the member it was found on.
+    pub device: usize,
+    /// Offset in that member where the header starts. For a compressed
+    /// hit this is the start of the compressed block.
+    pub offset: u64,
+    /// How it was found.
+    pub found: Found,
+    /// The header itself.
+    pub objset: ObjsetPhys,
+}
+
+/// How many object-set headers are kept before the list is truncated.
+///
+/// The test below is specific enough that a real member yields a
+/// handful; a cap only matters for a disk whose bytes happen to be
+/// adversarial, and a truncated list that says it was truncated beats
+/// one that grows until the machine gives out.
+const MAX_ROOTS: usize = 4096;
+
+/// Try `buf` as the start of the MOS's `objset_phys_t` (SPEC F-64).
+///
+/// An objset header begins with its meta-dnode, so the first 512 bytes
+/// have to parse as a dnode of type `DMU_OT_DNODE` before anything
+/// after them is worth reading — which settles almost every offset for
+/// the price of the check the dnode scan already makes.
+///
+/// Only `DMU_OST_META` is collected. A filesystem's or a volume's
+/// objset is reached *through* the MOS, so one found loose says nothing
+/// about where the pool's root is; and a meta-dnode with no block
+/// pointer has no dnode array under it, which is the one thing this is
+/// being found for.
+fn as_meta_objset(buf: &[u8]) -> Option<ObjsetPhys> {
+    if buf.len() < 1024 {
+        return None;
+    }
+    plausible_head(buf).ok()?;
+    let os = ObjsetPhys::parse(buf, Endian::Little).ok()?;
+    if os.meta_dnode.object_type != ot::DNODE || os.os_type != ObjsetType::Meta {
+        return None;
+    }
+    os.meta_dnode
+        .blkptr
+        .iter()
+        .any(|b| !b.is_hole())
+        .then_some(os)
+}
+
+/// Record an object-set header, unless the list is already full.
+fn consider_root(scan: &mut Scan, device: usize, offset: u64, found: Found, objset: ObjsetPhys) {
+    if scan.roots.len() >= MAX_ROOTS {
+        scan.roots_truncated = true;
+        return;
+    }
+    scan.roots.push(RootHit {
+        device,
+        offset,
+        found,
+        objset,
+    });
 }
 
 /// Judge one candidate dnode and, if it survives, record it.
@@ -326,6 +397,9 @@ fn plaintext_pass(scan: &mut Scan, opts: &Options, device: usize, base: u64, buf
                 Err(_) => scan.counts.bump(Reject::BonusLen),
             },
         }
+        if let Some(os) = as_meta_objset(&buf[at..]) {
+            consider_root(scan, device, base + at as u64, Found::Plaintext, os);
+        }
         at += DNODE_SIZE;
     }
 }
@@ -354,6 +428,15 @@ fn compressed_pass(
             let Some(out) = codec.decompress(here, *lsize as usize) else {
                 continue;
             };
+            if let Some(os) = as_meta_objset(&out) {
+                consider_root(
+                    scan,
+                    device,
+                    base + at as u64,
+                    Found::Compressed(*codec),
+                    os,
+                );
+            }
             let mut slot = 0u64;
             let mut off = 0usize;
             while off + DNODE_SIZE <= out.len() {
@@ -679,6 +762,53 @@ mod tests {
     use zvolrescue_io::MemSource;
 
     const SIZE: u64 = 64 * 1024 * 1024;
+
+    /// SPEC F-64: the MOS's own header is recognised in raw bytes, and
+    /// the three things that are not it are not.
+    #[test]
+    fn a_meta_objset_header_is_told_from_everything_that_is_not_one() {
+        use zfs_ondisk::blkptr::encode::Builder;
+        use zfs_ondisk::dmu::encode::{objset, DnodeSpec};
+
+        // `os_type` as it is on disk: DMU_OST_META is 1, DMU_OST_ZFS 2.
+        const META: u64 = 1;
+        const ZFS: u64 = 2;
+
+        let pointing = |kind: u8| {
+            DnodeSpec {
+                object_type: kind,
+                datablksz: 16384,
+                blkptrs: vec![Builder::new()
+                    .dva(0, 0, 0x20_0000, 0x1000, false)
+                    .sizes(16384, 16384)
+                    .bytes(Endian::Little)],
+                ..DnodeSpec::default()
+            }
+            .build()
+        };
+        // DMU_OST_META with a meta-dnode that points somewhere: the one
+        // shape worth stopping on.
+        let mos = objset(&pointing(ot::DNODE), META);
+        let found = as_meta_objset(&mos).expect("the MOS header");
+        assert_eq!(found.os_type, ObjsetType::Meta);
+        assert_eq!(found.meta_dnode.object_type, ot::DNODE);
+
+        // A filesystem's objset is reached through the MOS, so finding
+        // one loose says nothing about where the root is.
+        assert!(as_meta_objset(&objset(&pointing(ot::DNODE), ZFS)).is_none());
+        // A meta-dnode that is not a dnode array.
+        assert!(as_meta_objset(&objset(&pointing(ot::PLAIN_FILE_CONTENTS), META)).is_none());
+        // A meta-dnode with no pointer has no array under it to walk.
+        let empty = DnodeSpec {
+            object_type: ot::DNODE,
+            datablksz: 16384,
+            ..DnodeSpec::default()
+        }
+        .build();
+        assert!(as_meta_objset(&objset(&empty, META)).is_none());
+        // And a buffer too short to hold a header is not guessed at.
+        assert!(as_meta_objset(&mos[..1023]).is_none());
+    }
 
     fn carved() -> Vec<Vec<u8>> {
         let mut pool = Pool::mirror("tank", 0x5eed_0000_0000_0001, 12).txgs(&[

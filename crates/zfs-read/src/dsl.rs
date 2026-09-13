@@ -256,6 +256,22 @@ pub fn open_mos<'r, 'a>(
     );
     let block = reader.read_block(&rootbp, false)?;
     let os = ObjsetPhys::parse(&block.data, rootbp.endian)?;
+    open_mos_objset(reader, os, rootbp.endian)
+}
+
+/// The same, from an objset already in hand rather than one reached
+/// through an uberblock's root pointer (SPEC F-64).
+///
+/// A pool whose uberblock rings are all gone has no root pointer to
+/// follow, and the only way to the MOS is to find its `objset_phys_t`
+/// in raw space and start from there. Everything after that — the
+/// object directory, the checksum salt, the DSL — is the same work, so
+/// it is the same code; what differs is only how the objset arrived.
+pub fn open_mos_objset<'r, 'a>(
+    reader: &'r PoolReader<'a>,
+    os: ObjsetPhys,
+    endian: Endian,
+) -> Result<DnodeArray<'r, 'a>, ReadError> {
     trace!(
         "dsl",
         "MOS objset: type {} meta-dnode datablksz {} nlevels {} maxblkid {}",
@@ -270,7 +286,7 @@ pub fn open_mos<'r, 'a>(
             os.os_type.name()
         )));
     }
-    let mos = DnodeArray::new(reader, os.meta_dnode, rootbp.endian);
+    let mos = DnodeArray::new(reader, os.meta_dnode, endian);
     // The salt lives in the object directory, which is never itself
     // salted-checksummed; load it before anything else is read.
     match mos.object(OBJECT_DIRECTORY).and_then(|o| read_zap(&o)) {
