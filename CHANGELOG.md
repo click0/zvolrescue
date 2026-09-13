@@ -74,6 +74,28 @@ tagged. `v0.7.1` is the release that carries those six.
 ## Unreleased
 
 ### Fixed
+* **`normalization` is applied when matching a path (COMPANIONS
+  Z-09).** A dataset created with `normalization=formD` matches a name
+  however it was spelled, so a file stored composed is found by its
+  decomposed spelling and the other way round — the case a macOS client
+  and a Linux one create between them. It is the *last* thing tried: the
+  bytes first, then case folding where `casesensitivity` says so, then
+  this, each only when the one before found nothing. That order is the
+  point. Folding and normalizing read a name as text and compare it with
+  this build's Unicode tables, while ZFS matched with its own, frozen
+  long ago; ahead of an exact match that disagreement could pick the
+  wrong file, behind one the worst it can do is leave a file unfound,
+  which is what happened before.
+
+  The property is a bit set and is read by its bits, with a value whose
+  bits name no form treated as no normalization rather than guessed at.
+  Nothing here has seen one on a real pool — `ztest` makes no such
+  dataset — so the decoding is pinned against the constants in
+  `u8_textprep.h` and says so. The fixture for it is a second one,
+  because a real dataset cannot be both: `normalization` requires
+  `utf8only`, and `utf8only` forbids the `café.txt` the first fixture
+  holds as Latin-1.
+
 * **A closed pipe was still a failure where the report is written into
   a sink.** The panic hook added in v0.7.1 covers `println!`, which is
   how four of the five programs write. `zvoltimeline` builds its report

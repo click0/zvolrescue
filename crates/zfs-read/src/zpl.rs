@@ -69,6 +69,62 @@ pub struct DirEntry {
     pub file_type: FileType,
 }
 
+/// A Unicode normalization a dataset matches names under (Z-09).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Normalization {
+    /// `formD`: canonical decomposition.
+    D,
+    /// `formC`: canonical decomposition, then canonical composition.
+    C,
+    /// `formKD`: compatibility decomposition.
+    KD,
+    /// `formKC`: compatibility decomposition, then canonical composition.
+    KC,
+}
+
+impl Normalization {
+    /// Decode the `normalization` property, which is a bit set:
+    /// `U8_CANON_DECOMP` 0x10, `U8_COMPAT_DECOMP` 0x20, `U8_CANON_COMP`
+    /// 0x40 (`u8_textprep.h`). `None` for 0 — the property's own way of
+    /// saying names are not normalized — and for any value whose bits
+    /// name no form, because guessing at one would be worse than
+    /// matching only what is exactly there.
+    pub fn from_property(value: u64) -> Option<Normalization> {
+        const CANON_DECOMP: u64 = 0x10;
+        const COMPAT_DECOMP: u64 = 0x20;
+        const CANON_COMP: u64 = 0x40;
+        if value & CANON_DECOMP == 0 {
+            return None;
+        }
+        Some(
+            match (value & COMPAT_DECOMP != 0, value & CANON_COMP != 0) {
+                (false, false) => Normalization::D,
+                (false, true) => Normalization::C,
+                (true, false) => Normalization::KD,
+                (true, true) => Normalization::KC,
+            },
+        )
+    }
+
+    /// `name` in this form.
+    ///
+    /// The tables here are whatever version of Unicode this build was
+    /// compiled against; ZFS normalizes with tables of its own, frozen
+    /// long ago. For the characters anyone names a file with the two
+    /// agree, and where they do not the cost is bounded by where this is
+    /// used: a fallback that can turn "not found" into "found" and never
+    /// a correct match into a wrong one.
+    pub fn apply(self, name: &str) -> String {
+        use unicode_normalization::UnicodeNormalization;
+        match self {
+            Normalization::D => name.nfd().collect(),
+            Normalization::C => name.nfc().collect(),
+            Normalization::KD => name.nfkd().collect(),
+            Normalization::KC => name.nfkc().collect(),
+        }
+    }
+}
+
 impl DirEntry {
     /// Whether the name on disk is valid UTF-8 — that is, whether
     /// [`DirEntry::name`] gives it back exactly.
@@ -282,10 +338,21 @@ impl Filesystem<'_, '_> {
 
     /// Resolve a path given as the bytes it is on disk.
     ///
-    /// A name is bytes, not text, so a match on the bytes is tried
-    /// first and always wins. Only where the dataset says names are
-    /// matched without regard to case does a case-folded match count,
-    /// and then only when nothing matched exactly (Z-09).
+    /// Three attempts, in this order, and each only when the one before
+    /// it found nothing (Z-09):
+    ///
+    /// 1. the bytes, which always wins and is the only one that needs no
+    ///    assumption about what the bytes mean;
+    /// 2. case-folded, where the dataset's `casesensitivity` says names
+    ///    are matched that way;
+    /// 3. Unicode-normalized, where its `normalization` says so.
+    ///
+    /// The order is the whole design. Steps 2 and 3 read the name as
+    /// text and compare it with tables — this build's tables, not the
+    /// ones ZFS used — so putting either first could match the wrong
+    /// entry. Behind an exact match they cannot: the worst a
+    /// disagreement between the two sets of tables can do is leave a
+    /// file unfound, which is what would have happened anyway.
     pub fn lookup_bytes(&self, path: &[u8]) -> Result<u64, ReadError> {
         let shown = String::from_utf8_lossy(path).into_owned();
         let mut at = self.root;
@@ -297,18 +364,43 @@ impl Filesystem<'_, '_> {
             let found = entries
                 .iter()
                 .find(|e| e.raw == part)
-                .or_else(|| {
-                    let part = std::str::from_utf8(part).ok()?;
-                    self.case_insensitive().then(|| {
-                        entries
-                            .iter()
-                            .find(|e| e.name.to_lowercase() == part.to_lowercase())
-                    })?
-                })
+                .or_else(|| self.matched_as_text(&entries, part))
                 .ok_or_else(|| ReadError::Io(format!("{shown}: no such file or directory")))?;
             at = found.object;
         }
         Ok(at)
+    }
+
+    /// The fallbacks of [`Filesystem::lookup_bytes`]: a name read as
+    /// text, folded and normalized as the dataset's properties say.
+    ///
+    /// Returns nothing at all for a component that is not UTF-8, because
+    /// neither folding nor normalizing means anything for bytes that are
+    /// not text — and such a name can only be asked for exactly.
+    fn matched_as_text<'e>(&self, entries: &'e [DirEntry], part: &[u8]) -> Option<&'e DirEntry> {
+        let part = std::str::from_utf8(part).ok()?;
+        let fold = self.case_insensitive();
+        if fold {
+            let want = part.to_lowercase();
+            if let Some(e) = entries.iter().find(|e| e.name.to_lowercase() == want) {
+                return Some(e);
+            }
+        }
+        let form = self.normalization()?;
+        // Folding and normalizing are independent properties and a
+        // dataset may have both; when it does, the last attempt applies
+        // both rather than making the operator choose which one the path
+        // was typed under.
+        let prepare = |s: &str| {
+            let s = form.apply(s);
+            if fold {
+                s.to_lowercase()
+            } else {
+                s
+            }
+        };
+        let want = prepare(part);
+        entries.iter().find(|e| prepare(&e.name) == want)
     }
 
     /// An object's contents as a reader.
@@ -364,6 +456,24 @@ impl Filesystem<'_, '_> {
         out.sort_by(|a, b| a.0.cmp(&b.0));
         out.dedup_by(|a, b| a.0 == b.0);
         out
+    }
+
+    /// The Unicode normalization this dataset matches names under, if
+    /// any (Z-09).
+    ///
+    /// The property is a bit set, the one OpenZFS's `u8_textprep.h`
+    /// defines: `U8_CANON_DECOMP` 0x10, `U8_COMPAT_DECOMP` 0x20,
+    /// `U8_CANON_COMP` 0x40. So `formD` is 0x10, `formKD` 0x30, `formC`
+    /// 0x50 and `formKC` 0x70. It is read by its bits rather than as one
+    /// of four numbers, because that is how it is written.
+    ///
+    /// **Not verified against a pool.** `ztest` makes no dataset with
+    /// `normalization` set, so nothing in this workspace's tests has
+    /// ever seen one of these values on disk; the mapping comes from the
+    /// header. That is the reason normalization is a *fallback* below
+    /// and never the first thing tried.
+    pub fn normalization(&self) -> Option<Normalization> {
+        Normalization::from_property(*self.properties.get("normalization")?)
     }
 
     /// Whether names in this dataset are matched without regard to case.
@@ -535,7 +645,10 @@ fn walk_into(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fixture::{zpl_deep, zpl_hello, zpl_latin1, zpl_members, Pool, ZPL_LATIN1_NAME};
+    use crate::fixture::{
+        zpl_deep, zpl_hello, zpl_latin1, zpl_members_matching, Matching, Pool, ZPL_COMPOSED_NAME,
+        ZPL_DECOMPOSED_NAME, ZPL_LATIN1_NAME,
+    };
     use crate::pool::{assemble, uberblock_candidates};
     use crate::vdev::scan_device;
     use zvolrescue_io::{BlockSource, MemSource};
@@ -548,9 +661,13 @@ mod tests {
     /// reader, which borrows the sources, and none of them outlives the
     /// pool they were assembled from.
     fn with_fs(f: impl FnOnce(&Filesystem<'_, '_>)) {
+        with_matching_fs(Matching::Exact, f);
+    }
+
+    fn with_matching_fs(matching: Matching, f: impl FnOnce(&Filesystem<'_, '_>)) {
         let mut pool = Pool::mirror("tank", 0x5eed_0000_0000_0003, 12)
             .txgs(&[(4816228, 1757100000), (4816229, 1757100005)]);
-        let members = zpl_members(&mut pool, SIZE);
+        let members = zpl_members_matching(&mut pool, SIZE, matching);
         let sources: Vec<MemSource> = members.into_iter().map(MemSource::new).collect();
         let scans: Vec<_> = sources
             .iter()
@@ -664,6 +781,61 @@ mod tests {
                 zpl_latin1()
             );
         });
+    }
+
+    /// Z-09: a dataset that normalizes finds a composed name by its
+    /// decomposed spelling, and the reverse — which is the case a macOS
+    /// client and a Linux one create between them.
+    #[test]
+    fn a_normalizing_dataset_matches_across_the_two_spellings() {
+        with_matching_fs(Matching::NormalizedFormD, |fs| {
+            assert_eq!(fs.normalization(), Some(Normalization::D));
+            // Exactly as stored: no normalization needed, and it wins.
+            let object = fs.lookup_bytes(ZPL_COMPOSED_NAME).expect("composed");
+            // The other spelling of the same name reaches the same file.
+            assert_eq!(
+                fs.lookup_bytes(ZPL_DECOMPOSED_NAME).expect("decomposed"),
+                object
+            );
+            // A name that is neither is still not there.
+            assert!(fs.lookup("resume.txt").is_err());
+        });
+    }
+
+    /// And a dataset that does not normalize does not: the property is
+    /// read, not assumed. Without this the test above would pass on a
+    /// reader that normalized everything always.
+    #[test]
+    fn a_dataset_that_does_not_normalize_matches_only_the_bytes() {
+        with_fs(|fs| {
+            assert_eq!(fs.normalization(), None);
+            assert_eq!(fs.lookup_bytes(ZPL_LATIN1_NAME).expect("as stored"), 10);
+            // The composed fixture's name is not in this one at all, and
+            // neither spelling of it may be invented.
+            assert!(fs.lookup_bytes(ZPL_COMPOSED_NAME).is_err());
+            assert!(fs.lookup_bytes(ZPL_DECOMPOSED_NAME).is_err());
+        });
+    }
+
+    /// The property is a bit set from `u8_textprep.h`, not one of four
+    /// numbers. Nothing in this workspace has seen one on a real pool,
+    /// so the decoding is pinned here against the header's constants.
+    #[test]
+    fn the_normalization_property_is_read_by_its_bits() {
+        use Normalization::*;
+        for (value, want) in [
+            (0x00, None),
+            (0x10, Some(D)),  // U8_CANON_DECOMP
+            (0x30, Some(KD)), // | U8_COMPAT_DECOMP
+            (0x50, Some(C)),  // | U8_CANON_COMP
+            (0x70, Some(KC)), // all three
+            // No canonical decomposition bit names no form; composing
+            // alone is not one of the four, and is not guessed at.
+            (0x40, None),
+            (0x20, None),
+        ] {
+            assert_eq!(Normalization::from_property(value), want, "{value:#x}");
+        }
     }
 
     /// Z-04: extended attributes, packed into the system attributes.

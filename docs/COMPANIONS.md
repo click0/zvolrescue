@@ -498,8 +498,29 @@ that it is extracted under those bytes, found under those bytes, and
 A path is matched on the bytes first, and case-folded only where the
 dataset's `casesensitivity` says so.
 
-Not implemented: `normalization` in path matching (it is reported), and
-the feature-flag extensions to the SA layout (Z-10).
+`normalization` is applied in path matching, and only as the last thing
+tried. A path is matched on its bytes first — the only comparison that
+assumes nothing about what the bytes mean — then case-folded where
+`casesensitivity` says so, then normalized where `normalization` says so,
+and each step runs only when the one before it found nothing. The order
+is the whole design: folding and normalizing read a name as text and
+compare it with *this build's* Unicode tables, while ZFS matched with
+tables of its own, frozen long ago. Ahead of an exact match that
+disagreement could pick the wrong file; behind one it cannot — the worst
+it can do is leave a file unfound, which is what would have happened
+anyway.
+
+The property is a bit set (`U8_CANON_DECOMP` 0x10, `U8_COMPAT_DECOMP`
+0x20, `U8_CANON_COMP` 0x40) and is read by its bits; a value whose bits
+name none of the four forms is treated as no normalization rather than
+guessed at. **None of this has been seen on a real pool**: `ztest`
+creates no dataset with `normalization` set, so the decoding is pinned to
+the header's constants in a unit test and nothing more. The fixture that
+exercises the matching is a second one, because a real dataset cannot be
+both — `normalization` requires `utf8only`, and a dataset with
+`utf8only` on cannot hold the `caf\xe9.txt` the first fixture does.
+
+Not implemented: the feature-flag extensions to the SA layout (Z-10).
 Sparse regions come out as the holes they are, since a hole is a hole in
 the tree; a file whose tail was never written is extracted to the length
 the attributes give.*

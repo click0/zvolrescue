@@ -847,7 +847,30 @@ pub fn zpl_latin1() -> Vec<u8> {
 /// sub/             a directory
 /// sub/deep.txt     one block of pattern
 /// ```
-fn build_zpl_objset(m: &mut [Vec<u8>], a: &mut Alloc) -> [u8; blkptr::SIZE] {
+/// How a ZPL fixture's dataset matches names (Z-09).
+///
+/// The two are separate fixtures because a real pool cannot be both:
+/// `normalization` requires `utf8only`, and a dataset with `utf8only`
+/// on cannot hold `caf\xe9.txt`. A fixture that is impossible on disk
+/// tests nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Matching {
+    /// `casesensitivity=sensitive`, `normalization=none`, `utf8only=off`
+    /// — and a name that is not UTF-8, which such a dataset may hold.
+    Exact,
+    /// `normalization=formD`, `utf8only=on`, and a file whose name is on
+    /// disk in composed form, to be found by its decomposed spelling.
+    NormalizedFormD,
+}
+
+/// The file in a [`Matching::NormalizedFormD`] fixture, as stored:
+/// `résumé.txt` composed, the way most systems write it.
+pub const ZPL_COMPOSED_NAME: &[u8] = "r\u{e9}sum\u{e9}.txt".as_bytes();
+
+/// The same name decomposed, the way a macOS client would ask for it.
+pub const ZPL_DECOMPOSED_NAME: &[u8] = "re\u{301}sume\u{301}.txt".as_bytes();
+
+fn build_zpl_objset(m: &mut [Vec<u8>], a: &mut Alloc, matching: Matching) -> [u8; blkptr::SIZE] {
     let mut dnodes = vec![0u8; 16384];
     let mut put = |obj: u64, bytes: Vec<u8>| {
         let at = obj as usize * DNODE_SIZE;
@@ -906,8 +929,21 @@ fn build_zpl_objset(m: &mut [Vec<u8>], a: &mut Alloc) -> [u8; blkptr::SIZE] {
                 ("ROOT", 3),
                 ("SA_ATTRS", 2),
                 ("casesensitivity", 0),
-                ("normalization", 0),
-                ("utf8only", 0),
+                // 0x10 is U8_CANON_DECOMP — `formD` (u8_textprep.h).
+                (
+                    "normalization",
+                    match matching {
+                        Matching::Exact => 0,
+                        Matching::NormalizedFormD => 0x10,
+                    },
+                ),
+                (
+                    "utf8only",
+                    match matching {
+                        Matching::Exact => 0,
+                        Matching::NormalizedFormD => 1,
+                    },
+                ),
             ],
         ),
     );
@@ -946,10 +982,16 @@ fn build_zpl_objset(m: &mut [Vec<u8>], a: &mut Alloc) -> [u8; blkptr::SIZE] {
         .build(),
     );
 
-    // 3: the root directory.
+    // 3: the root directory. Object 10 is the one name that differs
+    // between the two fixtures: a dataset that matches exactly may hold
+    // bytes that are not UTF-8, and one that normalizes may not.
+    let odd_name: &[u8] = match matching {
+        Matching::Exact => ZPL_LATIN1_NAME,
+        Matching::NormalizedFormD => ZPL_COMPOSED_NAME,
+    };
     let root_entries: [(&[u8], u64); 5] = [
         // A name no dataset with utf8only=on could hold (Z-09).
-        (ZPL_LATIN1_NAME, dirent_value(10, 8)),
+        (odd_name, dirent_value(10, 8)),
         // Two names for one object: a hard link (Z-07).
         (b"hardlink.txt", dirent_value(6, 8)),
         (b"hello.txt", dirent_value(6, 8)),
@@ -1130,6 +1172,12 @@ fn deadlist_obj(a: &mut Alloc, m: &mut [Vec<u8>], used: u64, entries: &[(&str, u
 /// list is asserted in several places, and a recovery tool's tests are
 /// worth more when each fixture says one thing.
 pub fn zpl_members(pool: &mut Pool, size: u64) -> Vec<Vec<u8>> {
+    zpl_members_matching(pool, size, Matching::Exact)
+}
+
+/// The same fixture with the dataset's name-matching properties chosen
+/// (Z-09).
+pub fn zpl_members_matching(pool: &mut Pool, size: u64, matching: Matching) -> Vec<Vec<u8>> {
     let n = pool.members.len();
     let mut members: Vec<Vec<u8>> = (0..n).map(|_| vec![0u8; size as usize]).collect();
     let layout = match pool.nparity {
@@ -1141,7 +1189,7 @@ pub fn zpl_members(pool: &mut Pool, size: u64) -> Vec<Vec<u8>> {
     };
     let mut a = Alloc::with_layout(0x20_0000, layout);
     let m = &mut members[..];
-    let os_zpl = build_zpl_objset(m, &mut a);
+    let os_zpl = build_zpl_objset(m, &mut a, matching);
     let empty_meta = DnodeSpec {
         object_type: ot::DNODE,
         ..DnodeSpec::default()

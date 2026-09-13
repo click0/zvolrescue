@@ -9,6 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+unicode-normalization.workspace = true
 zfs-ondisk.workspace = true
 zvolrescue-io.workspace = true
 sha2 = { workspace = true }
