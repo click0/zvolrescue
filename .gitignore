@@ -7,3 +7,5 @@ manifest.json
 ztest.*
 zpool.cache
 __pycache__/
+# CI checks the testdata repository out here for the damage matrix.
+/testdata/

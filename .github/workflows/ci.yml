@@ -727,6 +727,65 @@ jobs:
       - run: cargo build --release && cargo build --release -p zfs-read --examples
       - run: tests/crosscheck-ztest.sh ./target/release/zvolrescue /tmp/crosscheck ./target/release/examples/walk-objects ./target/release/examples/unwrap-key ./target/release/zvoltimeline ./target/release/examples/space
 
+  # The damage matrix found two real defects in the tool during one
+  # afternoon and then ran only when someone remembered to run it. This
+  # is a subset — one geometry, ten manifests, about five minutes — kept
+  # small enough to sit in every push. The full matrix over three
+  # geometries stays a manual run.
+  matrix:
+    name: Damage matrix (one geometry, pinned subset)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          repository: click0/zvolrescue-testdata
+          path: testdata
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends zfsutils-linux zfs-test zstd
+      - run: cargo build --release && cargo build --release -p zfs-read --examples
+      - name: Build one pool of the interim golden image
+        run: POOLS=mirror RUN_TIME=20 sh tests/golden/build-ztest-image.sh /tmp/golden
+      - name: Ten manifests, one per class and the ones that found bugs
+        run: |
+          python3 tests/golden/run-matrix.py \
+            --image /tmp/golden/pools/mirror --oracle /tmp/golden/oracle/mirror \
+            --manifests testdata/manifests --out /tmp/golden/report --label mirror \
+            --tmp /tmp --only \
+              labels-all-four \
+              labels-bit-flips-all-four \
+              data-one-member \
+              data-zeros-two-members-same-range \
+              member-missing-one \
+              metadata-mos-one-copy \
+              metadata-objset-one-copy \
+              partition-start-shifted \
+              combo-vdev-phys-gone-and-member-missing \
+              combo-labels-plus-data
+          # The script itself fails only on `defect`. Here every one of
+          # the ten has to be a `pass`: `unexpected` means the tool no
+          # longer does what the redundancy guarantees, and `n/a` means a
+          # case quietly stopped applying and took its coverage with it.
+          # Both are the kind of silent loss this whole subset exists to
+          # prevent.
+          python3 - <<'EOF'
+          import json, sys
+          want = 10
+          rs = json.load(open("/tmp/golden/report/report-mirror.json"))
+          assert len(rs) == want, f"ran {len(rs)} of {want} manifests: {[r['id'] for r in rs]}"
+          bad = [r for r in rs if r["verdict"] != "pass"]
+          for r in bad:
+              print(f"{r['id']}: {r['verdict']} — expected {r['expected']}, actual {r['actual']}")
+              for n in r.get("notes", []):
+                  print(f"    {n}")
+              for k, v in (r.get("outcomes") or {}).items():
+                  if v != "ok":
+                      print(f"    {k}: {v}")
+          assert not bad, f"{len(bad)} of {want} did not pass"
+          assert all(r.get("inputs_unchanged") for r in rs), "a run modified its inputs"
+          print(f"all {want} passed, and every damaged copy is unchanged after the run")
+          EOF
+
   # 15.x is the first-class target (N-06): this one blocks.
   freebsd:
     name: FreeBSD 15 (ports rust)

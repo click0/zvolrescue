@@ -499,6 +499,15 @@ on in-memory fixtures and portable.
     from a raidz2 at 9 with two of four members absent, where the column
     stride has to be right for parity to reconstruct anything.
 * **Cross-check**: on hosts with OpenZFS userland, compare `zvolrescue scan -v`/`list` output with `zdb -l`/`zdb -u`/`zdb -d`.
+* **The damage matrix, on every push.** One geometry and ten manifests —
+  one per damage class, plus the cases that have caught defects — built
+  and run in CI in about five minutes; the full matrix over three
+  geometries stays a manual run. Every one of the ten must *pass*: the
+  script itself fails only on a defect, while `unexpected` means the tool
+  no longer does what the redundancy guarantees and `n/a` means a case
+  quietly stopped applying and took its coverage with it. Both are the
+  silent loss the subset exists to prevent, and both were checked by
+  causing them.
 * **Fuzzing**: `cargo fuzz` targets for the nvlist, blkptr, dnode and ZAP parsers, run for a bounded time in CI on every push.
 * **Static analysis**: `cargo clippy -D warnings`, `cargo fmt --check`, `cargo deny` (licences, advisories, banned crates); Miri on the `zfs-ondisk` unit tests.
 

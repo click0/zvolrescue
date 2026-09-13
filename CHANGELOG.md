@@ -74,6 +74,21 @@ tagged. `v0.7.1` is the release that carries those six.
 ## Unreleased
 
 ### Fixed
+* **The damage matrix runs on every push (SPEC §9).** It found two real
+  defects in the tool in one afternoon and then only ran when someone
+  remembered to run it. A subset now sits in CI: one geometry, ten
+  manifests — one per damage class, plus the cases that caught those
+  defects — built and judged in about five minutes. The full matrix over
+  three geometries stays a manual run.
+
+  Every one of the ten must *pass*, which is stricter than the script
+  itself: it fails only on a defect, while `unexpected` means the tool no
+  longer does what the redundancy guarantees and `n/a` means a case
+  quietly stopped applying and took its coverage with it. Both were
+  checked by causing them — a renamed manifest and a changed expectation
+  each fail the job. `tests/golden/build-ztest-image.sh` takes `POOLS` so
+  the build can be one geometry instead of three.
+
 * **`normalization` is applied when matching a path (COMPANIONS
   Z-09).** A dataset created with `normalization=formD` matches a name
   however it was spelled, so a file stored composed is found by its

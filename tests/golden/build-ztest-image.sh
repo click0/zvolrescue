@@ -102,16 +102,26 @@ package() {
 }
 
 say "interim golden image $TAG"
+built=""
 for spec in "mirror -K raidz -m 2 -r 1 -R 0" \
             "raidz2 -K raidz -m 1 -r 4 -R 2" \
             "draid1 -K draid -m 1 -r 4 -R 1 -D 2 -S 1"; do
     # shellcheck disable=SC2086
     set -- $spec
     topo=$1; shift
+    # `POOLS` narrows the build to the pools named in it, so CI can have
+    # one geometry in a couple of minutes where the full image takes ten.
+    case " ${POOLS:-mirror raidz2 draid1} " in
+        *" $topo "*) ;;
+        *) say "$topo: skipped (POOLS=${POOLS})"; continue ;;
+    esac
     build_pool "$topo" "$@"
     capture_oracle "$topo"
     package "$topo"
+    built="$built $topo"
 done
+built=${built# }
+[ -n "$built" ] || die "POOLS=${POOLS} names no pool this script builds"
 
 ( cd "$OUT/release" && for f in *.zst; do printf '%s  %s\n' "$(sha "$f")" "$f"; done > SHA256SUMS )
 
@@ -140,7 +150,7 @@ done
     echo
     echo "| Pool | Top-level vdev | Shape | Members (role → file) |"
     echo "|---|---|---|---|"
-    for topo in mirror raidz2 draid1; do
+    for topo in $built; do
         python3 - "$OUT/oracle/$topo/layout.json" "$topo" <<'PYEOF'
 import json, sys
 layout = json.load(open(sys.argv[1]))
@@ -153,7 +163,7 @@ PYEOF
     echo
     echo "## Datasets"
     echo
-    for topo in mirror raidz2 draid1; do
+    for topo in $built; do
         echo "### $topo"
         echo
         echo '```'
