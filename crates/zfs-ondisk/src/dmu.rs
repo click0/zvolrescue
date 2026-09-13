@@ -38,6 +38,9 @@ pub mod ot {
     pub const OBJECT_DIRECTORY: u8 = 1;
     /// Packed nvlist (pool config, history).
     pub const PACKED_NVLIST: u8 = 3;
+    /// The `uint64` bonus of a packed nvlist object: how much of the
+    /// object's data is really nvlist rather than padding.
+    pub const PACKED_NVLIST_SIZE: u8 = 4;
     /// Space map.
     pub const SPACE_MAP: u8 = 8;
     /// Dnode array (the meta-dnode's data).

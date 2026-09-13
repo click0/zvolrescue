@@ -477,6 +477,7 @@ mod assume_member_tests {
             state: None,
             txg: None,
             vdev_children: children,
+            features_for_read: Vec::new(),
             tops: tops_present
                 .iter()
                 .map(|id| zfs_read::pool::TopVdev {

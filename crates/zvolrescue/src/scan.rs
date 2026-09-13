@@ -236,6 +236,10 @@ struct PoolOut {
     txg: Option<u64>,
     vdev_children: Option<u64>,
     missing_tops: Vec<u64>,
+    /// The pool says a top-level vdev was removed, so some of the ids in
+    /// `missing_tops` may be vdevs that are gone on purpose rather than
+    /// members that are absent (SPEC F-69).
+    device_removal: bool,
     readable: bool,
     hosts: Vec<HostOut>,
     devices: Vec<PathBuf>,
@@ -436,6 +440,10 @@ fn pool_out(p: &PoolAssembly, paths: &[PathBuf]) -> PoolOut {
         txg: p.txg,
         vdev_children: p.vdev_children,
         missing_tops: p.missing_tops(),
+        device_removal: p
+            .features_for_read
+            .iter()
+            .any(|f| f == "com.delphix:device_removal"),
         readable: p.readable(),
         hosts: p
             .hosts
@@ -677,6 +685,15 @@ fn print_text(out: &ScanOut, verbose: u8) {
         }
         for id in &p.missing_tops {
             println!("  top-level vdev #{id}: no scanned member describes it  MISSING");
+        }
+        // A removed vdev is counted by `vdev_children` like any other and
+        // has no member to find, so it is indistinguishable here from one
+        // whose disks were not given. Which it is lives in the pool's
+        // configuration object, and reading the pool is what consults it.
+        if p.device_removal && !p.missing_tops.is_empty() {
+            println!(
+                "  note: device_removal is active, so some of the vdev(s) above may have been removed rather than lost; reading the pool translates through what they left behind (SPEC F-69)"
+            );
         }
         for m in &p.stale {
             println!(

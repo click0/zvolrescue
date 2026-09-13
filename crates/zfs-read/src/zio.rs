@@ -18,6 +18,7 @@ use zfs_ondisk::checksum::{verify_block, Salt, Verify};
 use zfs_ondisk::compress::{decompress, DecompressError};
 use zfs_ondisk::dmu::ot;
 use zfs_ondisk::draid;
+use zfs_ondisk::indirect::{Mapping, Unmapped};
 use zfs_ondisk::raidz;
 use zvolrescue_io::trace::hexdump;
 use zvolrescue_io::{trace, BlockSource};
@@ -167,6 +168,14 @@ impl Node {
     }
 }
 
+/// What a DVA's top-level vdev id resolves to.
+enum Where<'n> {
+    /// A vdev the labels describe.
+    Top(&'n Node),
+    /// A vdev that was removed, and the mapping it left behind.
+    Removed(Rc<Mapping>),
+}
+
 /// Reads blocks from the members of one pool.
 pub struct PoolReader<'a> {
     devices: Vec<Option<&'a dyn BlockSource>>,
@@ -188,6 +197,10 @@ pub struct PoolReader<'a> {
     salt: Cell<Option<Salt>>,
     /// Keys of the encrypted dataset currently being read, if any.
     keys: RefCell<Option<DatasetKeys>>,
+    /// Mappings of top-level vdevs that were removed, by vdev id (F-69).
+    /// Filled from the MOS configuration once it has been read; empty
+    /// on a pool that never had a vdev removed, which is most of them.
+    removed: RefCell<BTreeMap<u32, Rc<Mapping>>>,
 }
 
 /// Why a block could not be produced.
@@ -195,6 +208,9 @@ pub struct PoolReader<'a> {
 pub enum ReadError {
     /// The DVA names a top-level vdev the labels do not describe.
     UnknownVdev(u32),
+    /// The DVA names a vdev that was removed, and the mapping it left
+    /// behind does not account for this range (SPEC F-69).
+    Unmapped(u32, Unmapped),
     /// Every leaf that could hold the copy is missing.
     NoMember,
     /// The top-level vdev type is not readable in this build.
@@ -225,6 +241,9 @@ impl fmt::Display for ReadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ReadError::UnknownVdev(v) => write!(f, "DVA names unknown top-level vdev {v}"),
+            ReadError::Unmapped(v, gap) => {
+                write!(f, "removed top-level vdev {v}: {gap}")
+            }
             ReadError::NoMember => write!(f, "no present member holds this copy"),
             ReadError::Unsupported(k) => write!(f, "top-level vdev type {k} not supported yet"),
             ReadError::Gang(e) => write!(f, "gang block: {e}"),
@@ -290,6 +309,7 @@ impl<'a> PoolReader<'a> {
             tops,
             salt: Cell::new(None),
             keys: RefCell::new(None),
+            removed: RefCell::new(BTreeMap::new()),
         }
     }
 
@@ -341,6 +361,125 @@ impl<'a> PoolReader<'a> {
     /// Whether dataset keys are installed.
     pub fn has_keys(&self) -> bool {
         self.keys.borrow().is_some()
+    }
+
+    /// Record the mapping a removed top-level vdev left behind, so that
+    /// pointers still naming it can be translated (SPEC F-69).
+    pub fn set_removed_mapping(&self, vdev: u32, mapping: Mapping) {
+        trace!(
+            "indirect",
+            "top-level vdev {vdev} was removed: {} mapping entry(ies), {} byte(s) mapped",
+            mapping.len(),
+            mapping.mapped_bytes()
+        );
+        self.removed.borrow_mut().insert(vdev, Rc::new(mapping));
+    }
+
+    /// Removed top-level vdevs and how many mapping entries each has.
+    pub fn removed_vdevs(&self) -> Vec<(u32, usize)> {
+        self.removed
+            .borrow()
+            .iter()
+            .map(|(v, m)| (*v, m.len()))
+            .collect()
+    }
+
+    /// Where a DVA's vdev id leads.
+    ///
+    /// A removed vdev wins over a top-level vdev of the same id built
+    /// from the labels. The mapping comes from the configuration object
+    /// of the MOS being read, written at the transaction group this
+    /// read is working from; a label that still describes that vdev was
+    /// last written before it was removed and is the older account.
+    fn locate_vdev(&self, vdev: u32) -> Option<Where<'_>> {
+        if let Some(m) = self.removed.borrow().get(&vdev) {
+            return Some(Where::Removed(Rc::clone(m)));
+        }
+        self.tops.get(&vdev).map(Where::Top)
+    }
+
+    /// Every independent, unverified way to read `size` bytes at
+    /// `offset` of top-level vdev `vdev`, following the mapping of a
+    /// removed one.
+    fn candidates_on(
+        &self,
+        vdev: u32,
+        offset: u64,
+        size: usize,
+        depth: usize,
+    ) -> Vec<RawCandidate> {
+        match self.locate_vdev(vdev) {
+            Some(Where::Top(node)) => self.read_candidates(node, offset, size),
+            Some(Where::Removed(m)) => self.remapped_candidates(vdev, &m, offset, size, depth),
+            None => vec![(None, Err(ReadError::UnknownVdev(vdev)))],
+        }
+    }
+
+    /// The same, for a range that lives on a vdev that was removed: the
+    /// mapping says which pieces of it went where, and the pieces are
+    /// read in order and joined.
+    ///
+    /// A piece may land on a vdev that was itself removed later, so this
+    /// recurses; `depth` bounds a mapping that points at itself.
+    fn remapped_candidates(
+        &self,
+        vdev: u32,
+        mapping: &Mapping,
+        offset: u64,
+        size: usize,
+        depth: usize,
+    ) -> Vec<RawCandidate> {
+        if depth > 8 {
+            return vec![(
+                None,
+                Err(ReadError::Unrecoverable(
+                    "indirect mappings nested deeper than 8".into(),
+                )),
+            )];
+        }
+        let segments = match mapping.remap(offset, size as u64) {
+            Ok(s) => s,
+            Err(gap) => return vec![(None, Err(ReadError::Unmapped(vdev, gap)))],
+        };
+        trace!(
+            "indirect",
+            "vdev {vdev} {offset:#x}+{size} -> {}",
+            segments
+                .iter()
+                .map(|s| format!("vdev {} {:#x}+{}", s.vdev, s.offset, s.size))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let per: Vec<Vec<RawCandidate>> = segments
+            .iter()
+            .map(|s| self.candidates_on(s.vdev, s.offset, s.size as usize, depth + 1))
+            .collect();
+        // One way per copy the destinations offer: way k takes each
+        // segment's k-th candidate, so a piece that landed on a mirror
+        // still offers each of its sides rather than only the first.
+        //
+        // A piece that landed on a raidz or dRAID offers one way, which
+        // is that vdev's ordinary read with parity reconstruction where
+        // columns are lost. What it does not get is the combinatorial
+        // search that a block read directly from such a vdev falls back
+        // on when the checksum still fails afterwards: that works a
+        // whole block at a time, and here a block may be several pieces
+        // from several places. So a remapped block is recovered from a
+        // clean parity failure but not from a silently bad column.
+        let ways = per.iter().map(Vec::len).max().unwrap_or(0);
+        (0..ways)
+            .map(|k| {
+                let mut out = Vec::with_capacity(size);
+                for c in &per {
+                    match c.get(k.min(c.len().saturating_sub(1))) {
+                        Some((_, Ok(b))) => out.extend_from_slice(b),
+                        Some((_, Err(e))) => return (None, Err(e.clone())),
+                        None => return (None, Err(ReadError::NoMember)),
+                    }
+                }
+                (None, Ok(out))
+            })
+            .collect()
     }
 
     /// Verify `raw` against `bp` with the pool salt when one is known.
@@ -430,19 +569,17 @@ impl<'a> PoolReader<'a> {
     /// Read the raw `psize` bytes behind one DVA without verification
     /// (first copy that reads). Gang pointers are followed.
     pub fn read_dva(&self, dva: &Dva, psize: usize) -> Result<(Vec<u8>, usize), ReadError> {
-        let top = self
-            .tops
-            .get(&dva.vdev)
-            .ok_or(ReadError::UnknownVdev(dva.vdev))?;
         if dva.gang {
             return Err(ReadError::Gang("use read_block for gang pointers".into()));
         }
-        for (device, c) in self.read_candidates(top, dva.offset, psize) {
-            if let Ok(b) = c {
-                return Ok((b, device.unwrap_or(usize::MAX)));
+        let mut last = ReadError::NoMember;
+        for (device, c) in self.candidates_on(dva.vdev, dva.offset, psize, 0) {
+            match c {
+                Ok(b) => return Ok((b, device.unwrap_or(usize::MAX))),
+                Err(e) => last = e,
             }
         }
-        Err(ReadError::NoMember)
+        Err(last)
     }
 
     /// Read the columns of one raidz stripe: parity (None when unreadable),
@@ -774,23 +911,81 @@ impl<'a> PoolReader<'a> {
         }
     }
 
+    /// Read and verify the psize bytes of `bp` behind a `dva` that names
+    /// a vdev that was removed (SPEC F-69).
+    ///
+    /// The bytes are assembled from wherever the mapping sends each
+    /// piece, so a copy here is a whole assembled block rather than one
+    /// leaf's read, and the checksum is what says the assembly was
+    /// right. No device is named in the attempt: several may have
+    /// contributed to one copy.
+    fn read_verified_remapped(
+        &self,
+        dva: &Dva,
+        mapping: &Mapping,
+        bp: &BlkPtr,
+        attempts: &mut Vec<Attempt>,
+        i: usize,
+    ) -> Result<(Vec<u8>, Verify), ReadError> {
+        let mut last = ReadError::NoMember;
+        for (_, candidate) in
+            self.remapped_candidates(dva.vdev, mapping, dva.offset, bp.psize as usize, 0)
+        {
+            let result = match candidate {
+                Err(e) => {
+                    trace!(
+                        "indirect",
+                        "  dva {i} through removed vdev {}: {e}",
+                        dva.vdev
+                    );
+                    last = e.clone();
+                    Err(e)
+                }
+                Ok(raw) => {
+                    let v = self.verify(bp, &raw);
+                    trace!(
+                        "indirect",
+                        "  dva {i} through removed vdev {}: checksum {v:?}",
+                        dva.vdev
+                    );
+                    match v {
+                        Verify::Ok | Verify::NotChecked => {
+                            attempts.push(Attempt {
+                                dva: i,
+                                vdev: dva.vdev,
+                                device: None,
+                                result: Ok(v),
+                            });
+                            return Ok((raw, v));
+                        }
+                        Verify::Unsupported => last = ReadError::ChecksumUnsupported,
+                        Verify::Mismatch => last = ReadError::AllCopiesBad,
+                    }
+                    Ok(v)
+                }
+            };
+            attempts.push(Attempt {
+                dva: i,
+                vdev: dva.vdev,
+                device: None,
+                result,
+            });
+        }
+        Err(last)
+    }
+
     /// Read the raw bytes behind a gang pointer: the 512-byte header at
     /// the DVA (verified against the pointer's identity and birth, trying
     /// every copy), then each child pointer in order, concatenated;
     /// children may be gang blocks themselves.
-    fn read_gang(
-        &self,
-        node: &Node,
-        dva: &Dva,
-        bp: &BlkPtr,
-        depth: usize,
-    ) -> Result<Vec<u8>, ReadError> {
+    fn read_gang(&self, dva: &Dva, bp: &BlkPtr, depth: usize) -> Result<Vec<u8>, ReadError> {
         if depth > 8 {
             return Err(ReadError::Gang("nesting deeper than 8".into()));
         }
         let mut header = None;
         let mut last = ReadError::NoMember;
-        for (device, candidate) in self.read_candidates(node, dva.offset, blkptr::GANG_HEADER_SIZE)
+        for (device, candidate) in
+            self.candidates_on(dva.vdev, dva.offset, blkptr::GANG_HEADER_SIZE, 0)
         {
             match candidate {
                 Ok(buf) => {
@@ -874,7 +1069,7 @@ impl<'a> PoolReader<'a> {
             if dva.is_empty() {
                 continue;
             }
-            let Some(top) = self.tops.get(&dva.vdev) else {
+            let Some(location) = self.locate_vdev(dva.vdev) else {
                 last = ReadError::UnknownVdev(dva.vdev);
                 attempts.push(Attempt {
                     dva: i,
@@ -885,7 +1080,7 @@ impl<'a> PoolReader<'a> {
                 continue;
             };
             if dva.gang {
-                match self.read_gang(top, dva, bp, depth) {
+                match self.read_gang(dva, bp, depth) {
                     Ok(raw) => {
                         let v = self.verify(bp, &raw);
                         attempts.push(Attempt {
@@ -913,7 +1108,11 @@ impl<'a> PoolReader<'a> {
                 }
                 continue;
             }
-            match self.read_verified(top, dva, bp, attempts, i) {
+            let read = match &location {
+                Where::Top(top) => self.read_verified(top, dva, bp, attempts, i),
+                Where::Removed(m) => self.read_verified_remapped(dva, m, bp, attempts, i),
+            };
+            match read {
                 Ok((raw, _)) => return Ok(raw),
                 Err(e) => last = e,
             }
@@ -1442,5 +1641,111 @@ mod tests {
                 ReadError::AllCopiesBad
             );
         }
+    }
+}
+
+/// Reading a pool a top-level vdev was removed from (SPEC F-69).
+#[cfg(test)]
+mod removed_vdev_tests {
+    use super::*;
+    use crate::dmu::DnodeArray;
+    use crate::dsl::{open_mos, walk};
+    use crate::fixture::{removed_vdev_members, zvol_pattern, Pool};
+    use crate::pool::assemble;
+    use crate::vdev::scan_device;
+    use crate::zvol::{extract, open_volume, OnError};
+    use zfs_ondisk::dmu::ObjsetPhys;
+    use zfs_ondisk::label::LABEL_SIZE;
+    use zfs_ondisk::uberblock::Uberblock;
+    use zvolrescue_io::{BlockSource, MemSink, MemSource};
+
+    const SIZE: u64 = 64 * LABEL_SIZE;
+
+    fn build() -> (Vec<MemSource>, crate::pool::PoolAssembly, Uberblock) {
+        let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1)]);
+        let members = removed_vdev_members(&mut pool, SIZE);
+        let sources: Vec<MemSource> = members.into_iter().map(MemSource::new).collect();
+        let scans: Vec<_> = sources.iter().map(|s| scan_device(s).ok()).collect();
+        let ub = scans[0].as_ref().expect("member scans").labels[0]
+            .best()
+            .expect("a verified uberblock")
+            .ub
+            .clone();
+        let assembly = assemble(&scans).into_iter().next().expect("one pool");
+        (sources, assembly, ub)
+    }
+
+    /// The volume's bytes come out whole, through a vdev that is gone.
+    #[test]
+    fn a_volume_addressed_on_a_removed_vdev_reads() {
+        let (s, a, ub) = build();
+        // The labels still count the removed vdev, and nothing describes
+        // it: that is the state a pool is really in after a removal.
+        assert_eq!(a.missing_tops(), vec![1]);
+        let reader = PoolReader::new(&a, vec![Some(&s[0] as &dyn BlockSource)]);
+        let mos = open_mos(&reader, &ub).expect("MOS opens: it is on the vdev that remains");
+        assert_eq!(
+            reader.removed_vdevs(),
+            vec![(1, 4)],
+            "the mapping of vdev 1 should have come from the MOS configuration"
+        );
+        let tree = walk(&mos, "tank").expect("dataset tree");
+        let ds = tree.get("tank/vm/disk0").expect("the volume");
+        let (obj, _) = open_volume(&reader, ds).expect("volume opens");
+        let mut sink = MemSink::default();
+        let r = extract(
+            &obj,
+            ds.volsize.expect("volsize"),
+            &mut sink,
+            OnError::Zero,
+            |_, _| {},
+        )
+        .expect("extraction");
+        assert!(r.bad.is_empty() && !r.aborted);
+        assert_eq!(&sink.data[..8192], &zvol_pattern(0)[..]);
+        assert_eq!(&sink.data[16384..24576], &zvol_pattern(2)[..]);
+        assert_eq!(
+            reader.mismatches(),
+            0,
+            "a mistranslation would have shown up here: the checksum is of \
+             the bytes, and the bytes are somewhere else entirely"
+        );
+    }
+
+    /// And without the mapping they do not, which is what makes the test
+    /// above a test of the translation and not of the fixture.
+    #[test]
+    fn without_the_mapping_the_same_blocks_are_refused_by_name() {
+        let (s, a, ub) = build();
+        let reader = PoolReader::new(&a, vec![Some(&s[0] as &dyn BlockSource)]);
+        // Reach the MOS without going through `open_mos`, which is what
+        // loads the mapping. This is what the tool did before F-69, and
+        // what it still does when the configuration object is unreadable.
+        let rootbp =
+            zfs_ondisk::blkptr::BlkPtr::parse(&ub.rootbp, ub.endian).expect("root pointer");
+        let block = reader.read_block(&rootbp, false).expect("MOS objset");
+        let os = ObjsetPhys::parse(&block.data, rootbp.endian).expect("objset");
+        let mos = DnodeArray::new(&reader, os.meta_dnode, rootbp.endian);
+        assert!(reader.removed_vdevs().is_empty());
+        let tree = walk(&mos, "tank").expect("the dataset tree is not on the removed vdev");
+        let ds = tree.get("tank/vm/disk0").expect("the volume");
+        let (obj, _) = open_volume(&reader, ds).expect("its dnode is not on it either");
+        let mut sink = MemSink::default();
+        let r = extract(
+            &obj,
+            ds.volsize.expect("volsize"),
+            &mut sink,
+            OnError::Zero,
+            |_, _| {},
+        )
+        .expect("a refused block is reported, not fatal");
+        assert_eq!(r.bad.len(), 2, "both data blocks are out of reach");
+        assert!(
+            r.bad
+                .iter()
+                .all(|b| b.reason.contains("unknown top-level vdev 1")),
+            "expected refusals naming the removed vdev, got {:?}",
+            r.bad.iter().map(|b| b.reason.clone()).collect::<Vec<_>>()
+        );
     }
 }

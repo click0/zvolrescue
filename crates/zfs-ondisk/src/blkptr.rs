@@ -44,7 +44,8 @@ impl Dva {
         self.vdev == 0 && self.offset == 0 && self.asize == 0 && !self.gang
     }
 
-    fn parse(w0: u64, w1: u64) -> Dva {
+    /// Decode from the two words of a `dva_t`.
+    pub fn from_words(w0: u64, w1: u64) -> Dva {
         Dva {
             asize: bits(w0, 0, 24) << MINBLOCKSHIFT,
             vdev: bits(w0, 32, 32) as u32,
@@ -303,12 +304,12 @@ impl BlkPtr {
                 [Dva::default(); 3]
             } else {
                 [
-                    Dva::parse(w(0), w(1)),
-                    Dva::parse(w(2), w(3)),
+                    Dva::from_words(w(0), w(1)),
+                    Dva::from_words(w(2), w(3)),
                     if ciphertext {
                         Dva::default()
                     } else {
-                        Dva::parse(w(4), w(5))
+                        Dva::from_words(w(4), w(5))
                     },
                 ]
             },

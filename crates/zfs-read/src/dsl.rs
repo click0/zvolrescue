@@ -10,6 +10,9 @@ use std::collections::BTreeSet;
 
 use zfs_ondisk::dmu::{ObjsetPhys, ObjsetType, OT_NEWTYPE};
 use zfs_ondisk::dsl::{BpobjPhys, DeadlistPhys, DslDatasetPhys, DslDirPhys};
+use zfs_ondisk::indirect::{self, Mapping, MappingPhys};
+use zfs_ondisk::label::VdevNode;
+use zfs_ondisk::nvlist::{self, NvList};
 use zfs_ondisk::uberblock::Uberblock;
 use zfs_ondisk::zap::Value;
 use zfs_ondisk::Endian;
@@ -23,6 +26,9 @@ use zvolrescue_io::trace;
 pub const OBJECT_DIRECTORY: u64 = 1;
 /// Object-directory entry holding the pool checksum salt (`DMU_POOL_CHECKSUM_SALT`).
 pub const CHECKSUM_SALT: &str = "org.illumos:checksum_salt";
+/// Object-directory entry naming the packed nvlist of the pool's current
+/// configuration (`DMU_POOL_CONFIG`).
+pub const CONFIG: &str = "config";
 /// Object number of the data object inside a zvol objset (`ZVOL_OBJ`).
 pub const ZVOL_OBJ: u64 = 1;
 /// Object number of the properties ZAP inside a zvol objset (`ZVOL_ZAP_OBJ`).
@@ -289,8 +295,13 @@ pub fn open_mos_objset<'r, 'a>(
     let mos = DnodeArray::new(reader, os.meta_dnode, endian);
     // The salt lives in the object directory, which is never itself
     // salted-checksummed; load it before anything else is read.
+    let mut config = None;
     match mos.object(OBJECT_DIRECTORY).and_then(|o| read_zap(&o)) {
         Ok(entries) => {
+            config = entries
+                .iter()
+                .find(|e| e.name == CONFIG)
+                .and_then(|e| e.value.as_u64());
             let salt = entries
                 .iter()
                 .find(|e| e.name == CHECKSUM_SALT)
@@ -314,7 +325,108 @@ pub fn open_mos_objset<'r, 'a>(
             "object directory unreadable while looking for the checksum salt: {e}"
         ),
     }
+    load_removed_vdevs(reader, &mos, config);
     Ok(mos)
+}
+
+/// Install the mappings of every top-level vdev that was removed from
+/// this pool, so pointers that still name one can be translated (F-69).
+///
+/// `config` is the object the MOS object directory names as `config`,
+/// which the caller has usually just read.
+///
+/// No label describes a removed vdev — removing it is what took its
+/// members away — so the only account of it is the pool's own: the
+/// packed configuration nvlist in the MOS, written at the transaction
+/// group this MOS belongs to. Reading it here rather than from the
+/// labels is also what keeps an older transaction group honest: asked
+/// for a txg from before the removal, the configuration of *that* txg
+/// has no indirect vdev in it and nothing is translated.
+///
+/// Failure is not fatal and not silent. A pool that never had a vdev
+/// removed has nothing here to find, and one that did but whose
+/// configuration cannot be read is no worse off than before: its
+/// pointers into the removed vdev are refused by name, which is what
+/// they were.
+pub fn load_removed_vdevs(reader: &PoolReader<'_>, mos: &DnodeArray<'_, '_>, config: Option<u64>) {
+    let Some(config) = config else {
+        trace!(
+            "indirect",
+            "no `config` object: nothing here says a vdev was removed"
+        );
+        return;
+    };
+    let nv = match read_packed_nvlist(mos, config) {
+        Ok(nv) => nv,
+        Err(e) => {
+            trace!("indirect", "config object {config} unreadable: {e}");
+            return;
+        }
+    };
+    let Some(tree) = nv.list("vdev_tree") else {
+        trace!("indirect", "config object {config} has no vdev_tree");
+        return;
+    };
+    for child in tree.list_array("children").unwrap_or(&[]) {
+        let node = VdevNode::from_nvlist(child);
+        if node.kind != "indirect" {
+            continue;
+        }
+        let Some(object) = node.indirect_object else {
+            trace!(
+                "indirect",
+                "vdev {} is indirect but names no mapping object",
+                node.id
+            );
+            continue;
+        };
+        match read_indirect_mapping(mos, object) {
+            Ok(m) => reader.set_removed_mapping(node.id as u32, m),
+            Err(e) => trace!(
+                "indirect",
+                "vdev {}: mapping object {object} unreadable: {e}",
+                node.id
+            ),
+        }
+    }
+}
+
+/// Read a `DMU_OT_PACKED_NVLIST` object.
+///
+/// The object's data is padded out to a block boundary; its bonus holds
+/// the length that is really nvlist, so the padding is not handed to
+/// the parser as though it were data.
+fn read_packed_nvlist(mos: &DnodeArray<'_, '_>, object: u64) -> Result<NvList, ReadError> {
+    let obj = mos.object(object)?;
+    let stored = mos.endian().u64_at(&obj.dnode().bonus, 0);
+    let len = stored
+        .filter(|n| *n > 0 && *n <= obj.logical_size())
+        .unwrap_or_else(|| obj.logical_size());
+    let bytes = obj.read_range(0, len as usize)?;
+    nvlist::parse_packed(&bytes).map_err(|e| ReadError::Io(format!("packed nvlist: {e}")))
+}
+
+/// Read one removed vdev's mapping object: `vdev_indirect_mapping_phys_t`
+/// in the bonus, the entries in the data.
+fn read_indirect_mapping(mos: &DnodeArray<'_, '_>, object: u64) -> Result<Mapping, ReadError> {
+    let obj = mos.object(object)?;
+    let endian = mos.endian();
+    let phys = MappingPhys::parse(&obj.dnode().bonus, endian)
+        .map_err(|e| ReadError::Io(format!("mapping bonus: {e}")))?;
+    let len = phys
+        .num_entries
+        .saturating_mul(indirect::ENTRY_SIZE as u64)
+        .min(obj.logical_size());
+    trace!(
+        "indirect",
+        "mapping object {object}: {} entry(ies), max offset {:#x}, {} byte(s) mapped",
+        phys.num_entries,
+        phys.max_offset,
+        phys.bytes_mapped
+    );
+    let data = obj.read_range(0, len as usize)?;
+    Mapping::parse(&data, phys.num_entries, endian)
+        .map_err(|e| ReadError::Io(format!("mapping entries: {e}")))
 }
 
 /// Read the object directory of the MOS as `(name, object)` pairs.

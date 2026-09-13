@@ -141,6 +141,12 @@ pub struct VdevNode {
     pub draid_ngroups: Option<u64>,
     /// `is_log`.
     pub is_log: bool,
+    /// `com.delphix:indirect_object`: for a vdev of type `indirect`, the
+    /// MOS object holding the mapping from the addresses it used to own
+    /// to where those blocks now live (SPEC F-69). Only the MOS
+    /// configuration carries an indirect vdev — a removed vdev leaves no
+    /// member behind, so no label describes it.
+    pub indirect_object: Option<u64>,
     /// `children`, in order.
     pub children: Vec<VdevNode>,
 }
@@ -162,6 +168,7 @@ impl VdevNode {
             draid_nspares: nv.u64("draid_nspares"),
             draid_ngroups: nv.u64("draid_ngroups"),
             is_log: nv.u64("is_log").unwrap_or(0) != 0,
+            indirect_object: nv.u64("com.delphix:indirect_object"),
             children: nv
                 .list_array("children")
                 .map(|c| c.iter().map(VdevNode::from_nvlist).collect())

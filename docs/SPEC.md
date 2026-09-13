@@ -79,8 +79,10 @@ binding for every later decision in this document:
 * Recovery of pools whose encryption keys are unavailable (encrypted data is extracted as ciphertext with metadata only).
 * A GUI. A TUI is a possible later addition (see §10).
 * Generating `zfs send` streams (possible later phase).
-* Following the indirect mapping of a **removed** top-level vdev
-  (`device_removal`); see F-69 for what happens instead.
+* Honouring `com.delphix:obsolete_counts`. The mapping a removed
+  top-level vdev leaves behind *is* read and translated through (F-69);
+  the precise count of how much of it is no longer referenced is not,
+  and a pool with that feature active is refused rather than read (F-70).
 
 ## 4. Users and use cases
 
@@ -182,7 +184,7 @@ Priority: **M** = must (v1), **S** = should (v1 if time permits), **C** = could 
 | F-13 | M | Diff dataset lists between two TXGs to show what was created or destroyed in between. |
 | F-14 | S | Read dataset properties (ZAP) including user properties. |
 | F-15 | S ◇ | List pending deletions (`dp_free_bpobj`, deadlists) so the user can judge whether destroyed data is still on disk. |
-| F-69 | C | **A pool a vdev was removed from.** `device_removal` copies a top-level vdev's blocks elsewhere and leaves an `indirect` vdev holding a mapping from the old DVAs to the new ones. Read that mapping (`vdev_indirect_mapping`, and `obsolete_counts` where the feature is enabled) and translate through it. Until then the DVAs that still name the removed vdev are refused by name — `DVA names unknown top-level vdev N` — because no member describes it and nothing present says where its blocks went. The rest of the pool reads normally: the refusal is per block, not per pool. |
+| F-69 | C | **A pool a vdev was removed from.** `device_removal` copies a top-level vdev's blocks elsewhere and leaves an `indirect` vdev holding a mapping from the old DVAs to the new ones. The pointers are never rewritten — that would mean walking every pointer in the pool — so they go on naming a vdev that is gone. Read that mapping (`vdev_indirect_mapping`) and translate through it: a range the removal copied in pieces is several entries and is joined back together, and a piece that landed on a vdev itself removed later is followed through that one too. The mapping comes from the pool's configuration object in the MOS being read, never from the labels: no label describes a removed vdev, because removal is what took its members away. Reading it there is also what keeps an older transaction group honest — asked for one from before the removal, the configuration of *that* txg has no indirect vdev in it and nothing is translated. A removed vdev is still counted in `vdev_children` and still has no member to find, so `scan` says it cannot tell that apart from members that were not given. A range the mapping does not cover is refused by name, per block, and the rest of the pool reads normally. |
 
 ### 5.3 Data extraction
 

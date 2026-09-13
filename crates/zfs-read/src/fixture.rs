@@ -12,6 +12,7 @@ use zfs_ondisk::dmu::encode::{objset, DnodeSpec};
 use zfs_ondisk::dmu::{ot, DNODE_CORE_SIZE, DNODE_SIZE};
 use zfs_ondisk::dsl::encode::{dsl_dataset, dsl_dir};
 use zfs_ondisk::dsl::{DslDatasetPhys, DslDirPhys};
+use zfs_ondisk::indirect;
 use zfs_ondisk::label::{
     label_offsets, LABEL_SIZE, UBERBLOCK_RING_OFFSET, VDEV_PHYS_OFFSET, VDEV_PHYS_SIZE,
 };
@@ -292,7 +293,38 @@ pub struct Alloc {
     /// Pool salt for salted algorithms; also written into the sample
     /// object directory when set.
     pub salt: Option<zfs_ondisk::checksum::Salt>,
+    /// When set, blocks put through [`Alloc::put_removed`] are addressed
+    /// on this top-level vdev — one the pool has since had removed —
+    /// while their bytes are written where they always were. That is
+    /// the shape `zpool remove` leaves behind: the pointers are never
+    /// rewritten, so they go on naming a vdev that is gone (SPEC F-69).
+    pub removed_vdev: Option<u32>,
+    /// What it takes to translate those addresses back, in source order.
+    pub mapping: Vec<indirect::Entry>,
+    /// Next address to hand out in the removed vdev's own space.
+    removed_next: u64,
 }
+
+/// MOS object the sample pool's configuration nvlist lives in — the
+/// number its object directory has always named.
+pub const CONFIG_OBJECT: u64 = 11;
+
+/// MOS object the sample pool's removed-vdev mapping lives in.
+pub const MAPPING_OBJECT: u64 = 14;
+
+/// `DMU_OTN_UINT64_METADATA`: what a real pool's mapping object is, and
+/// what `zdb` prints for one as `uint64`.
+const MAPPING_OT: u8 = zfs_ondisk::dmu::OT_NEWTYPE | zfs_ondisk::dmu::OT_METADATA | 3;
+
+/// Where the removed vdev's own address space starts in fixtures. It
+/// bears no relation to where the bytes are: a reader that ignored the
+/// mapping, or applied half of it, cannot land on them by luck.
+pub const REMOVED_BASE: u64 = 0x40_0000;
+
+/// Space left between one fixture mapping entry and the next, so that a
+/// lookup which merely lands in the right neighbourhood is not the same
+/// as one that lands in the right entry.
+const REMOVED_GAP: u64 = 0x1_0000;
 
 impl Alloc {
     /// Start allocating at DVA offset `start` on a mirror.
@@ -307,7 +339,92 @@ impl Alloc {
             layout,
             checksum: zfs_ondisk::blkptr::Checksum::Fletcher4,
             salt: None,
+            removed_vdev: None,
+            mapping: Vec::new(),
+            removed_next: REMOVED_BASE,
         }
+    }
+
+    /// Store `data` as [`Alloc::put`] does, but hand back a pointer that
+    /// addresses it on the removed vdev when one is set, recording what
+    /// it takes to find the bytes again.
+    ///
+    /// With no removed vdev set this is exactly `put`, so a fixture that
+    /// does not ask for one is byte-identical to what it was.
+    pub fn put_removed(
+        &mut self,
+        members: &mut [Vec<u8>],
+        data: &[u8],
+        otype: u8,
+        level: u8,
+        txg: u64,
+    ) -> [u8; blkptr::SIZE] {
+        let dst = self.next;
+        let mut bytes = self.put(members, data, otype, level, txg);
+        let Some(vdev) = self.removed_vdev else {
+            return bytes;
+        };
+        assert_eq!(
+            self.layout,
+            Layout::Mirror,
+            "removed-vdev fixtures are mirror-only"
+        );
+        let asize = self.next - dst;
+        let src = self.removed_next;
+        self.removed_next += asize + REMOVED_GAP;
+        // A range the removal copied in pieces is several entries, and
+        // the reader has to join them. Anything big enough to have been
+        // split is split, so both cases are covered by one fixture.
+        let first = if asize >= 8192 { asize / 2 } else { asize };
+        self.mapping.push(indirect::Entry {
+            src,
+            size: first,
+            dst_vdev: 0,
+            dst_offset: dst,
+        });
+        if first < asize {
+            self.mapping.push(indirect::Entry {
+                src: src + first,
+                size: asize - first,
+                dst_vdev: 0,
+                dst_offset: dst + first,
+            });
+        }
+        // Only the address changes; the checksum is of the same bytes,
+        // which is what makes a mistranslation show up as a mismatch.
+        bytes[0..8].copy_from_slice(&(((vdev as u64) << 32) | (asize >> 9)).to_le_bytes());
+        bytes[8..16].copy_from_slice(&(src >> 9).to_le_bytes());
+        bytes
+    }
+
+    /// The mapping object's bonus for the entries handed out so far.
+    pub fn mapping_phys(&self) -> Vec<u8> {
+        let max = self.mapping.last().map(indirect::Entry::end).unwrap_or(0);
+        let mut bonus = Vec::new();
+        bonus.extend_from_slice(&max.to_le_bytes());
+        bonus.extend_from_slice(
+            &self
+                .mapping
+                .iter()
+                .map(|e| e.size)
+                .sum::<u64>()
+                .to_le_bytes(),
+        );
+        bonus.extend_from_slice(&(self.mapping.len() as u64).to_le_bytes());
+        // No obsolete-counts object: nothing here has been condensed.
+        bonus.extend_from_slice(&0u64.to_le_bytes());
+        bonus
+    }
+
+    /// The mapping object's data: the entries in their on-disk form.
+    pub fn mapping_entries(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.mapping.len() * indirect::ENTRY_SIZE);
+        for e in &self.mapping {
+            out.extend_from_slice(&(e.src >> 9).to_le_bytes());
+            out.extend_from_slice(&(((e.dst_vdev as u64) << 32) | (e.size >> 9)).to_le_bytes());
+            out.extend_from_slice(&(e.dst_offset >> 9).to_le_bytes());
+        }
+        out
     }
 
     /// Checksum words for `padded` under the current algorithm and salt.
@@ -545,8 +662,8 @@ pub fn build_sample_mos_variant(
     if a.salt.is_some() {
         a.checksum = zfs_ondisk::blkptr::Checksum::Blake3;
     }
-    let blk0 = a.put(m, &zvol_pattern(0), ot::ZVOL, 0, 100);
-    let blk2 = a.put(m, &zvol_pattern(2), ot::ZVOL, 0, 100);
+    let blk0 = a.put_removed(m, &zvol_pattern(0), ot::ZVOL, 0, 100);
+    let blk2 = a.put_removed(m, &zvol_pattern(2), ot::ZVOL, 0, 100);
     a.checksum = plain;
     let data_obj = DnodeSpec {
         object_type: ot::ZVOL,
@@ -663,6 +780,66 @@ pub fn build_sample_mos_variant(
         put(7, zap_obj(a, m, &[]));
     }
 
+    // A pool a top-level vdev was removed from (SPEC F-69). The volume's
+    // data blocks above are addressed on it; these two objects are what
+    // says where those bytes actually went.
+    //
+    // The configuration object carries the removed vdev and nothing
+    // else. It is the only account of one — removal takes its members
+    // away, so no label describes it — but the live vdevs are described
+    // by the labels already, and writing a second, unchecked account of
+    // them here would be inventing evidence rather than providing it.
+    if let Some(vdev) = a.removed_vdev {
+        let entries = a.mapping_entries();
+        let bonus = a.mapping_phys();
+        let blk = a.put(m, &entries, MAPPING_OT, 0, 100);
+        put(
+            MAPPING_OBJECT,
+            DnodeSpec {
+                object_type: MAPPING_OT,
+                datablksz: 4096,
+                blkptrs: vec![blk],
+                bonus_type: MAPPING_OT,
+                bonus,
+                ..DnodeSpec::default()
+            }
+            .build(),
+        );
+        let config = pack(&list(vec![(
+            "vdev_tree",
+            Value::List(list(vec![
+                ("type", Value::String("root".into())),
+                ("id", Value::Uint64(0)),
+                (
+                    "children",
+                    Value::ListArray(vec![list(vec![
+                        ("type", Value::String("indirect".into())),
+                        ("id", Value::Uint64(u64::from(vdev))),
+                        ("guid", Value::Uint64(0x1de_0000 + u64::from(vdev))),
+                        ("com.delphix:indirect_object", Value::Uint64(MAPPING_OBJECT)),
+                    ])]),
+                ),
+            ])),
+        )]));
+        assert!(
+            config.len() <= 4096,
+            "fixture config object outgrew a block"
+        );
+        let blk = a.put(m, &config, ot::PACKED_NVLIST, 0, 100);
+        put(
+            CONFIG_OBJECT,
+            DnodeSpec {
+                object_type: ot::PACKED_NVLIST,
+                datablksz: 4096,
+                blkptrs: vec![blk],
+                bonus_type: ot::PACKED_NVLIST_SIZE,
+                bonus: (config.len() as u64).to_le_bytes().to_vec(),
+                ..DnodeSpec::default()
+            }
+            .build(),
+        );
+    }
+
     let dnode_blk = a.put(m, &dnodes, ot::DNODE, 0, 100);
     let meta = DnodeSpec {
         object_type: ot::DNODE,
@@ -672,6 +849,29 @@ pub fn build_sample_mos_variant(
     }
     .build();
     a.put(m, &objset(&meta, 1), ot::OBJSET, 0, 100)
+}
+
+/// A mirror whose volume data blocks are addressed on a top-level vdev
+/// the pool has since had removed (SPEC F-69).
+///
+/// The pointers still name the vdev that is gone — removal never
+/// rewrites them — the bytes are on the vdev that remains, and the MOS
+/// carries the mapping between the two. The labels go on counting the
+/// removed vdev in `vdev_children`, because removing a vdev is not the
+/// same as forgetting it, and name `device_removal` as active.
+pub fn removed_vdev_members(pool: &mut Pool, size: u64) -> Vec<Vec<u8>> {
+    let n = pool.members.len();
+    let mut members: Vec<Vec<u8>> = (0..n).map(|_| vec![0u8; size as usize]).collect();
+    let mut a = Alloc::new(0x20_0000);
+    a.removed_vdev = Some(1);
+    build_sample_mos(pool, &mut members, &mut a);
+    pool.vdev_children = 2;
+    pool.features_for_read
+        .push("com.delphix:device_removal".into());
+    for (i, img) in members.iter_mut().enumerate() {
+        pool.write_labels(i, img);
+    }
+    members
 }
 
 /// A mirror whose newest TXG no longer has `tank/vm/disk0` while the

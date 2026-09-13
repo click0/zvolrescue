@@ -16,6 +16,56 @@ tagged. `v0.7.1` is the release that carries those six.
 ## Unreleased
 
 ### Added
+* **A pool a top-level vdev was removed from now reads (SPEC F-69).**
+  `zpool remove` does not free what was on a vdev: it copies those
+  blocks onto the vdevs that remain and leaves in its place an
+  `indirect` vdev holding nothing but a record of where each range of
+  its old address space went. The block pointers are never rewritten —
+  that would mean walking every pointer in the pool — so they go on
+  naming a vdev that no longer exists, and every one of them was
+  refused: `DVA names unknown top-level vdev 3`. It came up three times
+  in one afternoon on `ztest` images that happened to have had a vdev
+  removed during the run, which is what put it at the top of the list.
+
+  That mapping is now read and the addresses translated. A range the
+  removal copied in pieces is several entries and is joined back
+  together; a piece that landed on a vdev itself removed later is
+  followed through that one too, which real pools do — `ztest` produced
+  one with three removed vdevs where one maps onto another. Where the
+  destination is a mirror, each of its sides is still offered as a
+  separate copy, so redundancy survives the translation.
+
+  **The mapping comes from the pool's own account of itself, not from
+  the labels.** No label describes a removed vdev: removing it is what
+  took its members away. What does describe it is the configuration
+  object in the MOS — and reading it there rather than anywhere else is
+  also what keeps an older transaction group honest. Asked for a txg
+  from before the removal, the configuration of *that* txg has no
+  indirect vdev in it, and nothing is translated, because at that point
+  nothing had been.
+
+  `scan` gained one line rather than a claim it cannot support. A
+  removed vdev is still counted in `vdev_children` and still has no
+  member to find, so from the labels alone it is indistinguishable from
+  a member that was not given; `scan` does not read the MOS, so it says
+  that the distinction exists and that reading the pool resolves it.
+
+  `com.delphix:device_removal` moves to the features this build honours
+  and `com.delphix:obsolete_counts` deliberately does not. The counts
+  are bookkeeping over the same mapping, and a pointer that still names
+  the removed vdev is live whatever they say — but no pool measured
+  against this build has had that feature active, and F-70's rule is
+  that nothing is honoured here on reasoning alone.
+
+  Checked against `zdb` on two real `ztest` pools with vdevs removed
+  mid-run, one with three and one with four: the mapping objects match
+  entry for entry and byte for byte, and every object comes out — 343
+  of 343 and 279 of 279, with nothing refused. In CI a fixture whose
+  volume is addressed entirely on a removed vdev extracts to the same
+  sha256 as the same volume on a pool that never had one, and the same
+  blocks are refused by name when the mapping is not loaded, so the
+  test is of the translation and not of the fixture.
+
 * **A feature this build cannot account for now stops the read (SPEC
   F-70).** The last way left for this tool to be confidently wrong, and
   the only one no checksum catches.
@@ -127,19 +177,6 @@ tagged. `v0.7.1` is the release that carries those six.
   `roots` takes like every other command; without it the header is
   reported with its position and birth and the reason it could not be
   followed.
-
-### Documented
-* **A pool a vdev was removed from reads only in part, and now the spec
-  says so (SPEC F-69).** `device_removal` copies a top-level vdev's
-  blocks elsewhere and leaves an `indirect` vdev holding the mapping
-  from the old DVAs to the new ones. That mapping is not read, so a
-  block still named by an old DVA is refused — `DVA names unknown
-  top-level vdev N` — which is the honest answer and was nowhere
-  written down. It came up three times in one afternoon, on three
-  `ztest` images that happened to have had a vdev removed during the
-  run, and each time it had to be worked out again from first
-  principles. The refusal is per block: the rest of the pool reads
-  normally.
 
 ## v0.7.5 — 2026-09-13
 

@@ -485,6 +485,32 @@ jobs:
           test "$(./target/release/zvolrescue -q scan /tmp/f70/member0.img | grep -c 'NOT ACCOUNTED FOR')" = 0
           # The companions share the check, since they share the members.
           if ./target/release/zvolfiles -q list tank/fs /tmp/f70x/member0.img; then echo "must refuse"; exit 1; else test $? = 3; fi
+      - name: A pool a top-level vdev was removed from (SPEC F-69)
+        run: |
+          # The volume's data blocks are addressed on a vdev that is gone;
+          # the mapping it left behind in the MOS says where those bytes
+          # went. Nothing in the labels describes that vdev, because
+          # removal is what took its members away.
+          rm -rf /tmp/f69 /tmp/f69b
+          cargo run -q -p zfs-read --example mkfixture -- /tmp/f69 mirror 12 removed
+          cargo run -q -p zfs-read --example mkfixture -- /tmp/f69b mirror 12
+          ./target/release/zvolrescue -q list -r /tmp/f69/member0.img /tmp/f69/member1.img | grep -q "tank/vm/disk0"
+          # device_removal is active and accounted for, so no refusal.
+          test "$(./target/release/zvolrescue -q scan /tmp/f69/member0.img | grep -c 'NOT ACCOUNTED FOR')" = 0
+          # The same volume, byte for byte, as on a pool that never had a
+          # vdev removed: the translation is right or the hash is not.
+          ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/f69/member0.img /tmp/f69/member1.img -o /tmp/f69/out.img > /tmp/f69/log
+          ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/f69b/member0.img /tmp/f69b/member1.img --txg 4816229 -o /tmp/f69b/out.img > /tmp/f69b/log
+          cmp /tmp/f69/out.img /tmp/f69b/out.img
+          grep -q "0 zeroed (unreadable)" /tmp/f69/log
+          # The removed vdev is still counted, has no member to find, and
+          # `scan` says which of those two things it cannot tell apart.
+          ./target/release/zvolrescue -q scan /tmp/f69/member0.img | grep -q "top-level vdev #1: no scanned member describes it"
+          ./target/release/zvolrescue -q scan /tmp/f69/member0.img | grep -q "may have been removed rather than lost"
+          # Never a write to the evidence.
+          sha256sum /tmp/f69/member0.img /tmp/f69/member1.img > /tmp/f69.sums
+          ./target/release/zvolfiles -q list tank /tmp/f69/member0.img > /dev/null 2>&1 || true
+          sha256sum -c /tmp/f69.sums
       - name: Where the vdev begins, from the pointers alone (SPEC F-63, COMPANIONS C-21)
         run: |
           # A member with every label gone, sitting at a known offset

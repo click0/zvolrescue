@@ -82,6 +82,9 @@ pub struct PoolAssembly {
     pub txg: Option<u64>,
     /// Number of top-level vdevs the pool has according to its labels.
     pub vdev_children: Option<u64>,
+    /// `features_for_read` of the newest label: the read-incompatible
+    /// features the pool says are *active* (SPEC F-70).
+    pub features_for_read: Vec<String>,
     /// Top-level vdevs for which at least one member was scanned.
     pub tops: Vec<TopVdev>,
     /// Distinct `(hostid, hostname)` pairs seen in labels.
@@ -353,6 +356,7 @@ pub fn assemble(scans: &[Option<DeviceScan>]) -> Vec<PoolAssembly> {
             state: newest.state,
             txg: entries.iter().filter_map(|(_, c)| c.txg).max(),
             vdev_children: newest.vdev_children,
+            features_for_read: newest.features_for_read.clone(),
             tops,
             hosts,
             devices: entries.iter().map(|(i, _)| *i).collect(),

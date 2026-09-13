@@ -62,6 +62,10 @@ const KNOWN: &[(&str, &str)] = &[
     ),
     ("org.zfsonlinux:large_dnode", "dmu.rs: dn_extra_slots"),
     ("com.datto:encryption", "crypt.rs"),
+    (
+        "com.delphix:device_removal",
+        "indirect.rs: the mapping a removed vdev leaves behind",
+    ),
 ];
 
 /// Features this build knows it cannot honour, and what happens without
@@ -69,15 +73,13 @@ const KNOWN: &[(&str, &str)] = &[
 /// is told which part of the pool is out of reach and why.
 const NOT_IMPLEMENTED: &[(&str, &str)] = &[
     (
-        "com.delphix:device_removal",
-        "a top-level vdev was removed and its blocks live elsewhere; the \
-         indirect mapping that would translate their addresses is not read \
-         (SPEC F-69), so those blocks are refused by name",
-    ),
-    (
         "com.delphix:obsolete_counts",
-        "bookkeeping for a removed vdev; see com.delphix:device_removal \
-         (SPEC F-69)",
+        "a precise count of how much of a removed vdev's mapping is no \
+         longer referenced. The mapping itself is read and translated \
+         (SPEC F-69), and a pointer that still names the removed vdev is \
+         live whatever the counts say — but no pool measured against this \
+         build has had this active, and nothing is honoured here on \
+         reasoning alone",
     ),
     (
         "org.openzfs:raidz_expansion",

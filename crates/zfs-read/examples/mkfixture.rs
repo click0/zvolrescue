@@ -5,6 +5,10 @@
 //! three uberblocks each and, for mirrors, a small MOS with four datasets
 //! at the older TXGs and the volume destroyed at the newest one.
 //!
+//! With `removed`, the volume's data blocks are addressed on a top-level
+//! vdev the pool has since had removed, and the MOS carries the mapping
+//! that says where those bytes went (SPEC F-69).
+//!
 //! With `carved` as the fourth argument, no uberblock mentions the volume
 //! at all, though its blocks are still on the member: the pool a carve
 //! has to find something in when a walk cannot (COMPANIONS §3.4). With
@@ -15,7 +19,9 @@
 
 use std::path::PathBuf;
 
-use zfs_read::fixture::{carved_zvol_members, destroyed_zvol_members, zpl_members, Pool};
+use zfs_read::fixture::{
+    carved_zvol_members, destroyed_zvol_members, removed_vdev_members, zpl_members, Pool,
+};
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -32,6 +38,7 @@ fn main() {
     let feature = args.next();
     let carved = mode == "carved";
     let zpl = mode == "zpl";
+    let removed = mode == "removed";
     let mut pool = match kind.as_str() {
         "mirror" => Pool::mirror("tank", 0x5eed_0000_0000_0001, ashift),
         "raidz2" => Pool::raidz("tank", 0x5eed_0000_0000_0002, ashift, 4, 2),
@@ -51,7 +58,12 @@ fn main() {
     let size = 64 * 1024 * 1024u64;
     // A MOS in which tank/vm/disk0 exists at the older TXGs and is
     // destroyed at the newest; laid out as a mirror or with RAIDZ parity.
-    let members = if zpl {
+    let members = if removed {
+        println!(
+            "tank/vm/disk0 lives at addresses on top-level vdev 1, which the pool had removed"
+        );
+        removed_vdev_members(&mut pool, size)
+    } else if zpl {
         println!("tank/fs is a filesystem dataset with a small POSIX tree");
         zpl_members(&mut pool, size)
     } else if carved {

@@ -106,6 +106,9 @@ impl LayoutHints {
             state: None,
             txg: None,
             vdev_children: Some(self.tops.len() as u64),
+            // A hand-written layout describes where the members are, not
+            // what the pool has turned on; nothing here claims otherwise.
+            features_for_read: Vec::new(),
             tops,
             hosts: Vec::new(),
             devices,
@@ -145,6 +148,7 @@ impl LayoutHints {
                     draid_nspares: None,
                     draid_ngroups: None,
                     is_log: false,
+                    indirect_object: None,
                     children: Vec::new(),
                 });
                 *leaf += 1;
@@ -170,6 +174,7 @@ impl LayoutHints {
             draid_nspares: hint.draid_nspares,
             draid_ngroups: hint.draid_ngroups,
             is_log: false,
+            indirect_object: None,
             children,
         }
     }
