@@ -17,6 +17,7 @@ mod list;
 mod model;
 mod roots;
 mod scan;
+mod zeropoint;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -87,6 +88,24 @@ enum Command {
         /// Keep at most this many headers after ranking.
         #[arg(long, value_name = "N", default_value_t = 32)]
         max_roots: usize,
+    },
+    /// Where the vdev begins, from the pointers alone (SPEC F-63).
+    Zeropoint {
+        #[command(flatten)]
+        pool: PoolSpec,
+        /// Also write `zeropoint.json` here.
+        #[arg(short, long, value_name = "DIR")]
+        output: Option<PathBuf>,
+        /// Consider only bases in this byte range, as START-END. The
+        /// default is the first 64 MiB, where a partition begins.
+        #[arg(long, value_name = "START-END")]
+        window: Option<String>,
+        /// Compressions to try while collecting probes, as in `scan`.
+        #[arg(long, value_name = "LIST", default_value = "lz4,lzjb,gzip,zstd")]
+        compressed: String,
+        /// Collect probes from at most this many dnodes.
+        #[arg(long, value_name = "N", default_value_t = 4096)]
+        max_hits: usize,
     },
     /// Show the candidates a previous scan found.
     List {
@@ -161,6 +180,22 @@ fn main() -> ExitCode {
                 range,
                 compressed,
                 max_roots,
+            },
+        ),
+        Command::Zeropoint {
+            pool,
+            output,
+            window,
+            compressed,
+            max_hits,
+        } => zeropoint::run(
+            &cli.global,
+            &pool,
+            &zeropoint::Options {
+                output,
+                window,
+                compressed,
+                max_hits,
             },
         ),
         Command::List { dir } => list::run(&cli.global, &dir),

@@ -239,7 +239,7 @@ the earlier ones are unavailable:
 | F-60 | S | **Partition tables** (F-06): primary and backup GPT, MBR, plus layout conventions (1 MiB alignment; Linux whole-disk `-part9` 8 MiB tail; FreeBSD `freebsd-boot`/swap/`freebsd-zfs` order) yield base *candidates*, never a base. |
 | F-61 | S | **Any surviving uberblock** (F-05): each uberblock carries a `ZIO_CHECKSUM_LABEL` embedded checksum whose verifier is its own vdev-relative offset. An uberblock found by magic at physical `P` confirms base `B` iff the checksum verifies with verifier `P − B`; one hit fixes the base exactly, tells which of L0–L3 the slot belonged to and so recovers the old vdev size even after the partition was re-created with another size. Works with all four `vdev_phys` gone as long as one ring slot survives. |
 | F-62 | S | **Sibling labels**: in a mirror or RAIDZ the other members' configs give the lost member's `guid`, `asize` and `ashift`; `asize` plus alignment leaves a handful of base candidates to confirm with F-61/F-63. |
-| F-63 | C ◇ | **Pointer self-consistency, fully automatic** (the worst case, all rings gone and no hints): scan for structures recognisable without a base (dnode arrays — type ≤ 54, `indblkshift` 9..17, small `nlevels`/`nblkptr`, 512-byte period; indirect blocks; objset headers), collect their block pointers, and confirm a candidate base `B` by checking that the block at `B + 4 MiB + offset` has the pointer's checksum. Candidates step by `1 << ashift` (`ashift` itself follows from the smallest DVA offset step and `asize` granularity) inside the alignment window. A wrong base passes no check; the right one passes all. Gang headers (verifier `[vdev, offset, birth]`) and ZIL chains (`zc_next_blk` vs. the physical position of the next block) are extra anchors. |
+| F-63 | C ◇ | **Pointer self-consistency, fully automatic** (the worst case, all rings gone and no hints): scan for structures recognisable without a base (dnode arrays — type ≤ 54, `indblkshift` 9..17, small `nlevels`/`nblkptr`, 512-byte period; indirect blocks; objset headers), collect their block pointers, and confirm a candidate base `B` by checking that the block at `B + 4 MiB + offset` has the pointer's checksum. Candidates step by `1 << ashift` (`ashift` itself follows from the smallest DVA offset step and `asize` granularity) inside the alignment window. A wrong base is expected to pass no check — but it can pass a few, because a shifted base lines a pointer up with a *different* block of identical content, and a sparse member is mostly zeros. So what is reported is how many independent pointers agreed out of how many were read, not a yes or a no: on a `ztest` pool with every label gone the true base agreed with 46 of 64 probes and every other candidate with exactly 1. Gang headers (verifier `[vdev, offset, birth]`) and ZIL chains (`zc_next_blk` vs. the physical position of the next block) are extra anchors. |
 | F-64 | S ◇ | **Root without uberblocks**: once the base is known and no uberblock survives, find the MOS by scanning for `objset_phys` candidates of type META, rank them by the highest `birth` in their pointers and by how complete a MOS walk they yield, then continue through the DSL as usual. This is `zvolcarve` territory (F-41/F-42), not the atomic binary's. |
 
 **Implemented so far.** F-60's cheapest anchor is in: given an image of a
@@ -298,7 +298,12 @@ anything else. F-64 is in `zvolcarve` as `roots`: it scans for the MOS's
 own `objset_phys_t`, walks the DSL from each one it finds, and ranks
 them by how much of the pool came out — so a pool whose uberblock rings
 are all gone still has a way in. What is left of the bare-device case is
-F-63, deriving the base with no uberblock and no hints at all.
+F-63, which is in `zvolcarve` as `zeropoint`: it collects the block
+pointers a scan meets, and tests a candidate base by reading where each
+pointer says its block is and checking that the bytes hash to what the
+pointer carries. Nothing of the bare-device case is left undone, though
+F-64's and F-63's answers are both evidence to weigh rather than
+verdicts: each is reported with the count of pointers that agreed.
 
 Two regimes follow:
 

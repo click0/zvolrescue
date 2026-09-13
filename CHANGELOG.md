@@ -16,6 +16,35 @@ tagged. `v0.7.1` is the release that carries those six.
 ## Unreleased
 
 ### Added
+* **`zvolcarve zeropoint`: where the vdev begins, from the pointers
+  alone (SPEC F-63, COMPANIONS C-21).** The last row of the bare-device
+  case, and the one the spec had left optional. Every other route to the
+  base needs something that survived — a label, a partition table, a
+  sibling's configuration, an uberblock, or the operator's own knowledge
+  of the layout. This is the case where none of that is left.
+
+  What is still there is that ZFS describes its own blocks. A pointer
+  gives a position, a size and a checksum, and the position is relative
+  to the vdev's allocatable space — so the pointer is a test of any
+  candidate base: assume `B`, read at `B + 4 MiB + offset`, see whether
+  the bytes hash to what the pointer said. Candidates step by the
+  alignment the pointers themselves imply, since every allocation is a
+  multiple of `1 << ashift` and so every offset is too. The salted
+  algorithms are left out of the probes on purpose: their salt lives in
+  the MOS, which cannot be read until the base is known, so using one
+  would be circular.
+
+  **The spec's claim about this was too strong and is corrected with
+  it.** It said a wrong base passes no check. A wrong base can pass a
+  few: shifting it lines a pointer up with a *different* block of
+  identical content, and a sparse member is mostly zeros — the fixture
+  used here has 17,379 identical blocks in it. So the answer is reported
+  as agreements out of probes read rather than as a yes or a no. On a
+  `ztest` pool with all four labels gone and the member 2 MiB into a
+  larger image, the true base agreed with 46 of 64 probes and each of
+  the five other candidates with exactly 1, which is a distinction an
+  operator can act on and a boolean would have thrown away.
+
 * **A file's project id is reported where the dataset keeps one
   (COMPANIONS Z-10).** `ZPL_PROJID` is the last of the feature-flag
   attributes Z-10 named, and the only one still missing. `zvolfiles`

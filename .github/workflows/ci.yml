@@ -455,6 +455,49 @@ jobs:
           sha256sum /tmp/cv/member0.img /tmp/cv/member1.img > /tmp/cv.sums
           sha256sum -c /tmp/cv.sums
           if ./target/release/zvolcarve -q scan /tmp/cv/member0.img -o /tmp/cv/member0.img; then echo "must refuse"; exit 1; else test $? = 5; fi
+      - name: Where the vdev begins, from the pointers alone (SPEC F-63, COMPANIONS C-21)
+        run: |
+          # A member with every label gone, sitting at a known offset
+          # inside a larger device: no label, no partition table, no
+          # sibling, no uberblock ring, no hints. Only the pointers.
+          cargo run -q -p zfs-read --example mkfixture -- /tmp/f63 mirror 12 zpl
+          python3 - <<'EOF'
+          import os
+          LABEL, AT = 256 << 10, 1 << 20
+          m = bytearray(open("/tmp/f63/member0.img", "rb").read())
+          tail = (len(m) // LABEL) * LABEL
+          for b in (0, LABEL, tail - 2 * LABEL, tail - LABEL):
+              m[b:b + LABEL] = b"\0" * LABEL
+          with open("/tmp/f63/disk.img", "wb") as f:
+              f.write(b"\0" * AT)
+              f.write(bytes(m))
+              f.write(b"\0" * (2 << 20))
+          EOF
+          # Nothing else can place it, or the case proves nothing.
+          ./target/release/zvolrescue -q -f json scan /tmp/f63/disk.img | python3 -c 'import json,sys; d=json.load(sys.stdin); assert not d["devices"][0].get("pool"), d["devices"][0]'
+          ./target/release/zvolcarve -f json zeropoint /tmp/f63/disk.img > /tmp/f63/zp.json
+          python3 - <<'EOF'
+          import json
+          m = json.load(open("/tmp/f63/zp.json"))["members"][0]
+          assert m["probes"] > 0, m
+          # Every allocation is a multiple of 1 << ashift, so the shared
+          # alignment cannot be finer than the pool's 12.
+          assert 12 in m["shifts"], m
+          best = m["bases"][0]
+          assert best["base"] == (1 << 20), m["bases"]
+          assert best["confirmed"] > 1, best
+          # A wrong base can agree with a probe by landing on a different
+          # block of identical content, so what has to hold is that the
+          # right one agrees with more — not that nothing else agrees.
+          for other in m["bases"][1:]:
+              assert other["confirmed"] < best["confirmed"], m["bases"]
+          EOF
+          # And a device with no pool on it yields no base at all.
+          head -c 8388608 /dev/zero > /tmp/f63/empty.img
+          if ./target/release/zvolcarve -q zeropoint /tmp/f63/empty.img; then echo "an empty device must yield nothing"; exit 1; else test $? = 3; fi
+          # Never a write to the evidence.
+          sha256sum /tmp/f63/disk.img > /tmp/f63.sums
+          sha256sum -c /tmp/f63.sums
       - name: The MOS when no uberblock survives (SPEC F-64, COMPANIONS C-20)
         run: |
           # Every other way into a pool starts at an uberblock. With all

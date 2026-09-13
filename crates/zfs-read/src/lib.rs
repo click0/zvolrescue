@@ -17,6 +17,7 @@ pub mod dmu;
 pub mod dsl;
 pub mod fixture;
 pub mod hints;
+pub mod pointers;
 pub mod pool;
 pub mod spacemap;
 pub mod vdev;
