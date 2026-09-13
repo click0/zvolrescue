@@ -15,6 +15,7 @@
 mod dump;
 mod list;
 mod model;
+mod roots;
 mod scan;
 
 use std::path::PathBuf;
@@ -68,6 +69,24 @@ enum Command {
         /// one costs a pass, and dropping the wrong one finds nothing.
         #[arg(long, value_name = "LIST", default_value = "lz4,lzjb,gzip,zstd")]
         compressed: String,
+    },
+    /// Find the MOS when no uberblock survives (SPEC F-64).
+    Roots {
+        #[command(flatten)]
+        pool: PoolSpec,
+        /// Carve workspace: where the ranked headers are written.
+        #[arg(short, long, value_name = "DIR")]
+        output: PathBuf,
+        /// Only this byte range of each member, as START-END.
+        #[arg(long, value_name = "START-END")]
+        range: Option<String>,
+        /// Compressions to try at each allocation-aligned offset, as in
+        /// `scan`. A MOS header is lz4 on any modern pool.
+        #[arg(long, value_name = "LIST", default_value = "lz4,lzjb,gzip,zstd")]
+        compressed: String,
+        /// Keep at most this many headers after ranking.
+        #[arg(long, value_name = "N", default_value_t = 32)]
+        max_roots: usize,
     },
     /// Show the candidates a previous scan found.
     List {
@@ -126,6 +145,22 @@ fn main() -> ExitCode {
                 max_hits,
                 sample,
                 compressed,
+            },
+        ),
+        Command::Roots {
+            pool,
+            output,
+            range,
+            compressed,
+            max_roots,
+        } => roots::run(
+            &cli.global,
+            &pool,
+            &roots::Options {
+                output,
+                range,
+                compressed,
+                max_roots,
             },
         ),
         Command::List { dir } => list::run(&cli.global, &dir),

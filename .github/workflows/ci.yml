@@ -455,6 +455,47 @@ jobs:
           sha256sum /tmp/cv/member0.img /tmp/cv/member1.img > /tmp/cv.sums
           sha256sum -c /tmp/cv.sums
           if ./target/release/zvolcarve -q scan /tmp/cv/member0.img -o /tmp/cv/member0.img; then echo "must refuse"; exit 1; else test $? = 5; fi
+      - name: The MOS when no uberblock survives (SPEC F-64, COMPANIONS C-20)
+        run: |
+          # Every other way into a pool starts at an uberblock. With all
+          # four rings zeroed there is no root pointer anywhere, and the
+          # only way in is the MOS's own header, found in raw space.
+          cargo run -q -p zfs-read --example mkfixture -- /tmp/f64 mirror 12 sample
+          python3 - <<'EOF'
+          import os
+          LABEL, UB_OFF, UB_SIZE = 256 << 10, 128 << 10, 128 << 10
+          for name in ("member0.img", "member1.img"):
+              p = f"/tmp/f64/{name}"
+              n = os.path.getsize(p)
+              tail = (n // LABEL) * LABEL
+              with open(p, "r+b") as f:
+                  for base in (0, LABEL, tail - 2 * LABEL, tail - LABEL):
+                      f.seek(base + UB_OFF)
+                      f.write(b"\0" * UB_SIZE)
+          EOF
+          # The ordinary path must now fail, or the case proves nothing.
+          if ./target/release/zvolrescue -q list -r /tmp/f64/member0.img /tmp/f64/member1.img; then echo "an uberblock survived; the case is void"; exit 1; else test $? = 3; fi
+          rm -rf /tmp/f64out
+          ./target/release/zvolcarve roots /tmp/f64/member0.img /tmp/f64/member1.img -o /tmp/f64out
+          python3 - <<'EOF'
+          import json
+          d = json.load(open("/tmp/f64out/roots.json"))
+          assert d["roots"], "no MOS header was found"
+          best = d["roots"][0]
+          # Ranked by how much of the pool came out, so the best one is
+          # the one a whole dataset tree walked out of.
+          assert best["datasets"] >= 2, best
+          assert "tank" in best["sample"] and "tank/vm" in best["sample"], best
+          assert "error" not in best, best
+          # And a header that walked out nothing says why rather than
+          # being dropped, so "unreadable" is told from "absent".
+          for r in d["roots"]:
+              assert r["datasets"] > 0 or r.get("error"), r
+          EOF
+          # Never a write to the evidence, and never one onto it.
+          sha256sum /tmp/f64/member0.img /tmp/f64/member1.img > /tmp/f64.sums
+          sha256sum -c /tmp/f64.sums
+          if ./target/release/zvolcarve -q roots /tmp/f64/member0.img -o /tmp/f64/member0.img; then echo "must refuse"; exit 1; else test $? = 5; fi
       - name: Files out of a filesystem dataset (COMPANIONS §5.4)
         run: |
           ./target/release/zvolfiles --version

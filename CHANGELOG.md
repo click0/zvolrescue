@@ -15,6 +15,42 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ## Unreleased
 
+### Added
+* **`zvolcarve roots`: the MOS when no uberblock survives (SPEC F-64,
+  COMPANIONS C-20).** Every other way into a pool starts at an
+  uberblock — it carries the root pointer, the root pointer names the
+  MOS, and the MOS names everything else. With all four label rings
+  gone there is no root pointer anywhere, and until now that was the end
+  of the road: `list` exits 3 and says no verified uberblock matches.
+  `roots` scans raw space for the MOS's own `objset_phys_t`, in plain
+  blocks and inside compressed ones alike.
+
+  Finding a header is cheap; believing one is not. So every header found
+  is *used*: the DSL is walked from it, and what ranks a candidate is
+  how much of the pool came out, with the birth of its pointers to
+  separate the ones that walked equally well. A header that yields
+  nothing is still reported, with the reason it gave — "found but
+  unreadable" and "not found" are different answers to an operator. The
+  ranked list goes to `roots.json` in the workspace.
+
+  The test is specific enough to be cheap: an objset header begins with
+  its meta-dnode, so the first 512 bytes must parse as a dnode of type
+  `DMU_OT_DNODE` before anything after them is read, and only
+  `DMU_OST_META` is collected — a filesystem's or a volume's objset is
+  reached *through* the MOS, so one found loose says nothing about where
+  the root is. Checked in CI against a fixture whose every uberblock
+  ring has been zeroed, with the ordinary path required to fail first so
+  the case cannot pass for the wrong reason; and against a real
+  `ztest` pool, where it walks out twelve datasets with no uberblock
+  involved at any point.
+
+  Reading a block the header points at still needs a layout, because a
+  block pointer addresses a DVA and only the layout says where a DVA is.
+  Where the labels are gone too, that comes from `--hints` (F-65), which
+  `roots` takes like every other command; without it the header is
+  reported with its position and birth and the reason it could not be
+  followed.
+
 ### Documented
 * **A pool a vdev was removed from reads only in part, and now the spec
   says so (SPEC F-69).** `device_removal` copies a top-level vdev's

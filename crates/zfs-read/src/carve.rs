@@ -201,6 +201,14 @@ pub struct Options {
     pub block_sizes: Vec<u64>,
     /// Stop after this many hits, so a wide search can be bounded.
     pub max_hits: usize,
+    /// Collect dnode candidates at all.
+    ///
+    /// The header search (SPEC F-64) wants none of them, and setting
+    /// `max_hits` to zero to say so would stop the whole scan at the
+    /// first dnode it met — the cap bounds the *scan*, not just the
+    /// list. Saying it here instead leaves the scan running to the end
+    /// of the member, which is what a search for one header needs.
+    pub collect_hits: bool,
     /// Read this many bytes at a time.
     pub chunk: usize,
 }
@@ -225,6 +233,7 @@ impl Default for Options {
             // and busy objsets.
             block_sizes: vec![16384, 32768, 131072],
             max_hits: 100_000,
+            collect_hits: true,
             chunk: 4 << 20,
         }
     }
@@ -336,6 +345,9 @@ fn consider(
     found: Found,
     dnode: DnodePhys,
 ) {
+    if !opts.collect_hits {
+        return;
+    }
     if let Err(r) = plausible_dnode(&dnode) {
         scan.counts.bump(r);
         return;
@@ -817,6 +829,53 @@ mod tests {
             (4816230, 1757100010),
         ]);
         carved_zvol_members(&mut pool, SIZE)
+    }
+
+    /// SPEC F-64, end to end: the MOS is found in raw space and the
+    /// dataset tree is walked from it, with no uberblock involved at any
+    /// point.
+    ///
+    /// The header on its own proves nothing — the thing worth asserting
+    /// is that a pool comes out of it, which is also what ranks one
+    /// candidate above another.
+    #[test]
+    fn the_dataset_tree_comes_out_of_a_header_found_in_raw_space() {
+        let members = carved();
+        let sources: Vec<MemSource> = members.into_iter().map(MemSource::new).collect();
+        let opts = Options {
+            collect_hits: false,
+            ..Options::default()
+        };
+        let mut roots = Vec::new();
+        for (i, src) in sources.iter().enumerate() {
+            roots.extend(scan_member(src, i, 12, &opts).expect("scan").roots);
+        }
+        assert!(!roots.is_empty(), "the MOS header is somewhere on a member");
+
+        let scans: Vec<_> = sources
+            .iter()
+            .map(|s| Some(scan_device(s).expect("scan")))
+            .collect();
+        let pool = assemble(&scans).into_iter().next().expect("a pool");
+        let devices: Vec<Option<&dyn BlockSource>> = sources
+            .iter()
+            .map(|s| Some(s as &dyn BlockSource))
+            .collect();
+        let reader = PoolReader::new(&pool, devices);
+        // The best header is the one the most of the pool comes out of,
+        // which is the same rule `zvolcarve roots` ranks by.
+        let best = roots
+            .iter()
+            .filter_map(|r| {
+                let mos =
+                    crate::dsl::open_mos_objset(&reader, r.objset.clone(), Endian::Little).ok()?;
+                crate::dsl::walk(&mos, "tank").ok()
+            })
+            .max_by_key(|t| t.datasets.len())
+            .expect("a header the DSL walks out of");
+        let names: Vec<&str> = best.datasets.iter().map(|d| d.name.as_str()).collect();
+        assert!(names.contains(&"tank"), "{names:?}");
+        assert!(names.contains(&"tank/vm"), "{names:?}");
     }
 
     /// The volume nothing points at is found by scanning for it, and its

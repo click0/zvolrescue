@@ -213,6 +213,7 @@ checksum, exactly as in the main binary.
 | C-17 | S | `--like DATASET`: read `volblocksize`, `nlevels` and `volsize` from a dataset that *still* exists in the pool and use them as the profile. In most incidents the lost volume was created like its neighbours, and a surviving sibling is a better source for these numbers than the operator's memory. |
 | C-18 | S | Profile fields are *hints* by default: a hit that fails a soft field is still recorded, with the failing field named, and ranked below the ones that matched, so a wrong guess costs ranking rather than the whole recovery. `--strict-profile` turns them into hard filters for the cases where the operator is certain and the scan would otherwise be too slow. |
 | C-19 | C | Auto-profile: with no profile given, `scan --sample N` reads the first N hits and reports the histograms of `volblocksize`, `nlevels` and birth TXG it saw, so the operator can pick a profile from what is actually on the disk instead of guessing. |
+| C-20 | S | `roots`: find the MOS when no uberblock survives (SPEC F-64). Scan for `objset_phys_t` of type `DMU_OST_META`, walk the DSL from each one found, and rank by how much of the pool came out with the birth of its pointers to separate the ones that walked equally well. A header that yields nothing is still reported, with the reason it gave: "found but unreadable" and "not found" are different answers. |
 
 ### 3.4 Acceptance
 

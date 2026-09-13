@@ -294,9 +294,11 @@ template leaves open and keeps the one no block has to be repaired
 around; `scan --emit-label` writes that layout back out as the front
 128 KiB of a label, sealed for its position and stopping short of the
 uberblock ring, so it can be placed on a copy of the disk and read by
-anything else. What is left of the bare-device case is F-63 (deriving the
-base with no uberblock at all) and F-64 (finding the MOS with no
-uberblock), which are `zvolcarve` territory.
+anything else. F-64 is in `zvolcarve` as `roots`: it scans for the MOS's
+own `objset_phys_t`, walks the DSL from each one it finds, and ranks
+them by how much of the pool came out — so a pool whose uberblock rings
+are all gone still has a way in. What is left of the bare-device case is
+F-63, deriving the base with no uberblock and no hints at all.
 
 Two regimes follow:
 
