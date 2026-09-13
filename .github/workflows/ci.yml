@@ -44,6 +44,22 @@ jobs:
           # after v0.7.1 shipped, and then v0.7.0 stopped existing at all.
           grep -q "\*\*Status:\*\* v$v " README.md || { echo "::error::README.md's status line is not v$v"; exit 1; }
           grep -q "\*\*Статус:\*\* v$v " README_UK.md || { echo "::error::README_UK.md's status line is not v$v"; exit 1; }
+          # Exactly one open section, and every version named once. The
+          # release notes carry whatever the open section still holds by
+          # reading from its heading to the next `## `, so a second
+          # heading of the same name does not duplicate anything — it
+          # truncates. This repository had two `## Unreleased` for three
+          # commits, and everything under the second would have been
+          # dropped from the notes without a word.
+          for f in CHANGELOG.md CHANGELOG.uk.md; do
+            dupes=$(grep '^## ' "$f" | sort | uniq -d)
+            test -z "$dupes" || { echo "::error::$f has a repeated section heading: $dupes"; exit 1; }
+          done
+          test "$(grep -c '^## Unreleased$' CHANGELOG.md)" -le 1
+          test "$(grep -c '^## Незібране$' CHANGELOG.uk.md)" -le 1
+          # And the two languages have the same shape, so one cannot
+          # quietly file something the other does not.
+          test "$(grep -c '^## ' CHANGELOG.md)" = "$(grep -c '^## ' CHANGELOG.uk.md)"
       - name: Every way a read can fail is classified (tests/golden)
         run: |
           # The damage matrix decides whether a failed block is the tool
@@ -509,6 +525,16 @@ jobs:
           assert x["user.spilled"]["value"].startswith("abcdefghij"), x
           x = {v["name"]: v for v in f["bigdnode.txt"]["xattrs"]}
           assert x["user.wide"]["bytes"] == 400, x
+          # Z-04: a value is in `value` or in `value_hex` and never in
+          # both, so no reader can take hex for text. This one is not
+          # text — sixteen of its bytes are the planted dnode header —
+          # and says so by having no `value` at all.
+          assert "value" not in x["user.wide"], x
+          assert x["user.wide"]["value_hex"].startswith("41424344"), x
+          for entry in f.values():
+              for v in entry.get("xattrs", []):
+                  assert ("value" in v) != ("value_hex" in v), v
+                  assert len(v.get("value_hex", "")) in (0, 2 * v["bytes"]), v
           EOF
           # One path, not the whole tree.
           rm -rf /tmp/zp/one

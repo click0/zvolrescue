@@ -520,6 +520,19 @@ exercises the matching is a second one, because a real dataset cannot be
 both — `normalization` requires `utf8only`, and a dataset with
 `utf8only` on cannot hold the `caf\xe9.txt` the first fixture does.
 
+An extended attribute's value is recorded in the manifest as `value`
+when every byte of it is text, and as `value_hex` when it is not —
+never both, and never the one under the other's name. A single field
+holding text sometimes and hex the rest of the time cannot be read
+back: `deadbeef` is a four-byte value and an eight-character value, and
+nothing in the record says which was on disk. A reader that asks for
+`value` and finds it missing knows it is missing something; a reader
+handed hex it takes for text does not. The name has no such pair,
+because an attribute name that is not UTF-8 has already lost its exact
+bytes by then — `xattr=sa` packs names into an nvlist, and nvlist
+strings are decoded lossily throughout this workspace — and no platform
+this runs on produces one.
+
 Large dnodes and spill blocks are read (Z-10). A dnode that owns more
 than one slot is read across all of them, and an enumeration steps over
 the slots it owns instead of parsing a bonus buffer as the next object's

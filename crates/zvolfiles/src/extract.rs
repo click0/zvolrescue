@@ -61,11 +61,31 @@ pub struct Extracted {
 }
 
 /// One extended attribute, as the manifest records it.
+///
+/// The value is in exactly one of two fields, and which one it is in
+/// says what it is. Writing hex into the same field that holds text
+/// leaves the two indistinguishable: `"deadbeef"` is a perfectly good
+/// four-byte value and a perfectly good eight-character one, and a
+/// manifest that cannot tell a reader which it meant has made something
+/// up. A reader that wants the value and finds `value` absent is
+/// missing it loudly, which is the outcome to prefer.
+///
+/// The name has no such pair. An extended-attribute name that is not
+/// UTF-8 loses its exact bytes before this point — `xattr=sa` packs the
+/// names into an nvlist, and nvlist strings are decoded lossily
+/// throughout this workspace — so there is nothing here to record. Such
+/// a name is not something ZFS or any platform this runs on produces.
 #[derive(Debug, Serialize)]
 pub struct Xattr {
     pub name: String,
-    /// The value as text when it is text, and as hex when it is not.
-    pub value: String,
+    /// The value as text, when every byte of it is text and none is a
+    /// NUL. Absent when it is not: see `value_hex`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// The value's exact bytes as hex, present when and only when
+    /// `value` is absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value_hex: Option<String>,
     pub bytes: usize,
 }
 
@@ -484,13 +504,17 @@ fn xattrs_of(fs: &Filesystem<'_, '_>, z: &zfs_ondisk::zpl::Znode) -> Vec<Xattr> 
     fs.xattrs(z)
         .into_iter()
         .map(|(name, bytes)| {
-            let value = match std::str::from_utf8(&bytes) {
-                Ok(t) if !t.contains('\0') => t.to_string(),
-                _ => bytes.iter().map(|b| format!("{b:02x}")).collect(),
+            let (value, value_hex) = match std::str::from_utf8(&bytes) {
+                Ok(t) if !t.contains('\0') => (Some(t.to_string()), None),
+                _ => (
+                    None,
+                    Some(bytes.iter().map(|b| format!("{b:02x}")).collect()),
+                ),
             };
             Xattr {
                 name,
                 value,
+                value_hex,
                 bytes: bytes.len(),
             }
         })

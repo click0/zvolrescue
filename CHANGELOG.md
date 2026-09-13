@@ -31,6 +31,19 @@ tagged. `v0.7.1` is the release that carries those six.
   14.x the build from source is `pkg install rust && cargo build
   --release`, and the suite passes there. CI had been pinned to 14.2,
   which has been out of support for some time.
+* **An extended attribute's value in `manifest.json` is now `value` or
+  `value_hex`, never one under the other's name (COMPANIONS Z-04).**
+  The manifest wrote a value as text when it was text and as hex when
+  it was not, in the same field and with nothing to say which — so
+  `deadbeef` in the record was a four-byte value and an eight-character
+  value at once, and a recovery reading it back could not tell. A value
+  that is text is now in `value` and one that is not is in `value_hex`,
+  exactly one of the two present. A reader that asks for `value` and
+  finds nothing is missing something loudly, which is the outcome to
+  prefer over being handed hex it takes for text. `bytes` is unchanged
+  and still the length on disk. Names have no such pair: an attribute
+  name that is not UTF-8 loses its exact bytes in the nvlist long
+  before the manifest, and nothing here can recover them.
 
 ### Added
 * **`zvolfiles` reads the attributes that did not fit the bonus buffer
@@ -90,9 +103,16 @@ tagged. `v0.7.1` is the release that carries those six.
   reconstruct anything. All five produce the image the walked extraction
   pins.
 
-## Unreleased
-
 ### Fixed
+* **The CHANGELOG had two `## Unreleased` sections, and the release
+  notes would have carried only the first.** The release workflow takes
+  the open section by reading from its heading to the next `## ` — so a
+  second heading of the same name does not add to the notes, it cuts
+  them short, and four entries under the second one would have gone
+  into a release describing changes it does not mention. Merged into
+  one. CI now refuses any repeated `## ` heading in either CHANGELOG,
+  and checks that the two languages have the same number of sections,
+  so one cannot file something the other does not.
 * **The damage matrix runs on every push (SPEC §9).** It found two real
   defects in the tool in one afternoon and then only ran when someone
   remembered to run it. A subset now sits in CI: one geometry, ten
