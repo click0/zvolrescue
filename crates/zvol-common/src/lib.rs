@@ -279,6 +279,15 @@ pub struct PoolSpec {
     /// every block read through it is still verified by its checksum.
     #[arg(long, value_name = "PATH[=GUID]")]
     pub assume_member: Vec<String>,
+    /// Read a pool whose active feature flags this build cannot account
+    /// for (SPEC F-70).
+    ///
+    /// Without this the run refuses and names them. With it the pool is
+    /// read as though the features were not there, which can be wrong in
+    /// a way no checksum objects to: a reflowed raidz hands back the
+    /// checksums of other blocks, and they agree.
+    #[arg(long)]
+    pub ignore_unknown_features: bool,
 }
 
 impl PoolSpec {

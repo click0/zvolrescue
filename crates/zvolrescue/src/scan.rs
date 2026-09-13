@@ -80,6 +80,11 @@ struct ConfigOut {
     hostid: Option<String>,
     hostname: Option<String>,
     features_for_read: Vec<String>,
+    /// Active read-incompatible features this build cannot account for
+    /// (SPEC F-70). Present whenever there are any: `scan` is the
+    /// command that says what is on a disk, and this is on it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    unaccounted_features: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -307,6 +312,10 @@ fn config_out(c: &LabelConfig) -> ConfigOut {
         hostid: c.hostid.map(hex),
         hostname: c.hostname.clone(),
         features_for_read: c.features_for_read.clone(),
+        unaccounted_features: zfs_ondisk::features::unaccounted(&c.features_for_read)
+            .into_iter()
+            .map(|(n, _)| n.to_string())
+            .collect(),
     }
 }
 
@@ -539,6 +548,16 @@ fn print_text(out: &ScanOut, verbose: u8) {
                 );
                 if verbose >= 1 && !c.features_for_read.is_empty() {
                     println!("  features_for_read: {}", c.features_for_read.join(" "));
+                }
+                // Not behind -v: a feature in use that this build cannot
+                // account for is the difference between an answer and a
+                // guess, and `scan` is where an operator looks first.
+                if !c.unaccounted_features.is_empty() {
+                    println!(
+                        "  NOT ACCOUNTED FOR: {} — reading this pool needs \
+                         --ignore-unknown-features, and may be wrong (SPEC F-70)",
+                        c.unaccounted_features.join(" ")
+                    );
                 }
             }
             None => println!("  no readable ZFS label configuration"),

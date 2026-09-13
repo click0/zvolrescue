@@ -70,6 +70,10 @@ pub struct Pool {
     /// Per-TXG root block pointers that override `rootbp` for that TXG,
     /// so different TXGs can describe different dataset trees.
     pub rootbp_by_txg: Vec<(u64, [u8; blkptr::SIZE])>,
+    /// Active read-incompatible features to name in every label
+    /// (SPEC F-70). The two a real pool always carries, unless a test
+    /// adds one to see the tool refuse.
+    pub features_for_read: Vec<String>,
 }
 
 impl Pool {
@@ -94,6 +98,13 @@ impl Pool {
             state: 0,
             rootbp: None,
             rootbp_by_txg: Vec::new(),
+            // What every pool in the cross-check carries, so a fixture
+            // is refused for the same reasons a real pool would be and
+            // for no others.
+            features_for_read: vec![
+                "com.delphix:hole_birth".into(),
+                "com.delphix:embedded_data".into(),
+            ],
         }
     }
 
@@ -114,6 +125,12 @@ impl Pool {
     /// Set the uberblocks to record.
     pub fn txgs(mut self, txgs: &[(u64, u64)]) -> Pool {
         self.uberblocks = txgs.to_vec();
+        self
+    }
+
+    /// Claim one more active read-incompatible feature (SPEC F-70).
+    pub fn with_feature(mut self, name: &str) -> Pool {
+        self.features_for_read.push(name.to_string());
         self
     }
 
@@ -175,10 +192,12 @@ impl Pool {
             ("vdev_tree", Value::List(self.tree())),
             (
                 "features_for_read",
-                Value::List(list(vec![
-                    ("com.delphix:hole_birth", Value::Boolean),
-                    ("com.delphix:embedded_data", Value::Boolean),
-                ])),
+                Value::List(list(
+                    self.features_for_read
+                        .iter()
+                        .map(|n| (n.as_str(), Value::Boolean))
+                        .collect::<Vec<_>>(),
+                )),
             ),
         ])
     }

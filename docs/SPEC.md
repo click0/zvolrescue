@@ -170,6 +170,7 @@ Priority: **M** = must (v1), **S** = should (v1 if time permits), **C** = could 
 | F-04 | M | Decode the uberblock ring of every label: TXG, timestamp, checksum validity, root blkptr, MMP fields. |
 | F-05 | S | Detect partially overwritten labels and fall back to the best surviving copy, per vdev. |
 | F-06 | S | Support GPT/MBR partition tables inside whole-disk images (locate ZFS partitions automatically). |
+| F-70 | M | **Refuse what cannot be accounted for.** A label lists under `features_for_read` the read-incompatible features that are *active*. Every run that reads blocks checks that list against the features this build implements, and refuses the pool when any is unaccounted for, naming each and saying whether it is known-and-unimplemented or simply unknown. This is not a warning, because the failure it prevents is silent: `raidz_expansion` reflows a raidz group's rows, so the original geometry reads the wrong blocks and their checksums agree with themselves. `scan` reports the same list and never refuses — surveying a disk is its job. `--ignore-unknown-features` reads anyway and says what that costs. |
 
 ### 5.2 Reading pool metadata at a chosen TXG
 

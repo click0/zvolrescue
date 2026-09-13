@@ -9,7 +9,9 @@
 //! at all, though its blocks are still on the member: the pool a carve
 //! has to find something in when a walk cannot (COMPANIONS §3.4). With
 //! `zpl`, the pool holds one filesystem dataset with a small POSIX tree
-//! instead of a volume (COMPANIONS §5.4).
+//! instead of a volume (COMPANIONS §5.4). A fifth argument names one more
+//! active read-incompatible feature for the labels to claim, so a refusal
+//! can be seen (SPEC F-70).
 
 use std::path::PathBuf;
 
@@ -27,6 +29,7 @@ fn main() {
         .map(|a| a.parse().expect("ashift"))
         .unwrap_or(12);
     let mode = args.next().unwrap_or_default();
+    let feature = args.next();
     let carved = mode == "carved";
     let zpl = mode == "zpl";
     let mut pool = match kind.as_str() {
@@ -39,6 +42,10 @@ fn main() {
         (4816229, 1757100005),
         (4816230, 1757100010),
     ]);
+    if let Some(f) = &feature {
+        println!("the labels claim {f} is active");
+        pool = pool.with_feature(f);
+    }
     std::fs::create_dir_all(&dir).expect("mkdir");
     let n = pool.members.len();
     let size = 64 * 1024 * 1024u64;

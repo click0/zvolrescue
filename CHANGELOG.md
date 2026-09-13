@@ -16,6 +16,36 @@ tagged. `v0.7.1` is the release that carries those six.
 ## Unreleased
 
 ### Added
+* **A feature this build cannot account for now stops the read (SPEC
+  F-70).** The last way left for this tool to be confidently wrong, and
+  the only one no checksum catches.
+
+  A label lists under `features_for_read` the read-incompatible features
+  that are *active* — the pool itself saying what a reader must
+  understand. That list was parsed, printed behind `-v`, and then
+  ignored. So a pool using a feature this build has never implemented
+  was read as though it were not using it. For most features that is
+  merely incomplete. For `raidz_expansion` it is silently wrong: the
+  group was widened and its rows reflowed, so the original geometry
+  reads *other* blocks, and their checksums agree with themselves.
+  Nothing in the tool objected, and nothing could have.
+
+  Every run that reads blocks now checks that list and refuses the pool
+  when anything on it is unaccounted for, naming each one and saying
+  whether it is known-and-unimplemented — with what goes wrong — or
+  simply unknown to this build. `scan` reports the same thing and never
+  refuses: surveying a disk is its job, and it says so unprompted rather
+  than behind `-v`. `--ignore-unknown-features` reads anyway and states
+  what that costs.
+
+  The list of features this build honours is deliberately evidenced
+  rather than asserted: each entry is either carried by the pools the
+  cross-check compares against `zdb` block for block, or implemented by
+  a named module of this workspace. A name misspelled in it costs a
+  refusal on a pool that could have been read — recoverable, and the
+  operator is told how. A name wrongly added would cost a silent wrong
+  answer, which is the thing being fixed.
+
 * **`zvolcarve zeropoint`: where the vdev begins, from the pointers
   alone (SPEC F-63, COMPANIONS C-21).** The last row of the bare-device
   case, and the one the spec had left optional. Every other route to the

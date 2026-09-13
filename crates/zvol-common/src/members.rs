@@ -271,6 +271,62 @@ fn pool_missing_a_whole_top(pools: &[PoolAssembly]) -> Option<(String, Vec<u64>)
 }
 
 /// Open every member named in `spec`, scan it, and assemble pools.
+/// Refuse a pool whose active read-incompatible features this build
+/// cannot account for (SPEC F-70).
+///
+/// The label lists, under `features_for_read`, the read-incompatible
+/// features that are *in use* — the pool itself saying what a reader
+/// must understand. A feature named there and not implemented here
+/// means the bytes may be read under assumptions that no longer hold,
+/// and the checksums will not object: they are the checksums of
+/// whatever blocks the wrong geometry lands on, and those agree with
+/// themselves. So this refuses rather than warns.
+///
+/// `scan` is deliberately not routed through here. Its job is to survey
+/// a disk and say what is on it, which includes saying this.
+fn refuse_unaccounted_features(
+    scans: &[Option<zfs_read::vdev::DeviceScan>],
+    ignore: bool,
+) -> Result<(), u8> {
+    let mut active: Vec<String> = scans
+        .iter()
+        .flatten()
+        .filter_map(|s| s.config())
+        .flat_map(|c| c.features_for_read)
+        .collect();
+    active.sort();
+    active.dedup();
+    let unaccounted = zfs_ondisk::features::unaccounted(&active);
+    if unaccounted.is_empty() {
+        return Ok(());
+    }
+    for (name, s) in &unaccounted {
+        match s {
+            zfs_ondisk::features::Support::No(why) => {
+                eprintln!("zvolrescue: {name}: not implemented.");
+                eprintln!("zvolrescue:   {why}.");
+            }
+            _ => eprintln!(
+                "zvolrescue: {name}: unknown to this build, and the pool says it is in use."
+            ),
+        }
+    }
+    if ignore {
+        eprintln!("zvolrescue: reading anyway (--ignore-unknown-features).");
+        eprintln!("zvolrescue:   what comes out may be wrong in a way no checksum catches.");
+        return Ok(());
+    }
+    eprintln!(
+        "zvolrescue: refusing this pool: {} active feature(s) above are unaccounted for.",
+        unaccounted.len()
+    );
+    eprintln!("zvolrescue:   reading past them would answer confidently and perhaps wrongly.");
+    eprintln!("zvolrescue:   `scan` still reports what is on the disk.");
+    eprintln!("zvolrescue:   --ignore-unknown-features reads anyway.");
+    Err(exit::UNRECOVERABLE)
+}
+
+/// Open every member named in `spec`, scan it, and assemble pools.
 pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
     let paths = spec.members().map_err(|e| {
         eprintln!("zvolrescue: {e}");
@@ -321,6 +377,7 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
     if scans.iter().all(|s| s.is_none()) {
         return Err(exit::EVIDENCE);
     }
+    refuse_unaccounted_features(&scans, spec.ignore_unknown_features)?;
     let mut bases: Vec<u64> = scans
         .iter()
         .map(|s| s.as_ref().map_or(0, |s| s.base))

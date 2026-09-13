@@ -455,6 +455,36 @@ jobs:
           sha256sum /tmp/cv/member0.img /tmp/cv/member1.img > /tmp/cv.sums
           sha256sum -c /tmp/cv.sums
           if ./target/release/zvolcarve -q scan /tmp/cv/member0.img -o /tmp/cv/member0.img; then echo "must refuse"; exit 1; else test $? = 5; fi
+      - name: A feature this build cannot account for stops the read (SPEC F-70)
+        run: |
+          # The failure this prevents is the only silent one left: a
+          # reflowed raidz reads the wrong blocks and their checksums
+          # agree with themselves, so nothing objects.
+          rm -rf /tmp/f70 /tmp/f70x /tmp/f70y
+          cargo run -q -p zfs-read --example mkfixture -- /tmp/f70 mirror 12
+          cargo run -q -p zfs-read --example mkfixture -- /tmp/f70x mirror 12 "" org.openzfs:raidz_expansion
+          cargo run -q -p zfs-read --example mkfixture -- /tmp/f70y mirror 12 "" org.example:not_a_real_feature
+          # A pool whose active features are all accounted for reads as before.
+          ./target/release/zvolrescue -q list -r /tmp/f70/member0.img /tmp/f70/member1.img > /dev/null
+          # A real ztest pool carries hole_birth, embedded_data and
+          # vdev_zaps_v2; the cross-check job proves those read correctly,
+          # and this proves they are not refused.
+          # Known and unimplemented: refused, and named as such.
+          if ./target/release/zvolrescue -q list -r /tmp/f70x/member0.img /tmp/f70x/member1.img; then echo "must refuse"; exit 1; else test $? = 3; fi
+          ./target/release/zvolrescue -q list -r /tmp/f70x/member0.img 2>&1 | grep -q "raidz_expansion: not implemented"
+          # Unknown: refused too, with the other message.
+          if ./target/release/zvolrescue -q list -r /tmp/f70y/member0.img; then echo "must refuse"; exit 1; else test $? = 3; fi
+          ./target/release/zvolrescue -q list -r /tmp/f70y/member0.img 2>&1 | grep -q "unknown to this build"
+          # The override reads, and says what it costs.
+          ./target/release/zvolrescue -q list -r --ignore-unknown-features /tmp/f70x/member0.img /tmp/f70x/member1.img > /dev/null
+          ./target/release/zvolrescue -q list -r --ignore-unknown-features /tmp/f70x/member0.img 2>&1 | grep -q "no checksum catches"
+          # `scan` surveys rather than refuses, and says it unprompted —
+          # not behind -v, because it is what an operator looks at first.
+          ./target/release/zvolrescue -q scan /tmp/f70x/member0.img | grep -q "NOT ACCOUNTED FOR: org.openzfs:raidz_expansion"
+          ./target/release/zvolrescue -q -f json scan /tmp/f70x/member0.img | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["devices"][0]["config"]["unaccounted_features"] == ["org.openzfs:raidz_expansion"], d["devices"][0]["config"]'
+          test "$(./target/release/zvolrescue -q scan /tmp/f70/member0.img | grep -c 'NOT ACCOUNTED FOR')" = 0
+          # The companions share the check, since they share the members.
+          if ./target/release/zvolfiles -q list tank/fs /tmp/f70x/member0.img; then echo "must refuse"; exit 1; else test $? = 3; fi
       - name: Where the vdev begins, from the pointers alone (SPEC F-63, COMPANIONS C-21)
         run: |
           # A member with every label gone, sitting at a known offset

@@ -17,6 +17,7 @@ pub mod dmu;
 pub mod draid;
 pub mod dsl;
 pub mod error;
+pub mod features;
 pub mod label;
 pub mod nvlist;
 pub mod part;
