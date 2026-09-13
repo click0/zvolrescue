@@ -441,7 +441,7 @@ zvolfiles objects  DATASET POOLSPEC [--txg N] [--key KEYSPEC] -o DIR
 | Z-07 | S | Hard links restored as hard links inside the output directory when both paths were extracted. |
 | Z-08 | S | `objects` (SPEC F-29): one file per object plus `objects.json` with dnode metadata — the fallback when Z-01 fails. |
 | Z-09 | S | `casesensitivity`, `normalization` and `utf8only` dataset properties honoured when matching `PATH`. |
-| Z-10 | C | Large dnodes, project quotas and other feature-flag extensions to the SA layout. |
+| Z-10 | C | Large dnodes and the spill block a layout overflows into; project quotas and other feature-flag extensions to the SA layout. |
 
 ### 5.4 Acceptance
 
@@ -520,10 +520,24 @@ exercises the matching is a second one, because a real dataset cannot be
 both — `normalization` requires `utf8only`, and a dataset with
 `utf8only` on cannot hold the `caf\xe9.txt` the first fixture does.
 
-Not implemented: the feature-flag extensions to the SA layout (Z-10).
-Sparse regions come out as the holes they are, since a hole is a hole in
-the tree; a file whose tail was never written is extracted to the length
-the attributes give.*
+Large dnodes and spill blocks are read (Z-10). A dnode that owns more
+than one slot is read across all of them, and an enumeration steps over
+the slots it owns instead of parsing a bonus buffer as the next object's
+header — which usually fails loudly, but is not guaranteed to, since
+those bytes are whatever the file's attributes happen to be. A layout
+too large for the bonus buffer is split, the rest going to the spill
+block under a header and a layout of its own; both halves are placed and
+merged. An unreadable spill block is an error rather than a warning,
+because the bonus half on its own is a plausible-looking object: a file
+with no extended attributes, instead of a file that was only half read.
+
+Not implemented: project quotas (`ZPL_PROJID`) are not reported. Nothing
+else is lost by that — an attribute this reader has no name for is
+simply not asked for, and the rest of the layout is placed around it —
+but a dataset's project ids do not appear in the output. Sparse regions
+come out as the holes they are, since a hole is a hole in the tree; a
+file whose tail was never written is extracted to the length the
+attributes give.*
 
 ---
 

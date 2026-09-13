@@ -66,9 +66,20 @@ pub fn run(
         })?;
         let max = fs.objects.max_object();
         let mut objects = Vec::new();
-        for obj in 0..=max {
-            let Ok(d) = fs.objects.get(obj) else { continue };
+        let mut obj = 0;
+        while obj <= max {
+            let Ok(d) = fs.objects.get(obj) else {
+                obj += 1;
+                continue;
+            };
+            // A large dnode owns the slots that follow it, and those hold
+            // the rest of its bonus buffer rather than objects of their
+            // own (Z-10). Stepping by one would dump whatever those
+            // attribute bytes happen to parse as, as an object that was
+            // never there.
+            let next = obj + 1 + u64::from(d.extra_slots);
             if d.is_free() {
+                obj = next;
                 continue;
             }
             let mut record = ObjectOut {
@@ -90,6 +101,7 @@ pub fn run(
                 Err(e) => record.error = Some(e),
             }
             objects.push(record);
+            obj = next;
         }
         let written = objects.iter().filter(|o| o.error.is_none()).count();
         let incomplete = objects.iter().filter(|o| o.errors > 0).count();

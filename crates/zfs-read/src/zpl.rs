@@ -12,7 +12,8 @@
 
 use std::collections::BTreeMap;
 
-use zfs_ondisk::dmu::{ObjsetPhys, ObjsetType};
+use zfs_ondisk::blkptr::BlkPtr;
+use zfs_ondisk::dmu::{ot, ObjsetPhys, ObjsetType};
 use zfs_ondisk::zap::Value;
 use zfs_ondisk::zpl::{
     self, attr, dirent, parse_sa_header, parse_znode_phys, place_attrs, FileType, RegisteredAttr,
@@ -269,7 +270,16 @@ impl Filesystem<'_, '_> {
         })?;
         let lengths = |n: u16| self.attr_length.get(&n).copied();
         let placed = place_attrs(&d.bonus, &header, &layout, &lengths, self.endian);
-        let by_num: BTreeMap<u16, Vec<u8>> = placed.into_iter().collect();
+        let mut by_num: BTreeMap<u16, Vec<u8>> = placed.into_iter().collect();
+        // Whatever did not fit the bonus buffer is in the spill block,
+        // under a header and a layout of its own (Z-10).
+        if d.bonus_type == ot::SA {
+            if let Some(bp) = &d.spill {
+                for (num, value) in self.spilled_attrs(object, bp)? {
+                    by_num.entry(num).or_insert(value);
+                }
+            }
+        }
         let word = |name: &str| -> u64 {
             self.attr_num
                 .get(name)
@@ -305,6 +315,53 @@ impl Filesystem<'_, '_> {
             parent: word(attr::PARENT),
             symlink,
         })
+    }
+
+    /// The system attributes an object keeps in its spill block (Z-10).
+    ///
+    /// A layout that does not fit the bonus buffer is split: what fits
+    /// stays in the bonus and the rest goes to the spill block, which
+    /// carries a header and names a layout of its own. Usually what
+    /// spills is `ZPL_DXATTR` — the one attribute large enough to push
+    /// a layout over the edge — but nothing says it has to be, and a
+    /// reader that looks only at the bonus loses whatever went there
+    /// without noticing. That is why an unreadable spill is an error
+    /// and not a warning: a file whose attributes are half-read is a
+    /// wrong answer, and a refusal is not.
+    fn spilled_attrs(&self, object: u64, bp: &BlkPtr) -> Result<Vec<(u16, Vec<u8>)>, ReadError> {
+        if bp.is_hole() {
+            return Ok(Vec::new());
+        }
+        let block = self
+            .objects
+            .meta_reader()
+            .read_block(bp, false)
+            .map_err(|e| ReadError::Io(format!("object {object}: spill block: {e}")))?;
+        let header = parse_sa_header(&block.data, bp.endian).map_err(|e| {
+            ReadError::Io(format!(
+                "object {object}: its spill block is not a system-attribute buffer: {e}"
+            ))
+        })?;
+        let layout = self.layouts.get(&header.layout).cloned().ok_or_else(|| {
+            ReadError::Io(format!(
+                "object {object}: spill-block layout {} is not in this dataset's layouts",
+                header.layout
+            ))
+        })?;
+        trace!(
+            "zpl",
+            "object {object}: spill block holds layout {} ({} attribute(s))",
+            header.layout,
+            layout.len()
+        );
+        let lengths = |n: u16| self.attr_length.get(&n).copied();
+        Ok(place_attrs(
+            &block.data,
+            &header,
+            &layout,
+            &lengths,
+            bp.endian,
+        ))
     }
 
     /// The entries of one directory (Z-01).
@@ -646,8 +703,10 @@ fn walk_into(
 mod tests {
     use super::*;
     use crate::fixture::{
-        zpl_deep, zpl_hello, zpl_latin1, zpl_members_matching, Matching, Pool, ZPL_COMPOSED_NAME,
-        ZPL_DECOMPOSED_NAME, ZPL_LATIN1_NAME,
+        zpl_big_dnode, zpl_big_dnode_value, zpl_deep, zpl_hello, zpl_latin1, zpl_members_with,
+        zpl_spilled, zpl_spilled_value, Matching, Pool, Spill, ZPL_BIG_DNODE_TRAP,
+        ZPL_BIG_DNODE_XATTR, ZPL_COMPOSED_NAME, ZPL_DECOMPOSED_NAME, ZPL_LATIN1_NAME,
+        ZPL_SPILLED_XATTR,
     };
     use crate::pool::{assemble, uberblock_candidates};
     use crate::vdev::scan_device;
@@ -665,9 +724,13 @@ mod tests {
     }
 
     fn with_matching_fs(matching: Matching, f: impl FnOnce(&Filesystem<'_, '_>)) {
+        with_fixture(matching, Spill::Attributes, f);
+    }
+
+    fn with_fixture(matching: Matching, spill: Spill, f: impl FnOnce(&Filesystem<'_, '_>)) {
         let mut pool = Pool::mirror("tank", 0x5eed_0000_0000_0003, 12)
             .txgs(&[(4816228, 1757100000), (4816229, 1757100005)]);
-        let members = zpl_members_matching(&mut pool, SIZE, matching);
+        let members = zpl_members_with(&mut pool, SIZE, matching, spill);
         let sources: Vec<MemSource> = members.into_iter().map(MemSource::new).collect();
         let scans: Vec<_> = sources
             .iter()
@@ -705,23 +768,37 @@ mod tests {
             assert_eq!(
                 paths,
                 [
+                    b"bigdnode.txt".as_slice(),
                     ZPL_LATIN1_NAME,
                     b"hardlink.txt",
                     b"hello.txt",
                     b"link",
+                    b"spilled.txt",
                     b"sub",
                     b"sub/deep.txt"
                 ]
             );
             assert!(entries.iter().all(|e| e.error.is_none()), "{entries:?}");
+            // By name, not by position: a fixture gains files over time
+            // and a test that counts from the top starts asserting about
+            // whichever file happens to be there.
+            let at = |path: &[u8]| {
+                entries
+                    .iter()
+                    .find(|e| e.raw_path == path)
+                    .unwrap_or_else(|| panic!("{} is in the tree", String::from_utf8_lossy(path)))
+            };
 
-            // Z-09: the one name that is not text says so, and the other
-            // five do not.
-            assert!(!entries[0].path_is_text());
-            assert!(entries[1..].iter().all(Entry::path_is_text));
+            // Z-09: the one name that is not text says so, and the rest
+            // do not.
+            assert!(!at(ZPL_LATIN1_NAME).path_is_text());
+            assert!(entries
+                .iter()
+                .filter(|e| e.raw_path != ZPL_LATIN1_NAME)
+                .all(Entry::path_is_text));
 
             // Z-02: the metadata comes out of the system attributes.
-            let z = entries[2].znode.as_ref().expect("znode");
+            let z = at(b"hello.txt").znode.as_ref().expect("znode");
             assert_eq!(z.file_type(), FileType::Regular);
             assert_eq!(z.permissions(), 0o644);
             assert_eq!(z.size, zpl_hello().len() as u64);
@@ -729,12 +806,12 @@ mod tests {
             assert_eq!(z.mtime, 1_757_100_001);
             assert_eq!(z.parent, 3);
 
-            let dir = entries[4].znode.as_ref().expect("znode");
+            let dir = at(b"sub").znode.as_ref().expect("znode");
             assert_eq!(dir.file_type(), FileType::Dir);
             assert_eq!(dir.permissions(), 0o755);
 
             // Z-03: a symlink whose target lives in the attributes.
-            let link = &entries[3];
+            let link = at(b"link");
             let lz = link.znode.as_ref().expect("znode");
             assert_eq!(lz.file_type(), FileType::Symlink);
             assert_eq!(
@@ -743,7 +820,7 @@ mod tests {
             );
 
             // Z-03: the file's own bytes, through the pool, checksums and all.
-            let deep = fs.object(entries[5].object).expect("object");
+            let deep = fs.object(at(b"sub/deep.txt").object).expect("object");
             let want = zpl_deep();
             assert_eq!(deep.read_range(0, want.len()).expect("read"), want);
         });
@@ -856,6 +933,98 @@ mod tests {
         });
     }
 
+    /// Z-10: an attribute that did not fit the bonus buffer is in the
+    /// spill block, and is read from there.
+    ///
+    /// The point of the fixture is that the bonus alone is a plausible
+    /// answer: the ten plain attributes are all there, the file has a
+    /// size and a mode and times, and nothing about it looks wrong. A
+    /// reader that stops at the bonus reports a file with no extended
+    /// attributes rather than a file it could not fully read.
+    #[test]
+    fn an_attribute_too_large_for_the_bonus_is_read_from_the_spill_block() {
+        with_fs(|fs| {
+            let obj = fs.lookup("spilled.txt").expect("lookup");
+            let z = fs.znode(obj).expect("znode");
+            // The bonus half: present, and not what is being tested.
+            assert_eq!(z.size, zpl_spilled().len() as u64);
+            assert_eq!(z.permissions(), 0o644);
+            // The spill half.
+            let xattrs = fs.xattrs(&z);
+            let names: Vec<&str> = xattrs.iter().map(|(n, _)| n.as_str()).collect();
+            assert_eq!(names, [ZPL_SPILLED_XATTR]);
+            assert_eq!(xattrs[0].1, zpl_spilled_value());
+            assert!(
+                xattrs[0].1.len() > 512,
+                "the value has to be one no bonus buffer could hold"
+            );
+        });
+    }
+
+    /// Z-10: a spill block that cannot be read says so, rather than
+    /// handing back the half of the attributes that survived.
+    ///
+    /// The distinction this test exists for: the file's bonus is
+    /// intact, so a reader could return a perfectly plausible znode
+    /// with no extended attributes at all. The dnode says an attribute
+    /// lives in the spill block; unreadable is not absent.
+    #[test]
+    fn a_spill_block_that_is_not_attributes_is_refused_not_ignored() {
+        with_fixture(Matching::Exact, Spill::Unreadable, |fs| {
+            let obj = fs.lookup("spilled.txt").expect("lookup");
+            let e = fs
+                .znode(obj)
+                .expect_err("a half-read object is not an answer");
+            let said = e.to_string();
+            assert!(said.contains("spill block"), "{said}");
+            // The file that spills is the only one affected: everything
+            // else in the dataset still reads.
+            let other = fs.lookup("hello.txt").expect("lookup");
+            assert_eq!(
+                fs.znode(other).expect("znode").size,
+                zpl_hello().len() as u64
+            );
+        });
+    }
+
+    /// Z-10: a dnode that owns two slots is read across both of them.
+    #[test]
+    fn a_large_dnode_is_read_across_the_slots_it_owns() {
+        with_fs(|fs| {
+            let obj = fs.lookup("bigdnode.txt").expect("lookup");
+            let d = fs.objects.get(obj).expect("dnode");
+            assert_eq!(d.extra_slots, 1, "the fixture object is two slots wide");
+            assert!(
+                d.bonus.len() > 512 - 64 - 128,
+                "its bonus does not fit one slot"
+            );
+            let z = fs.znode(obj).expect("znode");
+            assert_eq!(z.size, zpl_big_dnode().len() as u64);
+            let xattrs = fs.xattrs(&z);
+            assert_eq!(
+                xattrs.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+                [ZPL_BIG_DNODE_XATTR]
+            );
+            assert_eq!(xattrs[0].1.len(), zpl_big_dnode_value().len());
+            assert!(
+                xattrs[0]
+                    .1
+                    .windows(ZPL_BIG_DNODE_TRAP.len())
+                    .any(|w| w == ZPL_BIG_DNODE_TRAP),
+                "the attribute carries the bytes planted in the second slot"
+            );
+            // And the slot it swallowed is not an object of its own.
+            // This one parses as a dnode — those bytes are part of the
+            // attribute above — so a walk that stepped by one would not
+            // fail, it would report an object that was never there.
+            let planted = fs.objects.get(obj + 1).expect("the trap parses");
+            assert!(!planted.is_free(), "and looks like a live object");
+            assert_eq!(fs.objects.next_object(obj), obj + 2);
+            let plain = fs.lookup("hello.txt").expect("lookup");
+            assert_eq!(fs.objects.next_object(plain), plain + 1);
+        });
+    }
+
     /// Z-07: two names for one object are one object.
     #[test]
     fn a_hard_link_is_the_same_object_under_two_names() {
@@ -888,10 +1057,12 @@ mod tests {
             assert_eq!(
                 paths,
                 [
+                    "bigdnode.txt",
                     "caf\u{fffd}.txt",
                     "hardlink.txt",
                     "hello.txt",
                     "link",
+                    "spilled.txt",
                     "sub"
                 ]
             );

@@ -449,7 +449,7 @@ jobs:
           import json
           d = json.load(open("/tmp/zp/list.json"))
           by = {f["path"]: f for f in d["files"]}
-          assert list(by) == ["caf\ufffd.txt", "hardlink.txt", "hello.txt", "link", "sub", "sub/deep.txt"], list(by)
+          assert list(by) == ["bigdnode.txt", "caf\ufffd.txt", "hardlink.txt", "hello.txt", "link", "spilled.txt", "sub", "sub/deep.txt"], list(by)
           # Z-09: a name that is not UTF-8 prints as best it can and
           # carries its exact bytes alongside; the others carry none.
           assert by["caf\ufffd.txt"]["path_hex"] == "636166e92e747874", by["caf\ufffd.txt"]
@@ -457,6 +457,11 @@ jobs:
           # Z-04: extended attributes out of the system attributes.
           assert by["hello.txt"]["xattrs"] == ["user.case", "user.note"], by["hello.txt"]
           assert "xattrs" not in by["sub/deep.txt"], by["sub/deep.txt"]
+          # Z-10: an attribute too large for the bonus buffer is in the
+          # spill block, and a dnode two slots wide is read across both.
+          # Both files look complete without them, which is the point.
+          assert by["spilled.txt"]["xattrs"] == ["user.spilled"], by["spilled.txt"]
+          assert by["bigdnode.txt"]["xattrs"] == ["user.wide"], by["bigdnode.txt"]
           # Z-07: two names, one object.
           assert by["hardlink.txt"]["object"] == by["hello.txt"]["object"], by
           assert by["hello.txt"]["links"] == 2, by
@@ -497,6 +502,13 @@ jobs:
           # them would need the platform's own call.
           x = {v["name"]: v["value"] for v in f["hello.txt"]["xattrs"]}
           assert x == {"user.case": "42", "user.note": "kept in the attributes"}, x
+          # Z-10: and the ones that only a spill block or a second dnode
+          # slot had room for come out whole, not truncated.
+          x = {v["name"]: v for v in f["spilled.txt"]["xattrs"]}
+          assert x["user.spilled"]["bytes"] == 600, x
+          assert x["user.spilled"]["value"].startswith("abcdefghij"), x
+          x = {v["name"]: v for v in f["bigdnode.txt"]["xattrs"]}
+          assert x["user.wide"]["bytes"] == 400, x
           EOF
           # One path, not the whole tree.
           rm -rf /tmp/zp/one
@@ -525,6 +537,10 @@ jobs:
           rm -rf /tmp/zp/objs
           ./target/release/zvolfiles -q objects tank/fs /tmp/zp/bad0.img /tmp/zp/bad1.img -o /tmp/zp/objs || test $? = 4
           cmp /tmp/zp/out/sub/deep.txt /tmp/zp/objs/objects/000009.bin
+          # Z-10: the slot the two-slot dnode owns is not an object of
+          # its own. A dump that stepped by one would invent object 13
+          # out of that file's extended attribute.
+          python3 -c 'import json; o = json.load(open("/tmp/zp/objs/objects.json")); n = [x["object"] for x in o["objects"]]; assert 12 in n and 13 not in n, n'
           # Never a write to the evidence, and never one onto it.
           sha256sum /tmp/zp/member0.img /tmp/zp/member1.img > /tmp/zp.sums
           sha256sum -c /tmp/zp.sums

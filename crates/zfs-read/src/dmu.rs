@@ -195,6 +195,24 @@ impl<'r, 'a> DnodeArray<'r, 'a> {
         Ok(d)
     }
 
+    /// The next object number after `objnum`, skipping the slots a
+    /// large dnode owns.
+    ///
+    /// A dnode with `dn_extra_slots` occupies the slots that follow it,
+    /// and those slots hold the rest of its bonus buffer, not dnodes.
+    /// Parsing one as a dnode reads attribute bytes as a header:
+    /// usually that fails loudly, but nothing guarantees it — the bytes
+    /// are whatever the file's attributes happen to be, and a
+    /// sufficiently unlucky bonus parses as an object that was never
+    /// there. Stepping with this rather than by one is the only safe
+    /// way to walk an array that has large dnodes in it.
+    ///
+    /// A slot that cannot be read at all advances by one, so a walk
+    /// gets past it instead of stopping.
+    pub fn next_object(&self, objnum: u64) -> u64 {
+        objnum + 1 + self.get(objnum).map_or(0, |d| u64::from(d.extra_slots))
+    }
+
     /// An [`ObjectReader`] for object `objnum`.
     pub fn object(&self, objnum: u64) -> Result<ObjectReader<'r, 'a>, ReadError> {
         let dnode = self.get(objnum)?;

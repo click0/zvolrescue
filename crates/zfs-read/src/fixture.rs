@@ -9,7 +9,7 @@
 use zfs_ondisk::blkptr::{self, encode::Builder, LABEL_START_SIZE};
 use zfs_ondisk::checksum::seal_label;
 use zfs_ondisk::dmu::encode::{objset, DnodeSpec};
-use zfs_ondisk::dmu::{ot, DNODE_SIZE};
+use zfs_ondisk::dmu::{ot, DNODE_CORE_SIZE, DNODE_SIZE};
 use zfs_ondisk::dsl::encode::{dsl_dataset, dsl_dir};
 use zfs_ondisk::dsl::{DslDatasetPhys, DslDirPhys};
 use zfs_ondisk::label::{
@@ -762,6 +762,11 @@ mod zpl_attr {
     pub const WITH_XATTR: [u16; 11] = [
         ATIME, MTIME, CTIME, CRTIME, MODE, SIZE, PARENT, LINKS, UID, GID, DXATTR,
     ];
+    /// What a spill block holds when the extended attributes did not fit
+    /// beside the rest: the overflowing attribute, and only it. The
+    /// bonus keeps [`PLAIN`] and names its own layout, exactly as
+    /// OpenZFS splits a layout that will not fit one buffer.
+    pub const SPILLED: [u16; 1] = [DXATTR];
 }
 
 /// The registry value OpenZFS encodes for one attribute.
@@ -826,6 +831,66 @@ pub fn zpl_deep() -> Vec<u8> {
     (0..4096u32).map(|i| (i % 251) as u8).collect()
 }
 
+/// The contents of `spilled.txt`, the file whose extended attribute
+/// does not fit in its bonus buffer (Z-10).
+pub fn zpl_spilled() -> Vec<u8> {
+    b"my attributes did not all fit here\n".to_vec()
+}
+
+/// The name of that attribute.
+pub const ZPL_SPILLED_XATTR: &str = "user.spilled";
+
+/// Its value: 600 bytes, where the bonus buffer of a one-slot dnode
+/// with one block pointer has 192 in total.
+pub fn zpl_spilled_value() -> Vec<u8> {
+    (0..600u32).map(|i| b'a' + (i % 26) as u8).collect()
+}
+
+/// The contents of `bigdnode.txt`, the file stored in a two-slot dnode.
+pub fn zpl_big_dnode() -> Vec<u8> {
+    b"I am two dnode slots wide\n".to_vec()
+}
+
+/// The name of its extended attribute.
+pub const ZPL_BIG_DNODE_XATTR: &str = "user.wide";
+
+/// Its value: 400 bytes, which fit beside the other attributes only
+/// because the dnode is 1024 bytes rather than 512.
+///
+/// Sixteen of those bytes are [`ZPL_BIG_DNODE_TRAP`], placed where the
+/// dnode's second slot begins.
+pub fn zpl_big_dnode_value() -> Vec<u8> {
+    (0..400u32).map(|i| b'A' + (i % 26) as u8).collect()
+}
+
+/// A dnode header, planted in the second slot of the fixture's large
+/// dnode (Z-10).
+///
+/// The slot a large dnode owns holds the rest of its bonus buffer, and
+/// those bytes are whatever the file's attributes happen to be. Usually
+/// they do not parse as a dnode and a walk that stepped by one slot
+/// would merely fail; these do parse, so such a walk reports an object
+/// that was never there. A fixture where the wrong answer is a loud one
+/// tests nothing about the guard against it.
+pub const ZPL_BIG_DNODE_TRAP: [u8; 16] = [
+    ot::PLAIN_FILE_CONTENTS, // dn_type
+    17,                      // dn_indblkshift
+    1,                       // dn_nlevels
+    1,                       // dn_nblkptr
+    0,                       // dn_bonustype
+    0,                       // dn_checksum
+    0,                       // dn_compress
+    0,                       // dn_flags
+    8,
+    0, // dn_datablkszsec: 4 KiB
+    0,
+    0, // dn_bonuslen
+    0, // dn_extra_slots
+    0,
+    0,
+    0,
+];
+
 /// The name of the fixture's one file whose name is not UTF-8:
 /// `café.txt` as a Latin-1 machine wrote it, which is a name a dataset
 /// with `utf8only=off` is allowed to hold (Z-09).
@@ -863,6 +928,20 @@ pub enum Matching {
     NormalizedFormD,
 }
 
+/// What the ZPL fixture's spill block holds (Z-10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Spill {
+    /// The attribute that did not fit the bonus, written the way
+    /// OpenZFS writes it: a buffer with a header of its own, naming a
+    /// layout of its own.
+    Attributes,
+    /// A block that is not a system-attribute buffer at all — the shape
+    /// the damage takes when a spill block is overwritten. The dnode
+    /// still says an attribute lives there, so the attribute is not
+    /// absent, it is unreadable, and the two are not the same answer.
+    Unreadable,
+}
+
 /// The file in a [`Matching::NormalizedFormD`] fixture, as stored:
 /// `résumé.txt` composed, the way most systems write it.
 pub const ZPL_COMPOSED_NAME: &[u8] = "r\u{e9}sum\u{e9}.txt".as_bytes();
@@ -870,7 +949,12 @@ pub const ZPL_COMPOSED_NAME: &[u8] = "r\u{e9}sum\u{e9}.txt".as_bytes();
 /// The same name decomposed, the way a macOS client would ask for it.
 pub const ZPL_DECOMPOSED_NAME: &[u8] = "re\u{301}sume\u{301}.txt".as_bytes();
 
-fn build_zpl_objset(m: &mut [Vec<u8>], a: &mut Alloc, matching: Matching) -> [u8; blkptr::SIZE] {
+fn build_zpl_objset(
+    m: &mut [Vec<u8>],
+    a: &mut Alloc,
+    matching: Matching,
+    spill: Spill,
+) -> [u8; blkptr::SIZE] {
     let mut dnodes = vec![0u8; 16384];
     let mut put = |obj: u64, bytes: Vec<u8>| {
         let at = obj as usize * DNODE_SIZE;
@@ -966,6 +1050,7 @@ fn build_zpl_objset(m: &mut [Vec<u8>], a: &mut Alloc, matching: Matching) -> [u8
             ("2", 2, as_bytes(&zpl_attr::PLAIN)),
             ("3", 2, as_bytes(&zpl_attr::WITH_SYMLINK)),
             ("4", 2, as_bytes(&zpl_attr::WITH_XATTR)),
+            ("6", 2, as_bytes(&zpl_attr::SPILLED)),
         ],
     );
     let b0 = a.put(m, &hdr, ot::SA, 0, 100);
@@ -989,13 +1074,19 @@ fn build_zpl_objset(m: &mut [Vec<u8>], a: &mut Alloc, matching: Matching) -> [u8
         Matching::Exact => ZPL_LATIN1_NAME,
         Matching::NormalizedFormD => ZPL_COMPOSED_NAME,
     };
-    let root_entries: [(&[u8], u64); 5] = [
+    let root_entries: [(&[u8], u64); 7] = [
+        // A large dnode: its attributes fit, but only because it owns
+        // two slots instead of one (Z-10).
+        (b"bigdnode.txt", dirent_value(12, 8)),
         // A name no dataset with utf8only=on could hold (Z-09).
         (odd_name, dirent_value(10, 8)),
         // Two names for one object: a hard link (Z-07).
         (b"hardlink.txt", dirent_value(6, 8)),
         (b"hello.txt", dirent_value(6, 8)),
         (b"link", dirent_value(8, 10)),
+        // An attribute that did not fit the bonus and went to the spill
+        // block (Z-10).
+        (b"spilled.txt", dirent_value(11, 8)),
         (b"sub", dirent_value(7, 4)),
     ];
     let root_blk = a.put(
@@ -1096,6 +1187,74 @@ fn build_zpl_objset(m: &mut [Vec<u8>], a: &mut Alloc, matching: Matching) -> [u8
             sa_bonus(2, &meta(0o100644, latin1.len() as u64, 3, 1), &[]),
         ),
     );
+    // 11: a file whose extended attribute is too large to sit beside
+    // the rest of its attributes. The bonus holds the ten plain ones
+    // and names layout 2; the spill block holds a buffer of its own,
+    // with its own header, naming layout 6 (Z-10).
+    let spilled = zpl_spilled();
+    let packed = pack(&list(vec![(
+        ZPL_SPILLED_XATTR,
+        Value::Bytes(zpl_spilled_value()),
+    )]));
+    let mut spill_block = match spill {
+        Spill::Attributes => sa_bonus(6, &[(zpl_attr::DXATTR, packed)], &[zpl_attr::DXATTR]),
+        // Checksummed and read back exactly as written; what is wrong
+        // with it is what it says, not whether it arrived.
+        Spill::Unreadable => b"this is not a system-attribute buffer".to_vec(),
+    };
+    spill_block.resize(4096, 0);
+    let spill_blk = a.put(m, &spill_block, ot::SA, 0, 100);
+    let mut spilled_block = spilled.clone();
+    spilled_block.resize(4096, 0);
+    let spilled_data = a.put(m, &spilled_block, ot::PLAIN_FILE_CONTENTS, 0, 100);
+    put(
+        11,
+        DnodeSpec {
+            object_type: ot::PLAIN_FILE_CONTENTS,
+            datablksz: 4096,
+            bonus_type: ot::SA,
+            bonus: sa_bonus(2, &meta(0o100644, spilled.len() as u64, 3, 1), &[]),
+            blkptrs: vec![spilled_data],
+            spill: Some(spill_blk),
+            ..DnodeSpec::default()
+        }
+        .build(),
+    );
+    // 12 (and 13, which it owns): a large dnode. The same attributes as
+    // object 6, but the extended attribute is large enough that they
+    // only fit because the dnode is two slots rather than one — which
+    // is what `large_dnode` is for, and what a reader that assumes 512
+    // bytes per object would misread (Z-10).
+    let big = zpl_big_dnode();
+    let big_packed = pack(&list(vec![(
+        ZPL_BIG_DNODE_XATTR,
+        Value::Bytes(zpl_big_dnode_value()),
+    )]));
+    let mut big_fields = meta(0o100644, big.len() as u64, 3, 1);
+    big_fields.push((zpl_attr::DXATTR, big_packed));
+    let mut big_bonus = sa_bonus(4, &big_fields, &[zpl_attr::DXATTR]);
+    // Where the second slot of this dnode starts, counted from the
+    // beginning of the bonus buffer: the core, then the one block
+    // pointer, then 512 bytes of the first slot.
+    let second_slot = DNODE_SIZE - (DNODE_CORE_SIZE + blkptr::SIZE);
+    big_bonus[second_slot..second_slot + ZPL_BIG_DNODE_TRAP.len()]
+        .copy_from_slice(&ZPL_BIG_DNODE_TRAP);
+    let mut big_block = big.clone();
+    big_block.resize(4096, 0);
+    let big_data = a.put(m, &big_block, ot::PLAIN_FILE_CONTENTS, 0, 100);
+    put(
+        12,
+        DnodeSpec {
+            object_type: ot::PLAIN_FILE_CONTENTS,
+            datablksz: 4096,
+            bonus_type: ot::SA,
+            bonus: big_bonus,
+            blkptrs: vec![big_data],
+            extra_slots: 1,
+            ..DnodeSpec::default()
+        }
+        .build(),
+    );
 
     let dnode_blk = a.put(m, &dnodes, ot::DNODE, 0, 100);
     let meta_dnode = DnodeSpec {
@@ -1178,6 +1337,16 @@ pub fn zpl_members(pool: &mut Pool, size: u64) -> Vec<Vec<u8>> {
 /// The same fixture with the dataset's name-matching properties chosen
 /// (Z-09).
 pub fn zpl_members_matching(pool: &mut Pool, size: u64, matching: Matching) -> Vec<Vec<u8>> {
+    zpl_members_with(pool, size, matching, Spill::Attributes)
+}
+
+/// The same fixture with the spill block chosen too (Z-10).
+pub fn zpl_members_with(
+    pool: &mut Pool,
+    size: u64,
+    matching: Matching,
+    spill: Spill,
+) -> Vec<Vec<u8>> {
     let n = pool.members.len();
     let mut members: Vec<Vec<u8>> = (0..n).map(|_| vec![0u8; size as usize]).collect();
     let layout = match pool.nparity {
@@ -1189,7 +1358,7 @@ pub fn zpl_members_matching(pool: &mut Pool, size: u64, matching: Matching) -> V
     };
     let mut a = Alloc::with_layout(0x20_0000, layout);
     let m = &mut members[..];
-    let os_zpl = build_zpl_objset(m, &mut a, matching);
+    let os_zpl = build_zpl_objset(m, &mut a, matching, spill);
     let empty_meta = DnodeSpec {
         object_type: ot::DNODE,
         ..DnodeSpec::default()

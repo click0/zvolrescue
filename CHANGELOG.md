@@ -33,6 +33,25 @@ tagged. `v0.7.1` is the release that carries those six.
   which has been out of support for some time.
 
 ### Added
+* **`zvolfiles` reads the attributes that did not fit the bonus buffer
+  (COMPANIONS Z-10).** A system-attribute layout too large for a dnode's
+  bonus is split by OpenZFS: what fits stays there and the rest goes to
+  the spill block, under a header and a layout of its own. Until now
+  only the bonus half was read, and the half in the spill block was lost
+  without a word — an extended attribute of any size is the usual thing
+  to go there, so a file with attributes came out looking like a file
+  with none. Both halves are now placed and merged. A spill block that
+  cannot be read, or that is not a system-attribute buffer, is an error
+  naming the object, because the bonus half on its own looks like a
+  complete answer and is not one.
+* **A dnode that owns more than one slot is walked as one object
+  (COMPANIONS Z-10).** `large_dnode` dnodes were already parsed across
+  the slots they own; what was missing was a way to enumerate an array
+  containing them without reading a bonus buffer as the next object's
+  header. `DnodeArray::next_object` steps by what the dnode owns. The
+  fixture now carries both cases — a file whose attribute spilled and a
+  file two slots wide — and CI asserts both come out of `zvolfiles`
+  whole, through the binary and into the manifest.
 * **A device is not an image, and the record now says which (SPEC
   F-68).** Every run records, per input, whether it was a regular file
   or a device, and says once when any input is a device — not because
