@@ -12,6 +12,7 @@ use serde_json::{json, Map, Value as Json};
 use zfs_ondisk::checksum::ChecksumStatus;
 use zfs_ondisk::label::{pool_state_name, LabelConfig};
 use zfs_ondisk::nvlist::{NvList, Value};
+use zfs_read::dsl::removed_tops_of;
 use zfs_read::pool::{assemble, PoolAssembly};
 use zfs_read::vdev::{DeviceScan, LabelScan};
 use zfs_read::zeropoint::{
@@ -236,9 +237,14 @@ struct PoolOut {
     txg: Option<u64>,
     vdev_children: Option<u64>,
     missing_tops: Vec<u64>,
-    /// The pool says a top-level vdev was removed, so some of the ids in
-    /// `missing_tops` may be vdevs that are gone on purpose rather than
-    /// members that are absent (SPEC F-69).
+    /// Top-level vdevs the pool's own configuration says were removed
+    /// (SPEC F-69): counted, described by no label, and not missing.
+    /// Their blocks live on the vdevs that remain and are read through
+    /// the mapping each left in the MOS.
+    removed_tops: Vec<u64>,
+    /// `device_removal` is active. When `missing_tops` is not empty as
+    /// well, the MOS could not be asked which of them were removed —
+    /// or they really are missing.
     device_removal: bool,
     readable: bool,
     hosts: Vec<HostOut>,
@@ -440,6 +446,7 @@ fn pool_out(p: &PoolAssembly, paths: &[PathBuf]) -> PoolOut {
         txg: p.txg,
         vdev_children: p.vdev_children,
         missing_tops: p.missing_tops(),
+        removed_tops: p.removed_tops.clone(),
         device_removal: p
             .features_for_read
             .iter()
@@ -683,16 +690,23 @@ fn print_text(out: &ScanOut, verbose: u8) {
                 );
             }
         }
+        for id in &p.removed_tops {
+            println!(
+                "  top-level vdev #{id}: removed; its blocks live on the vdevs that remain and are read through the mapping it left in the MOS (SPEC F-69)"
+            );
+        }
         for id in &p.missing_tops {
             println!("  top-level vdev #{id}: no scanned member describes it  MISSING");
         }
         // A removed vdev is counted by `vdev_children` like any other and
-        // has no member to find, so it is indistinguishable here from one
-        // whose disks were not given. Which it is lives in the pool's
-        // configuration object, and reading the pool is what consults it.
+        // has no member to find. The pool's configuration object is what
+        // tells it from one whose disks were not given, and it was asked
+        // above; a vdev still listed as missing here is one the MOS could
+        // not vouch for — because it could not be read, or because the
+        // vdev really is missing.
         if p.device_removal && !p.missing_tops.is_empty() {
             println!(
-                "  note: device_removal is active, so some of the vdev(s) above may have been removed rather than lost; reading the pool translates through what they left behind (SPEC F-69)"
+                "  note: device_removal is active and the MOS could not say whether the vdev(s) above were removed; reading the pool at a txg whose MOS survives is what settles it (SPEC F-69)"
             );
         }
         for m in &p.stale {
@@ -865,8 +879,11 @@ fn emit_label(
 pub fn run(g: &Global, devices: &[PathBuf], zp: &ZeroPointOpts, emit: &EmitOpts) -> u8 {
     let mut scans: Vec<Option<DeviceScan>> = Vec::with_capacity(devices.len());
     let mut outs: Vec<DeviceOut> = Vec::with_capacity(devices.len());
+    // Kept open past the loop: telling a removed top-level vdev from a
+    // missing one means asking the pool's MOS (SPEC F-69).
+    let mut sources: Vec<Option<FileSource>> = Vec::with_capacity(devices.len());
     for path in devices {
-        let (scan, size, error, zero_point, table) = match FileSource::open(path) {
+        let (scan, size, error, zero_point, table, source) = match FileSource::open(path) {
             Ok(src) => {
                 let (scan, error) = match scan_with_recovered_base(&src) {
                     Ok(s) => (Some(s), None),
@@ -882,9 +899,9 @@ pub fn run(g: &Global, devices: &[PathBuf], zp: &ZeroPointOpts, emit: &EmitOpts)
                 } else {
                     Vec::new()
                 };
-                (scan, src.size(), error, zero_point, table)
+                (scan, src.size(), error, zero_point, table, Some(src))
             }
-            Err(e) => (None, 0, Some(e.to_string()), Vec::new(), None),
+            Err(e) => (None, 0, Some(e.to_string()), Vec::new(), None, None),
         };
         let mut out = device_out(path, &scan, size, error, g.verbose);
         out.zero_point = zero_point;
@@ -906,11 +923,24 @@ pub fn run(g: &Global, devices: &[PathBuf], zp: &ZeroPointOpts, emit: &EmitOpts)
         });
         outs.push(out);
         scans.push(scan);
+        sources.push(source);
     }
-    let pools: Vec<PoolOut> = assemble(&scans)
-        .iter()
-        .map(|p| pool_out(p, devices))
-        .collect();
+    let mut assembled = assemble(&scans);
+    {
+        let opened: Vec<Option<&dyn BlockSource>> = sources
+            .iter()
+            .map(|s| s.as_ref().map(|s| s as &dyn BlockSource))
+            .collect();
+        let bases: Vec<u64> = scans
+            .iter()
+            .map(|s| s.as_ref().map_or(0, |s| s.base))
+            .collect();
+        for pool in &mut assembled {
+            let removed = removed_tops_of(&scans, opened.clone(), &bases, pool);
+            pool.note_removed_tops(removed);
+        }
+    }
+    let pools: Vec<PoolOut> = assembled.iter().map(|p| pool_out(p, devices)).collect();
     let out = ScanOut {
         devices: outs,
         pools,

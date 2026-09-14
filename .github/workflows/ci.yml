@@ -586,10 +586,25 @@ jobs:
           ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/f69b/member0.img /tmp/f69b/member1.img --txg 4816229 -o /tmp/f69b/out.img > /tmp/f69b/log
           cmp /tmp/f69/out.img /tmp/f69b/out.img
           grep -q "0 zeroed (unreadable)" /tmp/f69/log
-          # The removed vdev is still counted, has no member to find, and
-          # `scan` says which of those two things it cannot tell apart.
-          ./target/release/zvolrescue -q scan /tmp/f69/member0.img | grep -q "top-level vdev #1: no scanned member describes it"
-          ./target/release/zvolrescue -q scan /tmp/f69/member0.img | grep -q "may have been removed rather than lost"
+          # The removed vdev is still counted and has no member to find.
+          # From the labels alone that is a missing vdev; `scan` asks the
+          # pool's own configuration and says which it really is — so a
+          # pool with every live member present is READABLE, not "NOT
+          # readable", and the JSON `readable` a script keys on is true.
+          ./target/release/zvolrescue -q scan /tmp/f69/member0.img /tmp/f69/member1.img | grep -q "top-level vdev #1: removed; its blocks live on the vdevs that remain"
+          ./target/release/zvolrescue -q scan /tmp/f69/member0.img /tmp/f69/member1.img | grep -q "READABLE from scanned members"
+          ./target/release/zvolrescue -q -f json scan /tmp/f69/member0.img /tmp/f69/member1.img | python3 -c 'import json,sys; p=json.load(sys.stdin)["pools"][0]; assert p["readable"] and p["removed_tops"] == [1] and p["missing_tops"] == [], p'
+          # A pool that never had a vdev removed never opens its MOS for this.
+          test "$(./target/release/zvolrescue -q --debug scan /tmp/f69b/member0.img /tmp/f69b/member1.img 2>&1 | grep -c '\[indirect\]')" = 0
+          # A label-less member is still bound into a pool with a removed
+          # vdev: the vdev that is gone on purpose is not a reason to
+          # refuse the one that is only unlabelled (SPEC F-62).
+          cp /tmp/f69/member1.img /tmp/f69/nolabel.img
+          python3 -c 'b=bytearray(open("/tmp/f69/nolabel.img","rb").read())
+          for off in (0, 256*1024, len(b)-512*1024, len(b)-256*1024):
+              b[off+16*1024:off+128*1024] = bytes(112*1024)
+          open("/tmp/f69/nolabel.img","wb").write(bytes(b))'
+          ./target/release/zvolrescue -q list -r /tmp/f69/nolabel.img /tmp/f69/member0.img --assume-member /tmp/f69/nolabel.img 2>&1 | grep -q "read as leaf"
           # Never a write to the evidence.
           sha256sum /tmp/f69/member0.img /tmp/f69/member1.img > /tmp/f69.sums
           ./target/release/zvolfiles -q list tank /tmp/f69/member0.img > /dev/null 2>&1 || true

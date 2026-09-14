@@ -87,6 +87,12 @@ pub struct PoolAssembly {
     pub features_for_read: Vec<String>,
     /// Top-level vdevs for which at least one member was scanned.
     pub tops: Vec<TopVdev>,
+    /// Top-level vdevs the pool's own configuration says were removed
+    /// (SPEC F-69): counted in `vdev_children`, described by no label —
+    /// removal is what took their members away — and not missing. Only
+    /// the MOS knows; empty until [`PoolAssembly::note_removed_tops`]
+    /// has been told.
+    pub removed_tops: Vec<u64>,
     /// Distinct `(hostid, hostname)` pairs seen in labels.
     pub hosts: Vec<(Option<u64>, Option<String>)>,
     /// Indices of scanned devices that belong to this pool.
@@ -112,14 +118,29 @@ pub struct StaleMember {
 }
 
 impl PoolAssembly {
-    /// Top-level vdev ids that no scanned device described.
+    /// Top-level vdev ids that no scanned device described and the pool
+    /// does not say were removed.
     pub fn missing_tops(&self) -> Vec<u64> {
         let Some(n) = self.vdev_children else {
             return Vec::new();
         };
         (0..n)
             .filter(|id| !self.tops.iter().any(|t| t.id == *id))
+            .filter(|id| !self.removed_tops.contains(id))
             .collect()
+    }
+
+    /// Record which of the undescribed top-level vdevs were removed.
+    /// Ids that a label does describe are ignored: a label is a member
+    /// that exists, and the MOS is believed only about what none does.
+    pub fn note_removed_tops(&mut self, removed: impl IntoIterator<Item = u64>) {
+        let mut ids: Vec<u64> = removed
+            .into_iter()
+            .filter(|id| !self.tops.iter().any(|t| t.id == *id))
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        self.removed_tops = ids;
     }
 
     /// True when every top-level vdev is known and readable.
@@ -358,6 +379,7 @@ pub fn assemble(scans: &[Option<DeviceScan>]) -> Vec<PoolAssembly> {
             vdev_children: newest.vdev_children,
             features_for_read: newest.features_for_read.clone(),
             tops,
+            removed_tops: Vec::new(),
             hosts,
             devices: entries.iter().map(|(i, _)| *i).collect(),
             stale,
@@ -509,6 +531,51 @@ pub enum TxgSelect {
     Exact(u64),
     /// Highest TXG whose uberblock timestamp is at or before this Unix time.
     Before(u64),
+}
+
+#[cfg(test)]
+mod removed_tops_tests {
+    use super::*;
+
+    fn pool(children: u64, described: &[u64]) -> PoolAssembly {
+        PoolAssembly {
+            name: "tank".into(),
+            guid: 1,
+            state: None,
+            txg: None,
+            vdev_children: Some(children),
+            features_for_read: vec!["com.delphix:device_removal".into()],
+            tops: described
+                .iter()
+                .map(|id| TopVdev {
+                    id: *id,
+                    guid: 0,
+                    name: format!("mirror-{id}"),
+                    kind: "mirror".into(),
+                    nparity: None,
+                    ashift: Some(12),
+                    members: Vec::new(),
+                    tree: Default::default(),
+                })
+                .collect(),
+            removed_tops: Vec::new(),
+            hosts: Vec::new(),
+            devices: Vec::new(),
+            stale: Vec::new(),
+        }
+    }
+
+    /// Counted, undescribed, and — once the pool has said so — not
+    /// missing. A vdev a label does describe is a member that exists,
+    /// whatever the MOS says about its id.
+    #[test]
+    fn a_removed_top_is_not_missing_and_a_described_one_is_not_removed() {
+        let mut p = pool(4, &[0, 2]);
+        assert_eq!(p.missing_tops(), vec![1, 3]);
+        p.note_removed_tops([3, 0, 3]);
+        assert_eq!(p.removed_tops, vec![3]);
+        assert_eq!(p.missing_tops(), vec![1]);
+    }
 }
 
 /// A verified uberblock available for a pool, with where it was found.

@@ -11,6 +11,7 @@
 use std::path::PathBuf;
 
 use zfs_read::bind::{bind_by_reading, Verdict};
+use zfs_read::dsl::removed_tops_of;
 use zfs_read::hints::{search_order, LayoutHints};
 use zfs_read::pool::{assemble, PoolAssembly};
 use zfs_read::vdev::DeviceScan;
@@ -423,6 +424,14 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
         .iter()
         .map(|s| s.as_ref().map(|s| s as &dyn BlockSource))
         .collect();
+    // A top-level vdev no label describes is missing, unless the pool
+    // itself says it was removed (SPEC F-69). Asked before anything
+    // judges what is missing, so that `--assume-member` does not refuse
+    // a leaf on account of a vdev that is gone on purpose.
+    for pool in &mut pools {
+        let removed = removed_tops_of(&scans, devices.clone(), &bases, pool);
+        pool.note_removed_tops(removed);
+    }
     bind_assumed(spec, &paths, &mut pools, &scans, &devices, &bases)?;
     drop(devices);
     Ok(Members {
@@ -491,6 +500,7 @@ mod assume_member_tests {
                     tree: Default::default(),
                 })
                 .collect(),
+            removed_tops: Vec::new(),
             hosts: Vec::new(),
             devices: Vec::new(),
             stale: Vec::new(),

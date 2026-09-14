@@ -110,6 +110,7 @@ impl LayoutHints {
             // what the pool has turned on; nothing here claims otherwise.
             features_for_read: Vec::new(),
             tops,
+            removed_tops: Vec::new(),
             hosts: Vec::new(),
             devices,
             stale: Vec::new(),

@@ -112,11 +112,19 @@ tagged. `v0.7.1` is the release that carries those six.
   indirect vdev in it, and nothing is translated, because at that point
   nothing had been.
 
-  `scan` gained one line rather than a claim it cannot support. A
-  removed vdev is still counted in `vdev_children` and still has no
-  member to find, so from the labels alone it is indistinguishable from
-  a member that was not given; `scan` does not read the MOS, so it says
-  that the distinction exists and that reading the pool resolves it.
+  `scan` asks rather than guesses. A removed vdev is still counted in
+  `vdev_children` and still has no member to find, so from the labels
+  alone it is a missing vdev — and a first version of this said exactly
+  that, calling a pool with every live member present "NOT readable" in
+  the summary line and `readable: false` in the JSON a script keys on.
+  Now `scan` asks the pool's configuration object which undescribed
+  vdevs were removed, only when there is one to ask about and
+  `device_removal` is active (a healthy pool never opens its MOS for
+  this), and reports them as removed with the pool readable. When the
+  MOS cannot be reached it says so and leaves them missing, which they
+  may well be. The same answer reaches `--assume-member`, which no
+  longer counts a vdev that is gone on purpose against the leaf being
+  bound.
 
   `com.delphix:device_removal` moves to the features this build honours
   and `com.delphix:obsolete_counts` deliberately does not. The counts

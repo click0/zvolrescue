@@ -18,9 +18,11 @@ use zfs_ondisk::zap::Value;
 use zfs_ondisk::Endian;
 
 use crate::dmu::{DnodeArray, ObjectReader};
+use crate::pool::{select_uberblock, uberblock_candidates, PoolAssembly, TxgSelect};
+use crate::vdev::DeviceScan;
 use crate::zap::read_zap;
 use crate::zio::{PoolReader, ReadError};
-use zvolrescue_io::trace;
+use zvolrescue_io::{trace, BlockSource};
 
 /// MOS object number of the object directory.
 pub const OBJECT_DIRECTORY: u64 = 1;
@@ -489,6 +491,72 @@ pub fn load_removed_vdevs(reader: &PoolReader<'_>, mos: &DnodeArray<'_, '_>, con
                 "vdev {}: mapping object {object} unreadable: {e}",
                 node.id
             ),
+        }
+    }
+}
+
+/// Which of a pool's undescribed top-level vdevs were removed, asked of
+/// the pool itself (SPEC F-69).
+///
+/// The labels count a removed vdev in `vdev_children` and describe it
+/// nowhere, so from the labels alone it is indistinguishable from a
+/// member that was not given. The pool's configuration object in the
+/// MOS is the only account that tells the two apart, and this asks it —
+/// but only when there is something to ask about (an undescribed vdev)
+/// and a reason to think the answer could be "removed" (the
+/// `device_removal` feature is active, which every pool with an
+/// indirect vdev has). A healthy pool with every member present never
+/// opens its MOS for this.
+///
+/// Best-effort by design: a pool whose MOS cannot be reached says
+/// nothing, and the ids stay missing, which they may well be. Reading
+/// the pool is what finds out.
+pub fn removed_tops_of(
+    scans: &[Option<DeviceScan>],
+    devices: Vec<Option<&dyn BlockSource>>,
+    bases: &[u64],
+    pool: &PoolAssembly,
+) -> Vec<u64> {
+    let removal_active = pool
+        .features_for_read
+        .iter()
+        .any(|f| f == "com.delphix:device_removal");
+    if pool.missing_tops().is_empty() || !removal_active {
+        return Vec::new();
+    }
+    let candidates = uberblock_candidates(scans, pool);
+    let Some(chosen) = select_uberblock(&candidates, TxgSelect::Newest) else {
+        trace!(
+            "indirect",
+            "pool {:?}: no verified uberblock, so which vdevs were removed stays unknown",
+            pool.name
+        );
+        return Vec::new();
+    };
+    let reader = PoolReader::new(pool, devices).with_base_offsets(bases);
+    match open_mos(&reader, &chosen.ub) {
+        Ok(_) => {
+            let ids: Vec<u64> = reader
+                .removed_vdevs()
+                .into_iter()
+                .map(|(v, _)| u64::from(v))
+                .collect();
+            trace!(
+                "indirect",
+                "pool {:?}: the MOS at txg {} says top-level vdev(s) {ids:?} were removed",
+                pool.name,
+                chosen.ub.txg
+            );
+            ids
+        }
+        Err(e) => {
+            trace!(
+                "indirect",
+                "pool {:?}: MOS unreadable at txg {}, so which vdevs were removed stays unknown: {e}",
+                pool.name,
+                chosen.ub.txg
+            );
+            Vec::new()
         }
     }
 }
