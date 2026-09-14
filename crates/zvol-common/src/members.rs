@@ -547,3 +547,72 @@ mod assume_member_tests {
         );
     }
 }
+
+/// The refusal on a feature this build cannot account for (SPEC F-70),
+/// on scans of real fixture members rather than on strings.
+#[cfg(test)]
+mod unaccounted_feature_tests {
+    use super::refuse_unaccounted_features;
+    use zfs_ondisk::label::LABEL_SIZE;
+    use zfs_read::fixture::{build_sample_mos, Alloc, Pool};
+    use zfs_read::vdev::{scan_device, DeviceScan};
+    use zvolrescue_io::MemSource;
+
+    const SIZE: u64 = 64 * LABEL_SIZE;
+
+    fn scans_claiming(features: &[&str]) -> Vec<Option<DeviceScan>> {
+        let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1)]);
+        for f in features {
+            pool = pool.with_feature(f);
+        }
+        let mut members = vec![vec![0u8; SIZE as usize]];
+        let mut a = Alloc::new(0x20_0000);
+        build_sample_mos(&mut pool, &mut members, &mut a);
+        pool.write_labels(0, &mut members[0]);
+        let src = MemSource::new(members.remove(0));
+        vec![scan_device(&src).ok()]
+    }
+
+    #[test]
+    fn a_pool_whose_features_are_all_accounted_for_is_not_refused() {
+        assert_eq!(
+            refuse_unaccounted_features(&scans_claiming(&[]), false),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_known_but_unimplemented_feature_is_refused() {
+        let scans = scans_claiming(&["org.openzfs:raidz_expansion"]);
+        assert_eq!(
+            refuse_unaccounted_features(&scans, false),
+            Err(crate::exit::UNRECOVERABLE)
+        );
+    }
+
+    #[test]
+    fn a_feature_this_build_has_never_heard_of_is_refused_too() {
+        let scans = scans_claiming(&["org.example:not_a_real_feature"]);
+        assert_eq!(
+            refuse_unaccounted_features(&scans, false),
+            Err(crate::exit::UNRECOVERABLE)
+        );
+    }
+
+    /// The override reads anyway; the cost is stated on stderr, which
+    /// is not what this checks.
+    #[test]
+    fn the_override_reads_anyway() {
+        let scans = scans_claiming(&["org.openzfs:raidz_expansion", "org.example:unknown"]);
+        assert_eq!(refuse_unaccounted_features(&scans, true), Ok(()));
+    }
+
+    /// A member that could not be scanned contributes nothing to the
+    /// list and does not by itself refuse the pool.
+    #[test]
+    fn an_unscanned_member_says_nothing_about_features() {
+        let mut scans = scans_claiming(&[]);
+        scans.push(None);
+        assert_eq!(refuse_unaccounted_features(&scans, false), Ok(()));
+    }
+}
