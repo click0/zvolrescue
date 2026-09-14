@@ -40,6 +40,12 @@ pub struct FileRef {
     pub size: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
+    /// Legacy digests taken while the file was written, when `--hash`
+    /// asked for them (SPEC F-53). Absent everywhere else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha1: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub md5: Option<String>,
 }
 
 /// A piece of evidence and what was run against it.
@@ -85,6 +91,11 @@ pub struct Extraction {
     pub size: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
+    /// Legacy digests of the same image (SPEC F-53).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha1: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub md5: Option<String>,
     /// Blocks that could not be read and were written as zeros.
     pub errors: u64,
     /// The extraction stopped early (`--strict` on an unreadable block).

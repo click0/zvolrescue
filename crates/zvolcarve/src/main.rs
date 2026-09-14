@@ -132,6 +132,11 @@ enum Command {
         /// Extract this many bytes instead of what the dnode implies.
         #[arg(long, value_name = "BYTES")]
         size: Option<u64>,
+        /// Also hash the image with these, as it is written, for a
+        /// toolchain that wants them: `md5`, `sha1`, comma-separated.
+        /// SHA-256 is always taken (SPEC F-53).
+        #[arg(long, value_name = "LIST")]
+        hash: Option<String>,
     },
 }
 
@@ -206,17 +211,29 @@ fn main() -> ExitCode {
             output,
             strict,
             size,
-        } => dump::run(
-            &cli.global,
-            &pool,
-            &dump::Options {
-                dir,
-                candidate,
-                output,
-                strict,
-                size,
-            },
-        ),
+            hash,
+        } => {
+            let hash = match hash.as_deref().map(zfs_read::hash::Extra::parse) {
+                None => zfs_read::hash::Extra::none(),
+                Some(Ok(e)) => e,
+                Some(Err(e)) => {
+                    eprintln!("zvolcarve: --hash: {e}");
+                    return ExitCode::from(exit::USAGE);
+                }
+            };
+            dump::run(
+                &cli.global,
+                &pool,
+                &dump::Options {
+                    dir,
+                    candidate,
+                    output,
+                    strict,
+                    size,
+                    hash,
+                },
+            )
+        }
     };
     ExitCode::from(code)
 }

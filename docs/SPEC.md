@@ -221,7 +221,7 @@ Priority: **M** = must (v1), **S** = should (v1 if time permits), **C** = could 
 | F-50 | M | Every command supports `-f text` (default) and `-f json` output. |
 | F-51 | M ◇ | `zvolreport` produces a single document: evidence list with SHA-256 of every input, labels, uberblock ring, dataset history, extraction log with output hashes, tool version and command line. |
 | F-52 | M ◇ | TXG timeline: TXG → uberblock timestamp → datasets born/destroyed → hostname/hostid seen. |
-| F-53 | S | Hash outputs on the fly (SHA-256, optionally MD5/SHA-1 for compatibility with existing forensic toolchains). |
+| F-53 | S | **Hash outputs on the fly.** SHA-256 always; `dump --hash md5,sha1` takes those in the same pass over the bytes, because an extracted image usually leaves for an acquisition log, a case-management system or a hashset that may speak only one of them, and taking a digest afterwards costs another full read of a multi-terabyte image. Neither is offered as a check on whether the image is *right* — both have practical collision attacks, which matters when someone may have chosen the bytes and does not when lining an image up against a record written before this tool touched it. Whatever was taken goes into the evidence record and the report, and `zvolreport verify` checks every digest a record carries, one result per digest, reading the file once for all of them. A digest name that is not one of these is refused, not ignored. |
 | F-54 | S | Machine-readable evidence log (`--evidence-log FILE`) in JSON Lines, append-only. |
 
 ### 5.6 Recovering the vdev zero point when the labels are gone

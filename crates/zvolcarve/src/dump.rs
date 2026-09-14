@@ -11,8 +11,9 @@ use std::path::PathBuf;
 use zfs_ondisk::dmu::DnodePhys;
 use zfs_ondisk::Endian;
 use zfs_read::dmu::ObjectReader;
+use zfs_read::hash::Extra;
 use zfs_read::zio::PoolReader;
-use zfs_read::zvol::{extract, OnError};
+use zfs_read::zvol::{extract_hashing, OnError};
 use zvol_common::evidence::FileRef;
 use zvol_common::members::{choose_pool, open_members};
 use zvol_common::{exit, Format, Global, PoolSpec};
@@ -27,6 +28,8 @@ pub struct Options {
     pub output: PathBuf,
     pub strict: bool,
     pub size: Option<u64>,
+    /// Legacy digests to take alongside SHA-256 (SPEC F-53).
+    pub hash: Extra,
 }
 
 /// Run `dump`.
@@ -119,7 +122,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     } else {
         OnError::Zero
     };
-    let report = match extract(&obj, size, &mut sink, on_error, |_, _| {}) {
+    let report = match extract_hashing(&obj, size, &mut sink, on_error, opts.hash, |_, _| {}) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("zvolcarve: {}: {e}", c.id);
@@ -139,6 +142,8 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         "bytes_written": report.bytes_written,
         "aborted": report.aborted,
         "sha256": report.sha256,
+        "sha1": report.sha1,
+        "md5": report.md5,
     });
     match g.format {
         Format::Json => println!(
@@ -152,6 +157,12 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 report.blocks_total, report.blocks_read, report.blocks_holes, report.blocks_zeroed
             );
             println!("  sha256: {}", report.sha256);
+            if let Some(h) = &report.sha1 {
+                println!("  sha1:   {h}");
+            }
+            if let Some(h) = &report.md5 {
+                println!("  md5:    {h}");
+            }
         }
     }
     // Either way the image is not the whole volume: say so with the
@@ -161,6 +172,11 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     } else {
         0
     };
-    let written = vec![FileRef::known(&opts.output, &report.sha256)];
+    let written = vec![FileRef::known_with(
+        &opts.output,
+        &report.sha256,
+        report.sha1.as_deref(),
+        report.md5.as_deref(),
+    )];
     g.log_evidence("zvolcarve", &out, code, &members.paths, written)
 }

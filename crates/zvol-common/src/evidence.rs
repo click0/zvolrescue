@@ -12,6 +12,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+// Re-exported so a tool that only depends on this crate can name the
+// digests it is checking against (SPEC F-53).
+pub use zfs_read::hash::{DigestSet, Digests, Extra};
 
 /// Record format this build writes and understands.
 pub const FORMAT_VERSION: u32 = 1;
@@ -38,6 +41,15 @@ pub struct FileRef {
     /// evidence is slow and the choice is the operator's.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
+    /// Hex SHA-1 of the same file, when `--hash` asked for it while it
+    /// was being written (SPEC F-53). Present only on outputs, and only
+    /// when asked: nothing recomputes it later, because doing so costs
+    /// another full read of the image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha1: Option<String>,
+    /// Hex MD5 of the same file, on the same terms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub md5: Option<String>,
 }
 
 /// What a path turned out to be (SPEC F-68).
@@ -89,6 +101,8 @@ impl FileRef {
             kind: Some(Kind::of(path)),
             size: std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
             sha256: None,
+            sha1: None,
+            md5: None,
         }
     }
 
@@ -97,6 +111,16 @@ impl FileRef {
         FileRef {
             sha256: Some(sha256.to_string()),
             ..FileRef::stat(path)
+        }
+    }
+
+    /// The same, with the legacy digests that were taken alongside it
+    /// (SPEC F-53).
+    pub fn known_with(path: &Path, sha256: &str, sha1: Option<&str>, md5: Option<&str>) -> FileRef {
+        FileRef {
+            sha1: sha1.map(str::to_string),
+            md5: md5.map(str::to_string),
+            ..FileRef::known(path, sha256)
         }
     }
 
@@ -109,8 +133,24 @@ impl FileRef {
     }
 }
 
-/// Hex SHA-256 of a file, read in 1 MiB chunks so a large image does not
-/// have to fit in memory.
+/// Every digest `extra` names, plus SHA-256, of a file read through once
+/// in 1 MiB chunks so a large image never has to fit in memory
+/// (SPEC F-53).
+pub fn digests_of(path: &Path, extra: Extra) -> io::Result<DigestSet> {
+    let mut f = std::fs::File::open(path)?;
+    let mut digests = Digests::new(extra);
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        digests.update(&buf[..n]);
+    }
+    Ok(digests.finish())
+}
+
+/// Hex SHA-256 of a file, read through once.
 pub fn sha256_of(path: &Path) -> io::Result<String> {
     let mut f = std::fs::File::open(path)?;
     let mut hasher = Sha256::new();

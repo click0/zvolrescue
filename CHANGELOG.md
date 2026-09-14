@@ -16,6 +16,37 @@ tagged. `v0.7.1` is the release that carries those six.
 ## Unreleased
 
 ### Added
+* **`dump --hash md5,sha1`: the legacy digests, taken in the same pass
+  (SPEC F-53).** An extracted image usually leaves for somewhere else,
+  and what is waiting there may be an acquisition log, a
+  case-management system or a hashset that only speaks MD5 or SHA-1.
+  Taking one afterwards costs another full read of a multi-terabyte
+  image, so the moment to take it is while the bytes are going past —
+  which is what the requirement said and what half of it had been doing
+  for SHA-256 alone.
+
+  Neither is offered as a check on whether the image is *right*. Both
+  have practical collision attacks, which matters when someone may have
+  chosen the bytes and does not matter for lining an image up against a
+  record written before this tool touched it. That is what they are
+  for, and the module says so where someone might otherwise reach for
+  one as a verifier.
+
+  What was taken goes into the evidence record, into the report, and
+  into `zvolreport verify`, which now checks **every** digest a record
+  carries rather than only its SHA-256 — one result per digest, with
+  the file read once for all of them. A hash that is written down and
+  never checked back is decoration.
+
+  `zvolcarve dump` takes the same flag: it writes images too.
+
+  Checked against the tools a forensic toolchain would actually use:
+  `sha256sum`, `sha1sum` and `md5sum` agree with all three on a real
+  32 MiB sparse image, the published RFC 1321 and FIPS 180 vectors are
+  unit tests, and a resumed extraction feeds the prefix into each
+  digest so that stopping and continuing comes to what one pass would
+  have. One byte changed in a finished image, and all three say so.
+
 * **`list --properties`: what a dataset has set, user properties
   included (SPEC F-14).** The properties ZAP was parsed as far as its
   object number and never read. It holds what an operator holding a

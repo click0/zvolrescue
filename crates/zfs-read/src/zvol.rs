@@ -1,14 +1,12 @@
 //! Extracting a volume's data object into a sparse image.
 
-use std::fmt::Write as _;
-
-use sha2::{Digest, Sha256};
 use zfs_ondisk::dmu::{ObjsetPhys, ObjsetType};
 use zfs_ondisk::Endian;
 use zvolrescue_io::{trace, BlockSink};
 
 use crate::dmu::{DnodeArray, ObjectReader};
 use crate::dsl::{Dataset, ZVOL_OBJ};
+use crate::hash::{Digests, Extra};
 use crate::zio::{PoolReader, ReadError};
 
 /// What to do with a block that cannot be read.
@@ -56,6 +54,10 @@ pub struct Report {
     pub aborted: bool,
     /// SHA-256 of the full `volsize` image (holes as zeros), lowercase hex.
     pub sha256: String,
+    /// SHA-1 of the same image, when it was asked for (SPEC F-53).
+    pub sha1: Option<String>,
+    /// MD5 of the same image, when it was asked for (SPEC F-53).
+    pub md5: Option<String>,
 }
 
 /// Open the dataset's objset and return its data object plus block size.
@@ -114,19 +116,49 @@ pub fn extract(
     on_error: OnError,
     progress: impl FnMut(u64, u64),
 ) -> Result<Report, ReadError> {
-    extract_from(obj, volsize, sink, on_error, 0, Sha256::new(), progress)
+    extract_from(
+        obj,
+        volsize,
+        sink,
+        on_error,
+        0,
+        Digests::new(Extra::none()),
+        progress,
+    )
 }
 
-/// Like [`extract`], resuming at block `start_block` with `hasher` already
-/// fed the first `start_block * blocksize` bytes of the image (read back
-/// from the partial output). Counters cover only the blocks visited now.
+/// Like [`extract`], also taking the legacy digests `extra` names
+/// (SPEC F-53). One pass over the bytes either way.
+pub fn extract_hashing(
+    obj: &ObjectReader<'_, '_>,
+    volsize: u64,
+    sink: &mut dyn BlockSink,
+    on_error: OnError,
+    extra: Extra,
+    progress: impl FnMut(u64, u64),
+) -> Result<Report, ReadError> {
+    extract_from(
+        obj,
+        volsize,
+        sink,
+        on_error,
+        0,
+        Digests::new(extra),
+        progress,
+    )
+}
+
+/// Like [`extract`], resuming at block `start_block` with `digests`
+/// already fed the first `start_block * blocksize` bytes of the image
+/// (read back from the partial output). Counters cover only the blocks
+/// visited now.
 pub fn extract_from(
     obj: &ObjectReader<'_, '_>,
     volsize: u64,
     sink: &mut dyn BlockSink,
     on_error: OnError,
     start_block: u64,
-    mut hasher: Sha256,
+    mut digests: Digests,
     mut progress: impl FnMut(u64, u64),
 ) -> Result<Report, ReadError> {
     let bs = obj.dnode().datablksz();
@@ -149,6 +181,8 @@ pub fn extract_from(
         bad: Vec::new(),
         aborted: false,
         sha256: String::new(),
+        sha1: None,
+        md5: None,
     };
     let zeros = vec![0u8; bs as usize];
     let mut hashed_to = (start_block * bs).min(volsize);
@@ -168,7 +202,7 @@ pub fn extract_from(
         match result {
             Ok(None) => {
                 report.blocks_holes += 1;
-                hasher.update(&zeros[..take]);
+                digests.update(&zeros[..take]);
             }
             Ok(Some(mut data)) => {
                 data.resize(bs as usize, 0);
@@ -176,7 +210,7 @@ pub fn extract_from(
                     .map_err(|e| ReadError::Io(e.to_string()))?;
                 report.blocks_read += 1;
                 report.bytes_written += take as u64;
-                hasher.update(&data[..take]);
+                digests.update(&data[..take]);
             }
             Err(e) => {
                 trace!("zvol", "blkid {blkid} @ {offset}: UNREADABLE: {e}");
@@ -191,7 +225,7 @@ pub fn extract_from(
                     break;
                 }
                 report.blocks_zeroed += 1;
-                hasher.update(&zeros[..take]);
+                digests.update(&zeros[..take]);
             }
         }
         hashed_to = offset + take as u64;
@@ -202,18 +236,16 @@ pub fn extract_from(
         let mut rest = volsize - hashed_to;
         while rest > 0 {
             let n = rest.min(bs) as usize;
-            hasher.update(&zeros[..n]);
+            digests.update(&zeros[..n]);
             rest -= n as u64;
         }
         sink.finish(volsize)
             .map_err(|e| ReadError::Io(e.to_string()))?;
     }
-    let digest = hasher.finalize();
-    let mut hex = String::with_capacity(64);
-    for b in digest {
-        let _ = write!(hex, "{b:02x}");
-    }
-    report.sha256 = hex;
+    let done = digests.finish();
+    report.sha256 = done.sha256;
+    report.sha1 = done.sha1;
+    report.md5 = done.md5;
     Ok(report)
 }
 
@@ -288,9 +320,9 @@ mod tests {
         let want = expected_image();
         assert_eq!(sink.data, want);
         assert_eq!(sink.writes, vec![(0, 8192), (16384, 8192)]);
-        let mut h = Sha256::new();
+        let mut h = Digests::new(Extra::none());
         h.update(&want);
-        assert_eq!(r.sha256, format!("{:x}", h.finalize()));
+        assert_eq!(r.sha256, h.finish().sha256);
         // A filesystem is refused.
         assert!(open_volume(&reader, tree.get("tank/vm").unwrap()).is_err());
     }
@@ -357,12 +389,22 @@ mod tests {
             data: full.data[..2 * 8192].to_vec(),
             ..Default::default()
         };
-        let mut h = Sha256::new();
+        // Resuming takes the legacy digests too: the prefix goes into
+        // each of them before the rest of the image does.
+        let extra = Extra {
+            md5: true,
+            sha1: true,
+        };
+        let mut h = Digests::new(extra);
         h.update(&partial.data);
         let rest =
             extract_from(&obj, volsize, &mut partial, OnError::Zero, 2, h, |_, _| {}).unwrap();
         assert_eq!(partial.data, full.data);
         assert_eq!(rest.sha256, whole.sha256);
+        let mut direct = Digests::new(extra);
+        direct.update(&full.data);
+        let direct = direct.finish();
+        assert_eq!((rest.sha1, rest.md5), (direct.sha1, direct.md5));
         assert_eq!((rest.blocks_read, rest.blocks_holes), (1, 1)); // blocks 2 and 3 only
     }
 }

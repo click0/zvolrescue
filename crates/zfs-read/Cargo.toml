@@ -20,6 +20,7 @@ hkdf = { workspace = true }
 hmac = { workspace = true }
 pbkdf2 = { workspace = true }
 sha1 = { workspace = true }
+md-5 = { workspace = true }
 
 [dev-dependencies]
 lz4_flex = { workspace = true }

@@ -6,9 +6,9 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use zfs_read::crypt::{unwrap_keys, wrapping_key, DatasetKeys, KeyMaterial};
 use zfs_read::dsl::{open_mos, walk, Dataset, DatasetTree, Encryption};
+use zfs_read::hash::{Digests, Extra};
 use zfs_read::pool::{select_uberblock, uberblock_candidates, Candidate, TxgSelect};
 use zfs_read::zio::PoolReader;
 use zfs_read::zvol::{extract_from, open_volume, volume_facts, OnError, Report};
@@ -34,6 +34,8 @@ pub struct Options {
     pub resume: bool,
     /// Extract every volume under `dataset`.
     pub recursive: bool,
+    /// Legacy digests to take alongside SHA-256 (SPEC F-53).
+    pub hash: Extra,
 }
 
 #[derive(Debug, Serialize)]
@@ -62,6 +64,11 @@ struct DumpOut {
     strict: bool,
     aborted: bool,
     sha256: String,
+    /// SHA-1 and MD5, when `--hash` asked for them (SPEC F-53).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sha1: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    md5: Option<String>,
     seconds: f64,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     bad: Vec<BadOut>,
@@ -198,6 +205,7 @@ fn dump_one(
     output: &Path,
     strict: bool,
     resume: bool,
+    hash: Extra,
 ) -> Result<DumpOut, u8> {
     let (obj, _) = match open_volume(reader, ds) {
         Ok(x) => x,
@@ -240,7 +248,7 @@ fn dump_one(
 
     // Where to start, and the hash of what is already there.
     let mut start_block = 0u64;
-    let mut hasher = Sha256::new();
+    let mut hasher = Digests::new(hash);
     let mut sink = if resume {
         let state: Option<ResumeState> = std::fs::read(&state_path)
             .ok()
@@ -261,7 +269,7 @@ fn dump_one(
                                     output.display()
                                 );
                                 start_block = 0;
-                                hasher = Sha256::new();
+                                hasher = Digests::new(hash);
                                 break;
                             }
                             hasher.update(&buf[..n]);
@@ -378,6 +386,8 @@ fn dump_one(
         strict,
         aborted: report.aborted,
         sha256: report.sha256.clone(),
+        sha1: report.sha1.clone(),
+        md5: report.md5.clone(),
         seconds: started.elapsed().as_secs_f64(),
         bad: report
             .bad
@@ -434,6 +444,12 @@ fn print_text(out: &RunOut) {
             v.blocks_total, v.blocks_read, v.blocks_holes, v.blocks_zeroed, v.bytes_written, v.seconds
         );
         println!("  sha256: {}", v.sha256);
+        if let Some(h) = &v.sha1 {
+            println!("  sha1:   {h}");
+        }
+        if let Some(h) = &v.md5 {
+            println!("  md5:    {h}");
+        }
         if let Some(e) = &v.encryption {
             println!("  decrypted: {e}");
         }
@@ -584,6 +600,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             &output,
             opts.strict,
             opts.resume,
+            opts.hash,
         ) {
             Ok(v) => {
                 if v.aborted {
@@ -631,7 +648,9 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     let mut written: Vec<evidence::FileRef> = out
         .volumes
         .iter()
-        .map(|v| evidence::FileRef::known(&v.output, &v.sha256))
+        .map(|v| {
+            evidence::FileRef::known_with(&v.output, &v.sha256, v.sha1.as_deref(), v.md5.as_deref())
+        })
         .collect();
     if opts.recursive {
         let manifest = opts.output.join("manifest.json");

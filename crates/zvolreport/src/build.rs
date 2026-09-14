@@ -119,6 +119,8 @@ fn extractions_of(result: &serde_json::Value) -> Vec<Extraction> {
                 output: PathBuf::from(str_at(v, "output")?),
                 size: u64_at(v, "volsize").unwrap_or(0),
                 sha256: str_at(v, "sha256"),
+                sha1: str_at(v, "sha1"),
+                md5: str_at(v, "md5"),
                 errors: u64_at(v, "blocks_zeroed").unwrap_or(0),
                 aborted: v
                     .get("aborted")
@@ -186,6 +188,10 @@ pub fn assemble(records: &[(LogRef, Vec<Record>)], opts: &Options) -> Report {
                         kind: i.kind,
                         size: i.size,
                         sha256: i.sha256.clone(),
+                        // Inputs are evidence, never written here, so
+                        // nothing takes a legacy digest of one.
+                        sha1: None,
+                        md5: None,
                     },
                     read_by: Vec::new(),
                 });
@@ -233,6 +239,8 @@ pub fn assemble(records: &[(LogRef, Vec<Record>)], opts: &Options) -> Report {
                     kind: o.kind,
                     size: o.size,
                     sha256: o.sha256.clone(),
+                    sha1: o.sha1.clone(),
+                    md5: o.md5.clone(),
                 },
             );
         }
@@ -443,6 +451,8 @@ mod tests {
                 kind: None,
                 size: 100,
                 sha256: None,
+                sha1: None,
+                md5: None,
             }],
             outputs: Vec::new(),
             result,

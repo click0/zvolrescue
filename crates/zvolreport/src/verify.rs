@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use zvol_common::evidence::sha256_of;
+use zvol_common::evidence::{digests_of, Extra};
 use zvol_common::{exit, Format, Global};
 
 use crate::model::{Report, REPORT_VERSION};
@@ -52,6 +52,10 @@ impl Status {
 pub struct Checked {
     /// `evidence` or `output`.
     pub kind: &'static str,
+    /// Which digest this row is about. A file with legacy digests
+    /// recorded beside its SHA-256 (SPEC F-53) gets a row for each: a
+    /// hash that is written down and never checked back is decoration.
+    pub algorithm: &'static str,
     /// Where the file was looked for, after any `--*-root`.
     pub path: PathBuf,
     pub status: Status,
@@ -107,39 +111,81 @@ fn locate(recorded: &Path, root: Option<&PathBuf>) -> PathBuf {
     }
 }
 
-fn check(kind: &'static str, path: &Path, recorded: Option<&String>) -> Checked {
-    let Some(want) = recorded else {
-        return Checked {
+/// What the report recorded about one file.
+struct Recorded<'a> {
+    sha256: Option<&'a String>,
+    sha1: Option<&'a String>,
+    md5: Option<&'a String>,
+}
+
+/// Check a file against every digest the report recorded for it.
+///
+/// The file is read once and each recorded digest is taken in that
+/// pass, so checking an image with three of them costs no more reading
+/// than checking it with one.
+fn check(kind: &'static str, path: &Path, recorded: &Recorded<'_>) -> Vec<Checked> {
+    let want: Vec<(&'static str, &String)> = [
+        ("sha256", recorded.sha256),
+        ("sha1", recorded.sha1),
+        ("md5", recorded.md5),
+    ]
+    .into_iter()
+    .filter_map(|(name, v)| v.map(|v| (name, v)))
+    .collect();
+    if want.is_empty() {
+        return vec![Checked {
             kind,
+            algorithm: "sha256",
             path: path.to_path_buf(),
             status: Status::Unhashed,
             recorded: None,
             found: None,
             detail: Some("no hash was recorded when it was read".into()),
-        };
-    };
-    match sha256_of(path) {
-        Err(e) => Checked {
-            kind,
-            path: path.to_path_buf(),
-            status: Status::Missing,
-            recorded: Some(want.clone()),
-            found: None,
-            detail: Some(e.to_string()),
-        },
-        Ok(got) => Checked {
-            kind,
-            path: path.to_path_buf(),
-            status: if &got == want {
-                Status::Pass
-            } else {
-                Status::Fail
-            },
-            recorded: Some(want.clone()),
-            found: Some(got),
-            detail: None,
-        },
+        }];
     }
+    let extra = Extra {
+        sha1: recorded.sha1.is_some(),
+        md5: recorded.md5.is_some(),
+    };
+    let got = match digests_of(path, extra) {
+        Err(e) => {
+            return want
+                .into_iter()
+                .map(|(algorithm, w)| Checked {
+                    kind,
+                    algorithm,
+                    path: path.to_path_buf(),
+                    status: Status::Missing,
+                    recorded: Some(w.clone()),
+                    found: None,
+                    detail: Some(e.to_string()),
+                })
+                .collect()
+        }
+        Ok(got) => got,
+    };
+    let computed = got.named();
+    want.into_iter()
+        .map(|(algorithm, w)| {
+            let found = computed
+                .iter()
+                .find(|(name, _)| *name == algorithm)
+                .map(|(_, hex)| (*hex).to_string());
+            Checked {
+                kind,
+                algorithm,
+                path: path.to_path_buf(),
+                status: if found.as_ref() == Some(w) {
+                    Status::Pass
+                } else {
+                    Status::Fail
+                },
+                recorded: Some(w.clone()),
+                found,
+                detail: None,
+            }
+        })
+        .collect()
 }
 
 /// Run `verify`.
@@ -230,11 +276,27 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
     let mut checked = Vec::new();
     for e in &report.evidence {
         let path = locate(&e.file.path, opts.evidence_root.as_ref());
-        checked.push(check("evidence", &path, e.file.sha256.as_ref()));
+        checked.extend(check(
+            "evidence",
+            &path,
+            &Recorded {
+                sha256: e.file.sha256.as_ref(),
+                sha1: e.file.sha1.as_ref(),
+                md5: e.file.md5.as_ref(),
+            },
+        ));
     }
     for o in &report.outputs {
         let path = locate(&o.path, opts.outputs_root.as_ref());
-        checked.push(check("output", &path, o.sha256.as_ref()));
+        checked.extend(check(
+            "output",
+            &path,
+            &Recorded {
+                sha256: o.sha256.as_ref(),
+                sha1: o.sha1.as_ref(),
+                md5: o.md5.as_ref(),
+            },
+        ));
     }
 
     let count = |s: Status| checked.iter().filter(|c| c.status == s).count();
@@ -253,38 +315,42 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
             serde_json::to_string_pretty(&out).expect("serialisable")
         ),
         Format::Text => {
-            println!("{:<9} {:<9} FILE", "KIND", "RESULT");
+            println!("{:<9} {:<9} {:<7} FILE", "KIND", "RESULT", "DIGEST");
             if let Some(s) = &out.signature {
                 println!(
-                    "{:<9} {:<9} {}",
+                    "{:<9} {:<9} {:<7} {}",
                     "signature",
                     s.status.as_str(),
+                    "ed25519",
                     s.path.display()
                 );
-                println!("{:<9} {:<9}   key {}", "", "", s.key.display());
+                println!("{:<9} {:<9} {:<7}   key {}", "", "", "", s.key.display());
                 if let Some(d) = &s.detail {
-                    println!("{:<9} {:<9}   {d}", "", "");
+                    println!("{:<9} {:<9} {:<7}   {d}", "", "", "");
                 }
             }
             for c in &out.checked {
                 println!(
-                    "{:<9} {:<9} {}",
+                    "{:<9} {:<9} {:<7} {}",
                     c.kind,
                     c.status.as_str(),
+                    c.algorithm,
                     c.path.display()
                 );
                 if let Some(d) = &c.detail {
-                    println!("{:<9} {:<9}   {d}", "", "");
+                    println!("{:<9} {:<9} {:<7}   {d}", "", "", "");
                 }
                 if c.status == Status::Fail {
                     println!(
-                        "{:<9} {:<9}   recorded {}",
+                        "{:<9} {:<9} {:<7}   recorded {}",
+                        "",
                         "",
                         "",
                         c.recorded.as_deref().unwrap_or("—")
                     );
                     println!(
-                        "{:<9} {:<9}   found    {}",
+                        "{:<9} {:<9} {:<7}   found    {}",
+                        "",
                         "",
                         "",
                         c.found.as_deref().unwrap_or("—")

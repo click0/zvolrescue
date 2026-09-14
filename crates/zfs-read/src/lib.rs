@@ -16,6 +16,7 @@ pub mod crypt;
 pub mod dmu;
 pub mod dsl;
 pub mod fixture;
+pub mod hash;
 pub mod hints;
 pub mod pointers;
 pub mod pool;

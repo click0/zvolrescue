@@ -485,6 +485,40 @@ jobs:
           test "$(./target/release/zvolrescue -q scan /tmp/f70/member0.img | grep -c 'NOT ACCOUNTED FOR')" = 0
           # The companions share the check, since they share the members.
           if ./target/release/zvolfiles -q list tank/fs /tmp/f70x/member0.img; then echo "must refuse"; exit 1; else test $? = 3; fi
+      - name: The legacy digests, taken in the same pass (SPEC F-53)
+        run: |
+          # An extracted image usually leaves for a toolchain that may
+          # only speak MD5 or SHA-1. Taking them later costs another
+          # full read of the image, so they are taken as it is written —
+          # and they have to be the same digests coreutils computes, or
+          # they are worth nothing to whatever is waiting.
+          rm -rf /tmp/f53 && mkdir -p /tmp/f53
+          cargo run -q -p zfs-read --example mkfixture -- /tmp/f53 mirror 12
+          cd /tmp/f53
+          $GITHUB_WORKSPACE/target/release/zvolrescue -q --evidence-log case.jsonl \
+            dump tank/vm/disk0 member0.img member1.img --txg 4816229 --hash md5,sha1 -o vol.img > out
+          grep -q "^  sha1:   $(sha1sum vol.img | cut -d' ' -f1)$" out
+          grep -q "^  md5:    $(md5sum vol.img | cut -d' ' -f1)$" out
+          grep -q "^  sha256: $(sha256sum vol.img | cut -d' ' -f1)$" out
+          # Not asked for is not computed, and not written down.
+          $GITHUB_WORKSPACE/target/release/zvolrescue -q dump tank/vm/disk0 member0.img \
+            --txg 4816229 -o plain.img > plain.out
+          test "$(grep -c 'sha1:\|md5:' plain.out)" = 0
+          # A name that is not a digest is refused rather than ignored.
+          if $GITHUB_WORKSPACE/target/release/zvolrescue -q dump tank/vm/disk0 member0.img \
+               --txg 4816229 --hash crc32 -o x.img; then echo "must refuse"; exit 1; else test $? = 1; fi
+          # The record carries all three, and verify checks all three back.
+          $GITHUB_WORKSPACE/target/release/zvolreport -q build case.jsonl -o report.json > /dev/null
+          $GITHUB_WORKSPACE/target/release/zvolreport -q verify report.json > verified
+          grep -q "output    PASS      sha256" verified
+          grep -q "output    PASS      sha1" verified
+          grep -q "output    PASS      md5" verified
+          # One byte changed, and every one of them says so.
+          printf '\xff' | dd of=vol.img bs=1 seek=100 conv=notrunc status=none
+          if $GITHUB_WORKSPACE/target/release/zvolreport -q verify report.json > broke; then
+            echo "must fail"; exit 1; else test $? = 4; fi
+          test "$(grep -c 'output    FAIL' broke)" = 3
+          cd "$GITHUB_WORKSPACE"
       - name: The properties a dataset has set, user properties included (SPEC F-14)
         run: |
           # Only what was set on the dataset itself is on disk. A number

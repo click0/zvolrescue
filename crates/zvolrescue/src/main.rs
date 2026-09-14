@@ -119,6 +119,11 @@ enum Cmd {
         /// image per volume plus manifest.json.
         #[arg(short, long)]
         recursive: bool,
+        /// Also hash the image with these, as it is written, for a
+        /// toolchain that wants them: `md5`, `sha1`, comma-separated.
+        /// SHA-256 is always taken (SPEC F-53).
+        #[arg(long, value_name = "LIST")]
+        hash: Option<String>,
     },
 }
 
@@ -196,19 +201,31 @@ fn main() -> ExitCode {
             key,
             resume,
             recursive,
-        } => dump::run(
-            &cli.global,
-            &pool,
-            &dump::Options {
-                dataset,
-                output,
-                txg,
-                strict,
-                key,
-                resume,
-                recursive,
-            },
-        ),
+            hash,
+        } => {
+            let hash = match hash.as_deref().map(zfs_read::hash::Extra::parse) {
+                None => zfs_read::hash::Extra::none(),
+                Some(Ok(e)) => e,
+                Some(Err(e)) => {
+                    eprintln!("zvolrescue: --hash: {e}");
+                    return ExitCode::from(exit::USAGE);
+                }
+            };
+            dump::run(
+                &cli.global,
+                &pool,
+                &dump::Options {
+                    dataset,
+                    output,
+                    txg,
+                    strict,
+                    key,
+                    resume,
+                    recursive,
+                    hash,
+                },
+            )
+        }
     };
     ExitCode::from(code)
 }
