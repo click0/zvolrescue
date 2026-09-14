@@ -247,6 +247,28 @@ tagged. `v0.7.1` is the release that carries those six.
   followed.
 
 ### Fixed
+* **The real-world test matrix said three implemented things were
+  pending (docs/REALWORLD-TESTS).** It is the checklist someone works
+  through before trusting this tool on a customer's disks, and it told
+  them that whole-disk GPT vdevs *needed* F-06, that `skein` and `edonr`
+  were *pending* F-21, and that an encrypted volume was *phase 3* and
+  exited 64 without a key. All three landed months ago — the same
+  document's own Results table records the runs that proved it, a few
+  screens further down — and a tester reading the criteria column would
+  have skipped those rows or recorded a false expectation. Nothing
+  returns exit 64 any more: the constant survives only so that a future
+  unimplemented command can use it.
+
+  The two markers that are still true stay: packaging, and reading per
+  sector on EIO, which is genuinely not implemented.
+
+  Four scenarios added for what has landed since the matrix was written:
+  a pool a vdev was removed from (F-69, which `ztest` reaches only by
+  chance and a real kernel does on demand), `list --properties` against
+  `zfs get -s local` (F-14), a pool carrying a feature this build does
+  not implement (F-70), and `dump --hash md5,sha1` against `md5sum` and
+  `sha1sum` (F-53).
+
 * **The damage matrix called a dataset lost to damage a tool defect.**
   `data-zeros-two-members-same-range` zeros every written byte on two
   leaves of a mirror. On a `ztest` pool that came out three leaves wide,

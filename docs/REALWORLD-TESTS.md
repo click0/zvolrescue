@@ -45,21 +45,24 @@ Run every scenario on every environment; record `zvolrescue --version`,
 | B6 | pool with a `log` and a `cache` vdev | `scan` lists them; `dump` unaffected |
 | B7 | dRAID (`draid2:8d:1s`), also with 1–2 members removed and with a distributed spare active | `list` matches `zpool list -t all`; `dump` hash matches |
 | B8 | pool after `zpool attach`/`detach`/`replace` (stale labels on old disks) | `scan` shows the old member with an older txg and does not mix it in |
-| B9 | whole-disk vdevs with GPT (Linux `-part1`, FreeBSD `p1`) | *needs F-06*: `scan` of the whole disk finds the ZFS partition |
+| B9 | whole-disk vdevs with GPT (Linux `-part1`, FreeBSD `p1`) | `scan` of the whole disk finds the ZFS partition (F-06/F-60; the cross-check covers it on `ztest` members, this covers a real partition table) |
 
 ### C. Data properties
 
 | # | Property | Pass criterion |
 |---|---|---|
 | C1 | `compression=off,lz4,zstd,zstd-19,gzip-1,gzip-9,lzjb,zle` on the volume | `dump` hash matches for each |
-| C2 | `checksum=fletcher2,fletcher4,sha256,sha512,skein,edonr,blake3` | matches; `skein`/`edonr` *pending F-21* |
+| C2 | `checksum=fletcher2,fletcher4,sha256,sha512,skein,edonr,blake3` | matches for each; all seven verify on `ztest` pools already (see Results), so what this adds is a kernel-written pool |
 | C3 | `volblocksize=4K,8K,16K,64K,128K,1M` (needs `large_blocks`) | matches |
 | C4 | sparse volume with holes, `zfs create -s -V 100G`, 1 GiB written | image is sparse, `du` small, hash matches |
 | C5 | `dedup=on` volume with repeated content | matches |
 | C6 | volume with snapshots and a clone; `dump` of `vol@snap` and of the clone | each matches its own hash |
-| C7 | encrypted volume (`encryption=aes-256-gcm`) with `--key raw:FILE` | *phase 3*; without key: exit 64 today |
+| C7 | encrypted volume (`encryption=aes-256-gcm`) with `--key raw:FILE` | matches with the key; without one every ciphertext block is refused as `encrypted: no key` and nothing is reported as verified |
 | C8 | large dnodes (`dnodesize=auto`) on the parent filesystem | `list` unaffected |
 | C9 | pool with 100+ datasets, deep nesting, long names (`longname` on FreeBSD 15) | `list -r` complete, matches `zdb -d` |
+| C10 | `zpool remove` a top-level vdev, then export (F-69) | `list`/`dump` read the blocks that still name the removed vdev and match `zdb`; `scan` says the vdev is counted but has no member. `ztest` reaches this only by chance — a real kernel does it on demand, which is the point of running it here |
+| C11 | `zfs set` several properties, including a user property (`org.example:ticket`), on a volume and on its parent (F-14) | `list --properties` reports exactly what `zfs get -s local` reports for that dataset — no more, since inherited values are not on disk, and no less |
+| C12 | a pool whose active `features_for_read` include one this build does not implement (`raidz_expansion` on FreeBSD 15 / OpenZFS 2.3) (F-70) | `list`/`dump` refuse with exit 3 and name the feature; `scan` says so without refusing; `--ignore-unknown-features` reads and states the cost |
 
 ### D. Recovery
 
@@ -72,6 +75,7 @@ Run every scenario on every environment; record `zvolrescue --version`,
 | D5 | pool whose newest uberblock is damaged (zero the slot) | `list` uses the previous verified txg and says so |
 | D6 | interrupt `dump` with SIGINT at ~50 %, then `--resume` | final hash matches, `resumed_from_block` > 0 |
 | D7 | `dump -r pool/vm` with 5 volumes | 5 images + manifest, hashes match |
+| D8 | `dump --hash md5,sha1` of a volume (F-53) | the three digests printed equal `sha256sum`, `sha1sum` and `md5sum` of the written image; all three land in the evidence record and `zvolreport verify` checks each |
 
 ### E. Scale and packaging
 
