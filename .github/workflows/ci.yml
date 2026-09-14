@@ -69,6 +69,15 @@ jobs:
           # against the enum here, where a new variant is still on a
           # branch.
           python3 tests/golden/check-read-errors.py
+          # The same reasoning one level up: the matrix also decides
+          # whether a *dataset* the tool did not list is damage doing
+          # what the manifest asked, or the tool losing one. That
+          # decision is a table with a doctest beside it, because the
+          # case that matters most — a dataset gone and the blocks
+          # naming it refused — needs a mirror wider than two leaves to
+          # reach, which is a property of the pool `ztest` happened to
+          # build and not something a run can be relied on to produce.
+          python3 -m doctest tests/golden/run-matrix.py
       - name: End-to-end on fixture members (scan, list, dump)
         run: |
           cargo run -p zfs-read --example mkfixture -- /tmp/fx mirror 12

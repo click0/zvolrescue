@@ -246,6 +246,35 @@ tagged. `v0.7.1` is the release that carries those six.
   reported with its position and birth and the reason it could not be
   followed.
 
+### Fixed
+* **The damage matrix called a dataset lost to damage a tool defect.**
+  `data-zeros-two-members-same-range` zeros every written byte on two
+  leaves of a mirror. On a `ztest` pool that came out three leaves wide,
+  enough survived to list thirteen datasets and refuse the blocks naming
+  the fourteenth — which is exactly right — and the harness recorded it
+  as breakage, because it compared the list against `zdb` on the
+  *undamaged* pool and any difference was a defect.
+
+  The oracle knows every dataset the pool had *before* the damage. Damage
+  that takes every copy of the blocks naming one takes the dataset with
+  them, and the tool not listing it is the same refusal seen one level
+  up — the walk says so in the line above. This is the mistake the
+  `CLEAN_REASONS` list exists to stop, one level higher, and it is fixed
+  the same way: the dataset list is judged after the blocks, and a
+  missing dataset is a refusal when the walk refused and a defect when it
+  did not. A dataset the tool *invented*, or one whose creation TXG it
+  read differently from `zdb`, stays a defect however much else was
+  refused: those come from bytes it did read and got wrong.
+
+  Nothing in the tool changed. The same pool and the same damage judge
+  the same at the commit before this run's three features as at its head,
+  and the verdict turns on how wide `ztest` happened to build the mirror
+  — which is what that job's own preamble says it must never enforce.
+
+  The decision is now a table with a doctest beside it, run in CI, since
+  the case that matters most needs a mirror wider than two leaves to
+  reach and no run can be relied on to produce one.
+
 ## v0.7.5 — 2026-09-13
 
 **What it cannot read, it no longer guesses at.** Extended attributes

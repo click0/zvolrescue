@@ -485,6 +485,45 @@ def judge_dump(args, oracle, manifest, members, work, assume=()):
     return outcomes, redundancy
 
 
+def judge_datasets(missing, extra, wrong_txg, blocks):
+    """How the dataset list compares with the oracle, given what the walk said.
+
+    The oracle is `zdb` on the *undamaged* pool, so every dataset it
+    knows is one the pool had before the damage. Damage that takes every
+    copy of the blocks naming a dataset takes the dataset with them, and
+    the tool not listing it is then the same refusal seen one level up —
+    the walk says so in `blocks`. Calling that breakage blames the reader
+    for an absence the manifest asked for, which is the mistake
+    CLEAN_REASONS exists to stop, one level higher.
+
+    What damage never explains is a dataset the tool *invented*, or one
+    whose creation TXG it read differently from zdb: those come from
+    bytes it did read and got wrong, so they stay defects however much
+    else was refused.
+
+    Returns `(verdict, detail)`; the detail is not judged, only printed.
+
+    >>> judge_datasets([], [], [], "ok")
+    ('ok', None)
+    >>> judge_datasets(["p/a"], [], [], "refused")[0]
+    'refused'
+    >>> judge_datasets(["p/a"], [], [], "ok")[0]
+    "differ from zdb (missing ['p/a'])"
+    >>> judge_datasets([], ["p/ghost"], [], "refused")[0]
+    "differ from zdb (extra ['p/ghost'], creation txg differs [])"
+    >>> judge_datasets([], [], ["p/a"], "refused")[0]
+    "differ from zdb (extra [], creation txg differs ['p/a'])"
+    """
+    if extra or wrong_txg:
+        return (f"differ from zdb (extra {extra[:3]}, "
+                f"creation txg differs {wrong_txg[:3]})"), None
+    if missing and blocks == "refused":
+        return "refused", f"not listed, and blocks were refused: {missing[:3]}"
+    if missing:
+        return f"differ from zdb (missing {missing[:3]})", None
+    return "ok", None
+
+
 def judge_walk(args, oracle, members, work, assume=()):
     """No zvols: the datasets must match `zdb -d` and every block must read."""
     outcomes = {}
@@ -505,12 +544,9 @@ def judge_walk(args, oracle, members, work, assume=()):
     except Exception as e:  # noqa: BLE001
         return {"pool": f"list output unparsable: {e}"}, False
     expected = {n: v["creation_txg"] for n, v in oracle.inventory.items()}
-    if listed != expected:
-        only_oracle = sorted(set(expected) - set(listed))
-        only_tool = sorted(set(listed) - set(expected))
-        outcomes["datasets"] = f"differ from zdb (missing {only_oracle[:3]}, extra {only_tool[:3]})"
-    else:
-        outcomes["datasets"] = "ok"
+    missing = sorted(set(expected) - set(listed))
+    extra = sorted(set(listed) - set(expected))
+    wrong_txg = sorted(n for n in set(expected) & set(listed) if expected[n] != listed[n])
     # The debug trace is far too large to keep: stream it and look only for
     # evidence that redundancy was used.
     walk_out = os.path.join(work, "walk.txt")
@@ -542,6 +578,12 @@ def judge_walk(args, oracle, members, work, assume=()):
         outcomes["blocks"] = f"walker exit {wproc.returncode}"
     else:
         outcomes["blocks"] = "ok"
+    # Judged last, because whether a missing dataset is a defect depends
+    # on what the walk just said.
+    verdict, detail = judge_datasets(missing, extra, wrong_txg, outcomes["blocks"])
+    outcomes["datasets"] = verdict
+    if detail:
+        outcomes["datasets_detail"] = detail
     m = re.search(r"^datasets (\d+) objects (\d+) blocks (\d+)", text, re.M)
     if m:
         outcomes["counts"] = f"{m.group(1)} datasets, {m.group(2)} objects, {m.group(3)} blocks"
@@ -610,7 +652,8 @@ def run_case(args, oracle, manifest, rng):
             outcomes, redundancy = judge_walk(args, oracle, members, work, assume)
             good = {"ok"}
         result["outcomes"] = outcomes
-        judged = {k: v for k, v in outcomes.items() if k not in ("counts", "refused_detail")}
+        judged = {k: v for k, v in outcomes.items()
+                  if k not in ("counts", "refused_detail", "datasets_detail")}
         values = set(judged.values())
         if values <= good:
             actual = "reconstructed" if redundancy else "bit-exact"
