@@ -167,11 +167,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     }
     // Either way the image is not the whole volume: say so with the
     // code, not only in the report.
-    let code = if report.aborted || report.blocks_zeroed > 0 {
-        exit::PARTIAL
-    } else {
-        0
-    };
+    let code = exit::after_extraction(0, report.aborted, report.blocks_zeroed);
     let written = vec![FileRef::known_with(
         &opts.output,
         &report.sha256,

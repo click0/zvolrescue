@@ -1749,3 +1749,175 @@ mod removed_vdev_tests {
         );
     }
 }
+
+/// Reading through the mapping a removed vdev leaves behind, with the
+/// mapping installed by hand so that each shape can be tried on its
+/// own (SPEC F-69).
+#[cfg(test)]
+mod mapping_reader_tests {
+    use super::*;
+    use crate::dsl::{open_mos, walk};
+    use crate::fixture::{build_sample_mos, zvol_pattern, Alloc, Pool, SAMPLE_ZVOL_BLOCK0_OFFSET};
+    use crate::pool::assemble;
+    use crate::vdev::scan_device;
+    use crate::zvol::open_volume;
+    use zfs_ondisk::indirect::{Entry, Mapping};
+    use zfs_ondisk::label::LABEL_SIZE;
+    use zfs_ondisk::uberblock::Uberblock;
+    use zvolrescue_io::MemSource;
+
+    const SIZE: u64 = 64 * LABEL_SIZE;
+    /// An address in a removed vdev's own space, nowhere near where the
+    /// bytes are: a reader that ignored the mapping could not land on
+    /// them by luck.
+    const AWAY: u64 = 0x100_0000;
+    const BLOCK: u64 = 8192;
+
+    /// A two-way mirror with the sample MOS, every pointer on vdev 0.
+    /// `damage` flips one byte of one member at an absolute offset.
+    fn build(
+        damage: Option<(usize, u64)>,
+    ) -> (Vec<MemSource>, crate::pool::PoolAssembly, Uberblock) {
+        let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1)]);
+        let mut members = vec![vec![0u8; SIZE as usize], vec![0u8; SIZE as usize]];
+        let mut a = Alloc::new(0x20_0000);
+        build_sample_mos(&mut pool, &mut members, &mut a);
+        for (i, m) in members.iter_mut().enumerate() {
+            pool.write_labels(i, m);
+        }
+        if let Some((member, at)) = damage {
+            members[member][at as usize] ^= 0xff;
+        }
+        let sources: Vec<MemSource> = members.into_iter().map(MemSource::new).collect();
+        let scans: Vec<_> = sources.iter().map(|s| scan_device(s).ok()).collect();
+        let ub = scans[0].as_ref().expect("scan").labels[0]
+            .best()
+            .expect("ub")
+            .ub
+            .clone();
+        let assembly = assemble(&scans).into_iter().next().expect("one pool");
+        (sources, assembly, ub)
+    }
+
+    fn reader<'a>(s: &'a [MemSource], a: &crate::pool::PoolAssembly) -> PoolReader<'a> {
+        PoolReader::new(a, s.iter().map(|x| Some(x as &dyn BlockSource)).collect())
+    }
+
+    /// The volume's first data block pointer, renamed onto `vdev` at
+    /// `offset`. The checksum is untouched: it is of the bytes, and the
+    /// bytes have not moved.
+    fn block0_on(reader: &PoolReader<'_>, ub: &Uberblock, vdev: u32, offset: u64) -> BlkPtr {
+        let mos = open_mos(reader, ub).expect("MOS");
+        let tree = walk(&mos, "tank").expect("tree");
+        let ds = tree.get("tank/vm/disk0").expect("the volume");
+        let (obj, _) = open_volume(reader, ds).expect("volume");
+        let mut bp = obj.locate(0).expect("locate").expect("block 0 is data");
+        assert_eq!(
+            (bp.dva[0].vdev, bp.dva[0].offset),
+            (0, SAMPLE_ZVOL_BLOCK0_OFFSET)
+        );
+        assert_eq!(bp.dva[0].asize, BLOCK);
+        bp.dva[0].vdev = vdev;
+        bp.dva[0].offset = offset;
+        bp
+    }
+
+    fn entry(src: u64, dst_vdev: u32, dst_offset: u64) -> Entry {
+        Entry {
+            src,
+            size: BLOCK,
+            dst_vdev,
+            dst_offset,
+        }
+    }
+
+    #[test]
+    fn a_pointer_onto_a_removed_vdev_reads_through_its_mapping() {
+        let (s, a, ub) = build(None);
+        let r = reader(&s, &a);
+        let bp = block0_on(&r, &ub, 7, AWAY);
+        // Before the mapping is known, the vdev is unknown.
+        assert_eq!(
+            r.read_block(&bp, false).unwrap_err(),
+            ReadError::UnknownVdev(7)
+        );
+        r.set_removed_mapping(
+            7,
+            Mapping::from_entries(vec![entry(AWAY, 0, SAMPLE_ZVOL_BLOCK0_OFFSET)]),
+        );
+        let block = r.read_block(&bp, false).expect("reads through the mapping");
+        assert_eq!(block.verify, Verify::Ok);
+        assert_eq!(block.data, zvol_pattern(0));
+        assert_eq!(r.removed_vdevs(), vec![(7, 1)]);
+    }
+
+    /// A vdev removed onto another that was itself removed later: the
+    /// mapping is followed twice.
+    #[test]
+    fn a_mapping_that_lands_on_another_removed_vdev_is_followed_through() {
+        let (s, a, ub) = build(None);
+        let r = reader(&s, &a);
+        let bp = block0_on(&r, &ub, 8, AWAY);
+        r.set_removed_mapping(
+            7,
+            Mapping::from_entries(vec![entry(AWAY, 0, SAMPLE_ZVOL_BLOCK0_OFFSET)]),
+        );
+        r.set_removed_mapping(8, Mapping::from_entries(vec![entry(AWAY, 7, AWAY)]));
+        let block = r.read_block(&bp, false).expect("two hops");
+        assert_eq!(block.verify, Verify::Ok);
+        assert_eq!(block.data, zvol_pattern(0));
+    }
+
+    /// A range the mapping does not cover is refused by name, not read
+    /// from somewhere near.
+    #[test]
+    fn a_gap_in_the_mapping_is_refused_and_says_where() {
+        let (s, a, ub) = build(None);
+        let r = reader(&s, &a);
+        r.set_removed_mapping(
+            7,
+            Mapping::from_entries(vec![entry(AWAY, 0, SAMPLE_ZVOL_BLOCK0_OFFSET)]),
+        );
+        let bp = block0_on(&r, &ub, 7, AWAY + 0x10000);
+        let err = r.read_block(&bp, false).unwrap_err();
+        assert!(matches!(err, ReadError::Unmapped(7, _)), "{err}");
+        assert!(
+            err.to_string()
+                .contains("not in the removed vdev's mapping"),
+            "{err}"
+        );
+    }
+
+    /// A mapping that points at itself is a malformed pool, not an
+    /// infinite read.
+    #[test]
+    fn a_mapping_that_loops_is_cut_off() {
+        let (s, a, ub) = build(None);
+        let r = reader(&s, &a);
+        r.set_removed_mapping(9, Mapping::from_entries(vec![entry(AWAY, 9, AWAY)]));
+        let bp = block0_on(&r, &ub, 9, AWAY);
+        let err = r.read_block(&bp, false).unwrap_err();
+        assert!(err.to_string().contains("nested deeper than 8"), "{err}");
+    }
+
+    /// The claim in the changelog: a piece that landed on a mirror still
+    /// offers each side. One side is damaged at the destination; the
+    /// read comes back through the other, and the attempts say so.
+    #[test]
+    fn a_mirror_destination_still_offers_its_other_side() {
+        let damaged_at = LABEL_START_SIZE + SAMPLE_ZVOL_BLOCK0_OFFSET + 100;
+        let (s, a, ub) = build(Some((0, damaged_at)));
+        let r = reader(&s, &a);
+        let bp = block0_on(&r, &ub, 7, AWAY);
+        r.set_removed_mapping(
+            7,
+            Mapping::from_entries(vec![entry(AWAY, 0, SAMPLE_ZVOL_BLOCK0_OFFSET)]),
+        );
+        let block = r.read_block(&bp, false).expect("the other side");
+        assert_eq!(block.verify, Verify::Ok);
+        assert_eq!(block.data, zvol_pattern(0));
+        let outcomes: Vec<_> = block.attempts.iter().map(|t| t.result.clone()).collect();
+        assert_eq!(outcomes, vec![Ok(Verify::Mismatch), Ok(Verify::Ok)]);
+        assert_eq!(r.mismatches(), 1);
+    }
+}

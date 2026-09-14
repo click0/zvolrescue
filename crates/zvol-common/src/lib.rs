@@ -35,6 +35,48 @@ pub mod exit {
     pub const INTERRUPTED: u8 = 6;
     /// Command exists in the spec but is not implemented in this build.
     pub const NOT_IMPLEMENTED: u8 = 64;
+
+    /// The status an extraction ends with, given how it went and what an
+    /// earlier volume of the same run already produced.
+    ///
+    /// Blocks written as zeros, or an abort at the first one, make the
+    /// image not the volume: that is [`PARTIAL`]. A code is never
+    /// lowered — with `-r`, a volume refused earlier ([`REFUSED`]) is not
+    /// overwritten by one that was merely partial, which is the mistake
+    /// this replaces.
+    pub fn after_extraction(prior: u8, aborted: bool, blocks_zeroed: u64) -> u8 {
+        if aborted || blocks_zeroed > 0 {
+            prior.max(PARTIAL)
+        } else {
+            prior
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_whole_image_leaves_the_code_alone() {
+            assert_eq!(after_extraction(0, false, 0), 0);
+            assert_eq!(after_extraction(UNRECOVERABLE, false, 0), UNRECOVERABLE);
+        }
+
+        #[test]
+        fn zeros_or_an_abort_make_it_partial_without_strict() {
+            assert_eq!(after_extraction(0, false, 1), PARTIAL);
+            assert_eq!(after_extraction(0, true, 0), PARTIAL);
+        }
+
+        /// The bug this function replaced: `-r` with a refused volume
+        /// and then a partial one came out 4, not 5.
+        #[test]
+        fn a_partial_volume_never_lowers_what_an_earlier_one_produced() {
+            assert_eq!(after_extraction(REFUSED, false, 3), REFUSED);
+            assert_eq!(after_extraction(INTERRUPTED, true, 0), INTERRUPTED);
+            assert_eq!(after_extraction(UNRECOVERABLE, false, 1), PARTIAL);
+        }
+    }
 }
 
 /// Output format.

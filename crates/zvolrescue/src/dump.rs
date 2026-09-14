@@ -608,12 +608,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 // not be told it is. The run says so in the warning, in
                 // the JSON and in the evidence record; now it says so
                 // in the one place a `dump || fail` can see.
-                // `max`, as the error branch below: with `-r` a volume
-                // refused earlier (5) must not be overwritten by a later
-                // one that was merely partial (4).
-                if v.aborted || v.blocks_zeroed > 0 {
-                    code = code.max(exit::PARTIAL);
-                }
+                code = exit::after_extraction(code, v.aborted, v.blocks_zeroed);
                 out.volumes.push(v);
             }
             Err(c) => {

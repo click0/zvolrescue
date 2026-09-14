@@ -375,3 +375,145 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
         0
     }
 }
+
+/// `check`: every digest a record carries is checked back, one row
+/// each, and the four states are told apart (SPEC F-53, R-0x).
+#[cfg(test)]
+mod check_tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("zvolreport-verify-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    fn image(dir: &Path) -> PathBuf {
+        let p = dir.join("vol.img");
+        fs::write(&p, b"the bytes of a volume, such as they are").expect("write");
+        p
+    }
+
+    fn all_three(p: &Path) -> (String, String, String) {
+        let d = digests_of(
+            p,
+            Extra {
+                md5: true,
+                sha1: true,
+            },
+        )
+        .expect("hash");
+        (d.sha256, d.sha1.expect("sha1"), d.md5.expect("md5"))
+    }
+
+    fn algorithms(rows: &[Checked]) -> Vec<&'static str> {
+        rows.iter().map(|c| c.algorithm).collect()
+    }
+
+    #[test]
+    fn every_recorded_digest_is_checked_and_passes() {
+        let dir = scratch("pass");
+        let p = image(&dir);
+        let (h256, h1, h5) = all_three(&p);
+        let rows = check(
+            "output",
+            &p,
+            &Recorded {
+                sha256: Some(&h256),
+                sha1: Some(&h1),
+                md5: Some(&h5),
+            },
+        );
+        assert_eq!(algorithms(&rows), vec!["sha256", "sha1", "md5"]);
+        assert!(rows.iter().all(|c| c.status == Status::Pass), "{rows:?}");
+        assert!(rows.iter().all(|c| c.found == c.recorded));
+    }
+
+    #[test]
+    fn one_changed_byte_fails_every_recorded_digest() {
+        let dir = scratch("fail");
+        let p = image(&dir);
+        let (h256, h1, h5) = all_three(&p);
+        let mut bytes = fs::read(&p).expect("read");
+        bytes[3] ^= 0x01;
+        fs::write(&p, bytes).expect("tamper");
+        let rows = check(
+            "output",
+            &p,
+            &Recorded {
+                sha256: Some(&h256),
+                sha1: Some(&h1),
+                md5: Some(&h5),
+            },
+        );
+        assert_eq!(rows.len(), 3);
+        for c in &rows {
+            assert!(c.status == Status::Fail, "{c:?}");
+            assert!(c.found.is_some() && c.found != c.recorded, "{c:?}");
+        }
+    }
+
+    #[test]
+    fn a_file_that_is_gone_is_missing_for_every_digest() {
+        let dir = scratch("missing");
+        let p = image(&dir);
+        let (h256, h1, h5) = all_three(&p);
+        fs::remove_file(&p).expect("remove");
+        let rows = check(
+            "output",
+            &p,
+            &Recorded {
+                sha256: Some(&h256),
+                sha1: Some(&h1),
+                md5: Some(&h5),
+            },
+        );
+        assert_eq!(rows.len(), 3);
+        assert!(rows
+            .iter()
+            .all(|c| c.status == Status::Missing && c.found.is_none()));
+        assert!(rows.iter().all(|c| c.detail.is_some()));
+    }
+
+    #[test]
+    fn nothing_recorded_is_one_row_with_nothing_to_check_against() {
+        let dir = scratch("unhashed");
+        let p = image(&dir);
+        let rows = check(
+            "evidence",
+            &p,
+            &Recorded {
+                sha256: None,
+                sha1: None,
+                md5: None,
+            },
+        );
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].status == Status::Unhashed);
+        assert!(rows[0].recorded.is_none() && rows[0].found.is_none());
+    }
+
+    /// Only what was recorded is checked: a record with SHA-256 and MD5
+    /// gets two rows, and SHA-1 is neither computed nor mentioned.
+    #[test]
+    fn only_the_digests_recorded_are_checked() {
+        let dir = scratch("subset");
+        let p = image(&dir);
+        let (h256, _, h5) = all_three(&p);
+        let rows = check(
+            "output",
+            &p,
+            &Recorded {
+                sha256: Some(&h256),
+                sha1: None,
+                md5: Some(&h5),
+            },
+        );
+        assert_eq!(algorithms(&rows), vec!["sha256", "md5"]);
+        assert!(rows.iter().all(|c| c.status == Status::Pass));
+    }
+}

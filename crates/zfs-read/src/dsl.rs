@@ -254,6 +254,33 @@ pub enum PropertyValue {
 }
 
 impl PropertyValue {
+    /// From what the ZAP holds.
+    ///
+    /// A single integer is a number. Several — which ZFS does not write
+    /// for any property of its own, but a ZAP can hold — are shown as
+    /// the list they are rather than as a debug dump. Bytes are text
+    /// when they decode as such, with the trailing NUL of their on-disk
+    /// form gone, and kept raw when they do not: a user property is a
+    /// string on the disk, and mangling one to make it print would say
+    /// something the pool does not.
+    pub fn from_zap(value: Value) -> PropertyValue {
+        match value {
+            Value::U64(v) => PropertyValue::Number(v),
+            Value::U64Array(a) if a.len() == 1 => PropertyValue::Number(a[0]),
+            Value::U64Array(a) => {
+                PropertyValue::Text(a.iter().map(u64::to_string).collect::<Vec<_>>().join(","))
+            }
+            Value::Bytes(b) => {
+                let text = b.strip_suffix(&[0]).unwrap_or(&b);
+                match std::str::from_utf8(text) {
+                    Ok(t) => PropertyValue::Text(t.to_string()),
+                    Err(_) => PropertyValue::Raw(b),
+                }
+            }
+            Value::Ints { raw, .. } => PropertyValue::Raw(raw),
+        }
+    }
+
     /// How to print it.
     pub fn to_display(&self) -> String {
         match self {
@@ -302,24 +329,14 @@ pub fn read_properties(
     Ok(entries
         .into_iter()
         .map(|e| {
-            let value = match e.value {
-                Value::U64(v) => PropertyValue::Number(v),
-                Value::U64Array(ref a) if a.len() == 1 => PropertyValue::Number(a[0]),
-                Value::Bytes(ref b) => {
-                    let text = b.strip_suffix(&[0]).unwrap_or(b);
-                    match std::str::from_utf8(text) {
-                        Ok(t) => PropertyValue::Text(t.to_string()),
-                        Err(_) => PropertyValue::Raw(b.clone()),
-                    }
-                }
-                ref other => PropertyValue::Text(format!("{other:?}")),
-            };
+            let name = e.name;
+            let value = PropertyValue::from_zap(e.value);
             let meaning = match &value {
-                PropertyValue::Number(v) => zfs_ondisk::props::describe(&e.name, *v),
+                PropertyValue::Number(v) => zfs_ondisk::props::describe(&name, *v),
                 _ => None,
             };
             Property {
-                name: e.name,
+                name,
                 value,
                 meaning,
             }
@@ -1362,5 +1379,150 @@ mod pending_tests {
             ZPL_BPOBJ_CHILD_BYTES
         );
         assert_eq!(p.total(), ZPL_DEADLIST_BYTES);
+    }
+}
+
+/// Telling a removed top-level vdev from a missing one (SPEC F-69).
+#[cfg(test)]
+mod removed_tops_tests {
+    use super::*;
+    use crate::fixture::{build_sample_mos, removed_vdev_members, Alloc, Pool};
+    use crate::pool::assemble;
+    use crate::vdev::scan_device;
+    use zfs_ondisk::blkptr::{BlkPtr, LABEL_START_SIZE};
+    use zfs_ondisk::label::LABEL_SIZE;
+    use zvolrescue_io::MemSource;
+
+    const SIZE: u64 = 64 * LABEL_SIZE;
+
+    fn scan_all(members: Vec<Vec<u8>>) -> (Vec<MemSource>, Vec<Option<DeviceScan>>) {
+        let sources: Vec<MemSource> = members.into_iter().map(MemSource::new).collect();
+        let scans = sources.iter().map(|s| scan_device(s).ok()).collect();
+        (sources, scans)
+    }
+
+    fn ask(sources: &[MemSource], scans: &[Option<DeviceScan>], pool: &PoolAssembly) -> Vec<u64> {
+        let devices: Vec<Option<&dyn BlockSource>> = sources
+            .iter()
+            .map(|s| Some(s as &dyn BlockSource))
+            .collect();
+        let bases = vec![0u64; sources.len()];
+        removed_tops_of(scans, devices, &bases, pool)
+    }
+
+    /// From the labels alone vdev 1 is missing; the MOS says it was
+    /// removed, and once the assembly is told, the pool is readable.
+    #[test]
+    fn the_mos_names_the_removed_top_and_the_pool_becomes_readable() {
+        let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1)]);
+        let members = removed_vdev_members(&mut pool, SIZE);
+        let (sources, scans) = scan_all(members);
+        let mut assembly = assemble(&scans).into_iter().next().expect("one pool");
+        assert_eq!(assembly.missing_tops(), vec![1]);
+        assert!(!assembly.readable());
+
+        let removed = ask(&sources, &scans, &assembly);
+        assert_eq!(removed, vec![1]);
+        assembly.note_removed_tops(removed);
+        assert_eq!(assembly.missing_tops(), Vec::<u64>::new());
+        assert!(assembly.readable());
+    }
+
+    /// With the MOS unreachable the question has no answer, and the
+    /// vdev stays missing — which it may be. This is the branch a CLI
+    /// run cannot reach on demand.
+    #[test]
+    fn without_a_reachable_mos_the_vdev_stays_missing() {
+        let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1)]);
+        let mut members = removed_vdev_members(&mut pool, SIZE);
+        // Find the MOS through a label, then take it away on both sides.
+        let (probe, scans) = scan_all(members.clone());
+        let ub = scans[0].as_ref().expect("scan").labels[0]
+            .best()
+            .expect("ub")
+            .ub
+            .clone();
+        let rootbp = BlkPtr::parse(&ub.rootbp, ub.endian).expect("root pointer");
+        let at = (LABEL_START_SIZE + rootbp.dva[0].offset) as usize;
+        drop(probe);
+        for m in &mut members {
+            m[at..at + rootbp.psize as usize].fill(0);
+        }
+        let (sources, scans) = scan_all(members);
+        let mut assembly = assemble(&scans).into_iter().next().expect("one pool");
+        assert_eq!(assembly.missing_tops(), vec![1]);
+
+        let removed = ask(&sources, &scans, &assembly);
+        assert_eq!(removed, Vec::<u64>::new());
+        assembly.note_removed_tops(removed);
+        assert_eq!(assembly.missing_tops(), vec![1]);
+        assert!(!assembly.readable());
+    }
+
+    /// Nothing undescribed means nothing to ask, whatever the labels
+    /// claim about features: the answer is empty before any block is
+    /// read.
+    #[test]
+    fn a_pool_with_every_top_described_has_nothing_to_ask() {
+        let mut pool = Pool::mirror("tank", 0x4242, 12)
+            .txgs(&[(100, 1)])
+            .with_feature("com.delphix:device_removal");
+        let mut members = vec![vec![0u8; SIZE as usize], vec![0u8; SIZE as usize]];
+        let mut a = Alloc::new(0x20_0000);
+        build_sample_mos(&mut pool, &mut members, &mut a);
+        for (i, m) in members.iter_mut().enumerate() {
+            pool.write_labels(i, m);
+        }
+        let (sources, scans) = scan_all(members);
+        let assembly = assemble(&scans).into_iter().next().expect("one pool");
+        assert!(assembly.missing_tops().is_empty());
+        assert_eq!(ask(&sources, &scans, &assembly), Vec::<u64>::new());
+    }
+}
+
+/// What a property value looks like, from what the ZAP holds (SPEC F-14).
+#[cfg(test)]
+mod property_value_tests {
+    use super::*;
+
+    #[test]
+    fn integers_are_numbers_and_several_are_a_list() {
+        assert_eq!(
+            PropertyValue::from_zap(Value::U64(7)),
+            PropertyValue::Number(7)
+        );
+        assert_eq!(
+            PropertyValue::from_zap(Value::U64Array(vec![7])),
+            PropertyValue::Number(7)
+        );
+        assert_eq!(
+            PropertyValue::from_zap(Value::U64Array(vec![1, 2, 3])),
+            PropertyValue::Text("1,2,3".into())
+        );
+    }
+
+    #[test]
+    fn text_loses_its_nul_and_bytes_that_are_not_text_stay_raw() {
+        assert_eq!(
+            PropertyValue::from_zap(Value::Bytes(b"RT-4471\0".to_vec())),
+            PropertyValue::Text("RT-4471".into())
+        );
+        assert_eq!(
+            PropertyValue::from_zap(Value::Bytes(b"plain".to_vec())),
+            PropertyValue::Text("plain".into())
+        );
+        let raw = vec![0xff, 0xfe, 0x00];
+        assert_eq!(
+            PropertyValue::from_zap(Value::Bytes(raw.clone())),
+            PropertyValue::Raw(raw)
+        );
+        assert_eq!(
+            PropertyValue::from_zap(Value::Ints {
+                intlen: 2,
+                raw: vec![1, 2]
+            }),
+            PropertyValue::Raw(vec![1, 2])
+        );
+        assert_eq!(PropertyValue::Raw(vec![0xab, 0x01]).to_display(), "ab01");
     }
 }
