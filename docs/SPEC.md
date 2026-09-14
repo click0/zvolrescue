@@ -396,8 +396,15 @@ KEYSPEC:   raw:FILE | hex:HEX | hex:@FILE | passphrase:FILE | prompt   (prompt r
 ```
 
 Exit codes: `0` success, `1` usage error, `2` evidence unreadable, `3` pool
-unrecoverable at requested TXG, `4` extraction completed with errors
-(`--strict` only), `5` refused (would write to evidence).
+unrecoverable at requested TXG, `4` the image is not the whole volume —
+blocks that could not be read were written as zeros, or `--strict`
+aborted at the first one — `5` refused (would write to evidence).
+
+`4` is not reserved for `--strict`. An image with zero-filled holes is
+not the volume, and a caller that reads only the status must not be told
+otherwise; the run also says so in its warning, its JSON and its
+evidence record. `zvolcarve dump` has always answered this way, and the
+two now agree.
 
 Example (UC-1):
 

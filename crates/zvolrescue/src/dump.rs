@@ -466,7 +466,7 @@ fn print_text(out: &RunOut) {
             println!("  ABORTED at the first unreadable block (--strict); the image is incomplete, --resume continues after a repair");
         } else if !v.bad.is_empty() {
             println!(
-                "  WARNING: {} unreadable block(s) were written as zeros; rerun with --strict to refuse partial output",
+                "  WARNING: {} unreadable block(s) were written as zeros (exit 4); rerun with --strict to refuse partial output",
                 v.bad.len()
             );
         }
@@ -603,7 +603,12 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             opts.hash,
         ) {
             Ok(v) => {
-                if v.aborted {
+                // An image with blocks written as zeros is not the
+                // volume, and a script that reads only the status must
+                // not be told it is. The run says so in the warning, in
+                // the JSON and in the evidence record; now it says so
+                // in the one place a `dump || fail` can see.
+                if v.aborted || v.blocks_zeroed > 0 {
                     code = exit::PARTIAL;
                 }
                 out.volumes.push(v);

@@ -480,6 +480,11 @@ def judge_dump(args, oracle, manifest, members, work, assume=()):
             outcomes[vol] = "ok" if sha256_file(out) == oracle.volumes[vol] else "hash mismatch"
         elif proc.returncode in (2, 3):
             outcomes[vol] = "refused"
+        elif proc.returncode == 4:
+            # The tool says the image is not the whole volume. That is
+            # neither a clean refusal nor an answer, so it is named
+            # rather than folded into either.
+            outcomes[vol] = "incomplete (blocks written as zeros)"
         else:
             outcomes[vol] = f"exit {proc.returncode}: {proc.stderr.strip()[:160]}"
     return outcomes, redundancy

@@ -98,6 +98,16 @@ jobs:
           ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/bad.img /tmp/fx/member1.img -o /tmp/healed.img
           cmp /tmp/disk0.img /tmp/healed.img
           if ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/bad.img -o /tmp/partial.img --strict; then echo "strict must fail"; exit 1; else test $? = 4; fi
+          # An incomplete image says so with the status, not only in the
+          # warning: a caller that reads `dump || fail` must not be told
+          # a zero-filled image is the volume. Without --strict the run
+          # finishes and still exits 4.
+          if ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/bad.img -o /tmp/zeroed.img > /tmp/zeroed.out; then echo "zeroed blocks must exit 4"; exit 1; else test $? = 4; fi
+          grep -q "1 zeroed (unreadable)" /tmp/zeroed.out
+          grep -q "written as zeros (exit 4)" /tmp/zeroed.out
+          # Healed from the other side of the mirror: nothing zeroed, exit 0.
+          ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/bad.img /tmp/fx/member1.img -o /tmp/healed2.img > /tmp/healed2.out
+          grep -q "0 zeroed (unreadable)" /tmp/healed2.out
           if ./target/release/zvolrescue dump tank/vm/disk0 /tmp/fx/member0.img -o /tmp/fx/member0.img; then echo "must refuse"; exit 1; else test $? = 5; fi
       - name: Zero point of a member whose labels are gone (SPEC F-61)
         run: |

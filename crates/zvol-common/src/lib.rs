@@ -23,7 +23,10 @@ pub mod exit {
     pub const EVIDENCE: u8 = 2;
     /// Pool unrecoverable at the requested TXG.
     pub const UNRECOVERABLE: u8 = 3;
-    /// Extraction completed with errors (`--strict`).
+    /// The image is not the whole volume: blocks were written as zeros
+    /// because they could not be read, or `--strict` aborted at the
+    /// first one. Either way the run says so in its output; this is so
+    /// that a caller reading only the status is told too.
     pub const PARTIAL: u8 = 4;
     /// Refused: the operation would write to evidence.
     pub const REFUSED: u8 = 5;

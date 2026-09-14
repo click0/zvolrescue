@@ -247,6 +247,28 @@ tagged. `v0.7.1` is the release that carries those six.
   followed.
 
 ### Fixed
+* **`dump` exited 0 on an image it had just filled with zeros.** When a
+  block could not be read, the run wrote zeros in its place, printed a
+  warning, listed the range and recorded it in the evidence log — and
+  then exited `0`. A caller that reads `dump || handle_failure`, which
+  is how this tool gets used in a script, was told the volume had been
+  recovered.
+
+  `zvolcarve dump` had answered `4` in the same situation all along,
+  saying "either way the image is not the whole volume: say so with the
+  code, not only in the report". Two tools disagreeing about the same
+  fact is one of them being wrong, and the spec was on the wrong side:
+  it reserved `4` for `--strict`. Both now exit `4` whenever blocks were
+  written as zeros, `--strict` or not, and the spec says so. `--strict`
+  is unchanged: it still aborts at the first unreadable block.
+
+  Nothing that could read the volume changes. A mirror that heals from
+  its other side, a raidz2 missing two members, a corrupted member
+  rebuilt from parity — all still exit `0`, because nothing was zeroed;
+  checked on the fixtures CI uses. The damage matrix learned the code
+  too, so an incomplete image is named rather than reported as an
+  unexplained exit.
+
 * **The real-world test matrix said three implemented things were
   pending (docs/REALWORLD-TESTS).** It is the checklist someone works
   through before trusting this tool on a customer's disks, and it told
