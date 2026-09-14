@@ -22,6 +22,7 @@ pub mod indirect;
 pub mod label;
 pub mod nvlist;
 pub mod part;
+pub mod props;
 pub mod raidz;
 pub mod signature;
 pub mod skein;

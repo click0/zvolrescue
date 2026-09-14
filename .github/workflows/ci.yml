@@ -485,6 +485,36 @@ jobs:
           test "$(./target/release/zvolrescue -q scan /tmp/f70/member0.img | grep -c 'NOT ACCOUNTED FOR')" = 0
           # The companions share the check, since they share the members.
           if ./target/release/zvolfiles -q list tank/fs /tmp/f70x/member0.img; then echo "must refuse"; exit 1; else test $? = 3; fi
+      - name: The properties a dataset has set, user properties included (SPEC F-14)
+        run: |
+          # Only what was set on the dataset itself is on disk. A number
+          # keeps its number unless this build can show its working for
+          # a name: checksum and compression share the block pointer's
+          # own enumerations, and nothing else is decoded.
+          rm -rf /tmp/f14
+          cargo run -q -p zfs-read --example mkfixture -- /tmp/f14 mirror 12
+          ./target/release/zvolrescue -q list -r -p --txg 4816229 /tmp/f14/member0.img /tmp/f14/member1.img > /tmp/f14/out
+          grep -q "property: compression = 15 (lz4)" /tmp/f14/out
+          grep -q "property: checksum = 12 (skein)" /tmp/f14/out
+          # A user property: a string, unquoted, with no meaning invented.
+          grep -q "property: org.example:ticket = RT-4471" /tmp/f14/out
+          # A dataset that set none shows none, and asking is what makes
+          # the difference between "none set" and "not asked".
+          test "$(grep -c 'property:' /tmp/f14/out)" = 3
+          test "$(./target/release/zvolrescue -q list -r --txg 4816229 /tmp/f14/member0.img | grep -c 'property:')" = 0
+          ./target/release/zvolrescue -q -f json list -r -p --txg 4816229 /tmp/f14/member0.img | python3 -c '
+          import json,sys
+          d = json.load(sys.stdin)
+          by = {x["name"]: x for x in d["datasets"]}
+          got = by["tank/vm/disk0"]["properties"]
+          assert got == [
+              {"name": "compression", "value": 15, "means": "lz4"},
+              {"name": "checksum", "value": 12, "means": "skein"},
+              {"name": "org.example:ticket", "value": "RT-4471"},
+          ], got
+          # Set nothing, and the list is empty rather than absent.
+          assert by["tank/vm"]["properties"] == [], by["tank/vm"]
+          '
       - name: A pool a top-level vdev was removed from (SPEC F-69)
         run: |
           # The volume's data blocks are addressed on a vdev that is gone;

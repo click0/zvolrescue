@@ -305,6 +305,9 @@ pub struct Alloc {
     removed_next: u64,
 }
 
+/// MOS object holding the properties set on `tank/vm/disk0`.
+pub const SAMPLE_PROPS_OBJECT: u64 = 15;
+
 /// MOS object the sample pool's configuration nvlist lives in — the
 /// number its object directory has always named.
 pub const CONFIG_OBJECT: u64 = 11;
@@ -714,7 +717,7 @@ pub fn build_sample_mos_variant(
         }
         .build()
     };
-    let dir_obj = |head: u64, children: u64, parent: u64| {
+    let dir_obj_with = |head: u64, children: u64, parent: u64, props: u64| {
         DnodeSpec {
             object_type: ot::DSL_DIR,
             bonus_type: ot::DSL_DIR,
@@ -722,12 +725,14 @@ pub fn build_sample_mos_variant(
                 head_dataset_obj: head,
                 child_dir_zapobj: children,
                 parent_obj: parent,
+                props_zapobj: props,
                 ..Default::default()
             }),
             ..DnodeSpec::default()
         }
         .build()
     };
+    let dir_obj = |head: u64, children: u64, parent: u64| dir_obj_with(head, children, parent, 0);
     let ds_obj = |d: &DslDatasetPhys| {
         DnodeSpec {
             object_type: ot::DSL_DATASET,
@@ -772,7 +777,33 @@ pub fn build_sample_mos_variant(
     put(9, dir_obj(0, 0, 2));
     if with_disk0 {
         put(7, zap_obj(a, m, &[("disk0", 12)]));
-        put(12, dir_obj(13, 0, 5));
+        // Properties set on the volume (SPEC F-14). A byte-array value
+        // forces a fatzap, which is what a ZAP holding a user property
+        // really is: a microzap entry is one 64-bit integer and cannot
+        // hold a string at all.
+        let hdr = zfs_ondisk::zap::encode::fat_header(4096, 1, 3);
+        let lf = zfs_ondisk::zap::encode::leaf(
+            4096,
+            &[
+                ("compression", 8, 15u64.to_be_bytes().to_vec()),
+                ("checksum", 8, 12u64.to_be_bytes().to_vec()),
+                ("org.example:ticket", 1, b"RT-4471\0".to_vec()),
+            ],
+        );
+        let h = a.put(m, &hdr, ot::DSL_PROPS, 0, 100);
+        let l = a.put(m, &lf, ot::DSL_PROPS, 0, 100);
+        put(
+            SAMPLE_PROPS_OBJECT,
+            DnodeSpec {
+                object_type: ot::DSL_PROPS,
+                datablksz: 4096,
+                maxblkid: 1,
+                blkptrs: vec![h, l],
+                ..DnodeSpec::default()
+            }
+            .build(),
+        );
+        put(12, dir_obj_with(13, 0, 5, SAMPLE_PROPS_OBJECT));
         put(13, ds_obj(&dataset_phys(12, 0, &os_zvol, 30, 0xa3, 8)));
         put(8, zap_obj(a, m, &[("before", 10)]));
         put(10, ds_obj(&dataset_phys(12, 13, &os_zvol, 25, 0xa4, 0)));

@@ -83,6 +83,11 @@ enum Cmd {
         /// Also list snapshots.
         #[arg(short, long)]
         recursive: bool,
+        /// Show the properties each dataset has set (SPEC F-14),
+        /// including user properties. Only what was set on the dataset
+        /// itself is on disk; anything else is inherited or a default.
+        #[arg(short, long)]
+        properties: bool,
     },
     /// Extract a zvol (or an object dump of a filesystem) to a raw sparse image.
     ///
@@ -170,6 +175,7 @@ fn main() -> ExitCode {
             before,
             diff,
             recursive,
+            properties,
         } => list::run(
             &cli.global,
             &pool,
@@ -178,6 +184,7 @@ fn main() -> ExitCode {
                 before,
                 diff,
                 recursive,
+                properties,
             },
         ),
         Cmd::Dump {

@@ -223,6 +223,108 @@ pub struct Dataset {
     pub warnings: Vec<String>,
 }
 
+/// One property as a dataset's own ZAP holds it (SPEC F-14).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Property {
+    /// The name exactly as the ZAP stores it, suffixes and all. A
+    /// property received with the dataset rather than set on it is a
+    /// second entry under a suffixed name, and renaming it here would
+    /// lose the difference.
+    pub name: String,
+    /// The value as stored.
+    pub value: PropertyValue,
+    /// What the number means, where this build can show its working
+    /// (`zfs_ondisk::props`). `None` leaves the number to speak.
+    pub meaning: Option<String>,
+}
+
+/// A property value as the ZAP holds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PropertyValue {
+    /// An integer: every property ZFS defines itself, and the form a
+    /// user property never takes.
+    Number(u64),
+    /// Text: user properties, and the few of ZFS's own that are names
+    /// or paths rather than numbers.
+    Text(String),
+    /// Bytes that are not text, kept as they are rather than mangled.
+    Raw(Vec<u8>),
+}
+
+impl PropertyValue {
+    /// How to print it.
+    pub fn to_display(&self) -> String {
+        match self {
+            PropertyValue::Number(v) => v.to_string(),
+            PropertyValue::Text(t) => t.clone(),
+            PropertyValue::Raw(b) => b
+                .iter()
+                .map(|x| format!("{x:02x}"))
+                .collect::<Vec<_>>()
+                .join(""),
+        }
+    }
+}
+
+/// Read the properties set on `dataset` (SPEC F-14).
+///
+/// Only what was *set here* is on disk. A property nobody set is
+/// inherited from an ancestor or is the pool's default, and neither is
+/// written down anywhere — so this reports what the dataset holds and
+/// leaves the rest to be read off the ancestors, which are in the same
+/// tree. A snapshot has a ZAP of its own and it is usually empty: its
+/// properties are its dataset's.
+///
+/// An unreadable or absent ZAP yields no properties rather than an
+/// error for the head cases, because a dataset with none set has object
+/// 0 here and that is not a failure.
+pub fn read_properties(
+    mos: &DnodeArray<'_, '_>,
+    dataset: &Dataset,
+) -> Result<Vec<Property>, ReadError> {
+    let object = if dataset.snapshot {
+        dataset.phys.props_obj
+    } else {
+        dataset.props_zapobj
+    };
+    if object == 0 {
+        return Ok(Vec::new());
+    }
+    let entries = read_zap(&mos.object(object)?)?;
+    trace!(
+        "dsl",
+        "{}: properties object {object}, {} entry(ies)",
+        dataset.name,
+        entries.len()
+    );
+    Ok(entries
+        .into_iter()
+        .map(|e| {
+            let value = match e.value {
+                Value::U64(v) => PropertyValue::Number(v),
+                Value::U64Array(ref a) if a.len() == 1 => PropertyValue::Number(a[0]),
+                Value::Bytes(ref b) => {
+                    let text = b.strip_suffix(&[0]).unwrap_or(b);
+                    match std::str::from_utf8(text) {
+                        Ok(t) => PropertyValue::Text(t.to_string()),
+                        Err(_) => PropertyValue::Raw(b.clone()),
+                    }
+                }
+                ref other => PropertyValue::Text(format!("{other:?}")),
+            };
+            let meaning = match &value {
+                PropertyValue::Number(v) => zfs_ondisk::props::describe(&e.name, *v),
+                _ => None,
+            };
+            Property {
+                name: e.name,
+                value,
+                meaning,
+            }
+        })
+        .collect())
+}
+
 /// Everything found in one MOS walk.
 #[derive(Debug, Clone, Default)]
 pub struct DatasetTree {
@@ -765,6 +867,55 @@ mod tests {
             .clone();
         let assembly = assemble(&scans).into_iter().next().unwrap();
         (sources, assembly, ub)
+    }
+
+    /// The properties a dataset has set, user properties included
+    /// (SPEC F-14).
+    #[test]
+    fn reads_the_properties_a_dataset_has_set() {
+        let (s, a, ub) = build();
+        let dyns: Vec<Option<&dyn BlockSource>> =
+            s.iter().map(|x| Some(x as &dyn BlockSource)).collect();
+        let reader = PoolReader::new(&a, dyns);
+        let mos = open_mos(&reader, &ub).unwrap();
+        let tree = walk(&mos, "tank").unwrap();
+
+        let volume = tree.get("tank/vm/disk0").expect("the volume");
+        let props = read_properties(&mos, volume).expect("properties");
+        assert_eq!(
+            props,
+            vec![
+                Property {
+                    name: "compression".into(),
+                    value: PropertyValue::Number(15),
+                    meaning: Some("lz4".into()),
+                },
+                Property {
+                    name: "checksum".into(),
+                    value: PropertyValue::Number(12),
+                    meaning: Some("skein".into()),
+                },
+                // A user property: a string, no meaning to add, and the
+                // trailing NUL of its on-disk form gone.
+                Property {
+                    name: "org.example:ticket".into(),
+                    value: PropertyValue::Text("RT-4471".into()),
+                    meaning: None,
+                },
+            ]
+        );
+
+        // A dataset that set none has none — which is not the same as
+        // having no properties: those are inherited or defaults, and
+        // neither is written down anywhere on the disk.
+        let parent = tree.get("tank/vm").expect("the parent filesystem");
+        assert_eq!(read_properties(&mos, parent).unwrap(), Vec::new());
+
+        // A snapshot has a ZAP of its own, and this one is empty: its
+        // properties are the volume's.
+        let snap = tree.get("tank/vm/disk0@before").expect("the snapshot");
+        assert!(snap.snapshot);
+        assert_eq!(read_properties(&mos, snap).unwrap(), Vec::new());
     }
 
     #[test]

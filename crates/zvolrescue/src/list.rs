@@ -4,7 +4,10 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 use zfs_ondisk::dmu::ObjsetType;
-use zfs_read::dsl::{open_mos, walk, Dataset, DatasetTree};
+use zfs_read::dmu::DnodeArray;
+use zfs_read::dsl::{
+    open_mos, read_properties, walk, Dataset, DatasetTree, Property, PropertyValue,
+};
 use zfs_read::pool::{select_uberblock, uberblock_candidates, TxgSelect};
 use zfs_read::zio::{PoolReader, ReadError};
 
@@ -22,6 +25,8 @@ pub struct Options {
     pub diff: Option<u64>,
     /// Include snapshots.
     pub recursive: bool,
+    /// Report the properties each dataset has set (SPEC F-14).
+    pub properties: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -41,8 +46,22 @@ struct DatasetOut {
     volblocksize: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     encryption: Option<EncryptionOut>,
+    /// Properties set on this dataset, when `--properties` was given.
+    /// Absent and empty mean different things — nothing was asked for,
+    /// and nothing is set — so an empty list is still written out.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    properties: Option<Vec<PropertyOut>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct PropertyOut {
+    name: String,
+    value: serde_json::Value,
+    /// What the number means, where this build can show its working.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    means: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -99,7 +118,18 @@ fn kind_name(d: &Dataset) -> String {
     }
 }
 
-fn dataset_out(d: &Dataset) -> DatasetOut {
+fn property_out(p: &Property) -> PropertyOut {
+    PropertyOut {
+        name: p.name.clone(),
+        value: match &p.value {
+            PropertyValue::Number(v) => serde_json::Value::from(*v),
+            other => serde_json::Value::from(other.to_display()),
+        },
+        means: p.meaning.clone(),
+    }
+}
+
+fn dataset_out(d: &Dataset, properties: Option<Vec<Property>>) -> DatasetOut {
     DatasetOut {
         name: d.name.clone(),
         kind: kind_name(d),
@@ -121,6 +151,7 @@ fn dataset_out(d: &Dataset) -> DatasetOut {
             encryption_root_dir_object: e.root_ddobj,
             crypto_key_object: e.crypto_key_obj,
         }),
+        properties: properties.map(|ps| ps.iter().map(property_out).collect()),
         warnings: d.warnings.clone(),
     }
 }
@@ -182,6 +213,21 @@ fn print_text(out: &ListOut) {
                     .map_or(String::new(), |l| format!(" ({l})"))
             )),
         );
+        for p in d.properties.iter().flatten() {
+            println!(
+                "{:<width$}  property: {} = {}{}",
+                "",
+                p.name,
+                // A JSON string prints itself with quotes; a property
+                // value is not quoted on the disk or in `zfs get`.
+                p.value
+                    .as_str()
+                    .map_or_else(|| p.value.to_string(), str::to_string),
+                p.means
+                    .as_ref()
+                    .map_or(String::new(), |m| format!(" ({m})"))
+            );
+        }
         for w in &d.warnings {
             println!("{:<width$}  warning: {w}", "");
         }
@@ -210,13 +256,30 @@ fn print_text(out: &ListOut) {
     }
 }
 
-fn walk_at(
-    reader: &PoolReader<'_>,
+fn walk_at<'r, 'a>(
+    reader: &'r PoolReader<'a>,
     ub: &zfs_ondisk::uberblock::Uberblock,
     name: &str,
-) -> Result<DatasetTree, ReadError> {
+) -> Result<(DnodeArray<'r, 'a>, DatasetTree), ReadError> {
     let mos = open_mos(reader, ub)?;
-    walk(&mos, name)
+    let tree = walk(&mos, name)?;
+    Ok((mos, tree))
+}
+
+/// The properties `d` has set, or the reason there are none to show.
+///
+/// An unreadable properties ZAP is not a reason to fail the listing:
+/// everything else about the dataset is already in hand, so the failure
+/// is reported in place of the properties and the row still prints.
+fn properties_of(mos: &DnodeArray<'_, '_>, d: &Dataset) -> Vec<Property> {
+    match read_properties(mos, d) {
+        Ok(ps) => ps,
+        Err(e) => vec![Property {
+            name: "(unreadable)".into(),
+            value: PropertyValue::Text(e.to_string()),
+            meaning: None,
+        }],
+    }
 }
 
 /// Run `list`.
@@ -253,7 +316,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         return exit::UNRECOVERABLE;
     };
     let reader = PoolReader::new(&pool, members.devices()).with_base_offsets(&members.bases());
-    let tree = match walk_at(&reader, &chosen.ub, &pool.name) {
+    let (mos, tree) = match walk_at(&reader, &chosen.ub, &pool.name) {
         Ok(t) => t,
         Err(e) => {
             eprintln!(
@@ -275,7 +338,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             .datasets
             .iter()
             .filter(|d| keep(d))
-            .map(dataset_out)
+            .map(|d| dataset_out(d, opts.properties.then(|| properties_of(&mos, d))))
             .collect(),
         errors: tree.errors.clone(),
         diff: None,
@@ -287,7 +350,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 eprintln!("zvolrescue: --diff txg {other_txg} has no verified uberblock");
                 code = exit::UNRECOVERABLE;
             }
-            Some(other) => match walk_at(&reader, &other.ub, &pool.name) {
+            Some(other) => match walk_at(&reader, &other.ub, &pool.name).map(|(_, t)| t) {
                 Err(e) => {
                     eprintln!("zvolrescue: cannot read the pool at txg {other_txg}: {e}");
                     code = exit::UNRECOVERABLE;
@@ -302,12 +365,12 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                         created_since: here
                             .iter()
                             .filter(|d| !there.iter().any(|o| o.guid == d.guid))
-                            .map(|d| dataset_out(d))
+                            .map(|d| dataset_out(d, None))
                             .collect(),
                         destroyed_since: there
                             .iter()
                             .filter(|d| !here.iter().any(|o| o.guid == d.guid))
-                            .map(|d| dataset_out(d))
+                            .map(|d| dataset_out(d, None))
                             .collect(),
                     });
                 }

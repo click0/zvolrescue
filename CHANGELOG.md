@@ -16,6 +16,43 @@ tagged. `v0.7.1` is the release that carries those six.
 ## Unreleased
 
 ### Added
+* **`list --properties`: what a dataset has set, user properties
+  included (SPEC F-14).** The properties ZAP was parsed as far as its
+  object number and never read. It holds what an operator holding a
+  dead pool most wants next after the dataset list: what `compression`
+  and `checksum` this volume was written with, what `recordsize` it
+  used, and whatever the shop's own bookkeeping put in a user property.
+
+  **Only what was set here is on disk.** A property nobody set is
+  inherited from an ancestor or is the pool's default, and neither is
+  written down anywhere — so this reports what the dataset holds and
+  says so, rather than computing an effective value out of a table of
+  defaults that no disk would confirm. The ancestors are in the same
+  listing, which is where an inherited value comes from.
+
+  **A number keeps its number unless the build can show its working.**
+  `checksum` and `dedup` carry the same `zio_checksum` enumeration a
+  block pointer carries, which this tool already decodes on every block
+  it reads and the cross-check compares against `zdb`. `compression`
+  carries a `zio_compress` code in its low seven bits with a `zstd`
+  level above them — and that split was measured, not remembered:
+  across the five pools the cross-check builds and two more with vdevs
+  removed, nineteen distinct values appear, and every one either fits
+  in seven bits (on, lzjb, zle, lz4) or has exactly `16` — zstd — in
+  them with 1..=19 or 100..=120 above. Nothing else produced a high
+  part at all. Everything else — `copies`, `recordsize`, every on/off
+  flag — prints the number the pool holds, because a name this build
+  cannot evidence would be worse than the number.
+
+  Checked against `zdb` on a real `ztest` pool: twenty properties over
+  eight datasets, name for name and value for value, with an empty
+  `diff`. In CI a fixture volume carries two of ZFS's own properties
+  and a user property — which forces a fatzap, since a microzap entry
+  is one 64-bit integer and cannot hold a string at all — and the
+  listing is compared in both text and JSON. Asking is what separates
+  "none set" from "not asked": without the flag no properties are read
+  at all, and with it a dataset that set none shows an empty list.
+
 * **A pool a top-level vdev was removed from now reads (SPEC F-69).**
   `zpool remove` does not free what was on a vdev: it copies those
   blocks onto the vdevs that remain and leaves in its place an
