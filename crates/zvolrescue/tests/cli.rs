@@ -8,7 +8,8 @@ use std::process::Command;
 use zfs_ondisk::blkptr::LABEL_START_SIZE;
 use zfs_ondisk::label::LABEL_SIZE;
 use zfs_read::fixture::{
-    build_sample_mos, removed_vdev_members, Alloc, Pool, SAMPLE_ZVOL_BLOCK0_OFFSET,
+    build_sample_mos, destroyed_zvol_members, removed_vdev_members, Alloc, Pool,
+    SAMPLE_ZVOL_BLOCK0_OFFSET,
 };
 use zfs_read::hash::{Digests, Extra};
 
@@ -266,4 +267,197 @@ fn an_image_with_zeroed_blocks_exits_4_and_a_healed_one_exits_0() {
     ]);
     assert_eq!(code, 4, "{out}");
     assert_eq!(json(&out)["volumes"][0]["aborted"], true);
+}
+
+/// `--diff` names what one transaction group has that the other does
+/// not, by guid: the destroyed volume and its snapshot, with the
+/// command that gets each back.
+#[test]
+fn list_diff_names_what_the_newest_txg_no_longer_has() {
+    let dir = scratch("list-diff");
+    let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1), (200, 2)]);
+    let (members, newest, previous) = destroyed_zvol_members(&mut pool, SIZE);
+    assert_eq!((newest, previous), (200, 100));
+    let paths = write_members(&dir, &members);
+
+    let (code, out, _) = run(&[
+        "-q", "-f", "json", "list", "-r", "--diff", "100", &paths[0], &paths[1],
+    ]);
+    assert_eq!(code, 0, "{out}");
+    let v = json(&out);
+    assert_eq!(v["txg"], 200);
+    let diff = &v["diff"];
+    assert_eq!(diff["txg"], 100);
+    assert_eq!(diff["created_since"], serde_json::json!([]));
+    let gone: Vec<&str> = diff["destroyed_since"]
+        .as_array()
+        .expect("destroyed_since")
+        .iter()
+        .map(|d| d["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        gone,
+        vec!["tank/vm/disk0", "tank/vm/disk0@before"],
+        "{diff}"
+    );
+    // Nothing that reads properties runs here, so none are reported.
+    assert!(diff["destroyed_since"][0].get("properties").is_none());
+
+    let (_, text, _) = run(&["-q", "list", "-r", "--diff", "100", &paths[0]]);
+    assert!(text.contains("compared with txg 100"), "{text}");
+    assert!(
+        text.contains("destroyed  tank/vm/disk0 ") && text.contains("--txg 100"),
+        "{text}"
+    );
+
+    // A transaction group no uberblock verifies at is an error, not an
+    // empty diff.
+    let (code, _, err) = run(&["-q", "list", "-r", "--diff", "150", &paths[0]]);
+    assert_eq!(code, 3);
+    assert!(
+        err.contains("--diff txg 150 has no verified uberblock"),
+        "{err}"
+    );
+}
+
+/// `--resume` believes a state file only as far as the output backs it
+/// up: a state that names another dataset, or claims more bytes than
+/// the file holds, is set aside and the extraction starts over, and
+/// the image and its digests come out the same either way.
+#[test]
+fn a_resume_state_the_output_does_not_back_up_is_set_aside() {
+    let dir = scratch("dump-resume");
+    let members = write_members(&dir, &plain_members());
+    let img = dir.join("vol.img");
+    let img_s = img.to_string_lossy().into_owned();
+    let state_path = dir.join("vol.img.resume.json");
+    let dump = |extra: &[&str]| {
+        let mut args = vec![
+            "-q",
+            "-f",
+            "json",
+            "dump",
+            "tank/vm/disk0",
+            &members[0],
+            "--hash",
+            "md5",
+            "-o",
+            &img_s,
+        ];
+        args.extend_from_slice(extra);
+        let (code, out, err) = run(&args);
+        assert_eq!(code, 0, "{out}{err}");
+        (json(&out)["volumes"][0].clone(), err)
+    };
+    let (first, _) = dump(&[]);
+    assert_eq!(first["resumed_from_block"], 0);
+    assert!(!state_path.exists(), "a finished dump leaves no state");
+    let want = (first["sha256"].clone(), first["md5"].clone());
+    let state = |dataset: &str, blocks_done: u64| {
+        serde_json::json!({
+            "version": 1,
+            "dataset": dataset,
+            "dataset_guid": first["dataset_guid"],
+            "txg": first["txg"],
+            "volsize": first["volsize"],
+            "blocksize": first["blocksize"],
+            "blocks_done": blocks_done,
+        })
+        .to_string()
+    };
+
+    // An honest state: the first two blocks are in the file, and they
+    // are hashed back before the rest is read.
+    std::fs::write(&state_path, state("tank/vm/disk0", 2)).unwrap();
+    let (v, err) = dump(&["--resume"]);
+    assert_eq!(v["resumed_from_block"], 2, "{err}");
+    assert_eq!((v["sha256"].clone(), v["md5"].clone()), want);
+    assert_eq!(v["blocks_read"], 1, "only block 2 is read now; 3 is a hole");
+
+    // A state for some other dataset.
+    std::fs::write(&state_path, state("tank/other", 2)).unwrap();
+    let (v, err) = dump(&["--resume"]);
+    assert!(
+        err.contains("describes a different dataset/txg/size"),
+        "{err}"
+    );
+    assert_eq!(v["resumed_from_block"], 0);
+    assert_eq!((v["sha256"].clone(), v["md5"].clone()), want);
+
+    // A state that claims two blocks are done when the file holds less
+    // than one.
+    std::fs::write(&state_path, state("tank/vm/disk0", 2)).unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&img)
+        .unwrap()
+        .set_len(4096)
+        .unwrap();
+    let (v, err) = dump(&["--resume"]);
+    assert!(
+        err.contains("shorter than the 16384 bytes the resume state claims; starting over"),
+        "{err}"
+    );
+    assert_eq!(v["resumed_from_block"], 0);
+    assert_eq!((v["sha256"].clone(), v["md5"].clone()), want);
+    assert_eq!(std::fs::metadata(&img).unwrap().len(), 32 << 20);
+}
+
+/// The text report prints each legacy digest on its own line, and only
+/// those that were taken.
+#[test]
+fn the_text_report_prints_the_legacy_digests_that_were_taken() {
+    let dir = scratch("dump-text");
+    let members = write_members(&dir, &plain_members());
+    let img = dir.join("vol.img");
+    let (code, text, _) = run(&[
+        "-q",
+        "dump",
+        "tank/vm/disk0",
+        &members[0],
+        "--hash",
+        "sha1",
+        "-o",
+        &img.to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "{text}");
+    let mut d = Digests::new(Extra {
+        md5: false,
+        sha1: true,
+    });
+    d.update(&std::fs::read(&img).unwrap());
+    let got = d.finish();
+    assert!(
+        text.contains(&format!("  sha256: {}", got.sha256)),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("  sha1:   {}", got.sha1.unwrap())),
+        "{text}"
+    );
+    assert!(!text.contains("  md5:"), "{text}");
+}
+
+/// A member that cannot be opened is reported as such, per device, and
+/// the scan exits 2: evidence was missing, nothing was refused.
+#[test]
+fn scan_reports_a_member_it_cannot_open_and_exits_2() {
+    let dir = scratch("scan-missing");
+    let missing = dir.join("nothing-here.img");
+    let missing_s = missing.to_string_lossy().into_owned();
+    let (code, out, _) = run(&["-q", "-f", "json", "scan", &missing_s]);
+    assert_eq!(code, 2, "{out}");
+    let v = json(&out);
+    assert_eq!(v["pools"], serde_json::json!([]));
+    let dev = &v["devices"][0];
+    assert_eq!(dev["path"], missing_s);
+    assert_eq!(dev["size"], 0);
+    assert!(
+        dev["error"].as_str().unwrap().contains("No such file"),
+        "{dev}"
+    );
+
+    let (code, text, _) = run(&["-q", "scan", &missing_s]);
+    assert_eq!(code, 2);
+    assert!(text.contains("error: No such file"), "{text}");
 }

@@ -178,11 +178,6 @@ impl Mapping {
         Mapping { entries }
     }
 
-    /// The entries, in source order.
-    pub fn entries(&self) -> &[Entry] {
-        &self.entries
-    }
-
     /// How many entries the mapping has.
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -321,6 +316,68 @@ mod tests {
             Entry::parse(&buf, Endian::Little).unwrap(),
             entry(0x1000, 0x2000, 3, 0x40000)
         );
+    }
+
+    /// A bonus or an entry that is too short is refused with the sizes,
+    /// not read with whatever happened to follow it in memory.
+    #[test]
+    fn a_short_bonus_or_entry_is_refused_by_size() {
+        let short = [0u8; 20];
+        assert_eq!(
+            MappingPhys::parse(&short, Endian::Little).unwrap_err(),
+            ParseError::Truncated {
+                needed: PHYS_LEN,
+                got: 20
+            }
+        );
+        assert_eq!(
+            Entry::parse(&short, Endian::Little).unwrap_err(),
+            ParseError::Truncated {
+                needed: ENTRY_SIZE,
+                got: 20
+            }
+        );
+        // Exactly enough is enough, and the fields land where they are.
+        let mut bonus = [0u8; PHYS_LEN];
+        bonus[0..8].copy_from_slice(&0x1_0000u64.to_le_bytes());
+        bonus[8..16].copy_from_slice(&0x8000u64.to_le_bytes());
+        bonus[16..24].copy_from_slice(&3u64.to_le_bytes());
+        bonus[24..32].copy_from_slice(&17u64.to_le_bytes());
+        assert_eq!(
+            MappingPhys::parse(&bonus, Endian::Little).unwrap(),
+            MappingPhys {
+                max_offset: 0x1_0000,
+                bytes_mapped: 0x8000,
+                num_entries: 3,
+                counts_object: 17
+            }
+        );
+    }
+
+    /// A partial mapping is not an error: what is there translates, and
+    /// what is not is reported as a gap where it is looked up.
+    #[test]
+    fn a_partial_mapping_translates_what_it_has() {
+        let mut data = vec![0u8; ENTRY_SIZE * 2 + 5];
+        for (i, (src, dst)) in [(0x4000u64, 0x9000u64), (0x0u64, 0x8000u64)]
+            .iter()
+            .enumerate()
+        {
+            let at = i * ENTRY_SIZE;
+            data[at..at + 8].copy_from_slice(&(src >> 9).to_le_bytes());
+            data[at + 8..at + 16].copy_from_slice(&((1u64 << 32) | (0x1000 >> 9)).to_le_bytes());
+            data[at + 16..at + 24].copy_from_slice(&(dst >> 9).to_le_bytes());
+        }
+        let m = Mapping::parse(&data, 3, Endian::Little).unwrap();
+        assert_eq!(
+            (m.len(), m.is_empty(), m.mapped_bytes()),
+            (2, false, 0x2000)
+        );
+        // Written out of order, looked up in order.
+        assert_eq!(m.remap(0x4100, 0x100).unwrap()[0].offset, 0x9100);
+        assert_eq!(m.remap(0x100, 0x100).unwrap()[0].offset, 0x8100);
+        assert!(m.remap(0x2000, 0x100).is_err());
+        assert!(Mapping::default().is_empty());
     }
 
     #[test]

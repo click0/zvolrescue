@@ -372,6 +372,54 @@ mod tests {
         assert!(sink.data.is_empty());
     }
 
+    /// `extract_hashing` is `extract` with the legacy digests taken in
+    /// the same pass: the image is the same, and each digest is what
+    /// the written bytes hash to.
+    #[test]
+    fn hashing_as_it_goes_gives_the_digests_of_the_image_written() {
+        let (s, a, ub, _) = build();
+        let reader = PoolReader::new(&a, vec![Some(&s[0] as &dyn BlockSource)]);
+        let mos = open_mos(&reader, &ub).unwrap();
+        let tree = walk(&mos, "tank").unwrap();
+        let ds = tree.get("tank/vm/disk0").unwrap();
+        let (obj, _) = open_volume(&reader, ds).unwrap();
+        let extra = Extra {
+            md5: true,
+            sha1: true,
+        };
+        let mut sink = MemSink::default();
+        let r = extract_hashing(
+            &obj,
+            ds.volsize.unwrap(),
+            &mut sink,
+            OnError::Zero,
+            extra,
+            |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(sink.data, expected_image());
+        let mut direct = Digests::new(extra);
+        direct.update(&sink.data);
+        let direct = direct.finish();
+        assert_eq!(r.sha256, direct.sha256);
+        assert!(r.sha1.is_some() && r.md5.is_some());
+        assert_eq!((r.sha1, r.md5), (direct.sha1, direct.md5));
+
+        // Not asked for: not there.
+        let mut sink = MemSink::default();
+        let r = extract_hashing(
+            &obj,
+            ds.volsize.unwrap(),
+            &mut sink,
+            OnError::Zero,
+            Extra::none(),
+            |_, _| {},
+        )
+        .unwrap();
+        assert_eq!((r.sha1, r.md5), (None, None));
+        assert_eq!(r.sha256, direct.sha256);
+    }
+
     #[test]
     fn resuming_mid_way_yields_the_same_image_and_hash() {
         let (s, a, ub, _) = build();

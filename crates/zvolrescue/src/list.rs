@@ -393,3 +393,52 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     // `list` writes nothing but its report on stdout.
     g.log_evidence("zvolrescue", &json, code, &members.paths, Vec::new())
 }
+
+#[cfg(test)]
+mod properties_tests {
+    use super::*;
+    use zfs_ondisk::label::LABEL_SIZE;
+    use zfs_read::fixture::{build_sample_mos, Alloc, Pool};
+    use zfs_read::pool::assemble;
+    use zfs_read::vdev::scan_device;
+    use zvolrescue_io::{BlockSource, MemSource};
+
+    /// A properties object that cannot be read is one row saying so,
+    /// not a dataset that silently has no properties and not a `list`
+    /// that dies on the one dataset whose ZAP is gone.
+    #[test]
+    fn an_unreadable_properties_object_is_one_row_that_says_so() {
+        let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1)]);
+        let mut members = vec![vec![0u8; (64 * LABEL_SIZE) as usize]];
+        let mut a = Alloc::new(0x20_0000);
+        build_sample_mos(&mut pool, &mut members, &mut a);
+        pool.write_labels(0, &mut members[0]);
+        let source = MemSource::new(members.remove(0));
+        let scans = vec![scan_device(&source).ok()];
+        let ub = scans[0].as_ref().expect("scan").labels[0]
+            .best()
+            .expect("ub")
+            .ub
+            .clone();
+        let assembly = assemble(&scans).into_iter().next().expect("one pool");
+        let reader = PoolReader::new(&assembly, vec![Some(&source as &dyn BlockSource)]);
+        let mos = open_mos(&reader, &ub).expect("MOS");
+        let tree = walk(&mos, "tank").expect("tree");
+        let disk0 = tree.get("tank/vm/disk0").expect("the volume");
+
+        let intact = properties_of(&mos, disk0);
+        assert_eq!(intact.len(), 3, "{intact:?}");
+        assert_eq!(intact[0].name, "compression");
+
+        let mut broken = disk0.clone();
+        broken.props_zapobj = 999_999;
+        let rows = properties_of(&mos, &broken);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].name, "(unreadable)");
+        assert!(
+            matches!(&rows[0].value, PropertyValue::Text(t) if !t.is_empty()),
+            "{rows:?}"
+        );
+        assert_eq!(rows[0].meaning, None);
+    }
+}

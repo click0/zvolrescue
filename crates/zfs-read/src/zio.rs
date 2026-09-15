@@ -1851,6 +1851,29 @@ mod mapping_reader_tests {
         assert_eq!(r.removed_vdevs(), vec![(7, 1)]);
     }
 
+    /// The raw read `zvolcarve` uses goes through the same translation:
+    /// a DVA on a removed vdev yields the bytes, and says which member
+    /// they came from.
+    #[test]
+    fn a_raw_read_of_a_dva_on_a_removed_vdev_is_translated_too() {
+        let (s, a, ub) = build(None);
+        let r = reader(&s, &a);
+        let bp = block0_on(&r, &ub, 7, AWAY);
+        assert_eq!(
+            r.read_dva(&bp.dva[0], BLOCK as usize).unwrap_err(),
+            ReadError::UnknownVdev(7)
+        );
+        r.set_removed_mapping(
+            7,
+            Mapping::from_entries(vec![entry(AWAY, 0, SAMPLE_ZVOL_BLOCK0_OFFSET)]),
+        );
+        let (bytes, device) = r.read_dva(&bp.dva[0], BLOCK as usize).expect("translated");
+        assert_eq!(bytes, zvol_pattern(0));
+        // A translated read is joined from pieces and has no one member
+        // to name; the caller gets the sentinel, not a made-up index.
+        assert_eq!(device, usize::MAX);
+    }
+
     /// A vdev removed onto another that was itself removed later: the
     /// mapping is followed twice.
     #[test]
