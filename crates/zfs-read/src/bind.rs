@@ -291,6 +291,34 @@ mod tests {
         assert!(assembly.vacant_leaves().is_empty());
     }
 
+    /// A three-way mirror with one leaf gone and another's labels wiped:
+    /// the third describes the topology, and the wiped member is bound
+    /// by reading — the shape the damage matrix produces when ztest has
+    /// attached a third side.
+    #[test]
+    fn a_wider_mirror_with_a_leaf_missing_still_binds_the_wiped_one() {
+        let mut pool = Pool::mirror("tank", 0x1000, 12).txgs(&[(100, 1), (200, 2)]);
+        pool.members.push(crate::fixture::Member {
+            guid: crate::fixture::Member::guid_for(0x1000, 2),
+            path: "/dev/gpt/tank-d2".into(),
+        });
+        let (sources, mut scans) = setup(pool, &[0]);
+        assert_eq!(sources.len(), 3);
+        // Leaf 1 is absent from the run altogether.
+        scans[1] = None;
+        let mut devices = as_dyn(&sources);
+        devices[1] = None;
+        let mut assembly = assemble(&scans).into_iter().next().expect("one pool");
+        assert_eq!(assembly.vacant_leaves().len(), 2);
+        let bases = vec![0u64; sources.len()];
+        let found = candidates_for(&assembly, &scans, &devices, &bases, 0);
+        assert!(!found.is_empty(), "the wiped member reads as a leaf");
+        match bind_by_reading(&mut assembly, &scans, &devices, &bases, 0) {
+            Verdict::Bound(_, _) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+
     #[test]
     fn a_device_that_does_not_hold_the_pools_data_reads_as_no_leaf() {
         let pool = Pool::mirror("tank", 0x1000, 12).txgs(&[(100, 1), (200, 2)]);

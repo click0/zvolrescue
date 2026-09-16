@@ -461,6 +461,42 @@ UNCLEAN_VARIANTS = ("Decompress", "Crypt")
 CHECKSUMLESS = re.compile(r"\boff(?: encrypted)?(?: gang)?: ERROR")
 
 
+# What the tool says when a member it was told belongs to the pool reads as
+# no leaf of it (SPEC F-62). It is an answer, not a breakage: the assertion
+# was tried by reading and the evidence did not bear it out, and the tool
+# stops there rather than bind on say-so. It exits 1 because the way on is
+# an operator's decision (`=GUID`), which is what usage errors are; the
+# harness must not read that as the tool failing in a way it cannot
+# account for.
+UNBOUND = "nothing reads through this member"
+
+
+def refusal(returncode, stderr):
+    """The refusal a tool exit amounts to, or None when it is not one.
+
+    2 is "not readable as a pool at all", 3 is "the pool is there but
+    cannot be recovered at that TXG"; both are refusals. So is 1 when it
+    carries the F-62 message: the tool was told a member belongs and
+    found by reading that it does not.
+
+    >>> refusal(2, "")
+    'refused'
+    >>> refusal(3, "zvolrescue: no verified uberblock")
+    'refused'
+    >>> refusal(1, "zvolrescue: --assume-member /x: nothing reads through this member — it is not one of the 2 leaves pool 'p' is missing.")
+    'refused (asserted member reads as no leaf)'
+    >>> refusal(1, "zvolrescue: --before wants Unix seconds") is None
+    True
+    >>> refusal(0, "") is None
+    True
+    """
+    if returncode in (2, 3):
+        return "refused"
+    if returncode == 1 and UNBOUND in stderr:
+        return "refused (asserted member reads as no leaf)"
+    return None
+
+
 def judge_dump(args, oracle, manifest, members, work, assume=()):
     want = manifest["expect"].get("volumes", "all")
     volumes = list(oracle.volumes) if want == "all" else list(want)
@@ -478,7 +514,7 @@ def judge_dump(args, oracle, manifest, members, work, assume=()):
         redundancy |= bool(REDUNDANCY.search(trace))
         if proc.returncode == 0 and os.path.exists(out):
             outcomes[vol] = "ok" if sha256_file(out) == oracle.volumes[vol] else "hash mismatch"
-        elif proc.returncode in (2, 3):
+        elif refusal(proc.returncode, proc.stderr):
             outcomes[vol] = "refused"
         elif proc.returncode == 4:
             # The tool says the image is not the whole volume. That is
@@ -538,10 +574,12 @@ def judge_walk(args, oracle, members, work, assume=()):
     hints = [a for path in assume for a in ("--assume-member", path)]
     proc = subprocess.run([args.tool, "-f", "json", "list", "-r", *members, *hints],
                           capture_output=True, text=True)
-    if proc.returncode in (2, 3):
+    if why := refusal(proc.returncode, proc.stderr):
         # 2: the members given are not readable as a pool at all.
         # 3: the pool is there but cannot be recovered at that TXG.
-        return {"pool": "refused"}, False
+        # 1 with the F-62 message: the member the manifest asserted does
+        # not read as any leaf the pool is missing.
+        return {"pool": "refused", "refused_detail": why}, False
     if proc.returncode != 0:
         return {"pool": f"list exit {proc.returncode}: {proc.stderr.strip()[:160]}"}, False
     try:
