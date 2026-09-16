@@ -274,6 +274,10 @@ pub struct Attempt {
     pub result: Result<Verify, ReadError>,
 }
 
+/// What a salvage comes to: the bytes, with each refused sector zeroed,
+/// and those sectors as `(start, len)` ranges relative to the first byte.
+pub type Salvage = (Vec<u8>, Vec<(u64, u64)>);
+
 /// A block that has been read, verified and decompressed.
 #[derive(Debug, Clone)]
 pub struct Block {
@@ -283,6 +287,33 @@ pub struct Block {
     pub verify: Verify,
     /// Every copy tried, in order, including the successful one.
     pub attempts: Vec<Attempt>,
+}
+
+/// Of two reasons a copy could not be had, the one worth reporting: a
+/// member that is not there says nothing about the copy, so a failure
+/// on a member that *is* there — an I/O error, a checksum that did not
+/// match — is kept over it. Otherwise the later one wins, as before.
+fn more_telling(so_far: ReadError, next: ReadError) -> ReadError {
+    match (&so_far, &next) {
+        (ReadError::NoMember, _) => next,
+        (_, ReadError::NoMember) => so_far,
+        _ => next,
+    }
+}
+
+/// The leaves a copy is read whole from: a disk, or every side of a
+/// mirror (nested mirrors flattened). `None` for a vdev whose members
+/// hold rows rather than copies.
+fn leaves_of(node: &Node) -> Option<Vec<Option<usize>>> {
+    match node {
+        Node::Leaf { device, .. } => Some(vec![*device]),
+        Node::Mirror { children } => children
+            .iter()
+            .map(leaves_of)
+            .collect::<Option<Vec<_>>>()
+            .map(|v| v.into_iter().flatten().collect()),
+        _ => None,
+    }
 }
 
 impl<'a> PoolReader<'a> {
@@ -483,7 +514,7 @@ impl<'a> PoolReader<'a> {
     }
 
     /// Verify `raw` against `bp` with the pool salt when one is known.
-    fn verify(&self, bp: &BlkPtr, raw: &[u8]) -> Verify {
+    pub fn verify(&self, bp: &BlkPtr, raw: &[u8]) -> Verify {
         let salt = self.salt.get();
         let crypt = bp.uses_crypt() && bp.object_type != ot::OBJSET;
         let v = verify_block(bp.checksum, raw, bp.endian, &bp.cksum, salt.as_ref(), crypt);
@@ -515,6 +546,33 @@ impl<'a> PoolReader<'a> {
         dev.read_at(base + LABEL_START_SIZE + offset, &mut buf)
             .map(|()| buf)
             .map_err(|e| ReadError::Io(e.to_string()))
+    }
+
+    /// [`read_leaf`](Self::read_leaf), reading around the sectors the
+    /// member refuses (SPEC F-33): the bytes, with each refused sector
+    /// zeroed, and those sectors as ranges relative to `offset`.
+    fn salvage_leaf(
+        &self,
+        device: Option<usize>,
+        offset: u64,
+        size: usize,
+    ) -> Result<Salvage, ReadError> {
+        let index = device.ok_or(ReadError::NoMember)?;
+        let dev = self
+            .devices
+            .get(index)
+            .copied()
+            .flatten()
+            .ok_or(ReadError::NoMember)?;
+        let base = self.bases.get(index).copied().unwrap_or(0);
+        if let Some(n) = self.reads.borrow_mut().get_mut(index) {
+            *n += 1;
+        }
+        let mut buf = vec![0u8; size];
+        let bad = dev
+            .read_at_salvaging(base + LABEL_START_SIZE + offset, &mut buf)
+            .map_err(|e| ReadError::Io(e.to_string()))?;
+        Ok((buf, bad))
     }
 
     /// Every independent, *unverified* way to obtain `size` bytes at
@@ -580,6 +638,58 @@ impl<'a> PoolReader<'a> {
             }
         }
         Err(last)
+    }
+
+    /// What is left of one DVA on a member with bad sectors (SPEC F-33):
+    /// the `psize` bytes behind it read around every sector the device
+    /// refuses, with those sectors zeroed and named as ranges relative
+    /// to the block's start.
+    ///
+    /// Only for a DVA on a plain disk or a mirror, where a copy is the
+    /// bytes themselves: under raidz or dRAID a column is data or parity
+    /// of a whole row and a partial column is reconstructed, not kept.
+    /// Of a mirror's sides the one with the fewest bytes lost is
+    /// returned. What comes back is unverified — the checksum covers the
+    /// whole block, and part of it is gone — and the caller says so.
+    pub fn salvage_dva(&self, dva: &Dva, psize: usize) -> Result<Salvage, ReadError> {
+        if dva.gang {
+            return Err(ReadError::Gang("a gang block is not salvaged".into()));
+        }
+        let node = match self.locate_vdev(dva.vdev) {
+            Some(Where::Top(n)) => n,
+            Some(Where::Removed(_)) => {
+                return Err(ReadError::Unsupported(
+                    "salvage through a removed vdev's mapping".into(),
+                ))
+            }
+            None => return Err(ReadError::UnknownVdev(dva.vdev)),
+        };
+        let leaves = leaves_of(node).ok_or_else(|| {
+            ReadError::Unsupported(format!(
+                "salvage under {}: parity reconstruction is whole-block",
+                node.describe()
+            ))
+        })?;
+        let mut best: Option<Salvage> = None;
+        let mut last = ReadError::NoMember;
+        for device in leaves {
+            match self.salvage_leaf(device, dva.offset, psize) {
+                Ok((data, bad)) => {
+                    let lost: u64 = bad.iter().map(|&(_, l)| l).sum();
+                    let better = best
+                        .as_ref()
+                        .is_none_or(|(_, b)| lost < b.iter().map(|&(_, l)| l).sum::<u64>());
+                    if better {
+                        best = Some((data, bad));
+                    }
+                    if lost == 0 {
+                        break;
+                    }
+                }
+                Err(e) => last = e,
+            }
+        }
+        best.ok_or(last)
     }
 
     /// Read the columns of one raidz stripe: parity (None when unreadable),
@@ -887,7 +997,7 @@ impl<'a> PoolReader<'a> {
                 for child in children {
                     match self.read_verified(child, dva, bp, attempts, i) {
                         Ok(x) => return Ok(x),
-                        Err(e) => last = e,
+                        Err(e) => last = more_telling(last, e),
                     }
                 }
                 Err(last)
@@ -1114,7 +1224,7 @@ impl<'a> PoolReader<'a> {
             };
             match read {
                 Ok((raw, _)) => return Ok(raw),
-                Err(e) => last = e,
+                Err(e) => last = more_telling(last, e),
             }
         }
         Err(last)

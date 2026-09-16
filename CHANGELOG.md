@@ -16,6 +16,34 @@ tagged. `v0.7.1` is the release that carries those six.
 ## Unreleased
 
 ### Added
+* **A bad sector costs its sector, not its block (SPEC F-33).** A disk
+  with one unreadable sector refuses the whole 8 KiB read that touches
+  it, and with no other copy `dump` wrote 8 KiB of zeros — 7.5 KiB of
+  which the disk would have given. The real-world matrix had carried
+  "read per sector on EIO — to implement" since it was written.
+
+  A read a member refuses is now read again in 4 KiB pieces and, inside
+  a piece that still fails, sector by sector; what comes back is kept
+  and only the refused sectors are zeros. Each zeroed sector is its own
+  range in `bad`, `blocks_salvaged` counts the blocks it happened to,
+  and the exit code is 4 as for any image with zeros in it. What was
+  kept is unverified — the checksum covers the whole block and part of
+  it is gone — and the range's reason says so, because a forensic
+  report that called those bytes verified would be lying.
+
+  Only what can be kept in part is: an uncompressed, unencrypted block
+  on a disk or mirror. A compressed block cannot be decompressed in
+  part, ciphertext cannot be decrypted in part, and under raidz or
+  dRAID a partial column is reconstructed rather than kept, so those
+  are zeroed whole as before, with the reason naming which. A mirror
+  still heals from its other side first, and nothing is salvaged that
+  could be read whole; a read that fails once and then gives every
+  sector counts only if its checksum then agrees. Tested against a
+  source that refuses reads touching given ranges the way a disk with
+  bad sectors does; the read error a mirror reports also stopped
+  saying "no present member" about a member that is present and
+  failing.
+
 * **The names a disk gives itself tie a bare member to its leaf (SPEC
   F-71).** On FreeBSD a member is usually handed to ZFS as
   `/dev/gpt/NAME`, `/dev/gptid/…` or `/dev/label/NAME`, and the pool's

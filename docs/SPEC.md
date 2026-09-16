@@ -203,7 +203,7 @@ Priority: **M** = must (v1), **S** = should (v1 if time permits), **C** = could 
 | F-30 | C ◇ | File-level extraction from filesystem datasets (ZPL: directories, files, symlinks, xattrs). |
 | F-31 | S | Bulk extraction: `--recursive pool/vm` dumps every zvol under a tree with a manifest. |
 | F-32 | S | Resume interrupted extractions (block-level progress file). |
-| F-33 | M | Partial-result policy: on unreadable blocks write zeros (default) or abort (`--strict`), always logging the LBA range and reason. |
+| F-33 | M | Partial-result policy: on unreadable blocks write zeros (default) or abort (`--strict`), always logging the LBA range and reason. **A bad sector costs its sector, not its block:** a member that refuses a read is read again in pieces and then sector by sector, and on an uncompressed, unencrypted block on a disk or mirror every sector it still gives is kept, only the refused ones are zeros, and each is logged as its own range — with the note that what was kept is unverified, since the checksum covers the whole block. A compressed or encrypted block, or one under raidz/dRAID, cannot be kept in part and is zeroed whole, with the reason. A block whose sectors all come back on retry counts only if its checksum then agrees. |
 
 ### 5.4 Carving (destroyed and unlinked data)
 

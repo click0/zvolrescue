@@ -139,6 +139,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         "blocks_read": report.blocks_read,
         "blocks_holes": report.blocks_holes,
         "blocks_zeroed": report.blocks_zeroed,
+        "blocks_salvaged": report.blocks_salvaged,
         "bytes_written": report.bytes_written,
         "aborted": report.aborted,
         "sha256": report.sha256,
@@ -153,8 +154,12 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         Format::Text => {
             println!("{}: {} bytes -> {}", c.id, size, opts.output.display());
             println!(
-                "  blocks: {} total, {} read, {} holes, {} zeroed (unreadable)",
-                report.blocks_total, report.blocks_read, report.blocks_holes, report.blocks_zeroed
+                "  blocks: {} total, {} read, {} holes, {} zeroed (unreadable), {} salvaged (unreadable sectors zeroed)",
+                report.blocks_total,
+                report.blocks_read,
+                report.blocks_holes,
+                report.blocks_zeroed,
+                report.blocks_salvaged
             );
             println!("  sha256: {}", report.sha256);
             if let Some(h) = &report.sha1 {
@@ -167,7 +172,11 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     }
     // Either way the image is not the whole volume: say so with the
     // code, not only in the report.
-    let code = exit::after_extraction(0, report.aborted, report.blocks_zeroed);
+    let code = exit::after_extraction(
+        0,
+        report.aborted,
+        report.blocks_zeroed + report.blocks_salvaged,
+    );
     let written = vec![FileRef::known_with(
         &opts.output,
         &report.sha256,

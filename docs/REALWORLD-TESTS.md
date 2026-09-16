@@ -101,7 +101,7 @@ matching it.
 | F4 | RAID controller exposing a passthrough/"single-disk RAID0" volume with metadata at the disk end | `scan` finds the four labels at the *reported* device size or warns which labels are missing |
 | F5 | NVMe (several vendors), SATA SSD, SAS | identical output; throughput per E1/E2 |
 | F6 | SMR (shingled) HDD vs. CMR | identical output; long sequential reads do not time out; note throughput |
-| F7 | Drive with known bad sectors (or `dm-flakey`/`dm-error` on Linux, `gnop -e 5 -r 10` on FreeBSD injecting EIO) under a mirror | `dump` heals from the other member; without redundancy the unreadable *sectors* are zeroed, not the whole block (*read per sector on EIO — to implement*) |
+| F7 | Drive with known bad sectors (or `dm-flakey`/`dm-error` on Linux, `gnop -e 5 -r 10` on FreeBSD injecting EIO) under a mirror | `dump` heals from the other member; without redundancy the unreadable *sectors* are zeroed, not the whole block, each as its own `bad` range, `blocks_salvaged` counts them and the exit code is 4 (F-33; unit-tested against a source that fails per sector — this covers a real drive's EIO) |
 | F8 | Reads on a drive with 4 KiB logical sectors when the pool is `ashift=9` (created on 512e, moved to 4Kn) | reads succeed (buffered I/O); `--debug` shows unaligned offsets handled |
 | F9 | Virtual disks: bhyve/QEMU virtio-blk with 512 vs 4096 logical, VMware, Hyper-V; `.img`/`.qcow2`-backed (raw only) | identical output |
 | F10 | Disk larger than 2 TiB and 16 TiB (GPT, offsets above 32/64-bit sector limits) | labels found at the correct end offsets |

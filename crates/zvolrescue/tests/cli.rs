@@ -240,6 +240,10 @@ fn an_image_with_zeroed_blocks_exits_4_and_a_healed_one_exits_0() {
     assert_eq!(code, 4, "{out}");
     let v = &json(&out)["volumes"][0];
     assert_eq!(v["blocks_zeroed"], 1, "{v}");
+    assert_eq!(
+        v["blocks_salvaged"], 0,
+        "a checksum mismatch names no sector: {v}"
+    );
     assert_eq!(v["aborted"], false);
     let zeroed_hash = v["sha256"].clone();
 

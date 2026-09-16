@@ -1,5 +1,6 @@
 //! Extracting a volume's data object into a sparse image.
 
+use zfs_ondisk::blkptr::{BlkPtr, Compression};
 use zfs_ondisk::dmu::{ObjsetPhys, ObjsetType};
 use zfs_ondisk::Endian;
 use zvolrescue_io::{trace, BlockSink};
@@ -7,7 +8,8 @@ use zvolrescue_io::{trace, BlockSink};
 use crate::dmu::{DnodeArray, ObjectReader};
 use crate::dsl::{Dataset, ZVOL_OBJ};
 use crate::hash::{Digests, Extra};
-use crate::zio::{PoolReader, ReadError};
+use crate::zio::{PoolReader, ReadError, Salvage};
+use zfs_ondisk::checksum::Verify;
 
 /// What to do with a block that cannot be read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +48,11 @@ pub struct Report {
     pub blocks_holes: u64,
     /// Blocks written as zeros because they could not be read.
     pub blocks_zeroed: u64,
+    /// Blocks written with only their unreadable sectors zeroed (SPEC
+    /// F-33): a member refused part of the block and gave the rest.
+    /// What was kept is unverified — the checksum covers the whole
+    /// block — and each zeroed range is in `bad`.
+    pub blocks_salvaged: u64,
     /// Bytes of real data written.
     pub bytes_written: u64,
     /// Unreadable ranges, in order.
@@ -177,6 +184,7 @@ pub fn extract_from(
         blocks_read: 0,
         blocks_holes: 0,
         blocks_zeroed: 0,
+        blocks_salvaged: 0,
         bytes_written: 0,
         bad: Vec::new(),
         aborted: false,
@@ -194,10 +202,11 @@ pub fn extract_from(
     for blkid in start_block..blocks_total {
         let offset = blkid * bs;
         let take = (volsize - offset).min(bs) as usize;
-        let result = match obj.locate(blkid) {
+        let located = obj.locate(blkid);
+        let result = match &located {
             Ok(None) => Ok(None),
-            Ok(Some(bp)) => obj.reader().read_block(&bp, false).map(|b| Some(b.data)),
-            Err(e) => Err(e),
+            Ok(Some(bp)) => obj.reader().read_block(bp, false).map(|b| Some(b.data)),
+            Err(e) => Err(e.clone()),
         };
         match result {
             Ok(None) => {
@@ -214,18 +223,76 @@ pub fn extract_from(
             }
             Err(e) => {
                 trace!("zvol", "blkid {blkid} @ {offset}: UNREADABLE: {e}");
-                report.bad.push(BadRange {
-                    offset,
-                    len: take as u64,
-                    blkid,
-                    reason: e.to_string(),
-                });
                 if on_error == OnError::Abort {
+                    report.bad.push(BadRange {
+                        offset,
+                        len: take as u64,
+                        blkid,
+                        reason: e.to_string(),
+                    });
                     report.aborted = true;
                     break;
                 }
-                report.blocks_zeroed += 1;
-                digests.update(&zeros[..take]);
+                // A member that refused part of the block may still give
+                // the rest (SPEC F-33): keep every sector it will, zero
+                // only what it will not, and say which is which.
+                let bp = located.as_ref().ok().and_then(|b| b.as_ref());
+                match bp.and_then(|bp| salvage(obj.reader(), bp, &e)) {
+                    Some(Salvaged::Whole(mut data)) => {
+                        // The retry read every sector and the checksum
+                        // agrees: a transient failure, and a whole block.
+                        trace!("zvol", "blkid {blkid}: read whole on retry, verified");
+                        data.resize(bs as usize, 0);
+                        sink.write_at(offset, &data[..take])
+                            .map_err(|e| ReadError::Io(e.to_string()))?;
+                        report.blocks_read += 1;
+                        report.bytes_written += take as u64;
+                        digests.update(&data[..take]);
+                    }
+                    Some(Salvaged::Partial(mut data, ranges)) => {
+                        data.resize(bs as usize, 0);
+                        sink.write_at(offset, &data[..take])
+                            .map_err(|e| ReadError::Io(e.to_string()))?;
+                        let mut lost = 0;
+                        for (start, len) in ranges {
+                            if start >= take as u64 {
+                                break;
+                            }
+                            let len = len.min(take as u64 - start);
+                            lost += len;
+                            report.bad.push(BadRange {
+                                offset: offset + start,
+                                len,
+                                blkid,
+                                reason: format!(
+                                    "sector(s) unreadable: {e}; the rest of the block was read and kept unverified (the checksum covers the whole block)"
+                                ),
+                            });
+                        }
+                        trace!(
+                            "zvol",
+                            "blkid {blkid}: salvaged, {lost} of {take} bytes zeroed"
+                        );
+                        report.blocks_salvaged += 1;
+                        report.bytes_written += take as u64 - lost;
+                        digests.update(&data[..take]);
+                    }
+                    None => {
+                        report.bad.push(BadRange {
+                            offset,
+                            len: take as u64,
+                            blkid,
+                            reason: match bp {
+                                Some(bp) if matches!(e, ReadError::Io(_)) => {
+                                    format!("{e}; {}", why_not_salvaged(obj.reader(), bp))
+                                }
+                                _ => e.to_string(),
+                            },
+                        });
+                        report.blocks_zeroed += 1;
+                        digests.update(&zeros[..take]);
+                    }
+                }
             }
         }
         hashed_to = offset + take as u64;
@@ -249,6 +316,73 @@ pub fn extract_from(
     Ok(report)
 }
 
+/// What a salvage of a block that could not be read whole came to.
+enum Salvaged {
+    /// Every sector read on retry and the block verifies.
+    Whole(Vec<u8>),
+    /// Some sectors are gone; the rest is here, unverified.
+    Partial(Vec<u8>, Vec<(u64, u64)>),
+}
+
+/// Try to keep what a member will still give of a block it refused
+/// (SPEC F-33). Only an I/O failure on an uncompressed, unencrypted
+/// block on a disk or mirror is salvaged: a checksum mismatch says
+/// nothing about *which* bytes are wrong, a compressed block cannot be
+/// decompressed in part, ciphertext cannot be decrypted in part, and
+/// under parity a partial column is reconstructed rather than kept.
+fn salvage(reader: &PoolReader<'_>, bp: &BlkPtr, e: &ReadError) -> Option<Salvaged> {
+    if !matches!(e, ReadError::Io(_))
+        || bp.compression != Compression::Off
+        || bp.is_encrypted()
+        || bp.embedded_payload().is_some()
+    {
+        return None;
+    }
+    let mut best: Option<Salvage> = None;
+    for dva in bp.dvas() {
+        if let Ok((data, bad)) = reader.salvage_dva(dva, bp.psize as usize) {
+            let lost: u64 = bad.iter().map(|&(_, l)| l).sum();
+            if best
+                .as_ref()
+                .is_none_or(|(_, b)| lost < b.iter().map(|&(_, l)| l).sum::<u64>())
+            {
+                best = Some((data, bad));
+            }
+            if lost == 0 {
+                break;
+            }
+        }
+    }
+    let (data, bad) = best?;
+    if bad.is_empty() {
+        // Nothing was refused the second time. Only a checksum makes
+        // that a block; without one it is a read that happened to work.
+        return (reader.verify(bp, &data) == Verify::Ok).then_some(Salvaged::Whole(data));
+    }
+    Some(Salvaged::Partial(data, bad))
+}
+
+/// Why an I/O failure on this block was not salvaged, for the record.
+fn why_not_salvaged(reader: &PoolReader<'_>, bp: &BlkPtr) -> String {
+    if bp.is_encrypted() {
+        return "ciphertext cannot be decrypted in part, so the whole block is zeros".into();
+    }
+    if bp.compression != Compression::Off {
+        return format!(
+            "compressed ({}): a partial block cannot be decompressed, so the whole block is zeros",
+            bp.compression.name()
+        );
+    }
+    match bp
+        .dvas()
+        .next()
+        .map(|d| reader.salvage_dva(d, bp.psize as usize))
+    {
+        Some(Err(err)) => format!("not salvaged: {err}"),
+        _ => "not salvaged".into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,7 +392,7 @@ mod tests {
     use crate::vdev::scan_device;
     use zfs_ondisk::blkptr::LABEL_START_SIZE;
     use zfs_ondisk::label::LABEL_SIZE;
-    use zvolrescue_io::{BlockSource, MemSink, MemSource};
+    use zvolrescue_io::{BlockSource, FlakySource, MemSink, MemSource};
 
     const SIZE: u64 = 64 * LABEL_SIZE;
 
@@ -418,6 +552,176 @@ mod tests {
         .unwrap();
         assert_eq!((r.sha1, r.md5), (None, None));
         assert_eq!(r.sha256, direct.sha256);
+    }
+
+    /// A member with a bad sector refuses the whole 8 KiB read that
+    /// touches it. With no other copy, the block used to become 8 KiB
+    /// of zeros; now it is the 7.5 KiB the disk will still give, the
+    /// one sector zeroed and named (SPEC F-33).
+    #[test]
+    fn a_bad_sector_costs_its_sector_and_not_its_block() {
+        let (s, a, ub, data_off) = build();
+        let bad_at = LABEL_START_SIZE + data_off + 1024 + 7;
+        let flaky = FlakySource::new(s[0].clone(), vec![(bad_at, 100)]);
+        let reader = PoolReader::new(&a, vec![Some(&flaky as &dyn BlockSource)]);
+        let mos = open_mos(&reader, &ub).unwrap();
+        let tree = walk(&mos, "tank").unwrap();
+        let ds = tree.get("tank/vm/disk0").unwrap();
+        let (obj, _) = open_volume(&reader, ds).unwrap();
+
+        let mut sink = MemSink::default();
+        let r = extract(
+            &obj,
+            ds.volsize.unwrap(),
+            &mut sink,
+            OnError::Zero,
+            |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(
+            (r.blocks_read, r.blocks_salvaged, r.blocks_zeroed),
+            (1, 1, 0)
+        );
+        assert_eq!(r.bytes_written, 16384 - 512);
+        assert_eq!(r.bad.len(), 1);
+        assert_eq!(
+            (r.bad[0].blkid, r.bad[0].offset, r.bad[0].len),
+            (0, 1024, 512)
+        );
+        assert!(
+            r.bad[0].reason.contains("sector(s) unreadable")
+                && r.bad[0].reason.contains("kept unverified"),
+            "{}",
+            r.bad[0].reason
+        );
+        let mut want = expected_image();
+        want[1024..1536].fill(0);
+        assert_eq!(sink.data, want);
+        let mut h = Digests::new(Extra::none());
+        h.update(&want);
+        assert_eq!(r.sha256, h.finish().sha256);
+
+        // --strict does not salvage: the block is refused whole.
+        let mut sink = MemSink::default();
+        let r = extract(
+            &obj,
+            ds.volsize.unwrap(),
+            &mut sink,
+            OnError::Abort,
+            |_, _| {},
+        )
+        .unwrap();
+        assert!(r.aborted);
+        assert_eq!((r.bad[0].offset, r.bad[0].len), (0, 8192));
+    }
+
+    /// A mirror heals a bad sector from its other side, and nothing is
+    /// salvaged: what could be read whole and verified is.
+    #[test]
+    fn a_mirror_heals_a_bad_sector_before_anything_is_salvaged() {
+        let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1)]);
+        let mut members = vec![vec![0u8; SIZE as usize], vec![0u8; SIZE as usize]];
+        let mut a = Alloc::new(0x20_0000);
+        build_sample_mos(&mut pool, &mut members, &mut a);
+        for (i, m) in members.iter_mut().enumerate() {
+            pool.write_labels(i, m);
+        }
+        let data_off = crate::fixture::SAMPLE_ZVOL_BLOCK0_OFFSET;
+        let bad_at = LABEL_START_SIZE + data_off + 4096;
+        let sources: Vec<MemSource> = members.into_iter().map(MemSource::new).collect();
+        let scans: Vec<_> = sources.iter().map(|s| scan_device(s).ok()).collect();
+        let ub = scans[0].as_ref().unwrap().labels[0]
+            .best()
+            .unwrap()
+            .ub
+            .clone();
+        let assembly = assemble(&scans).into_iter().next().unwrap();
+        let flaky = FlakySource::new(sources[0].clone(), vec![(bad_at, 512)]);
+        let reader = PoolReader::new(
+            &assembly,
+            vec![
+                Some(&flaky as &dyn BlockSource),
+                Some(&sources[1] as &dyn BlockSource),
+            ],
+        );
+        let mos = open_mos(&reader, &ub).unwrap();
+        let tree = walk(&mos, "tank").unwrap();
+        let ds = tree.get("tank/vm/disk0").unwrap();
+        let (obj, _) = open_volume(&reader, ds).unwrap();
+        let mut sink = MemSink::default();
+        let r = extract(
+            &obj,
+            ds.volsize.unwrap(),
+            &mut sink,
+            OnError::Zero,
+            |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(
+            (r.blocks_read, r.blocks_salvaged, r.blocks_zeroed),
+            (2, 0, 0)
+        );
+        assert!(r.bad.is_empty());
+        assert_eq!(sink.data, expected_image());
+    }
+
+    /// A read that fails once and then gives every sector is a block
+    /// only because its checksum says so: it is counted as read, not
+    /// as salvaged.
+    #[test]
+    fn a_failure_that_clears_on_retry_is_a_verified_block() {
+        struct Once {
+            inner: MemSource,
+            at: (u64, u64),
+            tripped: std::cell::Cell<bool>,
+        }
+        impl BlockSource for Once {
+            fn size(&self) -> u64 {
+                self.inner.size()
+            }
+            fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+                let end = offset + buf.len() as u64;
+                if !self.tripped.get() && self.at.0 < end && offset < self.at.0 + self.at.1 {
+                    self.tripped.set(true);
+                    return Err(std::io::Error::from_raw_os_error(5));
+                }
+                self.inner.read_at(offset, buf)
+            }
+            fn read_at_salvaging(
+                &self,
+                offset: u64,
+                buf: &mut [u8],
+            ) -> std::io::Result<Vec<(u64, u64)>> {
+                zvolrescue_io::salvage(&mut |o, b| self.read_at(o, b), offset, buf)
+            }
+        }
+        let (s, a, ub, data_off) = build();
+        let once = Once {
+            inner: s[0].clone(),
+            at: (LABEL_START_SIZE + data_off + 100, 1),
+            tripped: std::cell::Cell::new(false),
+        };
+        let reader = PoolReader::new(&a, vec![Some(&once as &dyn BlockSource)]);
+        let mos = open_mos(&reader, &ub).unwrap();
+        let tree = walk(&mos, "tank").unwrap();
+        let ds = tree.get("tank/vm/disk0").unwrap();
+        let (obj, _) = open_volume(&reader, ds).unwrap();
+        let mut sink = MemSink::default();
+        let r = extract(
+            &obj,
+            ds.volsize.unwrap(),
+            &mut sink,
+            OnError::Zero,
+            |_, _| {},
+        )
+        .unwrap();
+        assert!(once.tripped.get(), "the first read did fail");
+        assert_eq!(
+            (r.blocks_read, r.blocks_salvaged, r.blocks_zeroed),
+            (2, 0, 0)
+        );
+        assert!(r.bad.is_empty());
+        assert_eq!(sink.data, expected_image());
     }
 
     #[test]

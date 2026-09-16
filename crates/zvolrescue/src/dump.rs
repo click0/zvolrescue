@@ -59,6 +59,9 @@ struct DumpOut {
     blocks_read: u64,
     blocks_holes: u64,
     blocks_zeroed: u64,
+    /// Blocks written with only their unreadable sectors zeroed (SPEC
+    /// F-33); each zeroed range is in `bad`.
+    blocks_salvaged: u64,
     bytes_written: u64,
     resumed_from_block: u64,
     strict: bool,
@@ -381,6 +384,7 @@ fn dump_one(
         blocks_read: report.blocks_read,
         blocks_holes: report.blocks_holes,
         blocks_zeroed: report.blocks_zeroed,
+        blocks_salvaged: report.blocks_salvaged,
         bytes_written: report.bytes_written,
         resumed_from_block: start_block,
         strict,
@@ -440,8 +444,8 @@ fn print_text(out: &RunOut) {
             }
         );
         println!(
-            "  blocks: {} total, {} read, {} holes, {} zeroed (unreadable); {} bytes written in {:.1}s",
-            v.blocks_total, v.blocks_read, v.blocks_holes, v.blocks_zeroed, v.bytes_written, v.seconds
+            "  blocks: {} total, {} read, {} holes, {} zeroed (unreadable), {} salvaged (unreadable sectors zeroed); {} bytes written in {:.1}s",
+            v.blocks_total, v.blocks_read, v.blocks_holes, v.blocks_zeroed, v.blocks_salvaged, v.bytes_written, v.seconds
         );
         println!("  sha256: {}", v.sha256);
         if let Some(h) = &v.sha1 {
@@ -466,7 +470,7 @@ fn print_text(out: &RunOut) {
             println!("  ABORTED at the first unreadable block (--strict); the image is incomplete, --resume continues after a repair");
         } else if !v.bad.is_empty() {
             println!(
-                "  WARNING: {} unreadable block(s) were written as zeros (exit 4); rerun with --strict to refuse partial output",
+                "  WARNING: {} unreadable range(s) were written as zeros (exit 4); rerun with --strict to refuse partial output",
                 v.bad.len()
             );
         }
@@ -608,7 +612,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 // not be told it is. The run says so in the warning, in
                 // the JSON and in the evidence record; now it says so
                 // in the one place a `dump || fail` can see.
-                code = exit::after_extraction(code, v.aborted, v.blocks_zeroed);
+                code = exit::after_extraction(code, v.aborted, v.blocks_zeroed + v.blocks_salvaged);
                 out.volumes.push(v);
             }
             Err(c) => {
