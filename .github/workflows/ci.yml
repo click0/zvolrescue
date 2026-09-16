@@ -1226,6 +1226,9 @@ jobs:
             dd if=/tmp/fx/member0.img of=/dev/label/tank-d0 bs=1m status=none
             glabel stop tank-d0
             mdconfig -d -u "${md#md}"
+            # The sector as glabel wrote it, for the log: what the tool
+            # parses is compared against this, not against a header.
+            tail -c 512 /tmp/fx/label0.img | hexdump -C | head -4
             ./target/release/zvolrescue scan /tmp/fx/label0.img
             ./target/release/zvolrescue -q scan /tmp/fx/label0.img | grep -q "GEOM::LABEL v2 in the last sector: this was /dev/label/tank-d0, provider 67108864 bytes"
             ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/fx/member0.img --txg 4816229 -o /tmp/fx/plain.img

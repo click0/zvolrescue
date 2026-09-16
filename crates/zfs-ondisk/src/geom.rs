@@ -86,14 +86,17 @@ pub fn parse(sector: &[u8]) -> Option<GeomMeta> {
     if sector.len() < 36 {
         return None;
     }
-    let magic = &sector[..16];
-    let class = CLASSES.iter().find_map(|(m, class)| {
-        // Exact: `GEOM::RAID` must not claim a `GEOM::RAID3` record.
-        let padded = magic.len() >= m.len()
-            && &magic[..m.len()] == *m
-            && magic[m.len()..].iter().all(|&b| b == 0);
-        padded.then_some(*class)
-    })?;
+    // The magic is a C string in a 16-byte field. The kernel compares it
+    // with `strcmp`, and so must this: `glabel label` fills the field
+    // with `strlcpy` into a struct it never zeroed, so what follows the
+    // NUL is whatever was on the stack — a real `glabel` record parsed
+    // as nothing until this compared the string and not the field.
+    // Exact, so `GEOM::RAID` does not claim a `GEOM::RAID3` record.
+    let field = &sector[..16];
+    let word = &field[..field.iter().position(|&b| b == 0)?];
+    let class = CLASSES
+        .iter()
+        .find_map(|(m, class)| (*m == word).then_some(*class))?;
     let version = u32::from_le_bytes(sector[16..20].try_into().expect("4 bytes"));
     let name_at = |from: usize| -> Option<String> {
         let raw = sector.get(from..from + 16)?;
@@ -197,6 +200,20 @@ mod tests {
         );
         assert_eq!(parse(&[0u8; SECTOR]), None);
         assert_eq!(parse(&sector(b"GEOM::LABELX", 2, b"x")), None);
+        assert_eq!(parse(&sector(b"GEOM::LABELXXXXX", 2, b"x")), None);
         assert_eq!(parse(b"GEOM::LABEL"), None);
+    }
+
+    /// What `glabel label` really writes: the magic `strlcpy`'d into a
+    /// field that was never zeroed, so the bytes after its NUL are
+    /// stack garbage. The kernel reads it back with `strcmp`; so does
+    /// this. Found on FreeBSD 15 in CI, not by reading the header.
+    #[test]
+    fn a_magic_followed_by_stack_garbage_is_still_the_magic() {
+        let mut s = sector(b"GEOM::LABEL", 2, b"tank-d0");
+        s[12..16].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        s[36..44].copy_from_slice(&(64u64 << 20).to_le_bytes());
+        let m = parse(&s).expect("a label");
+        assert_eq!((m.class, m.name.as_deref()), ("label", Some("tank-d0")));
     }
 }
