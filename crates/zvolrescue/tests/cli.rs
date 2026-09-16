@@ -16,8 +16,18 @@ use zfs_read::hash::{Digests, Extra};
 const SIZE: u64 = 64 * LABEL_SIZE;
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("zvolrescue-cli-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let tmp = std::env::temp_dir();
+    // What an earlier run left under this name: each test writes tens
+    // of megabytes, and a directory per process id adds up.
+    if let Ok(entries) = std::fs::read_dir(&tmp) {
+        for e in entries.flatten() {
+            let n = e.file_name().to_string_lossy().into_owned();
+            if n.starts_with("zvolrescue-cli-") && n.ends_with(&format!("-{name}")) {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        }
+    }
+    let dir = tmp.join(format!("zvolrescue-cli-{}-{name}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
 }
@@ -460,4 +470,266 @@ fn scan_reports_a_member_it_cannot_open_and_exits_2() {
     let (code, text, _) = run(&["-q", "scan", &missing_s]);
     assert_eq!(code, 2);
     assert!(text.contains("error: No such file"), "{text}");
+}
+
+/// A whole-disk image: protective MBR, a GPT whose one partition is
+/// named and has a unique GUID, and `member` inside it.
+fn gpt_wrap(member: &[u8], start: u64, name: &str, guid_bytes: [u8; 16]) -> Vec<u8> {
+    let sector = 512usize;
+    let mut disk = vec![0u8; start as usize + member.len() + 64 * sector];
+    disk[510] = 0x55;
+    disk[511] = 0xaa;
+    disk[446 + 4] = 0xee;
+    disk[446 + 12..446 + 16].copy_from_slice(&u32::MAX.to_le_bytes());
+    disk[sector..sector + 8].copy_from_slice(b"EFI PART");
+    disk[sector + 80..sector + 84].copy_from_slice(&1u32.to_le_bytes());
+    disk[sector + 84..sector + 88].copy_from_slice(&128u32.to_le_bytes());
+    let mut e = vec![0u8; 128];
+    // freebsd-zfs, 516e7cba-6ecf-11d6-8ff8-00022d09712b, on-disk order.
+    e[..16].copy_from_slice(&[
+        0xba, 0x7c, 0x6e, 0x51, 0xcf, 0x6e, 0xd6, 0x11, 0x8f, 0xf8, 0x00, 0x02, 0x2d, 0x09, 0x71,
+        0x2b,
+    ]);
+    e[16..32].copy_from_slice(&guid_bytes);
+    let first = start / sector as u64;
+    let last = first + (member.len() / sector) as u64 - 1;
+    e[32..40].copy_from_slice(&first.to_le_bytes());
+    e[40..48].copy_from_slice(&last.to_le_bytes());
+    for (i, u) in name.encode_utf16().enumerate() {
+        e[56 + i * 2..58 + i * 2].copy_from_slice(&u.to_le_bytes());
+    }
+    disk[sector * 2..sector * 2 + 128].copy_from_slice(&e);
+    disk[start as usize..start as usize + member.len()].copy_from_slice(member);
+    disk
+}
+
+/// Zero every label's configuration, leaving the uberblock rings.
+fn wipe_configs(img: &mut [u8]) {
+    let (phys_off, phys) = (16 * 1024usize, 112 * 1024usize);
+    let label = LABEL_SIZE as usize;
+    let aligned = img.len() & !(label - 1);
+    for off in [0, label, aligned - 2 * label, aligned - label] {
+        img[off + phys_off..off + phys_off + phys].fill(0);
+    }
+}
+
+/// A member whose labels are gone is tied to the leaf its siblings
+/// describe by the name its own disk gives it (SPEC F-71): the GPT
+/// label matches the `path` the pool recorded, `scan` says which leaf
+/// that is and how to bind it, and the binding reads.
+#[test]
+fn a_bare_member_is_named_by_its_gpt_label_and_the_pool_says_which_leaf() {
+    let dir = scratch("gpt-name");
+    let members = plain_members();
+    let good = dir.join("member0.img");
+    std::fs::write(&good, &members[0]).unwrap();
+    let mut bare = members[1].clone();
+    wipe_configs(&mut bare);
+    let disk = dir.join("disk1.img");
+    std::fs::write(&disk, gpt_wrap(&bare, 1 << 20, "tank-d1", [0x33; 16])).unwrap();
+    let (good_s, disk_s) = (
+        good.to_string_lossy().into_owned(),
+        disk.to_string_lossy().into_owned(),
+    );
+
+    let (code, out, _) = run(&["-q", "-f", "json", "scan", &good_s, &disk_s]);
+    assert_eq!(code, 0, "{out}");
+    let v = json(&out);
+    let d = &v["devices"][1];
+    let part = &d["partitions"]["partitions"][0];
+    assert_eq!(part["name"], "tank-d1");
+    assert_eq!(part["guid"], "33333333-3333-3333-3333-333333333333");
+    assert_eq!(
+        d["names"],
+        serde_json::json!([
+            "/dev/gpt/tank-d1",
+            "/dev/disk/by-partlabel/tank-d1",
+            "/dev/gptid/33333333-3333-3333-3333-333333333333",
+            "/dev/disk/by-partuuid/33333333-3333-3333-3333-333333333333",
+        ])
+    );
+    assert!(
+        d["config"].is_null(),
+        "no label configuration survives: {d}"
+    );
+    let members = &v["pools"][0]["tops"][0]["members"];
+    assert_eq!(members[0]["present"], good_s);
+    assert!(members[1]["present"].is_null());
+    assert_eq!(members[1]["path"], "/dev/gpt/tank-d1");
+    assert_eq!(members[1]["named_by"], disk_s, "{members}");
+    assert!(members[0].get("named_by").is_none());
+    assert!(
+        v["pools"][0].get("name_hints").is_none(),
+        "matched, so not a mere hint"
+    );
+    let guid = members[1]["guid"].as_str().unwrap().to_owned();
+
+    let (_, text, _) = run(&["-q", "scan", &good_s, &disk_s]);
+    assert!(text.contains("named: /dev/gpt/tank-d1"), "{text}");
+    assert!(
+        text.contains(&format!(
+            "MISSING; {disk_s} is named /dev/gpt/tank-d1 on its own disk (SPEC F-71) — bind it with --assume-member {disk_s}={guid}"
+        )),
+        "{text}"
+    );
+
+    // The binding the scan spelled out is accepted: a sibling with its
+    // labels describes the pool (F-62), the bare disk takes the vacant
+    // leaf, and the volume comes out.
+    let img = dir.join("bound.img");
+    let (code, out, err) = run(&[
+        "-q",
+        "-f",
+        "json",
+        "dump",
+        "tank/vm/disk0",
+        &good_s,
+        &disk_s,
+        "--assume-member",
+        &format!("{disk_s}={guid}"),
+        "-o",
+        &img.to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "{out}{err}");
+    let (_, whole, _) = run(&[
+        "-q",
+        "-f",
+        "json",
+        "dump",
+        "tank/vm/disk0",
+        &good_s,
+        "-o",
+        &dir.join("whole.img").to_string_lossy(),
+    ]);
+    assert_eq!(
+        json(&out)["volumes"][0]["sha256"],
+        json(&whole)["volumes"][0]["sha256"]
+    );
+}
+
+/// A name that only contains the pool's name is reported as a hint and
+/// binds nothing; a name no pool recorded is just listed.
+#[test]
+fn a_name_that_merely_contains_the_pool_name_is_a_hint_not_a_binding() {
+    let dir = scratch("gpt-hint");
+    let members = plain_members();
+    let good = dir.join("member0.img");
+    std::fs::write(&good, &members[0]).unwrap();
+    let mut bare = members[1].clone();
+    wipe_configs(&mut bare);
+    let disk = dir.join("disk-x.img");
+    std::fs::write(&disk, gpt_wrap(&bare, 1 << 20, "tank-spare", [0x44; 16])).unwrap();
+    let (good_s, disk_s) = (
+        good.to_string_lossy().into_owned(),
+        disk.to_string_lossy().into_owned(),
+    );
+    let (code, out, _) = run(&["-q", "-f", "json", "scan", &good_s, &disk_s]);
+    assert_eq!(code, 0, "{out}");
+    let v = json(&out);
+    let members = &v["pools"][0]["tops"][0]["members"];
+    assert!(members[1].get("named_by").is_none(), "{members}");
+    assert_eq!(
+        v["pools"][0]["name_hints"],
+        serde_json::json!([
+            {"device": disk_s, "name": "/dev/gpt/tank-spare"},
+            {"device": disk_s, "name": "/dev/disk/by-partlabel/tank-spare"},
+        ])
+    );
+    let (_, text, _) = run(&["-q", "scan", &good_s, &disk_s]);
+    assert!(
+        text.contains("hint: ") && text.contains("nothing binds on it"),
+        "{text}"
+    );
+    assert!(text.contains(" MISSING\n"), "{text}");
+}
+
+/// `glabel`: the name is in the last sector and the provider ZFS saw
+/// ends there, so the rear labels are read where the metadata says and
+/// the device answers to `/dev/label/NAME`.
+#[test]
+fn a_glabel_names_the_member_and_says_how_long_its_provider_was() {
+    let dir = scratch("glabel");
+    // A member 512 bytes short of a 256 KiB boundary, so that the one
+    // sector the metadata occupies moves the rear labels.
+    let psize = SIZE - 512;
+    let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1)]);
+    let mut members = vec![vec![0u8; psize as usize], vec![0u8; psize as usize]];
+    let mut a = Alloc::new(0x20_0000);
+    build_sample_mos(&mut pool, &mut members, &mut a);
+    for (i, m) in members.iter_mut().enumerate() {
+        pool.write_labels(i, m);
+    }
+    let mut tail = vec![0u8; 512];
+    tail[..11].copy_from_slice(b"GEOM::LABEL");
+    tail[16..20].copy_from_slice(&2u32.to_le_bytes());
+    tail[20..27].copy_from_slice(b"tank-d0");
+    tail[36..44].copy_from_slice(&psize.to_le_bytes());
+    let mut labelled = members[0].clone();
+    labelled.extend_from_slice(&tail);
+    let img = dir.join("label0.img");
+    std::fs::write(&img, &labelled).unwrap();
+    let img_s = img.to_string_lossy().into_owned();
+
+    let (code, out, _) = run(&["-q", "-f", "json", "scan", &img_s]);
+    assert_eq!(code, 0, "{out}");
+    let d = &json(&out)["devices"][0];
+    assert_eq!(d["size"], SIZE);
+    assert_eq!(d["vdev_size"], psize);
+    assert_eq!(d["vdev_base_from"], "GEOM metadata");
+    assert_eq!(d["geom"]["class"], "label");
+    assert_eq!(d["geom"]["name"], "tank-d0");
+    assert_eq!(d["geom"]["provsize"], psize);
+    assert_eq!(d["names"], serde_json::json!(["/dev/label/tank-d0"]));
+    let ok = d["labels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|l| l["config_checksum"] == "ok")
+        .count();
+    assert_eq!(ok, 4, "{}", d["labels"]);
+
+    let (_, text, _) = run(&["-q", "scan", &img_s]);
+    assert!(
+        text.contains(&format!(
+            "GEOM::LABEL v2 in the last sector: this was /dev/label/tank-d0, provider {psize} bytes; the vdev is {psize} bytes and its rear labels were read there"
+        )),
+        "{text}"
+    );
+
+    // And the pool reads through it.
+    let (code, out, err) = run(&[
+        "-q",
+        "-f",
+        "json",
+        "dump",
+        "tank/vm/disk0",
+        &img_s,
+        "-o",
+        &dir.join("out.img").to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert_eq!(json(&out)["volumes"][0]["blocks_zeroed"], 0);
+}
+
+/// `geli` is named for what it is: nothing under it is readable, and the
+/// scan says so instead of reporting a disk with no ZFS on it.
+#[test]
+fn a_geli_provider_is_reported_as_encrypted() {
+    let dir = scratch("geli");
+    let mut img = vec![0u8; SIZE as usize];
+    let at = img.len() - 512;
+    img[at..at + 9].copy_from_slice(b"GEOM::ELI");
+    img[at + 16..at + 20].copy_from_slice(&7u32.to_le_bytes());
+    let p = dir.join("eli.img");
+    std::fs::write(&p, &img).unwrap();
+    let p_s = p.to_string_lossy().into_owned();
+    let (_, out, _) = run(&["-q", "-f", "json", "scan", &p_s]);
+    let d = &json(&out)["devices"][0];
+    assert_eq!(d["geom"]["class"], "eli");
+    assert!(d.get("names").is_none(), "{d}");
+    let (_, text, _) = run(&["-q", "scan", &p_s]);
+    assert!(
+        text.contains("GEOM::ELI v7 in the last sector; the member is geli-encrypted"),
+        "{text}"
+    );
 }

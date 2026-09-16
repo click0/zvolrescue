@@ -47,11 +47,15 @@ EOF
 
 # run_pool NAME REDUNDANCY ZTEST-ARGS...: REDUNDANCY is how many members
 # the walk in step 8 leaves out (parity level, or 1 for a mirror).
+# ASHIFT (default 12) is the pool's ashift: it sets the stride of every
+# DVA offset and of the RAIDZ column layout, so a pool built at another
+# value is a different pool to read, not the same one with a different
+# number in its label.
 run_pool() {
     name=$1; redundancy=$2; shift 2
     dir="$WORK/$name"; mkdir -p "$dir"
-    echo "== $name: ztest $*"
-    ( cd "$dir" && ztest -f "$dir" -v 1 "$@" -s 96m -a 12 -d 3 -t 2 -k 0 -T 15 -P 8 > "$dir/ztest.log" 2>&1 ) || { echo "ztest failed:"; tail -5 "$dir/ztest.log"; fail=1; return; }
+    echo "== $name: ztest $* -a ${ASHIFT:-12}"
+    ( cd "$dir" && ztest -f "$dir" -v 1 "$@" -s 96m -a "${ASHIFT:-12}" -d 3 -t 2 -k 0 -T 15 -P 8 > "$dir/ztest.log" 2>&1 ) || { echo "ztest failed:"; tail -5 "$dir/ztest.log"; fail=1; return; }
     members=$(ls "$dir"/ztest.*a)
 
     # 1. datasets: name + creation txg, from zdb and from zvolrescue.
@@ -496,5 +500,11 @@ run_pool raidz2 2 -K raidz -m 1 -r 4 -R 2
 run_pool raidz1-of-mirrors 1 -K raidz -m 2 -r 3 -R 1 -g 8192
 run_pool draid1 1 -K draid -m 1 -r 6 -R 1 -D 4 -S 1
 run_pool draid2 2 -K draid -m 1 -r 9 -R 2 -D 5 -S 2 -g 8192
+# The ends of the ashift range, against zdb rather than against this
+# tool's own fixtures: 9 is a 512-byte disk, 13 an 8 KiB one. RAIDZ at
+# 13 is where a wrong stride would show first; the mirror at 9 is the
+# other end.
+ASHIFT=13 run_pool raidz2-ashift13 2 -K raidz -m 1 -r 4 -R 2
+ASHIFT=9 run_pool mirror-ashift9 1 -K raidz -m 2 -r 1 -R 0
 
 exit $fail

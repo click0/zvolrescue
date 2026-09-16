@@ -18,6 +18,7 @@ pub mod draid;
 pub mod dsl;
 pub mod error;
 pub mod features;
+pub mod geom;
 pub mod indirect;
 pub mod label;
 pub mod nvlist;

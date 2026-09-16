@@ -1006,6 +1006,76 @@ jobs:
           if ./target/release/zvolrescue -q list /tmp/rz/member2.img /tmp/rz/member3.img --assume-member /tmp/elsewhere.img; then exit 1; else test $? = 1; fi
           if ./target/release/zvolrescue -q list /tmp/fx/member0.img /tmp/fx/member1.img --assume-member /tmp/fx/member0.img; then exit 1; else test $? = 1; fi
 
+      - name: A bare member is named by its own disk, and the pool says which leaf that is (SPEC F-71)
+        run: |
+          # The labels of member1 are gone; its disk still carries the
+          # GPT label the pool recorded it under, /dev/gpt/tank-d1. The
+          # scan lists the disk's names, ties the vacant leaf to the disk
+          # that carries its path, and spells out the binding.
+          python3 - <<'EOF'
+          import struct
+          LABEL, PHYS_OFF, PHYS = 256*1024, 16*1024, 112*1024
+          member = bytearray(open("/tmp/fx/member1.img", "rb").read())
+          aligned = len(member) & ~(LABEL-1)
+          for off in (0, LABEL, aligned-2*LABEL, aligned-LABEL):
+              member[off+PHYS_OFF:off+PHYS_OFF+PHYS] = b"\0" * PHYS
+          sector, start_lba = 512, 2048
+          disk = bytearray(sector * (start_lba + len(member)//sector + 64))
+          disk[510], disk[511] = 0x55, 0xAA
+          disk[446+4] = 0xee
+          struct.pack_into("<I", disk, 446+12, 0xffffffff)
+          disk[sector:sector+8] = b"EFI PART"
+          struct.pack_into("<I", disk, sector+80, 1)
+          struct.pack_into("<I", disk, sector+84, 128)
+          e = bytearray(128)
+          e[0:16] = bytes.fromhex("ba7c6e51cf6ed6118ff800022d09712b")   # freebsd-zfs
+          e[16:32] = bytes.fromhex("d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1")
+          struct.pack_into("<QQ", e, 32, start_lba, start_lba + len(member)//sector - 1)
+          n = "tank-d1".encode("utf-16-le"); e[56:56+len(n)] = n
+          disk[sector*2:sector*2+128] = e
+          disk[start_lba*sector:start_lba*sector+len(member)] = member
+          open("/tmp/fx/disk1.img", "wb").write(bytes(disk))
+          # And a glabel'd copy of member0: the metadata in the last
+          # sector, the provider ZFS saw ending right before it.
+          m0 = open("/tmp/fx/member0.img", "rb").read()
+          tail = bytearray(512); tail[0:11] = b"GEOM::LABEL"
+          struct.pack_into("<I", tail, 16, 2); tail[20:27] = b"tank-d0"
+          struct.pack_into("<Q", tail, 36, len(m0))
+          open("/tmp/fx/label0.img", "wb").write(m0 + bytes(tail))
+          EOF
+          ./target/release/zvolrescue scan /tmp/fx/member0.img /tmp/fx/disk1.img
+          ./target/release/zvolrescue -f json scan /tmp/fx/member0.img /tmp/fx/disk1.img | python3 -c '
+          import json,sys
+          d = json.load(sys.stdin)
+          disk = d["devices"][1]
+          assert disk.get("config") is None, disk
+          p = disk["partitions"]["partitions"][0]
+          assert p["name"] == "tank-d1" and p["guid"] == "d1d1d1d1-d1d1-d1d1-d1d1-d1d1d1d1d1d1", p
+          assert "/dev/gpt/tank-d1" in disk["names"] and "/dev/gptid/d1d1d1d1-d1d1-d1d1-d1d1-d1d1d1d1d1d1" in disk["names"], disk["names"]
+          m = d["pools"][0]["tops"][0]["members"]
+          assert m[0]["present"] and m[1]["present"] is None, m
+          assert m[1]["named_by"] == "/tmp/fx/disk1.img", m
+          assert "name_hints" not in d["pools"][0], d["pools"][0]
+          open("/tmp/fx/named-guid", "w").write(m[1]["guid"])'
+          ./target/release/zvolrescue -q scan /tmp/fx/member0.img /tmp/fx/disk1.img | grep -q "MISSING; /tmp/fx/disk1.img is named /dev/gpt/tank-d1 on its own disk (SPEC F-71)"
+          # The binding it spelled out reads.
+          ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/fx/member0.img /tmp/fx/disk1.img --assume-member /tmp/fx/disk1.img=$(cat /tmp/fx/named-guid) --txg 4816229 -o /tmp/fx/named.img
+          cmp /tmp/disk0.img /tmp/fx/named.img
+          # glabel: the name, the provider size, all four labels, and
+          # the volume — from a member the plain size would misread.
+          ./target/release/zvolrescue -f json scan /tmp/fx/label0.img | python3 -c '
+          import json,sys
+          d = json.load(sys.stdin)["devices"][0]
+          assert d["geom"]["class"] == "label" and d["geom"]["name"] == "tank-d0", d["geom"]
+          assert d["geom"]["provsize"] == d["size"] - 512, d
+          assert d["names"] == ["/dev/label/tank-d0"], d["names"]
+          assert sum(1 for l in d["labels"] if l["config_checksum"] == "ok") == 4, d["labels"]'
+          ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/fx/label0.img --txg 4816229 -o /tmp/fx/labelled.img
+          cmp /tmp/disk0.img /tmp/fx/labelled.img
+          # A disk with nothing on it but geli metadata says so.
+          python3 -c 'b=bytearray(8<<20); b[-512:-503]=b"GEOM::ELI"; b[-496:-492]=(7).to_bytes(4,"little"); open("/tmp/fx/eli.img","wb").write(bytes(b))'
+          ./target/release/zvolrescue -q scan /tmp/fx/eli.img | grep -q "GEOM::ELI v7 in the last sector; the member is geli-encrypted"
+
   crosscheck:
     name: Cross-check against OpenZFS userland (ztest + zdb)
     runs-on: ubuntu-latest
@@ -1131,6 +1201,36 @@ jobs:
             cargo test --all-targets
             cargo build --release
             ./target/release/zvolrescue --version
+            # SPEC F-71 against the real tools: gpart names a partition,
+            # glabel names a provider, and the scan reads both names
+            # back off the disk — with the GUID gpart itself reports.
+            cargo run -q -p zfs-read --example mkfixture -- /tmp/fx mirror 12
+            truncate -s 80m /tmp/fx/disk1.img
+            md=$(mdconfig -a -t vnode -f /tmp/fx/disk1.img)
+            gpart create -s gpt "$md"
+            gpart add -t freebsd-zfs -l tank-d1 -b 2048 -s 131072 "$md"
+            dd if=/tmp/fx/member1.img of=/dev/gpt/tank-d1 bs=1m status=none
+            # Its own labels gone: L0, L1, and the rear pair of a 64 MiB vdev.
+            for kb in 16 272 65040 65296; do dd if=/dev/zero of=/dev/gpt/tank-d1 bs=1k seek=$kb count=112 conv=notrunc status=none; done
+            rawuuid=$(gpart list "$md" | awk '/rawuuid/ { print $2; exit }')
+            mdconfig -d -u "${md#md}"
+            ./target/release/zvolrescue scan /tmp/fx/member0.img /tmp/fx/disk1.img
+            ./target/release/zvolrescue -q scan /tmp/fx/member0.img /tmp/fx/disk1.img | grep -q "\"tank-d1\"  gptid $rawuuid"
+            ./target/release/zvolrescue -q scan /tmp/fx/member0.img /tmp/fx/disk1.img | grep -q "named: /dev/gpt/tank-d1  /dev/disk/by-partlabel/tank-d1  /dev/gptid/$rawuuid"
+            ./target/release/zvolrescue -q scan /tmp/fx/member0.img /tmp/fx/disk1.img | grep -q "MISSING; /tmp/fx/disk1.img is named /dev/gpt/tank-d1 on its own disk (SPEC F-71)"
+            # glabel on a provider one sector longer than the member, the
+            # member written through the label device it offers.
+            truncate -s 67109376 /tmp/fx/label0.img
+            md=$(mdconfig -a -t vnode -f /tmp/fx/label0.img)
+            glabel label -v tank-d0 "/dev/$md"
+            dd if=/tmp/fx/member0.img of=/dev/label/tank-d0 bs=1m status=none
+            glabel stop tank-d0
+            mdconfig -d -u "${md#md}"
+            ./target/release/zvolrescue scan /tmp/fx/label0.img
+            ./target/release/zvolrescue -q scan /tmp/fx/label0.img | grep -q "GEOM::LABEL v2 in the last sector: this was /dev/label/tank-d0, provider 67108864 bytes"
+            ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/fx/member0.img --txg 4816229 -o /tmp/fx/plain.img
+            ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/fx/label0.img --txg 4816229 -o /tmp/fx/labelled.img
+            cmp /tmp/fx/plain.img /tmp/fx/labelled.img
 
   # 14.x on a best-effort footing (N-06): built and tested so a break is
   # visible, allowed to fail so it does not hold anything up. stable/14

@@ -37,7 +37,7 @@ Run every scenario on every environment; record `zvolrescue --version`,
 
 | # | Pool | Pass criterion |
 |---|---|---|
-| B1 | single disk, ashift 9 and 12 | `list -r` == `zdb -d`; `dump` == `sha256` of `/dev/zvol/...` |
+| B1 | single disk, ashift 9, 12 and 13 | `list -r` == `zdb -d`; `dump` == `sha256` of `/dev/zvol/...` |
 | B2 | mirror-2, one member absent | same, from the remaining member |
 | B3 | raidz1 (3), raidz2 (4, 6), raidz3 (7) | same with `nparity` members absent |
 | B4 | raidz with one member silently corrupted (`dd` over 1 MiB in the middle) | `dump` heals it, reports rebuilt blocks in `--debug` |
@@ -46,6 +46,7 @@ Run every scenario on every environment; record `zvolrescue --version`,
 | B7 | dRAID (`draid2:8d:1s`), also with 1–2 members removed and with a distributed spare active | `list` matches `zpool list -t all`; `dump` hash matches |
 | B8 | pool after `zpool attach`/`detach`/`replace` (stale labels on old disks) | `scan` shows the old member with an older txg and does not mix it in |
 | B9 | whole-disk vdevs with GPT (Linux `-part1`, FreeBSD `p1`) | `scan` of the whole disk finds the ZFS partition (F-06/F-60; the cross-check covers it on `ztest` members, this covers a real partition table) |
+| B10 | FreeBSD members given by name — `gpart -l` labels (`/dev/gpt/NAME`), `gptid`, `glabel` (`/dev/label/NAME`) — one member's labels zeroed | `scan` lists the names off the disk, names the vacant leaf the bare member's name matches and the `--assume-member` for it; the GUID equals `gpart list`'s `rawuuid`; a `glabel`'d member shows all four labels and dumps bit-exact (F-71; CI does this on `md` devices, this covers real disks and a pool the kernel made) |
 
 ### C. Data properties
 
@@ -94,7 +95,7 @@ matching it.
 
 | # | Scenario | Pass criterion |
 |---|---|---|
-| F1 | 512n, 512e (4 KiB physical / 512 logical) and 4Kn drives, pools with `ashift=9` and `ashift=12` on each | `scan` reports the pool's `ashift`, reads use the label geometry only; hashes match on all six combinations |
+| F1 | 512n, 512e (4 KiB physical / 512 logical) and 4Kn drives, pools with `ashift=9`, `ashift=12` and `ashift=13` on each | `scan` reports the pool's `ashift`, reads use the label geometry only; hashes match on all nine combinations (the cross-check covers 9, 12 and 13 on `ztest` pools against `zdb`; this covers real sector sizes) |
 | F2 | Same pool images read through a USB/UAS bridge that translates sectors (4K↔512), and directly | identical output; if the bridge changes the apparent device size, `scan` still finds L2/L3 via the size the OS reports |
 | F3 | HBA in JBOD/IT mode (LSI/Broadcom, Adaptec) vs. the same disks on onboard AHCI | identical output |
 | F4 | RAID controller exposing a passthrough/"single-disk RAID0" volume with metadata at the disk end | `scan` finds the four labels at the *reported* device size or warns which labels are missing |

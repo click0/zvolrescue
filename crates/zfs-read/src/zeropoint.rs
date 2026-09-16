@@ -11,6 +11,7 @@
 use std::collections::BTreeMap;
 use std::io;
 
+use zfs_ondisk::geom::{self, GeomMeta};
 use zfs_ondisk::part::{parse_gpt, parse_mbr, PartitionTable};
 use zfs_ondisk::uberblock::{self, MAX_UBERBLOCK_SHIFT};
 use zfs_ondisk::zeropoint::{
@@ -298,6 +299,36 @@ pub fn partition_table(dev: &dyn BlockSource) -> io::Result<Option<PartitionTabl
 /// checksum confirms it. The returned scan carries the base it used.
 pub fn scan_with_recovered_base(dev: &dyn BlockSource) -> io::Result<crate::vdev::DeviceScan> {
     let scan = crate::vdev::scan_device(dev)?;
+    // A GEOM class in the last sector means ZFS was given a provider one
+    // sector shorter than this, and its rear labels sit against *that*
+    // end (SPEC F-71). The rear pair is placed at the provider size
+    // rounded down to 256 KiB, so the sector matters when it carries the
+    // size across such a boundary and is harmless otherwise. Read at the
+    // size the metadata records — or one sector less than the device,
+    // for a class that does not record it — and keep the reading that
+    // verifies more labels. On a disk no GEOM class touched the sector
+    // is data or zeros and this is a no-op.
+    if let Some(meta) = geom_metadata(dev, dev.size())? {
+        let provsize = meta
+            .provsize
+            .filter(|&p| p < dev.size())
+            .unwrap_or(dev.size().saturating_sub(geom::SECTOR as u64));
+        if provsize < dev.size() {
+            if let Ok(mut shorter) = crate::vdev::scan_device_range(dev, 0, provsize) {
+                if shorter.verified_labels() > scan.verified_labels() {
+                    trace!(
+                        "zeropoint",
+                        "GEOM {} metadata in the last sector: {} of 4 labels verify for a {provsize}-byte provider, {} at the device size",
+                        meta.class,
+                        shorter.verified_labels(),
+                        scan.verified_labels()
+                    );
+                    shorter.base_source = Some("GEOM metadata");
+                    return Ok(shorter);
+                }
+            }
+        }
+    }
     if scan.config_verified() {
         return Ok(scan);
     }
@@ -359,6 +390,31 @@ pub fn scan_with_recovered_base(dev: &dyn BlockSource) -> io::Result<crate::vdev
     Ok(scan_from_anchors(dev, zero))
 }
 
+/// GEOM metadata in the last sector of the `end` bytes of `dev`, when
+/// a GEOM class wrote one there (SPEC F-71). `end` is the device size
+/// for a bare device or partition image, or a partition's end inside a
+/// whole-disk image.
+pub fn geom_metadata(dev: &dyn BlockSource, end: u64) -> io::Result<Option<GeomMeta>> {
+    let sector = geom::SECTOR as u64;
+    if end < sector || end > dev.size() {
+        return Ok(None);
+    }
+    let mut buf = vec![0u8; geom::SECTOR];
+    dev.read_at(end - sector, &mut buf)?;
+    let meta = geom::parse(&buf);
+    if let Some(m) = &meta {
+        trace!(
+            "geom",
+            "GEOM::{} v{} in the sector ending at {end}: name {:?}, provsize {:?}",
+            m.class.to_uppercase(),
+            m.version,
+            m.name,
+            m.provsize
+        );
+    }
+    Ok(meta)
+}
+
 /// Build a scan out of confirmed uberblock anchors alone.
 fn scan_from_anchors(dev: &dyn BlockSource, zero: &ZeroPoint) -> crate::vdev::DeviceScan {
     use crate::vdev::{LabelScan, UberblockSlot};
@@ -398,6 +454,7 @@ fn scan_from_anchors(dev: &dyn BlockSource, zero: &ZeroPoint) -> crate::vdev::De
     labels.sort_by_key(|l| l.index);
     crate::vdev::DeviceScan {
         size: dev.size(),
+        psize: dev.size().saturating_sub(zero.base),
         base: zero.base,
         base_source: Some("uberblock checksum"),
         labels,
@@ -571,6 +628,55 @@ mod tests {
         assert_eq!(scan.labels.len(), 4);
         assert!(scan.labels.iter().all(|l| l.config.is_some()));
         assert_eq!(scan.newest_txg(), Some(101));
+    }
+
+    /// `glabel label tank-d0 da0p2`: the label lives in the partition's
+    /// last sector, ZFS was given the sector-shorter `/dev/label/tank-d0`,
+    /// and placed its rear labels against *that* end. The rear pair sits
+    /// at the provider size rounded down to 256 KiB, so the one sector
+    /// matters exactly when it carries the size across such a boundary
+    /// — here the provider is 512 bytes short of 16 MiB and the image is
+    /// 16 MiB even. Read at the image size one label is missing; read
+    /// at the size the metadata records, all four are there.
+    #[test]
+    fn a_member_under_glabel_has_its_rear_labels_one_sector_before_the_end() {
+        let psize = 16 * 1024 * 1024 - geom::SECTOR as u64;
+        let mut img = member(psize);
+        let mut tail = vec![0u8; geom::SECTOR];
+        tail[..11].copy_from_slice(b"GEOM::LABEL");
+        tail[16..20].copy_from_slice(&2u32.to_le_bytes());
+        tail[20..27].copy_from_slice(b"tank-d0");
+        tail[36..44].copy_from_slice(&psize.to_le_bytes());
+        img.extend_from_slice(&tail);
+        let dev = MemSource::new(img);
+
+        let meta = geom_metadata(&dev, dev.size())
+            .expect("read")
+            .expect("a label");
+        assert_eq!(meta.name.as_deref(), Some("tank-d0"));
+        assert_eq!(meta.provsize, Some(psize));
+
+        // At the image size the rear pair is looked for 256 KiB too far:
+        // where L2 is expected sits the provider's L3, sealed for that
+        // very offset, and where L3 is expected there is nothing.
+        let at_image_size = crate::vdev::scan_device(&dev).expect("scan");
+        assert_eq!(at_image_size.verified_labels(), 3);
+
+        let scan = scan_with_recovered_base(&dev).expect("scan");
+        assert_eq!(scan.verified_labels(), 4);
+        assert_eq!(scan.base_source, Some("GEOM metadata"));
+        assert_eq!((scan.base, scan.psize), (0, psize));
+        assert_eq!(scan.newest_txg(), Some(101));
+
+        // A member no GEOM class touched reads exactly as before.
+        let psize = 16 * 1024 * 1024;
+        let plain = MemSource::new(member(psize));
+        assert_eq!(geom_metadata(&plain, plain.size()).expect("read"), None);
+        let scan = scan_with_recovered_base(&plain).expect("scan");
+        assert_eq!(
+            (scan.verified_labels(), scan.base_source, scan.psize),
+            (4, None, psize)
+        );
     }
 
     #[test]

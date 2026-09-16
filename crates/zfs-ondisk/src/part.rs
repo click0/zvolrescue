@@ -18,8 +18,14 @@ pub struct Partition {
     pub length: u64,
     /// GPT type GUID, formatted, or the MBR type byte as `0x..`.
     pub kind: String,
-    /// GPT partition name, when it has one.
+    /// GPT partition name, when it has one: what `gpart -l` set, and
+    /// the tail of `/dev/gpt/NAME` (FreeBSD) or
+    /// `/dev/disk/by-partlabel/NAME` (Linux).
     pub name: Option<String>,
+    /// GPT unique partition GUID, formatted: the tail of
+    /// `/dev/gptid/…` (FreeBSD) or `/dev/disk/by-partuuid/…` (Linux).
+    /// `None` on MBR.
+    pub guid: Option<String>,
     /// Whether the type is one ZFS is normally found in.
     pub zfs: bool,
 }
@@ -33,6 +39,28 @@ pub struct PartitionTable {
     pub sector: u64,
     /// The partitions, in table order.
     pub partitions: Vec<Partition>,
+}
+
+impl Partition {
+    /// The device nodes an operating system offers for this partition
+    /// by what the table says about it, FreeBSD's first: `/dev/gpt/NAME`
+    /// and `/dev/gptid/GUID`, then Linux's `/dev/disk/by-partlabel/NAME`
+    /// and `/dev/disk/by-partuuid/GUID`. These are the strings a pool's
+    /// labels record as a member's `path` when it was given by name,
+    /// so a partition whose own labels are gone can still be tied to
+    /// the leaf its siblings describe (SPEC F-71).
+    pub fn device_names(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(n) = &self.name {
+            out.push(format!("/dev/gpt/{n}"));
+            out.push(format!("/dev/disk/by-partlabel/{n}"));
+        }
+        if let Some(g) = &self.guid {
+            out.push(format!("/dev/gptid/{g}"));
+            out.push(format!("/dev/disk/by-partuuid/{g}"));
+        }
+        out
+    }
 }
 
 impl PartitionTable {
@@ -142,6 +170,7 @@ pub fn parse_gpt(
             zfs: matches!(kind.as_str(), GPT_ZFS | GPT_FREEBSD_ZFS),
             kind,
             name: e.get(56..128).and_then(utf16_name),
+            guid: (!e[16..32].iter().all(|&b| b == 0)).then(|| format_guid(&e[16..32])),
         });
     }
     Some(PartitionTable {
@@ -180,6 +209,7 @@ pub fn parse_mbr(sector0: &[u8], sector: u64) -> Option<PartitionTable> {
             zfs: kind == 0xbf,
             kind: format!("{kind:#04x}"),
             name: None,
+            guid: None,
         });
     }
     if partitions.is_empty() {
@@ -242,6 +272,22 @@ mod tests {
         assert_eq!(t.partitions[1].name.as_deref(), Some("zfs0"));
         assert_eq!(t.partitions[1].kind, GPT_FREEBSD_ZFS);
         assert!(t.partitions[1].zfs);
+        // The unique GUID is formatted the way `gpart list` prints
+        // `rawuuid`, and the names are the device nodes both systems
+        // offer for the partition (SPEC F-71).
+        assert_eq!(
+            t.partitions[1].guid.as_deref(),
+            Some("11111111-1111-1111-1111-111111111111")
+        );
+        assert_eq!(
+            t.partitions[1].device_names(),
+            vec![
+                "/dev/gpt/zfs0",
+                "/dev/disk/by-partlabel/zfs0",
+                "/dev/gptid/11111111-1111-1111-1111-111111111111",
+                "/dev/disk/by-partuuid/11111111-1111-1111-1111-111111111111",
+            ]
+        );
         // The ZFS partition is the first candidate, the rest follow.
         assert_eq!(t.candidate_bases(), vec![4096 * 512, 2048 * 512]);
         assert!(
@@ -258,6 +304,13 @@ mod tests {
         assert_eq!(t.sector, 4096);
         assert_eq!(t.partitions[0].start, 256 * 4096);
         assert_eq!(t.partitions[0].name, None);
+        assert_eq!(
+            t.partitions[0].device_names(),
+            vec![
+                "/dev/gptid/11111111-1111-1111-1111-111111111111",
+                "/dev/disk/by-partuuid/11111111-1111-1111-1111-111111111111",
+            ]
+        );
     }
 
     #[test]

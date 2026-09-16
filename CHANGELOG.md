@@ -13,6 +13,45 @@ development milestone that names what changed when — the sections below
 are their record — and ships inside the next version that does get
 tagged. `v0.7.1` is the release that carries those six.
 
+## Unreleased
+
+### Added
+* **The names a disk gives itself tie a bare member to its leaf (SPEC
+  F-71).** On FreeBSD a member is usually handed to ZFS as
+  `/dev/gpt/NAME`, `/dev/gptid/…` or `/dev/label/NAME`, and the pool's
+  labels record that string as the member's `path`. `scan` already read
+  the GPT partition name and did nothing with it; the partition's own
+  GUID and `glabel`'s metadata were not read at all. Now every device
+  lists the names its disk carries — GPT name and GUID, and any GEOM
+  class in the last sector of the device or of a partition — and where
+  a pool has a vacant leaf whose recorded `path` is one of those names,
+  the scan says which device that is and spells out the
+  `--assume-member` that binds it. The binding is still confirmed by
+  reading, exactly as F-62 does: the name says what the disk was
+  called, not what is on it. A name that merely contains a pool's name
+  (`tank-spare` beside `tank`) is a hint and binds nothing.
+
+  Two more things fall out of reading the GEOM sector. The metadata
+  records how long the provider was, and ZFS placed its rear labels
+  against *that* end — one sector before the image's — so a member whose
+  size the sector carries across a 256 KiB boundary now shows all four
+  labels instead of three. And a `geli` provider is named as
+  encrypted rather than reported as a disk with no ZFS on it.
+
+  Checked on FreeBSD 15 in CI with the real tools: `gpart add -l` and
+  `glabel label` on `md` devices, the GUID read back equal to what
+  `gpart list` prints, and the volume out of the labelled member equal
+  to the volume out of the plain one.
+
+* **The ends of the ashift range, against `zdb`.** The fixtures were
+  already built at ashift 9 and 13 as well as 12 (CI step "Every
+  ashift"), but the cross-check against OpenZFS userland ran every
+  geometry at 12. Two more `ztest` pools — raidz2 at ashift 13 and a
+  mirror at 9 — now go through the same thirteen steps as the others,
+  so the stride that decides whether a RAIDZ column read lands on the
+  right sector is compared against `zdb` at both ends and not only at
+  the middle. The real-world matrix rows say 9, 12 and 13 accordingly.
+
 ## v0.8.0 — 2026-09-16
 
 **A vdev that is gone, a dataset's own settings, and what a hash is for.**

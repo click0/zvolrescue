@@ -16,8 +16,18 @@ const SIZE: u64 = 64 * LABEL_SIZE;
 const FIXTURE_SHA256: &str = "febfe0108392728dbde89ee63f9f25419a0192ac04420db3ad88b0032a088585";
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("zvolcarve-cli-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let tmp = std::env::temp_dir();
+    // What an earlier run left under this name: each test writes tens
+    // of megabytes, and a directory per process id adds up.
+    if let Ok(entries) = std::fs::read_dir(&tmp) {
+        for e in entries.flatten() {
+            let n = e.file_name().to_string_lossy().into_owned();
+            if n.starts_with("zvolcarve-cli-") && n.ends_with(&format!("-{name}")) {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        }
+    }
+    let dir = tmp.join(format!("zvolcarve-cli-{}-{name}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
 }

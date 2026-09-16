@@ -86,10 +86,13 @@ impl Pool {
             ashift,
             kind: "mirror".into(),
             nparity: None,
+            // Named the way a FreeBSD administrator names them: by the
+            // GPT label, `/dev/gpt/<pool>-d<n>`, which is what F-71
+            // matches a bare member against.
             members: (0..2)
                 .map(|i| Member {
                     guid: Member::guid_for(guid, i),
-                    path: format!("/dev/fixture{i}"),
+                    path: format!("/dev/gpt/{name}-d{i}"),
                 })
                 .collect(),
             uberblocks: Vec::new(),
@@ -117,7 +120,7 @@ impl Pool {
         p.members = (0..width)
             .map(|i| Member {
                 guid: Member::guid_for(guid, i),
-                path: format!("/dev/fixture{i}"),
+                path: format!("/dev/gpt/{name}-d{i}"),
             })
             .collect();
         p

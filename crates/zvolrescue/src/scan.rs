@@ -10,13 +10,14 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde_json::{json, Map, Value as Json};
 use zfs_ondisk::checksum::ChecksumStatus;
+use zfs_ondisk::geom::GeomMeta;
 use zfs_ondisk::label::{pool_state_name, LabelConfig};
 use zfs_ondisk::nvlist::{NvList, Value};
 use zfs_read::dsl::removed_tops_of;
 use zfs_read::pool::{assemble, PoolAssembly};
 use zfs_read::vdev::{DeviceScan, LabelScan};
 use zfs_read::zeropoint::{
-    find as find_zero_point, partition_table, scan_with_recovered_base, Search,
+    find as find_zero_point, geom_metadata, partition_table, scan_with_recovered_base, Search,
 };
 use zvolrescue_io::{BlockSource, FileSource};
 
@@ -118,6 +119,47 @@ struct DeviceOut {
     /// The partition table of a whole-disk image, if it has one.
     #[serde(skip_serializing_if = "Option::is_none")]
     partitions: Option<TableOut>,
+    /// Bytes the vdev occupies from its base, when something said it is
+    /// shorter than what was opened: a partition's length, or the
+    /// provider size GEOM metadata records (SPEC F-71).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vdev_size: Option<u64>,
+    /// GEOM metadata in the device's last sector (SPEC F-71).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    geom: Option<GeomOut>,
+    /// Every device node an operating system would offer this device
+    /// or its partitions under, from what the disk itself says:
+    /// `/dev/gpt/NAME`, `/dev/gptid/GUID`, `/dev/label/NAME`, and the
+    /// Linux `by-partlabel`/`by-partuuid` forms. A pool's labels record
+    /// one of these as a member's `path`, so a member whose own labels
+    /// are gone can be matched to the leaf its siblings describe.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    names: Vec<String>,
+}
+
+/// What a GEOM class left in a provider's last sector (SPEC F-71).
+#[derive(Debug, Clone, Serialize)]
+struct GeomOut {
+    class: &'static str,
+    version: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provsize: Option<u64>,
+    /// The device node the class offered: `/dev/label/NAME`,
+    /// `/dev/mirror/NAME`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    device: Option<String>,
+}
+
+fn geom_out(m: &GeomMeta) -> GeomOut {
+    GeomOut {
+        class: m.class,
+        version: m.version,
+        name: m.name.clone(),
+        provsize: m.provsize,
+        device: m.device_name(),
+    }
 }
 
 /// How `scan` should look for a vdev's zero point (SPEC F-61).
@@ -139,7 +181,15 @@ struct PartitionOut {
     kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<String>,
+    /// The unique partition GUID: `gptid` on FreeBSD, `partuuid` on
+    /// Linux.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    guid: Option<String>,
     zfs: bool,
+    /// GEOM metadata in the partition's last sector, when a class was
+    /// configured on the partition itself (SPEC F-71).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    geom: Option<GeomOut>,
 }
 
 #[derive(Debug, Serialize)]
@@ -173,6 +223,13 @@ struct MemberOut {
     guid: String,
     path: Option<String>,
     present: Option<PathBuf>,
+    /// A scanned device that carries this member's `path` as one of its
+    /// own names — a GPT label, a `gptid`, a `glabel` — while no label
+    /// on it says which leaf it is (SPEC F-71). The name is the disk's
+    /// own account of what it was called; the binding is still
+    /// confirmed by reading, which is what `--assume-member` does.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    named_by: Option<PathBuf>,
 }
 
 /// A vdev as a layout template: the same shape `--hints` takes, so the
@@ -251,6 +308,31 @@ struct PoolOut {
     devices: Vec<PathBuf>,
     tops: Vec<TopOut>,
     stale: Vec<StaleOut>,
+    /// Devices this pool does not account for whose disk names contain
+    /// the pool's name (SPEC F-71): `tank-d2` on a disk with no labels,
+    /// next to a pool called `tank`. A hint about where the disk
+    /// belonged, not evidence of it — nothing binds on this.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    name_hints: Vec<NameHintOut>,
+}
+
+#[derive(Debug, Serialize)]
+struct NameHintOut {
+    device: PathBuf,
+    name: String,
+}
+
+/// Whether a member's recorded `path` and a device's name are the same
+/// node. Labels record `/dev/gpt/tank-d0`; older ones, or ones written
+/// on Linux, may drop the `/dev/`.
+fn same_node(path: &str, name: &str) -> bool {
+    let tail = |s: &str| s.strip_prefix("/dev/").unwrap_or(s).to_string();
+    tail(path) == tail(name)
+}
+
+/// Every name each scanned device answers to, in device order.
+fn device_names(out: &DeviceOut) -> Vec<String> {
+    out.names.clone()
 }
 
 #[derive(Debug, Serialize)]
@@ -415,10 +497,14 @@ fn device_out(
         vdev_base: None,
         vdev_base_from: None,
         partitions: None,
+        vdev_size: None,
+        geom: None,
+        names: Vec::new(),
     };
     if let Some(s) = scan {
         out.vdev_base = (s.base != 0).then_some(s.base);
         out.vdev_base_from = s.base_source;
+        out.vdev_size = (s.psize != s.size.saturating_sub(s.base)).then_some(s.psize);
         out.best_label = s.best_label;
         out.config = s.config().as_ref().map(config_out);
         if verbose >= 2 {
@@ -438,8 +524,53 @@ fn device_out(
     out
 }
 
-fn pool_out(p: &PoolAssembly, paths: &[PathBuf]) -> PoolOut {
+fn pool_out(p: &PoolAssembly, paths: &[PathBuf], names: &[Vec<String>]) -> PoolOut {
+    // A device that carries the name a vacant leaf was recorded under.
+    // Only a device that is not already a member of some pool and has
+    // no verified configuration of its own is a candidate: a device
+    // whose labels say what it is needs no name to say so.
+    let unplaced: Vec<usize> = (0..paths.len())
+        .filter(|&i| !p.devices.contains(&i) && !p.stale.iter().any(|m| m.device == i))
+        .collect();
+    let named_by = |path: &Option<String>| -> Option<PathBuf> {
+        let path = path.as_deref()?;
+        unplaced
+            .iter()
+            .find(|&&i| names[i].iter().any(|n| same_node(path, n)))
+            .map(|&i| paths[i].clone())
+    };
+    let member_out = |m: &zfs_read::pool::Member| MemberOut {
+        guid: hex(m.guid),
+        path: m.path.clone(),
+        present: m.present.map(|i| paths[i].clone()),
+        named_by: m.present.is_none().then(|| named_by(&m.path)).flatten(),
+    };
+    let claimed: Vec<PathBuf> = p
+        .tops
+        .iter()
+        .flat_map(|t| t.members.iter())
+        .filter(|m| m.present.is_none())
+        .filter_map(|m| named_by(&m.path))
+        .collect();
+    let pool_name = p.name.to_ascii_lowercase();
+    let name_hints: Vec<NameHintOut> = unplaced
+        .iter()
+        .filter(|&&i| !claimed.contains(&paths[i]))
+        .flat_map(|&i| {
+            names[i]
+                .iter()
+                .filter(|n| {
+                    let tail = n.rsplit('/').next().unwrap_or(n).to_ascii_lowercase();
+                    !pool_name.is_empty() && tail.contains(&pool_name)
+                })
+                .map(move |n| NameHintOut {
+                    device: paths[i].clone(),
+                    name: n.clone(),
+                })
+        })
+        .collect();
     PoolOut {
+        name_hints,
         name: p.name.clone(),
         guid: hex(p.guid),
         state: p.state.map(pool_state_name),
@@ -482,29 +613,42 @@ fn pool_out(p: &PoolAssembly, paths: &[PathBuf]) -> PoolOut {
                 nparity: t.nparity,
                 ashift: t.ashift,
                 readable: t.readable(),
-                members: t
-                    .members
-                    .iter()
-                    .map(|m| MemberOut {
-                        guid: hex(m.guid),
-                        path: m.path.clone(),
-                        present: m.present.map(|i| paths[i].clone()),
-                    })
-                    .collect(),
+                members: t.members.iter().map(member_out).collect(),
                 tree: tree_out(
                     &t.tree,
-                    &t.members
-                        .iter()
-                        .map(|m| MemberOut {
-                            guid: hex(m.guid),
-                            path: m.path.clone(),
-                            present: m.present.map(|i| paths[i].clone()),
-                        })
-                        .collect::<Vec<_>>(),
+                    &t.members.iter().map(member_out).collect::<Vec<_>>(),
                 ),
             })
             .collect(),
     }
+}
+
+/// One line for a GEOM class found in a last sector.
+fn print_geom(indent: &str, m: &GeomOut, vdev_size: Option<u64>) {
+    let mut line = format!(
+        "{indent}GEOM::{} v{} in the last sector",
+        m.class.to_uppercase(),
+        m.version
+    );
+    if let Some(d) = &m.device {
+        line.push_str(&format!(": this was {d}"));
+    }
+    if let Some(p) = m.provsize {
+        line.push_str(&format!(", provider {p} bytes"));
+    }
+    match m.class {
+        "eli" => line.push_str(
+            "; the member is geli-encrypted — attach it on a copy (geli attach) and scan the plaintext provider",
+        ),
+        "label" | "mirror" | "stripe" | "concat" | "raid3" | "raid" | "journal" | "cache"
+        | "virstor" | "shsec" => {
+            if let Some(v) = vdev_size {
+                line.push_str(&format!("; the vdev is {v} bytes and its rear labels were read there"));
+            }
+        }
+        _ => {}
+    }
+    println!("{line}");
 }
 
 fn print_text(out: &ScanOut, verbose: u8) {
@@ -528,9 +672,12 @@ fn print_text(out: &ScanOut, verbose: u8) {
                     p.start,
                     p.length,
                     p.kind,
-                    p.name
-                        .as_deref()
-                        .map_or(String::new(), |n| format!("  {n:?}")),
+                    match (&p.name, &p.guid) {
+                        (Some(n), Some(g)) => format!("  {n:?}  gptid {g}"),
+                        (Some(n), None) => format!("  {n:?}"),
+                        (None, Some(g)) => format!("  gptid {g}"),
+                        (None, None) => String::new(),
+                    },
                     if p.zfs {
                         "  <- a ZFS partition type"
                     } else {
@@ -541,6 +688,19 @@ fn print_text(out: &ScanOut, verbose: u8) {
         }
         if let (Some(base), Some(from)) = (d.vdev_base, d.vdev_base_from) {
             println!("  this member's vdev begins at byte {base} ({from})");
+        }
+        if let Some(m) = &d.geom {
+            print_geom("  ", m, d.vdev_size);
+        }
+        if let Some(t) = &d.partitions {
+            for p in &t.partitions {
+                if let Some(m) = &p.geom {
+                    print_geom(&format!("    partition {}: ", p.index), m, None);
+                }
+            }
+        }
+        if !d.names.is_empty() {
+            println!("  named: {}", d.names.join("  "));
         }
         match &d.config {
             Some(c) => {
@@ -683,12 +843,26 @@ fn print_text(out: &ScanOut, verbose: u8) {
                     "    {} {:<24} {}",
                     m.guid,
                     m.path.as_deref().unwrap_or("-"),
-                    match &m.present {
-                        Some(p) => format!("present: {}", p.display()),
-                        None => "MISSING".to_string(),
+                    match (&m.present, &m.named_by) {
+                        (Some(p), _) => format!("present: {}", p.display()),
+                        (None, Some(d)) => format!(
+                            "MISSING; {} is named {} on its own disk (SPEC F-71) — bind it with --assume-member {}={} and the read confirms or refuses it",
+                            d.display(),
+                            m.path.as_deref().unwrap_or("-"),
+                            d.display(),
+                            m.guid
+                        ),
+                        (None, None) => "MISSING".to_string(),
                     }
                 );
             }
+        }
+        for h in &p.name_hints {
+            println!(
+                "  hint: {} is named {}, which contains this pool's name; a name says where a disk was, not what it is — nothing binds on it",
+                h.device.display(),
+                h.name
+            );
         }
         for id in &p.removed_tops {
             println!(
@@ -905,22 +1079,39 @@ pub fn run(g: &Global, devices: &[PathBuf], zp: &ZeroPointOpts, emit: &EmitOpts)
         };
         let mut out = device_out(path, &scan, size, error, g.verbose);
         out.zero_point = zero_point;
+        // What the disk says it is called (SPEC F-71): the GEOM class in
+        // its last sector, and the name and GUID of each partition, with
+        // any GEOM class configured on the partition itself.
+        let src = source.as_ref();
+        let geom_at = |end: u64| src.and_then(|s| geom_metadata(s, end).ok().flatten());
+        out.geom = geom_at(size).map(|m| geom_out(&m));
+        let mut names: Vec<String> = Vec::new();
         out.partitions = table.map(|t| TableOut {
             scheme: t.scheme,
             sector: t.sector,
             partitions: t
                 .partitions
                 .into_iter()
-                .map(|p| PartitionOut {
-                    index: p.index,
-                    start: p.start,
-                    length: p.length,
-                    kind: p.kind,
-                    name: p.name,
-                    zfs: p.zfs,
+                .map(|p| {
+                    names.extend(p.device_names());
+                    let geom = geom_at(p.start + p.length).map(|m| geom_out(&m));
+                    names.extend(geom.as_ref().and_then(|m| m.device.clone()));
+                    PartitionOut {
+                        index: p.index,
+                        start: p.start,
+                        length: p.length,
+                        kind: p.kind,
+                        name: p.name,
+                        guid: p.guid,
+                        zfs: p.zfs,
+                        geom,
+                    }
                 })
                 .collect(),
         });
+        names.extend(out.geom.as_ref().and_then(|m| m.device.clone()));
+        names.dedup();
+        out.names = names;
         outs.push(out);
         scans.push(scan);
         sources.push(source);
@@ -940,7 +1131,11 @@ pub fn run(g: &Global, devices: &[PathBuf], zp: &ZeroPointOpts, emit: &EmitOpts)
             pool.note_removed_tops(removed);
         }
     }
-    let pools: Vec<PoolOut> = assembled.iter().map(|p| pool_out(p, devices)).collect();
+    let names: Vec<Vec<String>> = outs.iter().map(device_names).collect();
+    let pools: Vec<PoolOut> = assembled
+        .iter()
+        .map(|p| pool_out(p, devices, &names))
+        .collect();
     let out = ScanOut {
         devices: outs,
         pools,

@@ -85,13 +85,20 @@ impl LabelScan {
 pub struct DeviceScan {
     /// Device size in bytes.
     pub size: u64,
+    /// Bytes of the device the vdev occupies from `base`: where the
+    /// rear pair of labels was looked for. Equal to `size - base`
+    /// unless something said the vdev is shorter than what was opened —
+    /// a partition table, or GEOM metadata in the last sector (F-71).
+    pub psize: u64,
     /// Byte offset at which the vdev begins. Zero unless the labels were
     /// found somewhere other than the start of what was opened — see
     /// [`scan_device_at`].
     pub base: u64,
     /// How that base was arrived at: `"partition table"` when a table
     /// pointed at it, `"uberblock checksum"` when the anchor search did,
-    /// `None` when the labels were simply where they should be.
+    /// `"GEOM metadata"` when the last sector said how long the
+    /// provider was, `None` when the labels were simply where they
+    /// should be.
     pub base_source: Option<&'static str>,
     /// The four labels.
     pub labels: Vec<LabelScan>,
@@ -112,9 +119,16 @@ impl DeviceScan {
     /// the wrong base: the nvlist is intact, the offset it was sealed
     /// with is not the one it was found at.
     pub fn config_verified(&self) -> bool {
+        self.verified_labels() > 0
+    }
+
+    /// How many of the four labels hold a configuration whose checksum
+    /// verified where it was read.
+    pub fn verified_labels(&self) -> usize {
         self.labels
             .iter()
-            .any(|l| l.config.is_some() && l.phys_checksum == ChecksumStatus::Ok)
+            .filter(|l| l.config.is_some() && l.phys_checksum == ChecksumStatus::Ok)
+            .count()
     }
 
     /// Highest TXG of any checksum-verified uberblock across all labels.
@@ -282,6 +296,7 @@ pub fn scan_device_range(dev: &dyn BlockSource, base: u64, psize: u64) -> io::Re
     trace!("label", "best label: {best_label:?}");
     Ok(DeviceScan {
         size: dev.size(),
+        psize,
         base,
         base_source: None,
         labels,
