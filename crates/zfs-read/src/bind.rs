@@ -16,8 +16,19 @@ use crate::dsl::{open_mos, walk};
 use crate::pool::{uberblock_candidates, PoolAssembly};
 use crate::vdev::DeviceScan;
 use crate::zio::PoolReader;
-use zfs_ondisk::label::VdevNode;
+use zfs_ondisk::blkptr::LABEL_START_SIZE;
+use zfs_ondisk::label::{VdevNode, LABEL_SIZE};
 use zvolrescue_io::{trace, BlockSource};
+
+/// The alignment partitioning tools put a member at: `gpart`, `sgdisk`
+/// and `zpool create` on a whole disk all start it on a 1 MiB boundary.
+const BASE_ALIGN: u64 = 1 << 20;
+/// How many bases are tried for a member nothing on it confirms: the
+/// first and the last this many multiples of [`BASE_ALIGN`] that leave
+/// room for the member. A member is at the front of its disk or, less
+/// often, its tail is at the disk's end; the middle of a large disk is
+/// where a base is not.
+const BASE_TRIALS_EACH_END: usize = 512;
 
 /// A leaf a device was found to be.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +45,50 @@ pub struct Binding {
     /// binding that reads either way is consistent, not proven: the
     /// vdev's redundancy answered for the slot.
     pub used: bool,
+    /// Where the member's vdev begins on the device, confirmed by the
+    /// walk. What the member's own scan found, or — when nothing on the
+    /// member confirmed a base — the one of the candidates the
+    /// siblings' `asize` bounded that read (SPEC F-62).
+    pub base: u64,
+}
+
+/// Bytes a leaf of `top` occupies, as its siblings' labels put it: the
+/// top's `asize`, shared out for raidz and dRAID, plus the labels at
+/// both ends. `None` when the labels do not say.
+fn leaf_psize(pool: &PoolAssembly, top: usize) -> Option<u64> {
+    let t = &pool.tops[top];
+    let asize = t.tree.asize?;
+    let per_leaf = match t.kind.as_str() {
+        "raidz" | "draid" => asize / t.members.len().max(1) as u64,
+        _ => asize,
+    };
+    Some(per_leaf + LABEL_START_SIZE + 2 * LABEL_SIZE)
+}
+
+/// Bases worth trying for a member of `top` on a device of `size`
+/// bytes when nothing on the member confirms one (SPEC F-62): 0, and
+/// every multiple of [`BASE_ALIGN`] that leaves room for the leaf the
+/// siblings describe — the first and the last [`BASE_TRIALS_EACH_END`]
+/// of them when there are more. Each is confirmed or refused by
+/// reading through it, never assumed.
+pub fn base_candidates(pool: &PoolAssembly, top: usize, size: u64) -> Vec<u64> {
+    let need = leaf_psize(pool, top).unwrap_or(LABEL_START_SIZE + 2 * LABEL_SIZE);
+    let last = size.saturating_sub(need) / BASE_ALIGN;
+    let mut out = vec![0];
+    let count = last as usize;
+    let mut push = |k: u64| {
+        let b = k * BASE_ALIGN;
+        if out.last() != Some(&b) {
+            out.push(b);
+        }
+    };
+    if count <= 2 * BASE_TRIALS_EACH_END {
+        (1..=last).for_each(&mut push);
+    } else {
+        (1..=BASE_TRIALS_EACH_END as u64).for_each(&mut push);
+        (last - BASE_TRIALS_EACH_END as u64 + 1..=last).for_each(&mut push);
+    }
+    out
 }
 
 /// Try `device` in each leaf the pool's configuration leaves vacant and
@@ -53,12 +108,30 @@ pub fn candidates_for(
     device: usize,
 ) -> Vec<Binding> {
     let mut out = Vec::new();
+    // A member whose scan confirmed nothing — no label, no uberblock
+    // anchor — has no base of its own to be read at. The siblings'
+    // asize bounds where its vdev can begin, and each candidate base is
+    // tried the way a leaf is.
+    let unanchored = scans.get(device).and_then(Option::as_ref).is_none_or(|s| {
+        !s.config_verified() && s.newest_txg().is_none() && s.base_source.is_none()
+    });
+    let own_base = bases.get(device).copied().unwrap_or(0);
     for (top, leaf) in pool.vacant_leaves() {
         let guid = pool.tops[top].members[leaf].guid;
         let mut trial = pool.clone();
         if trial.bind_member(device, Some(guid)).is_err() {
             continue;
         }
+        let trial_bases: Vec<u64> = if unanchored && own_base == 0 {
+            let size = devices
+                .get(device)
+                .copied()
+                .flatten()
+                .map_or(0, |d| d.size());
+            base_candidates(pool, top, size)
+        } else {
+            vec![own_base]
+        };
         // Withhold as many siblings as the redundancy allows, so what is
         // left leans on the candidate as hard as it can.
         let siblings: Vec<(usize, usize)> = trial.tops[top]
@@ -84,11 +157,31 @@ pub fn candidates_for(
         }
         trace!(
             "pool",
-            "trying device {device} as leaf {guid:#x}, withholding {withheld:?}"
+            "trying device {device} as leaf {guid:#x}, withholding {withheld:?}, {} base(s)",
+            trial_bases.len()
         );
-        if walks(&trial, scans, masked.clone(), bases).is_none() {
-            trace!("pool", "device {device} is not leaf {guid:#x}");
+        let mut at_base = bases.to_vec();
+        let Some(base) = trial_bases.iter().copied().find(|&b| {
+            if let Some(slot) = at_base.get_mut(device) {
+                *slot = b;
+            }
+            walks(&trial, scans, masked.clone(), &at_base).is_some()
+        }) else {
+            trace!(
+                "pool",
+                "device {device} is not leaf {guid:#x} at any base tried"
+            );
             continue;
+        };
+        if let Some(slot) = at_base.get_mut(device) {
+            *slot = base;
+        }
+        let bases = at_base.as_slice();
+        if base != own_base {
+            trace!(
+                "pool",
+                "device {device} reads as leaf {guid:#x} with its vdev at byte {base}"
+            );
         }
         // Does the walk depend on what this member *holds*, or merely on
         // the slot being occupied? Put a device of zeros in its place: if
@@ -121,6 +214,7 @@ pub fn candidates_for(
             leaf,
             guid,
             used: needed,
+            base,
         });
     }
     out
@@ -317,6 +411,72 @@ mod tests {
             Verdict::Bound(_, _) => {}
             other => panic!("{other:?}"),
         }
+    }
+
+    /// All four labels gone — rings and all, so no anchor — and the
+    /// member 1 MiB into a larger image with nothing saying so: the
+    /// siblings' asize bounds where it can begin, and the walk finds
+    /// the one base it reads at.
+    #[test]
+    fn a_member_with_no_anchor_is_found_at_the_base_its_siblings_bound() {
+        use zfs_ondisk::blkptr::LABEL_START_SIZE;
+        let mut pool = Pool::mirror("tank", 0x1000, 12).txgs(&[(100, 1), (200, 2)]);
+        pool.asize = Some((SIZE - LABEL_START_SIZE - 2 * LABEL_SIZE) & !((1u64 << 12) - 1));
+        let (mut members, _, _) = destroyed_zvol_members(&mut pool, SIZE);
+        // Every label, whole: nothing left to confirm a base with.
+        let aligned = SIZE & !(LABEL_SIZE - 1);
+        for off in [
+            0,
+            LABEL_SIZE,
+            aligned - 2 * LABEL_SIZE,
+            aligned - LABEL_SIZE,
+        ] {
+            members[0][off as usize..(off + LABEL_SIZE) as usize].fill(0);
+        }
+        let shift = 1u64 << 20;
+        let mut image = vec![0x5au8; shift as usize];
+        image.extend_from_slice(&members[0]);
+        image.extend_from_slice(&vec![0u8; 8 << 20]);
+        members[0] = image;
+        let sources: Vec<MemSource> = members.into_iter().map(MemSource::new).collect();
+        let scans: Vec<_> = sources
+            .iter()
+            .map(|s| crate::zeropoint::scan_with_recovered_base(s).ok())
+            .collect();
+        assert!(
+            scans[0].as_ref().unwrap().newest_txg().is_none(),
+            "no anchor"
+        );
+        let mut assembly = assemble(&scans).into_iter().next().expect("one pool");
+        let devices = as_dyn(&sources);
+        let bases = vec![0u64; sources.len()];
+        let candidates = base_candidates(&assembly, 0, sources[0].size());
+        assert!(candidates.contains(&shift), "{candidates:?}");
+        assert!(candidates.len() < 32, "{}", candidates.len());
+        match bind_by_reading(&mut assembly, &scans, &devices, &bases, 0) {
+            Verdict::Bound(b, 1) => {
+                assert_eq!(b.guid, assembly.tops[0].members[0].guid);
+                assert_eq!(b.base, shift);
+                assert!(b.used);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// The candidate list is bounded whatever the disk's size: a huge
+    /// image yields the first and last few hundred, not millions.
+    #[test]
+    fn base_candidates_stay_a_handful_on_a_huge_disk() {
+        let pool = Pool::mirror("tank", 0x1000, 12).txgs(&[(100, 1), (200, 2)]);
+        let (_, scans) = setup(pool, &[]);
+        let assembly = assemble(&scans).into_iter().next().expect("one pool");
+        let many = base_candidates(&assembly, 0, 4 << 40);
+        assert_eq!(many.len(), 1 + 2 * BASE_TRIALS_EACH_END);
+        assert_eq!(many[0], 0);
+        assert_eq!(many[1], BASE_ALIGN);
+        assert!(many.windows(2).all(|w| w[0] < w[1]));
+        // Too small for the leaf at all: only 0 is left to try.
+        assert_eq!(base_candidates(&assembly, 0, 1 << 20), vec![0]);
     }
 
     #[test]

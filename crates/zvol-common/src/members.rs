@@ -111,7 +111,7 @@ fn bind_assumed(
     pools: &mut [PoolAssembly],
     scans: &[Option<DeviceScan>],
     devices: &[Option<&dyn BlockSource>],
-    bases: &[u64],
+    bases: &mut [u64],
 ) -> Result<(), u8> {
     let assumed = spec.assumed().map_err(|e| {
         eprintln!("zvolrescue: {e}");
@@ -196,7 +196,7 @@ fn bind_assumed(
             match bind_by_reading(&mut pools[pool], scans, devices, bases, device) {
                 Verdict::Bound(b, fitting) => {
                     eprintln!(
-                        "zvolrescue: {}: read as leaf {:#018x} of {} — the metadata walk verifies through it{}",
+                        "zvolrescue: {}: read as leaf {:#018x} of {} — the metadata walk verifies through it{}{}",
                         path.display(),
                         b.guid,
                         pools[pool].tops[b.top].name,
@@ -204,8 +204,17 @@ fn bind_assumed(
                             format!(" ({fitting} leaves of that mirror fit; they hold the same bytes)")
                         } else {
                             String::new()
+                        },
+                        if b.base != bases[device] {
+                            format!(
+                                ", with its vdev at byte {} (nothing on the member confirmed a base; the siblings' asize bounded the search and the walk confirmed this one — SPEC F-62)",
+                                b.base
+                            )
+                        } else {
+                            String::new()
                         }
                     );
+                    bases[device] = b.base;
                     continue;
                 }
                 Verdict::Ambiguous(fits) => {
@@ -228,6 +237,7 @@ fn bind_assumed(
                     if pools[pool].bind_member(device, Some(first)).is_err() {
                         return Err(exit::USAGE);
                     }
+                    bases[device] = fits[0].base;
                     continue;
                 }
                 Verdict::Nothing => {
@@ -432,7 +442,7 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
         let removed = removed_tops_of(&scans, devices.clone(), &bases, pool);
         pool.note_removed_tops(removed);
     }
-    bind_assumed(spec, &paths, &mut pools, &scans, &devices, &bases)?;
+    bind_assumed(spec, &paths, &mut pools, &scans, &devices, &mut bases)?;
     drop(devices);
     Ok(Members {
         sources,

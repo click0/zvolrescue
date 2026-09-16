@@ -830,6 +830,66 @@ fn a_three_way_mirror_reads_from_one_side_and_binds_a_bare_one() {
     assert_eq!(json(&out)["volumes"][0]["sha256"], want);
 }
 
+/// A member with all four labels gone — rings included, so no anchor —
+/// sitting 1 MiB into a larger image with no partition table: the
+/// siblings' asize bounds where its vdev can begin, the walk confirms
+/// the base, and the volume comes out through it (SPEC F-62).
+#[test]
+fn a_bare_member_with_no_anchor_is_read_at_the_base_the_walk_confirms() {
+    let dir = scratch("no-anchor");
+    let want = reference_sha(&dir);
+    let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1)]);
+    pool.asize = Some((SIZE - LABEL_START_SIZE - 2 * LABEL_SIZE) & !4095);
+    let mut members = vec![vec![0u8; SIZE as usize]; 2];
+    let mut a = Alloc::new(0x20_0000);
+    build_sample_mos(&mut pool, &mut members, &mut a);
+    for (i, m) in members.iter_mut().enumerate() {
+        pool.write_labels(i, m);
+    }
+    let aligned = SIZE & !(LABEL_SIZE - 1);
+    for off in [
+        0,
+        LABEL_SIZE,
+        aligned - 2 * LABEL_SIZE,
+        aligned - LABEL_SIZE,
+    ] {
+        members[0][off as usize..(off + LABEL_SIZE) as usize].fill(0);
+    }
+    let mut image = vec![0x5au8; 1 << 20];
+    image.extend_from_slice(&members[0]);
+    image.extend_from_slice(&vec![0u8; 8 << 20]);
+    let bare = dir.join("bare-shifted.img");
+    std::fs::write(&bare, &image).unwrap();
+    let bare_s = bare.to_string_lossy().into_owned();
+    let good = dir.join("member1.img");
+    std::fs::write(&good, &members[1]).unwrap();
+    let good_s = good.to_string_lossy().into_owned();
+
+    // Nothing on the member says where it begins.
+    let (_, out, _) = run(&["-q", "-f", "json", "scan", &bare_s]);
+    let d = &json(&out)["devices"][0];
+    assert!(d["config"].is_null() && d["newest_txg"].is_null(), "{d}");
+
+    // With the sibling withheld from the read, the volume has to come
+    // through the bare member at the confirmed base.
+    let (code, out, err) = run(&[
+        "-q",
+        "-f",
+        "json",
+        "dump",
+        "tank/vm/disk0",
+        &bare_s,
+        &good_s,
+        "--assume-member",
+        &bare_s,
+        "-o",
+        &dir.join("bound.img").to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(err.contains("with its vdev at byte 1048576"), "{err}");
+    assert_eq!(json(&out)["volumes"][0]["sha256"], want);
+}
+
 /// A pool of two mirrors, the MOS on one and the volume's data on the
 /// other: `scan` shows both tops with their members, the volume reads
 /// across them, and with every member of the data mirror gone its

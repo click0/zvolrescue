@@ -16,6 +16,24 @@ tagged. `v0.7.1` is the release that carries those six.
 ## Unreleased
 
 ### Added
+* **A member with no anchor at all is found at the base its siblings
+  bound (SPEC F-62, the other half).** F-62 could bind a label-less
+  member to a leaf by reading through it, but only at a base something
+  on the member had confirmed: a surviving uberblock ring, or a
+  partition table. Every label gone — rings included — and the member
+  somewhere inside a larger image with no table left, and the binding
+  tried base 0, read garbage and said nothing reads through it.
+
+  The siblings' labels say how big a leaf of that top is (`asize`, plus
+  the labels at both ends), which bounds where its vdev can begin. The
+  trial now tries 0 and every 1 MiB multiple that leaves room for such
+  a leaf — the first and last 512 of them on a disk large enough to
+  have more, since a member is at the front of its disk or its tail is
+  at the end — and the base that walks is the one the member is read
+  at. Confirmed by the checksums the walk verifies, never assumed, and
+  said out loud: `read as leaf … with its vdev at byte N`. The fixture
+  can now write a real `asize` for it.
+
 * **Fixtures for a three-way mirror and for a pool of two mirrors.**
   Both shapes were read before — a mirror is any number of sides, and
   a pool is any number of top-level vdevs — but only `ztest` ever

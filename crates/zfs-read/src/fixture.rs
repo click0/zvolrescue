@@ -55,6 +55,10 @@ pub struct Pool {
     /// `id` of this top-level vdev among the pool's; its guid is derived
     /// from it so that two tops never share one.
     pub top_id: u64,
+    /// `asize` to write for the top-level vdev. `None` writes a large
+    /// round number, as fixtures always have; a test that needs the
+    /// labels to say how big the members really are sets it.
+    pub asize: Option<u64>,
     /// `ashift` of the top-level vdev.
     pub ashift: u32,
     /// Top-level vdev type: `mirror`, `raidz`, or `disk`.
@@ -99,6 +103,7 @@ impl Pool {
             name: name.into(),
             guid,
             top_id: 0,
+            asize: None,
             ashift,
             kind: "mirror".into(),
             nparity: None,
@@ -185,7 +190,7 @@ impl Pool {
             ("metaslab_array", Value::Uint64(65)),
             ("metaslab_shift", Value::Uint64(29)),
             ("ashift", Value::Uint64(self.ashift as u64)),
-            ("asize", Value::Uint64(1 << 36)),
+            ("asize", Value::Uint64(self.asize.unwrap_or(1 << 36))),
             ("is_log", Value::Uint64(0)),
             ("create_txg", Value::Uint64(4)),
         ];

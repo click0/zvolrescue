@@ -265,9 +265,9 @@ is placed against the vdev's size, so it confirms a base only together
 with one. The base is also used for reading: a member whose labels
 verify only at that base is scanned there, and every DVA on it resolves
 to `base + 4 MiB + offset`, so `list` and `dump` work on a partition that
-was re-created with a different start. F-62 is half done: a member whose own
+was re-created with a different start. F-62 is in: a member whose own
 labels are gone can be bound to a leaf its siblings' configuration names
-but no scanned device carries, through `--assume-member PATH[=GUID]`. Which leaf a bare member is, its own disk can say (F-71): `scan` matches the GPT label, `gptid` or `glabel` it carries against the `path` each vacant leaf was recorded under, and spells out that binding for `--assume-member` to confirm.
+but no scanned device carries, through `--assume-member PATH[=GUID]`. Which leaf a bare member is, its own disk can say (F-71): `scan` matches the GPT label, `gptid` or `glabel` it carries against the `path` each vacant leaf was recorded under, and spells out that binding for `--assume-member` to confirm. And when nothing on the member confirms a base at all — every label gone, rings included, and no partition table — the siblings' `asize` bounds where its vdev can begin: 0 and every 1 MiB multiple that leaves room for a leaf that size (the first and last few hundred on a large disk), each tried by the same walk, and the one that reads is the base — confirmed by checksums on the way, never assumed.
 The assertion buys nothing but a slot — every block read through it is
 still checksum-verified, so a wrong binding is refused rather than
 believed. Without a GUID the binding is worked out
