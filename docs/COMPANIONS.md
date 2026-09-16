@@ -122,7 +122,7 @@ recorded TXGs, imported on two hostids): the event list equals the script,
 and the `dump` command printed for the destroyed zvol recovers it
 bit-exact.
 
-*Status: T-01…T-06, T-08, T-10 and T-11 are implemented and run in CI on
+*Status: T-01…T-11 are implemented and run in CI on
 the mirror fixture (three transaction groups, the volume destroyed at the
 newest): the event list is the scripted one, and the `dump` command the
 tool prints recovers the volume with the SHA-256 the end-to-end step
@@ -233,8 +233,9 @@ zero candidates *and* a non-zero rejection count for the field at fault.
 The extracted image is bit-identical in every case, because the profile
 never touches what `dump` verifies.
 
-*Status: C-01…C-05, C-07, C-08, C-10 and C-13…C-18 are
-implemented, and the acceptance run is a CI step on a fixture where the
+*Status: C-01…C-21 are implemented — C-06, C-09, C-11, C-12 and C-19
+each have a CI step of their own, and C-20 and C-21 are `roots` and
+`zeropoint` — and the acceptance run is a CI step on a fixture where the
 volume is on the members and no uberblock mentions it at any
 transaction group: `zvolrescue list` shows only `tank` and `tank/vm`,
 `zvolcarve scan` ranks the volume's dnode first, and `zvolcarve dump`
@@ -453,8 +454,9 @@ xattrs and hard links, destroyed after a snapshot of its hashes:
 hashes and metadata; `objects` produces the same file contents when the
 root directory ZAP is deliberately zeroed.
 
-*Status: Z-01…Z-03, Z-05, Z-06 and Z-08 are implemented, and that second
-half of the acceptance is a CI step: the fixture's tree is listed with
+*Status: Z-01…Z-10 are implemented — Z-04, Z-07, Z-09 and Z-10 each
+have a CI step of their own — and that second half of the acceptance is
+a CI step: the fixture's tree is listed with
 its modes, sizes, times and symlink target out of the system attributes,
 extracted with a manifest that hashes every file, and — with the root
 directory ZAP zeroed on every member — `list` fails while `objects`
