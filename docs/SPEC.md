@@ -1,6 +1,6 @@
 # zvolrescue — Technical Specification (ТЗ)
 
-**Status:** living document, revised 2026-09-13 (tool at v0.7.5) · **Owner:** Vladyslav V. Prodan
+**Status:** living document, revised 2026-09-16 (tool at v0.8.0) · **Owner:** Vladyslav V. Prodan
 
 **Ukrainian version:** [SPEC.uk.md](SPEC.uk.md) · **Companion tools:** [COMPANIONS.md](COMPANIONS.md)
 

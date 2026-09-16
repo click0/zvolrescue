@@ -13,7 +13,18 @@ development milestone that names what changed when — the sections below
 are their record — and ships inside the next version that does get
 tagged. `v0.7.1` is the release that carries those six.
 
-## Unreleased
+## v0.8.0 — 2026-09-16
+
+**A vdev that is gone, a dataset's own settings, and what a hash is for.**
+A pool a top-level vdev was removed from now reads, through the mapping
+the removal left in the MOS, and a feature this build cannot account for
+stops the read by name instead of letting it guess. `list --properties`
+shows what a dataset was written with, user properties included. `dump
+--hash md5,sha1` takes the legacy digests in the same pass as SHA-256
+and `zvolreport verify` checks every digest a record carries back.
+`zvolcarve zeropoint` and `zvolcarve roots` give two more ways into a
+pool nothing points into. And an image `dump` had to fill with zeros is
+exit 4, not a success.
 
 ### Added
 * **`dump --hash md5,sha1`: the legacy digests, taken in the same pass
