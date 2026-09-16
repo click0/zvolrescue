@@ -40,13 +40,21 @@ impl Member {
     }
 }
 
-/// A single-top-level-vdev fixture pool.
+/// One top-level vdev of a fixture pool, with everything a label of one
+/// of its members says about the pool. A pool with several top-level
+/// vdevs is several of these sharing name, GUID and uberblocks, one per
+/// top, each with its own `top_id` — which is also how real labels
+/// work: a member's label describes its own top-level vdev and nothing
+/// of the others. [`two_top_mirror_members`] builds such a pool.
 #[derive(Debug, Clone)]
 pub struct Pool {
     /// Pool name.
     pub name: String,
     /// Pool GUID.
     pub guid: u64,
+    /// `id` of this top-level vdev among the pool's; its guid is derived
+    /// from it so that two tops never share one.
+    pub top_id: u64,
     /// `ashift` of the top-level vdev.
     pub ashift: u32,
     /// Top-level vdev type: `mirror`, `raidz`, or `disk`.
@@ -80,16 +88,24 @@ pub struct Pool {
 impl Pool {
     /// A two-way mirror.
     pub fn mirror(name: &str, guid: u64, ashift: u32) -> Pool {
+        Pool::mirror_of(name, guid, ashift, 2)
+    }
+
+    /// A mirror of `width` leaves. Three or four is what `zpool attach`
+    /// leaves behind, and what the damage matrix meets when `ztest` has
+    /// attached a side during its run.
+    pub fn mirror_of(name: &str, guid: u64, ashift: u32, width: usize) -> Pool {
         Pool {
             name: name.into(),
             guid,
+            top_id: 0,
             ashift,
             kind: "mirror".into(),
             nparity: None,
             // Named the way a FreeBSD administrator names them: by the
             // GPT label, `/dev/gpt/<pool>-d<n>`, which is what F-71
             // matches a bare member against.
-            members: (0..2)
+            members: (0..width)
                 .map(|i| Member {
                     guid: Member::guid_for(guid, i),
                     path: format!("/dev/gpt/{name}-d{i}"),
@@ -139,8 +155,14 @@ impl Pool {
     }
 
     /// The top-level vdev tree as it appears in every member's label.
+    /// The guid of this top-level vdev: distinct per `top_id`, and what
+    /// `top_guid` in every member's label names.
+    pub fn top_guid(&self) -> u64 {
+        self.guid ^ 0xf0f0 ^ (self.top_id << 20)
+    }
+
     fn tree(&self) -> NvList {
-        let top_guid = self.guid ^ 0xf0f0;
+        let top_guid = self.top_guid();
         let children: Vec<NvList> = self
             .members
             .iter()
@@ -158,7 +180,7 @@ impl Pool {
             .collect();
         let mut pairs = vec![
             ("type", Value::String(self.kind.clone())),
-            ("id", Value::Uint64(0)),
+            ("id", Value::Uint64(self.top_id)),
             ("guid", Value::Uint64(top_guid)),
             ("metaslab_array", Value::Uint64(65)),
             ("metaslab_shift", Value::Uint64(29)),
@@ -190,7 +212,7 @@ impl Pool {
             ("errata", Value::Uint64(0)),
             ("hostid", Value::Uint64(self.hostid)),
             ("hostname", Value::String(self.hostname.clone())),
-            ("top_guid", Value::Uint64(self.guid ^ 0xf0f0)),
+            ("top_guid", Value::Uint64(self.top_guid())),
             ("guid", Value::Uint64(self.members[i].guid)),
             ("vdev_children", Value::Uint64(self.vdev_children)),
             ("vdev_tree", Value::List(self.tree())),
@@ -243,7 +265,7 @@ impl Pool {
                     self.members
                         .iter()
                         .map(|m| m.guid)
-                        .fold(self.guid ^ 0xf0f0, u64::wrapping_add),
+                        .fold(self.top_guid(), u64::wrapping_add),
                 );
                 w(ub, 32, *ts);
                 let per_txg = self
@@ -306,6 +328,16 @@ pub struct Alloc {
     pub mapping: Vec<indirect::Entry>,
     /// Next address to hand out in the removed vdev's own space.
     removed_next: u64,
+    /// Top-level vdev the pointers handed out name.
+    pub vdev: u32,
+    /// Which of the member images this allocator writes to: the leaves
+    /// of its top-level vdev. `None` is all of them.
+    pub members: Option<std::ops::Range<usize>>,
+    /// An allocator for another top-level vdev, which the sample builder
+    /// uses for the volume's data blocks: with it set, the MOS lands on
+    /// this allocator's top and the data on that one, so a read has to
+    /// go through both.
+    pub data: Option<Box<Alloc>>,
 }
 
 /// MOS object holding the properties set on `tank/vm/disk0`.
@@ -348,6 +380,25 @@ impl Alloc {
             removed_vdev: None,
             mapping: Vec::new(),
             removed_next: REMOVED_BASE,
+            vdev: 0,
+            members: None,
+            data: None,
+        }
+    }
+
+    /// The same, for top-level vdev `vdev`, writing to `members[range]`.
+    pub fn for_top(start: u64, vdev: u32, range: std::ops::Range<usize>) -> Alloc {
+        let mut a = Alloc::new(start);
+        a.vdev = vdev;
+        a.members = Some(range);
+        a
+    }
+
+    /// The images this allocator writes to.
+    fn mine<'m>(&self, members: &'m mut [Vec<u8>]) -> &'m mut [Vec<u8>] {
+        match &self.members {
+            Some(r) => &mut members[r.clone()],
+            None => members,
         }
     }
 
@@ -461,7 +512,7 @@ impl Alloc {
                 padded.resize(size, 0);
                 let offset = self.next;
                 self.next += size as u64;
-                for m in members.iter_mut() {
+                for m in self.mine(members).iter_mut() {
                     write_at_dva(m, offset, &padded);
                 }
                 self.bp(offset, size as u64, size as u64, &padded, otype, level, txg)
@@ -472,6 +523,7 @@ impl Alloc {
                 let mut padded = data.to_vec();
                 padded.resize(size, 0);
                 let offset = self.next;
+                let members = self.mine(members);
                 let m = zfs_ondisk::raidz::map(
                     offset,
                     size as u64,
@@ -560,7 +612,7 @@ impl Alloc {
         txg: u64,
     ) -> [u8; blkptr::SIZE] {
         Builder::new()
-            .dva(0, 0, offset, asize, false)
+            .dva(0, self.vdev, offset, asize, false)
             .sizes(size, size)
             .props(2, self.checksum.code(), otype, level)
             .births(0, txg, 1)
@@ -656,7 +708,7 @@ pub fn build_sample_mos_variant(
     let os_fs = a.put(m, &objset(&empty_meta, 2), ot::OBJSET, 0, 100);
     let mut zvol_dnodes = vec![0u8; 4096];
     // Data blocks 0 and 2 of the volume; 1 and 3 are holes.
-    if with_disk0 && a.layout == Layout::Mirror {
+    if with_disk0 && a.layout == Layout::Mirror && a.data.is_none() {
         assert_eq!(
             a.next, SAMPLE_ZVOL_BLOCK0_OFFSET,
             "sample layout changed: update SAMPLE_ZVOL_BLOCK0_OFFSET"
@@ -668,8 +720,17 @@ pub fn build_sample_mos_variant(
     if a.salt.is_some() {
         a.checksum = zfs_ondisk::blkptr::Checksum::Blake3;
     }
-    let blk0 = a.put_removed(m, &zvol_pattern(0), ot::ZVOL, 0, 100);
-    let blk2 = a.put_removed(m, &zvol_pattern(2), ot::ZVOL, 0, 100);
+    // On another top-level vdev when the fixture has one for data.
+    let (blk0, blk2) = match a.data.as_mut() {
+        Some(d) => (
+            d.put_removed(m, &zvol_pattern(0), ot::ZVOL, 0, 100),
+            d.put_removed(m, &zvol_pattern(2), ot::ZVOL, 0, 100),
+        ),
+        None => (
+            a.put_removed(m, &zvol_pattern(0), ot::ZVOL, 0, 100),
+            a.put_removed(m, &zvol_pattern(2), ot::ZVOL, 0, 100),
+        ),
+    };
     a.checksum = plain;
     let data_obj = DnodeSpec {
         object_type: ot::ZVOL,
@@ -906,6 +967,59 @@ pub fn removed_vdev_members(pool: &mut Pool, size: u64) -> Vec<Vec<u8>> {
         pool.write_labels(i, img);
     }
     members
+}
+
+/// Where the volume's first data block lives on the *second* top-level
+/// vdev of a [`two_top_mirror_members`] pool: its allocator starts here.
+pub const TWO_TOP_DATA_OFFSET: u64 = 0x30_0000;
+
+/// A pool of two top-level mirrors — `mirror-0` of `widths[0]` leaves
+/// holding the MOS, `mirror-1` of `widths[1]` leaves holding the
+/// volume's data — the "RAID10" shape, and the smallest pool a read
+/// has to cross top-level vdevs to complete (SPEC §9, "one pool,
+/// several geometries").
+///
+/// Every member's label describes only its own top, as real labels do:
+/// take away every member of `mirror-1` and nothing left says what it
+/// was. Returns one [`Pool`] per top (the same pool, seen from each) and
+/// the member images, `mirror-0`'s first.
+pub fn two_top_mirror_members(
+    name: &str,
+    guid: u64,
+    ashift: u32,
+    widths: [usize; 2],
+    txgs: &[(u64, u64)],
+    size: u64,
+) -> (Vec<Pool>, Vec<Vec<u8>>) {
+    let total = widths[0] + widths[1];
+    let mut members: Vec<Vec<u8>> = (0..total).map(|_| vec![0u8; size as usize]).collect();
+    let mut a = Alloc::new(0x20_0000);
+    a.members = Some(0..widths[0]);
+    a.data = Some(Box::new(Alloc::for_top(
+        TWO_TOP_DATA_OFFSET,
+        1,
+        widths[0]..total,
+    )));
+    let rootbp = build_sample_mos_variant(&mut members, &mut a, true);
+    let mut tops = Vec::new();
+    for (top_id, range) in [(0u64, 0..widths[0]), (1, widths[0]..total)] {
+        let mut p = Pool::mirror_of(name, guid, ashift, range.len()).txgs(txgs);
+        p.top_id = top_id;
+        p.vdev_children = 2;
+        p.members = range
+            .clone()
+            .map(|i| Member {
+                guid: Member::guid_for(guid, i),
+                path: format!("/dev/gpt/{name}-d{i}"),
+            })
+            .collect();
+        p.rootbp = Some(rootbp);
+        for (k, i) in range.enumerate() {
+            p.write_labels(k, &mut members[i]);
+        }
+        tops.push(p);
+    }
+    (tops, members)
 }
 
 /// A mirror whose newest TXG no longer has `tank/vm/disk0` while the

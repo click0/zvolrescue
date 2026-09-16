@@ -504,7 +504,7 @@ on in-memory fixtures and portable.
 
 * **Unit tests** for every on-disk structure parser using golden byte arrays taken from real pools.
 * **Fixture pools**, generated in CI on a FreeBSD runner (GitHub Actions `vmactions/freebsd-vm`, or a self-hosted FreeBSD host) and on Linux with OpenZFS:
-  * topologies: single, mirror-2, raidz1-3, raidz2-4, raidz3-5, draid1;
+  * topologies: single, mirror-2, mirror-3 (what `zpool attach` leaves), raidz1-3, raidz2-4, raidz3-5, draid1, and a pool of two mirrors with the MOS on one and the data on the other, since a member's label describes only its own top-level vdev and a read that has to cross tops is a different read;
   * `ashift` 9, 12 and 13 across those topologies: it sets the stride of
     every DVA offset and of the RAIDZ column layout, so a mistake in it
     is not a small mistake — it is the difference between reading the

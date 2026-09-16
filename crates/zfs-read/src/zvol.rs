@@ -724,6 +724,73 @@ mod tests {
         assert_eq!(sink.data, expected_image());
     }
 
+    /// A pool of two mirrors: the MOS on `mirror-0`, the volume's data on
+    /// `mirror-1`. The image is the same as from a one-top pool, and it
+    /// still is with one side of each mirror gone. With every member of
+    /// `mirror-1` gone nothing describes that top, and its blocks are
+    /// refused by name rather than read from anywhere else.
+    #[test]
+    fn a_volume_whose_data_is_on_another_top_reads_across_both() {
+        use crate::fixture::two_top_mirror_members;
+        let (tops, members) = two_top_mirror_members("tank", 0x7070, 12, [2, 3], &[(100, 1)], SIZE);
+        assert_eq!((tops.len(), members.len()), (2, 5));
+        let sources: Vec<MemSource> = members.into_iter().map(MemSource::new).collect();
+        let run = |present: &[bool]| {
+            let scans: Vec<_> = sources
+                .iter()
+                .zip(present)
+                .map(|(s, &p)| if p { scan_device(s).ok() } else { None })
+                .collect();
+            let ub = scans.iter().flatten().next().expect("a scan").labels[0]
+                .best()
+                .unwrap()
+                .ub
+                .clone();
+            let assembly = assemble(&scans).into_iter().next().expect("one pool");
+            let devices: Vec<Option<&dyn BlockSource>> = sources
+                .iter()
+                .zip(present)
+                .map(|(s, &p)| p.then_some(s as &dyn BlockSource))
+                .collect();
+            let reader = PoolReader::new(&assembly, devices);
+            let mos = open_mos(&reader, &ub).unwrap();
+            let tree = walk(&mos, "tank").unwrap();
+            let ds = tree.get("tank/vm/disk0").unwrap();
+            let (obj, _) = open_volume(&reader, ds).unwrap();
+            let mut sink = MemSink::default();
+            let r = extract(
+                &obj,
+                ds.volsize.unwrap(),
+                &mut sink,
+                OnError::Zero,
+                |_, _| {},
+            )
+            .unwrap();
+            (assembly.missing_tops(), r, sink.data)
+        };
+        let (missing, r, data) = run(&[true; 5]);
+        assert!(missing.is_empty());
+        assert_eq!((r.blocks_read, r.blocks_zeroed), (2, 0));
+        assert_eq!(data, expected_image());
+
+        // One side of each mirror gone: the other sides answer.
+        let (missing, r, data) = run(&[true, false, false, true, false]);
+        assert!(missing.is_empty());
+        assert_eq!((r.blocks_read, r.blocks_zeroed), (2, 0));
+        assert_eq!(data, expected_image());
+
+        // mirror-1 gone entirely: the MOS still lists the volume, and its
+        // data blocks name a top nothing describes.
+        let (missing, r, _) = run(&[true, true, false, false, false]);
+        assert_eq!(missing, vec![1]);
+        assert_eq!((r.blocks_read, r.blocks_zeroed), (0, 2));
+        assert!(
+            r.bad[0].reason.contains("unknown top-level vdev 1"),
+            "{}",
+            r.bad[0].reason
+        );
+    }
+
     #[test]
     fn resuming_mid_way_yields_the_same_image_and_hash() {
         let (s, a, ub, _) = build();

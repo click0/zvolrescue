@@ -963,6 +963,47 @@ jobs:
           # Three missing: beyond raidz2, exit 3.
           if ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/rz/member2.img -o /tmp/rz-3miss.img; then echo "must fail"; exit 1; else test $? = 3; fi
 
+      - name: A three-way mirror, and a pool of two mirrors (SPEC §9)
+        run: |
+          # The shapes ztest builds by chance — a mirror `zpool attach`
+          # widened, and several top-level vdevs — as fixtures, so they
+          # are tried on every push and not when a run happens to make
+          # them.
+          cargo run -q -p zfs-read --example mkfixture -- /tmp/m3 mirror3 12
+          ./target/release/zvolrescue -f json scan /tmp/m3/member0.img /tmp/m3/member1.img /tmp/m3/member2.img | python3 -c 'import json,sys; t=json.load(sys.stdin)["pools"][0]["tops"][0]; assert t["kind"] == "mirror" and len(t["members"]) == 3, t; assert all(m["present"] for m in t["members"]), t'
+          # Any one side is a whole copy.
+          ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/m3/member1.img --txg 4816229 -o /tmp/m3-one.img
+          cmp /tmp/disk0.img /tmp/m3-one.img
+          # The damage-matrix shape: one side's labels gone, another
+          # absent, the third describing the pool. The bare side is
+          # bound by reading (SPEC F-62) and the volume comes out.
+          python3 -c '
+          LABEL, PHYS_OFF, PHYS = 256*1024, 16*1024, 112*1024
+          b = bytearray(open("/tmp/m3/member0.img", "rb").read())
+          aligned = len(b) & ~(LABEL-1)
+          for off in (0, LABEL, aligned-2*LABEL, aligned-LABEL):
+              b[off+PHYS_OFF:off+PHYS_OFF+PHYS] = b"\0" * PHYS
+          open("/tmp/m3/bare0.img", "wb").write(bytes(b))'
+          ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/m3/bare0.img /tmp/m3/member2.img --assume-member /tmp/m3/bare0.img --txg 4816229 -o /tmp/m3-bound.img 2> /tmp/m3-bound.err
+          grep -q "read as leaf" /tmp/m3-bound.err
+          cmp /tmp/disk0.img /tmp/m3-bound.img
+          # Two top-level mirrors: the MOS on mirror-0 (two leaves), the
+          # volume's data on mirror-1 (three). A read crosses both.
+          cargo run -q -p zfs-read --example mkfixture -- /tmp/st striped 12
+          ./target/release/zvolrescue scan /tmp/st/member*.img
+          ./target/release/zvolrescue -f json scan /tmp/st/member*.img | python3 -c 'import json,sys; p=json.load(sys.stdin)["pools"][0]; assert p["readable"] and p["missing_tops"] == [], p; t=p["tops"]; assert [x["id"] for x in t] == [0, 1], t; assert [len(x["members"]) for x in t] == [2, 3], t'
+          ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/st/member*.img -o /tmp/st-all.img
+          cmp /tmp/disk0.img /tmp/st-all.img
+          # One side of each mirror is enough.
+          ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/st/member1.img /tmp/st/member3.img -o /tmp/st-one-each.img
+          cmp /tmp/disk0.img /tmp/st-one-each.img
+          # mirror-1 gone entirely: nothing describes it, the MOS still
+          # lists the volume, and its blocks are refused by the top's
+          # name — zeros with the reason, exit 4.
+          ./target/release/zvolrescue -f json scan /tmp/st/member0.img /tmp/st/member1.img | python3 -c 'import json,sys; p=json.load(sys.stdin)["pools"][0]; assert p["missing_tops"] == [1] and not p["readable"], p'
+          if ./target/release/zvolrescue -f json dump tank/vm/disk0 /tmp/st/member0.img /tmp/st/member1.img -o /tmp/st-no-data.img > /tmp/st-no-data.json; then echo "must exit 4"; exit 1; else test $? = 4; fi
+          python3 -c 'import json; v=json.load(open("/tmp/st-no-data.json"))["volumes"][0]; assert v["blocks_zeroed"] == 2, v; assert "unknown top-level vdev 1" in v["bad"][0]["reason"], v["bad"]'
+
       - name: A member whose labels are gone, bound to the leaf its siblings name (SPEC F-62)
         run: |
           python3 - <<'EOF'

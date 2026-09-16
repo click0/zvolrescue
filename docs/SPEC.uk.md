@@ -507,7 +507,7 @@ docs/                   SPEC.md, SPEC.uk.md, COMPANIONS.md, COMPANIONS.uk.md, re
 
 * **Unit-тести** для кожного парсера on-disk структур на «золотих» байтових масивах із реальних пулів.
 * **Fixture-пули**, що генеруються в CI на FreeBSD-runner-і (GitHub Actions `vmactions/freebsd-vm` або власний хост FreeBSD) та на Linux з OpenZFS:
-  * топології: single, mirror-2, raidz1-3, raidz2-4, raidz3-5, draid1;
+  * топології: single, mirror-2, mirror-3 (те, що лишає `zpool attach`), raidz1-3, raidz2-4, raidz3-5, draid1, а також пул із двох дзеркал, де MOS на одному, а дані на іншому, — бо мітка члена описує лише свій top-level vdev, і читання, якому треба перетнути top-и, є іншим читанням;
   * `ashift` 9, 12 і 13 на цих топологіях: він задає крок кожного зсуву
     DVA і розкладки колонок RAIDZ, тож помилка в ньому — не дрібна
     помилка, а різниця між тим, щоб прочитати потрібний сектор і

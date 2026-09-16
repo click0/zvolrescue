@@ -1,6 +1,6 @@
 //! Write fixture member images for smoke tests.
 //!
-//! `cargo run -p zfs-read --example mkfixture -- DIR [mirror|raidz2] [ashift] [carved|zpl]`
+//! `cargo run -p zfs-read --example mkfixture -- DIR [mirror|mirror3|raidz2|striped] [ashift] [carved|zpl|removed]`
 //! writes `DIR/member0.img`, `DIR/member1.img`, … with sealed labels,
 //! three uberblocks each and, for mirrors, a small MOS with four datasets
 //! at the older TXGs and the volume destroyed at the newest one.
@@ -16,11 +16,18 @@
 //! instead of a volume (COMPANIONS §5.4). A fifth argument names one more
 //! active read-incompatible feature for the labels to claim, so a refusal
 //! can be seen (SPEC F-70).
+//!
+//! `mirror3` is a three-way mirror, the shape `zpool attach` leaves.
+//! `striped` is a pool of two top-level mirrors, two and three leaves
+//! wide, with the MOS on the first and the volume's data on the second:
+//! members `member0`…`member4`, one transaction group, the volume
+//! present. It takes no mode.
 
 use std::path::PathBuf;
 
 use zfs_read::fixture::{
-    carved_zvol_members, destroyed_zvol_members, removed_vdev_members, zpl_members, Pool,
+    carved_zvol_members, destroyed_zvol_members, removed_vdev_members, two_top_mirror_members,
+    zpl_members, Pool,
 };
 
 fn main() {
@@ -39,8 +46,28 @@ fn main() {
     let carved = mode == "carved";
     let zpl = mode == "zpl";
     let removed = mode == "removed";
+    if kind == "striped" {
+        assert!(mode.is_empty(), "striped takes no mode");
+        let (_, members) = two_top_mirror_members(
+            "tank",
+            0x5eed_0000_0000_0003,
+            ashift,
+            [2, 3],
+            &[(4816229, 1757100005)],
+            64 * 1024 * 1024,
+        );
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        println!("tank/vm/disk0's data is on mirror-1 (members 2..5); the MOS is on mirror-0 (members 0..2)");
+        for (i, img) in members.iter().enumerate() {
+            let p = dir.join(format!("member{i}.img"));
+            std::fs::write(&p, img).expect("write");
+            println!("{}", p.display());
+        }
+        return;
+    }
     let mut pool = match kind.as_str() {
         "mirror" => Pool::mirror("tank", 0x5eed_0000_0000_0001, ashift),
+        "mirror3" => Pool::mirror_of("tank", 0x5eed_0000_0000_0001, ashift, 3),
         "raidz2" => Pool::raidz("tank", 0x5eed_0000_0000_0002, ashift, 4, 2),
         other => panic!("unknown kind {other}"),
     }

@@ -16,6 +16,24 @@ tagged. `v0.7.1` is the release that carries those six.
 ## Unreleased
 
 ### Added
+* **Fixtures for a three-way mirror and for a pool of two mirrors.**
+  Both shapes were read before — a mirror is any number of sides, and
+  a pool is any number of top-level vdevs — but only `ztest` ever
+  produced them, by chance: a side attached during its run, a vdev
+  added. Now `mkfixture mirror3` builds the widened mirror and
+  `mkfixture striped` a pool whose MOS is on `mirror-0` and whose
+  volume's data is on `mirror-1`, three leaves wide, so that a read
+  has to cross tops to finish. Every push checks: any one side of the
+  three-way mirror is a whole copy; the damage-matrix shape (one side's
+  labels gone, another absent, the third describing the pool) binds the
+  bare side by reading (F-62) and the volume comes out; the two-mirror
+  pool reads with one side of each; and with every member of `mirror-1`
+  gone the MOS still lists the volume while its blocks are refused by
+  the name of the top nothing describes — zeros with the reason, exit 4
+  — because a member's label describes only its own top-level vdev,
+  which is how ZFS labels work and what makes that top unrecoverable
+  without `--hints`.
+
 * **A bad sector costs its sector, not its block (SPEC F-33).** A disk
   with one unreadable sector refuses the whole 8 KiB read that touches
   it, and with no other copy `dump` wrote 8 KiB of zeros — 7.5 KiB of

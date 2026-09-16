@@ -8,8 +8,8 @@ use std::process::Command;
 use zfs_ondisk::blkptr::LABEL_START_SIZE;
 use zfs_ondisk::label::LABEL_SIZE;
 use zfs_read::fixture::{
-    build_sample_mos, destroyed_zvol_members, removed_vdev_members, Alloc, Pool,
-    SAMPLE_ZVOL_BLOCK0_OFFSET,
+    build_sample_mos, destroyed_zvol_members, removed_vdev_members, two_top_mirror_members, Alloc,
+    Pool, SAMPLE_ZVOL_BLOCK0_OFFSET,
 };
 use zfs_read::hash::{Digests, Extra};
 
@@ -737,5 +737,174 @@ fn a_geli_provider_is_reported_as_encrypted() {
     assert!(
         text.contains("GEOM::ELI v7 in the last sector; the member is geli-encrypted"),
         "{text}"
+    );
+}
+
+/// The SHA-256 of the volume out of any healthy fixture; what every
+/// shape below has to come to.
+fn reference_sha(dir: &Path) -> String {
+    let refdir = dir.join("ref");
+    std::fs::create_dir_all(&refdir).expect("ref dir");
+    let members = write_members(&refdir, &plain_members());
+    let (code, out, _) = run(&[
+        "-q",
+        "-f",
+        "json",
+        "dump",
+        "tank/vm/disk0",
+        &members[0],
+        "-o",
+        &dir.join("ref.img").to_string_lossy(),
+    ]);
+    assert_eq!(code, 0);
+    json(&out)["volumes"][0]["sha256"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// A three-way mirror, the shape `zpool attach` leaves: the pool reads
+/// from any one side, and the damage-matrix shape — one side's labels
+/// gone, another side absent — binds the bare side by reading through
+/// it, with the third describing the pool (SPEC F-62).
+#[test]
+fn a_three_way_mirror_reads_from_one_side_and_binds_a_bare_one() {
+    let dir = scratch("mirror3");
+    let want = reference_sha(&dir);
+    let mut pool = Pool::mirror_of("tank", 0x4242, 12, 3).txgs(&[(100, 1)]);
+    let mut members = vec![vec![0u8; SIZE as usize]; 3];
+    let mut a = Alloc::new(0x20_0000);
+    build_sample_mos(&mut pool, &mut members, &mut a);
+    for (i, m) in members.iter_mut().enumerate() {
+        pool.write_labels(i, m);
+    }
+    let paths = write_members(&dir, &members);
+
+    let (code, out, _) = run(&["-q", "-f", "json", "scan", &paths[0], &paths[1], &paths[2]]);
+    assert_eq!(code, 0, "{out}");
+    let top = &json(&out)["pools"][0]["tops"][0];
+    assert_eq!(top["kind"], "mirror");
+    assert_eq!(top["members"].as_array().unwrap().len(), 3);
+    assert!(top["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|m| !m["present"].is_null()));
+
+    // Two sides gone: the third is a whole copy.
+    let (code, out, _) = run(&[
+        "-q",
+        "-f",
+        "json",
+        "dump",
+        "tank/vm/disk0",
+        &paths[2],
+        "-o",
+        &dir.join("one-side.img").to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(json(&out)["volumes"][0]["sha256"], want);
+
+    // The matrix shape: side 0 without labels, side 1 absent, side 2
+    // intact. The bare side is bound by reading, and both sides serve.
+    let mut bare = members[0].clone();
+    wipe_configs(&mut bare);
+    let bare_p = dir.join("bare0.img");
+    std::fs::write(&bare_p, &bare).unwrap();
+    let bare_s = bare_p.to_string_lossy().into_owned();
+    let (code, out, err) = run(&[
+        "-q",
+        "-f",
+        "json",
+        "dump",
+        "tank/vm/disk0",
+        &bare_s,
+        &paths[2],
+        "--assume-member",
+        &bare_s,
+        "-o",
+        &dir.join("bound.img").to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(err.contains("read as leaf"), "{err}");
+    assert_eq!(json(&out)["volumes"][0]["sha256"], want);
+}
+
+/// A pool of two mirrors, the MOS on one and the volume's data on the
+/// other: `scan` shows both tops with their members, the volume reads
+/// across them, and with every member of the data mirror gone its
+/// blocks are refused by the name of the top nothing describes.
+#[test]
+fn a_pool_of_two_mirrors_reads_across_both_tops() {
+    let dir = scratch("striped");
+    let want = reference_sha(&dir);
+    let (_, members) = two_top_mirror_members("tank", 0x7070, 12, [2, 3], &[(100, 1)], SIZE);
+    let paths = write_members(&dir, &members);
+    let all: Vec<&str> = paths.iter().map(String::as_str).collect();
+
+    let mut args = vec!["-q", "-f", "json", "scan"];
+    args.extend(&all);
+    let (code, out, _) = run(&args);
+    assert_eq!(code, 0, "{out}");
+    let pool = &json(&out)["pools"][0];
+    assert_eq!(pool["readable"], true, "{pool}");
+    assert_eq!(pool["missing_tops"], serde_json::json!([]));
+    let tops = pool["tops"].as_array().unwrap();
+    assert_eq!(tops.len(), 2, "{pool}");
+    assert_eq!(
+        (tops[0]["id"].as_u64(), tops[1]["id"].as_u64()),
+        (Some(0), Some(1))
+    );
+    assert_eq!(
+        (
+            tops[0]["members"].as_array().unwrap().len(),
+            tops[1]["members"].as_array().unwrap().len()
+        ),
+        (2, 3)
+    );
+    assert!(tops[0]["members"][0]["present"]
+        .as_str()
+        .unwrap()
+        .ends_with("member0.img"));
+    assert!(tops[1]["members"][2]["present"]
+        .as_str()
+        .unwrap()
+        .ends_with("member4.img"));
+
+    let dump = |members: &[&str], name: &str| {
+        let mut args = vec!["-q", "-f", "json", "dump", "tank/vm/disk0"];
+        args.extend(members);
+        let out_p = dir.join(name).to_string_lossy().into_owned();
+        args.extend(["-o", &out_p]);
+        let (code, out, _) = run(&args);
+        (code, json(&out))
+    };
+    let (code, v) = dump(&all, "all.img");
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["volumes"][0]["sha256"], want);
+
+    // One side of each mirror: still the whole volume.
+    let (code, v) = dump(&[all[1], all[3]], "one-each.img");
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["volumes"][0]["sha256"], want);
+
+    // mirror-1 gone entirely: the MOS lists the volume, the data blocks
+    // name a top nothing present describes, and the image is zeros with
+    // the reason on every range (exit 4).
+    let (code, out, _) = run(&["-q", "-f", "json", "scan", all[0], all[1]]);
+    assert_eq!(code, 0);
+    let pool = &json(&out)["pools"][0];
+    assert_eq!(pool["missing_tops"], serde_json::json!([1]), "{pool}");
+    assert_eq!(pool["readable"], false);
+    let (code, v) = dump(&[all[0], all[1]], "no-data-top.img");
+    assert_eq!(code, 4, "{v}");
+    let vol = &v["volumes"][0];
+    assert_eq!(vol["blocks_zeroed"], 2, "{vol}");
+    assert!(
+        vol["bad"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("unknown top-level vdev 1"),
+        "{vol}"
     );
 }
