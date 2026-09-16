@@ -20,9 +20,11 @@
 //! provider is one sector shorter than what a forensic image of the
 //! partition holds. Whenever that sector carries the size across a
 //! 256 KiB boundary, a search that trusts the image size looks in the
-//! wrong place and reports two labels missing on a member that has all
-//! four. `md_provsize`, where the metadata version carries it, says
-//! exactly how long that provider was.
+//! wrong place and reports a label missing on a member that has all
+//! four. `md_provsize`, where the metadata version carries it, is the
+//! size of the provider the metadata was written on — the sector
+//! included, which is what the kernel checks it against when tasting —
+//! so the provider ZFS saw is that less one sector.
 //!
 //! Formats are from `sys/geom/{label,mirror,eli}/g_*.h`: a 16-byte
 //! magic, a little-endian version, and per-class fields after that.
@@ -44,15 +46,24 @@ pub struct GeomMeta {
     /// The name the class gave the provider, where it has one — the
     /// tail of `/dev/label/…` or `/dev/mirror/…`.
     pub name: Option<String>,
-    /// Size in bytes of the provider the class was configured on, where
-    /// the metadata version records it. The provider offered above it,
-    /// the one ZFS wrote to, is one sector shorter.
+    /// Size in bytes of the provider the class was configured on, this
+    /// sector included, where the metadata version records it — what
+    /// `md_provsize` holds and the kernel compares to the provider's
+    /// mediasize when it tastes. The provider offered above it, the one
+    /// ZFS wrote to, is one sector shorter: [`GeomMeta::inner_size`].
     pub provsize: Option<u64>,
     /// Metadata version, as written.
     pub version: u32,
 }
 
 impl GeomMeta {
+    /// Size of the provider the class offered above this one — the one
+    /// ZFS was given — when the metadata records the size at all: one
+    /// sector less than `provsize`.
+    pub fn inner_size(&self) -> Option<u64> {
+        self.provsize.map(|p| p.saturating_sub(SECTOR as u64))
+    }
+
     /// The device node FreeBSD would offer for this provider, when the
     /// class names its providers: `/dev/label/NAME`, `/dev/mirror/NAME`.
     pub fn device_name(&self) -> Option<String> {
@@ -149,11 +160,12 @@ mod tests {
     #[test]
     fn a_glabel_record_gives_its_name_and_the_provider_size() {
         let mut s = sector(b"GEOM::LABEL", 2, b"tank-d0");
-        s[36..44].copy_from_slice(&(64u64 << 20).to_le_bytes());
+        s[36..44].copy_from_slice(&((64u64 << 20) + 512).to_le_bytes());
         let m = parse(&s).expect("a label");
         assert_eq!(m.class, "label");
         assert_eq!(m.name.as_deref(), Some("tank-d0"));
-        assert_eq!(m.provsize, Some(64 << 20));
+        assert_eq!(m.provsize, Some((64 << 20) + 512));
+        assert_eq!(m.inner_size(), Some(64 << 20));
         assert_eq!(m.device_name().as_deref(), Some("/dev/label/tank-d0"));
     }
 
@@ -164,6 +176,7 @@ mod tests {
         s[36..44].copy_from_slice(&0xdead_beefu64.to_le_bytes());
         let m = parse(&s).expect("a label");
         assert_eq!((m.name.as_deref(), m.provsize), (Some("old"), None));
+        assert_eq!(m.inner_size(), None);
     }
 
     #[test]

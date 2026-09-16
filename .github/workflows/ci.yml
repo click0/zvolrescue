@@ -1040,7 +1040,7 @@ jobs:
           m0 = open("/tmp/fx/member0.img", "rb").read()
           tail = bytearray(512); tail[0:11] = b"GEOM::LABEL"
           struct.pack_into("<I", tail, 16, 2); tail[20:27] = b"tank-d0"
-          struct.pack_into("<Q", tail, 36, len(m0))
+          struct.pack_into("<Q", tail, 36, len(m0) + 512)   # the provider, sector included
           open("/tmp/fx/label0.img", "wb").write(m0 + bytes(tail))
           EOF
           ./target/release/zvolrescue scan /tmp/fx/member0.img /tmp/fx/disk1.img
@@ -1067,7 +1067,7 @@ jobs:
           import json,sys
           d = json.load(sys.stdin)["devices"][0]
           assert d["geom"]["class"] == "label" and d["geom"]["name"] == "tank-d0", d["geom"]
-          assert d["geom"]["provsize"] == d["size"] - 512, d
+          assert d["geom"]["provsize"] == d["size"], d
           assert d["names"] == ["/dev/label/tank-d0"], d["names"]
           assert sum(1 for l in d["labels"] if l["config_checksum"] == "ok") == 4, d["labels"]'
           ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/fx/label0.img --txg 4816229 -o /tmp/fx/labelled.img
@@ -1230,7 +1230,7 @@ jobs:
             # parses is compared against this, not against a header.
             tail -c 512 /tmp/fx/label0.img | hexdump -C | head -4
             ./target/release/zvolrescue scan /tmp/fx/label0.img
-            ./target/release/zvolrescue -q scan /tmp/fx/label0.img | grep -q "GEOM::LABEL v2 in the last sector: this was /dev/label/tank-d0, provider 67108864 bytes"
+            ./target/release/zvolrescue -q scan /tmp/fx/label0.img | grep -q "GEOM::LABEL v2 in the last sector: this was /dev/label/tank-d0, provider 67109376 bytes"
             ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/fx/member0.img --txg 4816229 -o /tmp/fx/plain.img
             ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/fx/label0.img --txg 4816229 -o /tmp/fx/labelled.img
             cmp /tmp/fx/plain.img /tmp/fx/labelled.img

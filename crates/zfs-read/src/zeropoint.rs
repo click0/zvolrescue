@@ -310,7 +310,7 @@ pub fn scan_with_recovered_base(dev: &dyn BlockSource) -> io::Result<crate::vdev
     // is data or zeros and this is a no-op.
     if let Some(meta) = geom_metadata(dev, dev.size())? {
         let provsize = meta
-            .provsize
+            .inner_size()
             .filter(|&p| p < dev.size())
             .unwrap_or(dev.size().saturating_sub(geom::SECTOR as u64));
         if provsize < dev.size() {
@@ -642,11 +642,13 @@ mod tests {
     fn a_member_under_glabel_has_its_rear_labels_one_sector_before_the_end() {
         let psize = 16 * 1024 * 1024 - geom::SECTOR as u64;
         let mut img = member(psize);
+        // `md_provsize` is the provider the metadata sits on, the sector
+        // included; what ZFS was given is one sector less.
         let mut tail = vec![0u8; geom::SECTOR];
         tail[..11].copy_from_slice(b"GEOM::LABEL");
         tail[16..20].copy_from_slice(&2u32.to_le_bytes());
         tail[20..27].copy_from_slice(b"tank-d0");
-        tail[36..44].copy_from_slice(&psize.to_le_bytes());
+        tail[36..44].copy_from_slice(&(psize + geom::SECTOR as u64).to_le_bytes());
         img.extend_from_slice(&tail);
         let dev = MemSource::new(img);
 
@@ -654,7 +656,8 @@ mod tests {
             .expect("read")
             .expect("a label");
         assert_eq!(meta.name.as_deref(), Some("tank-d0"));
-        assert_eq!(meta.provsize, Some(psize));
+        assert_eq!(meta.provsize, Some(dev.size()));
+        assert_eq!(meta.inner_size(), Some(psize));
 
         // At the image size the rear pair is looked for 256 KiB too far:
         // where L2 is expected sits the provider's L3, sealed for that

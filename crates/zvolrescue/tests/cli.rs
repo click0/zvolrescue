@@ -663,7 +663,9 @@ fn a_glabel_names_the_member_and_says_how_long_its_provider_was() {
     tail[..11].copy_from_slice(b"GEOM::LABEL");
     tail[16..20].copy_from_slice(&2u32.to_le_bytes());
     tail[20..27].copy_from_slice(b"tank-d0");
-    tail[36..44].copy_from_slice(&psize.to_le_bytes());
+    // As glabel writes it: the size of the provider it was put on, the
+    // metadata sector included.
+    tail[36..44].copy_from_slice(&SIZE.to_le_bytes());
     let mut labelled = members[0].clone();
     labelled.extend_from_slice(&tail);
     let img = dir.join("label0.img");
@@ -678,7 +680,7 @@ fn a_glabel_names_the_member_and_says_how_long_its_provider_was() {
     assert_eq!(d["vdev_base_from"], "GEOM metadata");
     assert_eq!(d["geom"]["class"], "label");
     assert_eq!(d["geom"]["name"], "tank-d0");
-    assert_eq!(d["geom"]["provsize"], psize);
+    assert_eq!(d["geom"]["provsize"], SIZE);
     assert_eq!(d["names"], serde_json::json!(["/dev/label/tank-d0"]));
     let ok = d["labels"]
         .as_array()
@@ -691,7 +693,7 @@ fn a_glabel_names_the_member_and_says_how_long_its_provider_was() {
     let (_, text, _) = run(&["-q", "scan", &img_s]);
     assert!(
         text.contains(&format!(
-            "GEOM::LABEL v2 in the last sector: this was /dev/label/tank-d0, provider {psize} bytes; the vdev is {psize} bytes and its rear labels were read there"
+            "GEOM::LABEL v2 in the last sector: this was /dev/label/tank-d0, provider {SIZE} bytes; the vdev is {psize} bytes and its rear labels were read there"
         )),
         "{text}"
     );

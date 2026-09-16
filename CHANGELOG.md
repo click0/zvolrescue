@@ -32,10 +32,10 @@ tagged. `v0.7.1` is the release that carries those six.
   (`tank-spare` beside `tank`) is a hint and binds nothing.
 
   Two more things fall out of reading the GEOM sector. The metadata
-  records how long the provider was, and ZFS placed its rear labels
-  against *that* end — one sector before the image's — so a member whose
-  size the sector carries across a 256 KiB boundary now shows all four
-  labels instead of three. And a `geli` provider is named as
+  records the size of the provider it sits on, and ZFS was given one
+  sector less than that and placed its rear labels against *that* end —
+  so a member whose size the sector carries across a 256 KiB boundary
+  now shows all four labels instead of three. And a `geli` provider is named as
   encrypted rather than reported as a disk with no ZFS on it.
 
   Checked on FreeBSD 15 in CI with the real tools: `gpart add -l` and
