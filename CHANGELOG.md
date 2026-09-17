@@ -13,7 +13,17 @@ development milestone that names what changed when — the sections below
 are their record — and ships inside the next version that does get
 tagged. `v0.7.1` is the release that carries those six.
 
-## Unreleased
+## v0.9.0 — 2026-09-17
+
+**What the disk never gave, and what the disk still says.**
+An image's ddrescue map is honoured: sectors the imager could not read
+are refused by name, not read as data, and a bad sector on any member
+costs its sector rather than its block. A disk's own names — a GPT
+label, a `gptid`, a `glabel` — tie a member whose labels are gone to the
+leaf its siblings describe, and a member with no anchor at all is found
+at the base their `asize` bounds. Three-way mirrors and pools of several
+mirrors are fixtures now, and ashift 9 and 13 are cross-checked against
+`zdb`.
 
 ### Added
 * **The imager's map (SPEC F-72), and retries per sector (F-33).** An
