@@ -13,7 +13,7 @@ development milestone that names what changed when — the sections below
 are their record — and ships inside the next version that does get
 tagged. `v0.7.1` is the release that carries those six.
 
-## v0.9.0 — 2026-09-17
+## v0.8.5 — 2026-09-17
 
 **What the disk never gave, and what the disk still says.**
 An image's ddrescue map is honoured: sectors the imager could not read
