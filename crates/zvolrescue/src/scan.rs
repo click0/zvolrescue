@@ -22,7 +22,7 @@ use zfs_read::zeropoint::{
 use zvolrescue_io::{BlockSource, FileSource};
 
 use zvol_common::timefmt::iso8601;
-use zvol_common::{evidence, exit, Format, Global};
+use zvol_common::{evidence, exit, Format, Global, OpenOpts};
 
 #[derive(Debug, Serialize)]
 struct UberblockOut {
@@ -127,6 +127,10 @@ struct DeviceOut {
     /// GEOM metadata in the device's last sector (SPEC F-71).
     #[serde(skip_serializing_if = "Option::is_none")]
     geom: Option<GeomOut>,
+    /// What the imager's map says of this image (SPEC F-72), when one
+    /// was given with `--map`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    map: Option<MapOut>,
     /// Every device node an operating system would offer this device
     /// or its partitions under, from what the disk itself says:
     /// `/dev/gpt/NAME`, `/dev/gptid/GUID`, `/dev/label/NAME`, and the
@@ -135,6 +139,23 @@ struct DeviceOut {
     /// are gone can be matched to the leaf its siblings describe.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     names: Vec<String>,
+}
+
+/// What an imager could not read of an image (SPEC F-72).
+#[derive(Debug, Clone, Serialize)]
+struct MapOut {
+    /// The mapfile.
+    path: PathBuf,
+    /// Bytes the imager did not finish.
+    unreadable_bytes: u64,
+    /// Ranges it did not finish, `[start, len]`, merged.
+    unreadable: Vec<(u64, u64)>,
+    /// Bytes per map status: `+` finished, `-` bad sector, `/`
+    /// non-scraped, `*` non-trimmed, `?` non-tried.
+    by_status: std::collections::BTreeMap<char, u64>,
+    /// Label positions (0..=3) the unfinished ranges touch: where the
+    /// pool's own account of itself was never read.
+    labels_touched: Vec<usize>,
 }
 
 /// What a GEOM class left in a provider's last sector (SPEC F-71).
@@ -499,6 +520,7 @@ fn device_out(
         partitions: None,
         vdev_size: None,
         geom: None,
+        map: None,
         names: Vec::new(),
     };
     if let Some(s) = scan {
@@ -701,6 +723,26 @@ fn print_text(out: &ScanOut, verbose: u8) {
         }
         if !d.names.is_empty() {
             println!("  named: {}", d.names.join("  "));
+        }
+        if let Some(m) = &d.map {
+            println!(
+                "  imager's map {}: {} byte(s) in {} range(s) never read{}; they are refused, not trusted (SPEC F-72)",
+                m.path.display(),
+                m.unreadable_bytes,
+                m.unreadable.len(),
+                if m.labels_touched.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        ", touching label(s) {}",
+                        m.labels_touched
+                            .iter()
+                            .map(|i| format!("L{i}"))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    )
+                }
+            );
         }
         match &d.config {
             Some(c) => {
@@ -1050,14 +1092,31 @@ fn emit_label(
 }
 
 /// Run `scan`.
-pub fn run(g: &Global, devices: &[PathBuf], zp: &ZeroPointOpts, emit: &EmitOpts) -> u8 {
+pub fn run(
+    g: &Global,
+    devices: &[PathBuf],
+    open: &OpenOpts,
+    zp: &ZeroPointOpts,
+    emit: &EmitOpts,
+) -> u8 {
+    for (member, file) in &open.maps {
+        if !devices.contains(member) {
+            eprintln!(
+                "zvolrescue: --map {}={}: {} is not among the devices given",
+                member.display(),
+                file.display(),
+                member.display()
+            );
+            return exit::USAGE;
+        }
+    }
     let mut scans: Vec<Option<DeviceScan>> = Vec::with_capacity(devices.len());
     let mut outs: Vec<DeviceOut> = Vec::with_capacity(devices.len());
     // Kept open past the loop: telling a removed top-level vdev from a
     // missing one means asking the pool's MOS (SPEC F-69).
     let mut sources: Vec<Option<FileSource>> = Vec::with_capacity(devices.len());
     for path in devices {
-        let (scan, size, error, zero_point, table, source) = match FileSource::open(path) {
+        let (scan, size, error, zero_point, table, source) = match open.open(path) {
             Ok(src) => {
                 let (scan, error) = match scan_with_recovered_base(&src) {
                     Ok(s) => (Some(s), None),
@@ -1083,6 +1142,26 @@ pub fn run(g: &Global, devices: &[PathBuf], zp: &ZeroPointOpts, emit: &EmitOpts)
         // its last sector, and the name and GUID of each partition, with
         // any GEOM class configured on the partition itself.
         let src = source.as_ref();
+        out.map = src.and_then(|s| s.map()).map(|m| {
+            let labels_touched = out
+                .labels
+                .iter()
+                .filter(|l| m.touches(l.offset, zfs_ondisk::label::LABEL_SIZE))
+                .map(|l| l.index)
+                .collect();
+            MapOut {
+                path: open
+                    .maps
+                    .iter()
+                    .find(|(mem, _)| mem == path)
+                    .map(|(_, f)| f.clone())
+                    .unwrap_or_default(),
+                unreadable_bytes: m.unreadable_bytes(),
+                unreadable: m.unreadable().to_vec(),
+                by_status: m.by_status.clone(),
+                labels_touched,
+            }
+        });
         let geom_at = |end: u64| src.and_then(|s| geom_metadata(s, end).ok().flatten());
         out.geom = geom_at(size).map(|m| geom_out(&m));
         let mut names: Vec<String> = Vec::new();
@@ -1185,5 +1264,7 @@ pub fn run(g: &Global, devices: &[PathBuf], zp: &ZeroPointOpts, emit: &EmitOpts)
     } else {
         0
     };
-    g.log_evidence("zvolrescue", &json, code, devices, written)
+    let mut inputs = devices.to_vec();
+    inputs.extend(open.map_files());
+    g.log_evidence("zvolrescue", &json, code, &inputs, written)
 }

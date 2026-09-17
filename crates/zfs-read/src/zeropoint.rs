@@ -130,7 +130,9 @@ pub fn find(dev: &dyn BlockSource, opts: &Search) -> io::Result<Vec<ZeroPoint>> 
         while pos < end {
             let want = (CHUNK + MAX_SLOT).min(size - pos);
             let chunk = &mut buf[..want as usize];
-            dev.read_at(pos, chunk)?;
+            // Zeros where the device or the imager's map refuses (SPEC
+            // F-72): no anchor is found there, and the search goes on.
+            dev.read_at_salvaging(pos, chunk)?;
             let last = if want > MAX_SLOT { want - MAX_SLOT } else { 1 };
             let mut off = 0u64;
             while off < last && pos + off < end {

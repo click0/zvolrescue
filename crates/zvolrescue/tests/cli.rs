@@ -968,3 +968,130 @@ fn a_pool_of_two_mirrors_reads_across_both_tops() {
         "{vol}"
     );
 }
+
+/// An image made with ddrescue comes with its map (SPEC F-72): the
+/// sectors the imager could not read are refused before they are read,
+/// so a block crossing them is kept as far as the imager read it and
+/// the rest is zeros with the imager named as the reason — never a
+/// checksum failure with no cause. `scan` reports the map, and which
+/// labels the unread ranges touch.
+#[test]
+fn an_imagers_map_names_what_the_disk_never_gave() {
+    let dir = scratch("ddrescue-map");
+    let members = write_members(&dir, &plain_members());
+    // Two sectors inside the volume's first data block, and the whole of
+    // label L1, never read by the imager.
+    let bad_at = LABEL_START_SIZE + SAMPLE_ZVOL_BLOCK0_OFFSET + 2048;
+    let map = dir.join("member0.map");
+    std::fs::write(
+        &map,
+        format!(
+            "# Mapfile. Created by GNU ddrescue version 1.27\n# current_pos  current_status  current_pass\n{:#x}     +               1\n#      pos        size  status\n0x0  {:#x}  +\n{:#x}  0x40000  -\n{:#x}  {:#x}  +\n{:#x}  0x400  -\n{:#x}  {:#x}  +\n",
+            SIZE,
+            LABEL_SIZE,
+            LABEL_SIZE,
+            2 * LABEL_SIZE,
+            bad_at - 2 * LABEL_SIZE,
+            bad_at,
+            bad_at + 0x400,
+            SIZE - bad_at - 0x400
+        ),
+    )
+    .unwrap();
+    let spec = format!("{}={}", members[0], map.display());
+
+    let (code, out, _) = run(&["-q", "-f", "json", "scan", &members[0], "--map", &spec]);
+    assert_eq!(code, 0, "{out}");
+    let d = &json(&out)["devices"][0];
+    assert_eq!(d["map"]["unreadable_bytes"], 0x40000 + 0x400, "{d}");
+    assert_eq!(d["map"]["labels_touched"], serde_json::json!([1]), "{d}");
+    assert_eq!(d["map"]["by_status"]["-"], 0x40000 + 0x400);
+    assert_eq!(
+        d["labels"][1]["config_checksum"], "missing",
+        "{}",
+        d["labels"][1]
+    );
+    let (_, text, _) = run(&["-q", "scan", &members[0], "--map", &spec]);
+    assert!(
+        text.contains(
+            "never read, touching label(s) L1; they are refused, not trusted (SPEC F-72)"
+        ),
+        "{text}"
+    );
+
+    // Alone, the member's block 0 is kept less the two sectors, and the
+    // reason names the imager.
+    let (code, out, err) = run(&[
+        "-q",
+        "-f",
+        "json",
+        "dump",
+        "tank/vm/disk0",
+        &members[0],
+        "--map",
+        &spec,
+        "--retries",
+        "3",
+        "-o",
+        &dir.join("mapped.img").to_string_lossy(),
+    ]);
+    assert_eq!(code, 4, "{out}{err}");
+    let v = &json(&out)["volumes"][0];
+    assert_eq!(
+        (v["blocks_salvaged"].as_u64(), v["blocks_zeroed"].as_u64()),
+        (Some(1), Some(0)),
+        "{v}"
+    );
+    assert_eq!(
+        (v["bad"][0]["offset"].as_u64(), v["bad"][0]["len"].as_u64()),
+        (Some(2048), Some(1024)),
+        "{v}"
+    );
+    assert!(
+        v["bad"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("imager could not read (ddrescue map)"),
+        "{v}"
+    );
+    assert!(
+        err.contains("the imager's map says 263168 byte(s) in 2 range(s) were never read"),
+        "{err}"
+    );
+    let mut want = std::fs::read(dir.join("ref.img")).unwrap_or_default();
+    if want.is_empty() {
+        let _ = reference_sha(&dir);
+        want = std::fs::read(dir.join("ref.img")).unwrap();
+    }
+    want[2048..3072].fill(0);
+    assert_eq!(std::fs::read(dir.join("mapped.img")).unwrap(), want);
+
+    // The other side heals it: the map only says what this member never
+    // gave, and the mirror still has it.
+    let (code, out, _) = run(&[
+        "-q",
+        "-f",
+        "json",
+        "dump",
+        "tank/vm/disk0",
+        &members[0],
+        &members[1],
+        "--map",
+        &spec,
+        "-o",
+        &dir.join("healed.img").to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(json(&out)["volumes"][0]["blocks_salvaged"], 0);
+
+    // A map for a file that is not a member is a usage error.
+    let (code, _, err) = run(&[
+        "-q",
+        "scan",
+        &members[0],
+        "--map",
+        &format!("{}={}", members[1], map.display()),
+    ]);
+    assert_eq!(code, 1);
+    assert!(err.contains("is not among the devices given"), "{err}");
+}

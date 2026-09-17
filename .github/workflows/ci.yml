@@ -1117,6 +1117,44 @@ jobs:
           python3 -c 'b=bytearray(8<<20); b[-512:-503]=b"GEOM::ELI"; b[-496:-492]=(7).to_bytes(4,"little"); open("/tmp/fx/eli.img","wb").write(bytes(b))'
           ./target/release/zvolrescue -q scan /tmp/fx/eli.img | grep -q "GEOM::ELI v7 in the last sector; the member is geli-encrypted"
 
+      - name: An image with its ddrescue map (SPEC F-72)
+        run: |
+          # The map says two sectors of the volume's first data block and
+          # the whole of label L1 were never read. Read through the map,
+          # the block is kept less those sectors and the reason names the
+          # imager; the mirror's other side heals it; scan reports what
+          # the map touches.
+          python3 - <<'EOF'
+          SIZE = 64*1024*1024
+          LABEL = 256*1024
+          bad = 4*1024*1024 + 0x200000 + 4096 + 2048
+          lines = ["# Mapfile. Created by GNU ddrescue version 1.27",
+                   "# current_pos  current_status  current_pass",
+                   f"{SIZE:#x}  +  1",
+                   "#      pos        size  status",
+                   f"0x0  {LABEL:#x}  +",
+                   f"{LABEL:#x}  {LABEL:#x}  -",
+                   f"{2*LABEL:#x}  {bad-2*LABEL:#x}  +",
+                   f"{bad:#x}  0x400  -",
+                   f"{bad+0x400:#x}  {SIZE-bad-0x400:#x}  +"]
+          open("/tmp/fx/member0.map", "w").write("\n".join(lines) + "\n")
+          EOF
+          ./target/release/zvolrescue scan /tmp/fx/member0.img --map /tmp/fx/member0.img=/tmp/fx/member0.map
+          ./target/release/zvolrescue -f json scan /tmp/fx/member0.img --map /tmp/fx/member0.img=/tmp/fx/member0.map | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"][0]; assert d["map"]["unreadable_bytes"] == 0x40400, d["map"]; assert d["map"]["labels_touched"] == [1], d["map"]; assert d["labels"][1]["config_checksum"] == "missing", d["labels"][1]'
+          if ./target/release/zvolrescue -f json dump tank/vm/disk0 /tmp/fx/member0.img --map /tmp/fx/member0.img=/tmp/fx/member0.map --retries 3 --txg 4816229 -o /tmp/fx/mapped.img --evidence-log /tmp/fx/map-ev.jsonl > /tmp/fx/mapped.json; then echo "must exit 4"; exit 1; else test $? = 4; fi
+          python3 -c '
+          import json
+          v = json.load(open("/tmp/fx/mapped.json"))["volumes"][0]
+          assert v["blocks_salvaged"] == 1 and v["blocks_zeroed"] == 0, v
+          assert (v["bad"][0]["offset"], v["bad"][0]["len"]) == (2048, 1024), v["bad"]
+          assert "imager could not read (ddrescue map)" in v["bad"][0]["reason"], v["bad"]
+          want = bytearray(open("/tmp/disk0.img", "rb").read()); want[2048:3072] = b"\0" * 1024
+          assert open("/tmp/fx/mapped.img", "rb").read() == bytes(want)
+          ev = json.loads(open("/tmp/fx/map-ev.jsonl").readlines()[-1])
+          assert any(i["path"].endswith("member0.map") for i in ev["inputs"]), ev["inputs"]'
+          ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/fx/member0.img /tmp/fx/member1.img --map /tmp/fx/member0.img=/tmp/fx/member0.map --txg 4816229 -o /tmp/fx/map-healed.img
+          cmp /tmp/disk0.img /tmp/fx/map-healed.img
+
   crosscheck:
     name: Cross-check against OpenZFS userland (ztest + zdb)
     runs-on: ubuntu-latest

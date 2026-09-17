@@ -665,5 +665,5 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             written.push(f);
         }
     }
-    g.log_evidence("zvolrescue", &json, code, &members.paths, written)
+    g.log_evidence("zvolrescue", &json, code, &members.inputs(), written)
 }

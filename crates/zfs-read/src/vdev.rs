@@ -198,7 +198,10 @@ pub fn scan_device_range(dev: &dyn BlockSource, base: u64, psize: u64) -> io::Re
     let mut vdev_ashift = None;
     let mut probe = vec![0u8; VDEV_PHYS_SIZE as usize];
     for &offset in offsets.iter() {
-        dev.read_at(base + offset + VDEV_PHYS_OFFSET, &mut probe)?;
+        // Around what the device — or the imager's map (SPEC F-72) —
+        // refuses: a label with a sector gone parses as far as it goes
+        // and verifies or not on its own; a scan does not stop for it.
+        dev.read_at_salvaging(base + offset + VDEV_PHYS_OFFSET, &mut probe)?;
         if let Ok(c) = parse_vdev_phys(&probe, offset).config {
             if let Some(a) = c.list("vdev_tree").and_then(|t| t.u64("ashift")) {
                 vdev_ashift = Some(a);
@@ -209,7 +212,7 @@ pub fn scan_device_range(dev: &dyn BlockSource, base: u64, psize: u64) -> io::Re
     let mut label = vec![0u8; LABEL_SIZE as usize];
     let mut labels = Vec::with_capacity(LABELS_PER_VDEV);
     for (index, &offset) in offsets.iter().enumerate() {
-        dev.read_at(base + offset, &mut label)?;
+        dev.read_at_salvaging(base + offset, &mut label)?;
         let phys_start = VDEV_PHYS_OFFSET as usize;
         let phys = parse_vdev_phys(
             &label[phys_start..phys_start + VDEV_PHYS_SIZE as usize],

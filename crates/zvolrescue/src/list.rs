@@ -391,7 +391,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         code
     };
     // `list` writes nothing but its report on stdout.
-    g.log_evidence("zvolrescue", &json, code, &members.paths, Vec::new())
+    g.log_evidence("zvolrescue", &json, code, &members.inputs(), Vec::new())
 }
 
 #[cfg(test)]

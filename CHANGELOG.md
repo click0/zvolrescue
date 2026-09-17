@@ -16,6 +16,26 @@ tagged. `v0.7.1` is the release that carries those six.
 ## Unreleased
 
 ### Added
+* **The imager's map (SPEC F-72), and retries per sector (F-33).** An
+  image of a failing disk is made with GNU `ddrescue`, and the mapfile
+  beside it is the only record of which bytes the disk actually gave.
+  Where it could not read, the image holds zeros that look like data,
+  and a block crossing them failed its checksum with nothing to say
+  why. `--map MEMBER=MAPFILE` reads the map — its own format, comments
+  and status line and hex positions — and every unfinished range is
+  refused before it is read, the way a disk refuses a bad sector, so
+  the block takes the F-33 path: kept as far as the imager read it,
+  zeros for the rest, and the reason names the imager. `scan` reports
+  the map per device: bytes never read, by status, and which of the
+  four labels the unread ranges touch. The mapfile is hashed into the
+  evidence record as an input. And `--retries N` (default 1) reads a
+  refused sector that many more times before giving it up, for the
+  marginal sector on a live disk that gives on the third try — an
+  image file pays nothing for it. Prompted by a Habr write-up of a
+  NAND recovery that read every failing page up to 128 times: the
+  lesson for a tool that starts from images is that the image's own
+  record of what was never read has to be honoured.
+
 * **A member with no anchor at all is found at the base its siblings
   bound (SPEC F-62, the other half).** F-62 could bind a label-less
   member to a leaf by reading through it, but only at a base something

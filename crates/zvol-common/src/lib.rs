@@ -11,9 +11,10 @@ pub mod hints;
 pub mod members;
 pub mod timefmt;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Args, ValueEnum};
+use zvolrescue_io::{ddrescue, FileSource};
 
 /// Exit codes from SPEC §7.
 pub mod exit {
@@ -333,9 +334,70 @@ pub struct PoolSpec {
     /// checksums of other blocks, and they agree.
     #[arg(long)]
     pub ignore_unknown_features: bool,
+    /// The GNU ddrescue mapfile an image was made with, as
+    /// `MEMBER=MAPFILE` (SPEC F-72). Repeatable. Sectors the imager
+    /// could not read are refused before they are read, so a block that
+    /// crosses them is kept as far as the imager did read it and the
+    /// rest is zeros with the reason — not a checksum failure with none.
+    #[arg(long, value_name = "MEMBER=MAPFILE")]
+    pub map: Vec<String>,
+    /// Read a sector the device refuses this many more times before it
+    /// is given up as zeros (SPEC F-33). Costs nothing on an image file.
+    #[arg(long, value_name = "N", default_value_t = 1)]
+    pub retries: u32,
+}
+
+/// How members are opened: what to retry and what an imager's map says
+/// of them (SPEC F-33, F-72).
+#[derive(Debug, Clone, Default)]
+pub struct OpenOpts {
+    /// Retries per refused sector.
+    pub retries: u32,
+    /// `(member, mapfile)` pairs.
+    pub maps: Vec<(PathBuf, PathBuf)>,
+}
+
+impl OpenOpts {
+    /// Parse `MEMBER=MAPFILE` specs.
+    pub fn parse(retries: u32, maps: &[String]) -> Result<OpenOpts, String> {
+        let maps = maps
+            .iter()
+            .map(|spec| match spec.split_once('=') {
+                Some((m, f)) if !m.is_empty() && !f.is_empty() => {
+                    Ok((PathBuf::from(m), PathBuf::from(f)))
+                }
+                _ => Err(format!("--map {spec}: want MEMBER=MAPFILE")),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(OpenOpts { retries, maps })
+    }
+
+    /// The mapfiles, for the evidence record: they are inputs too.
+    pub fn map_files(&self) -> Vec<PathBuf> {
+        self.maps.iter().map(|(_, f)| f.clone()).collect()
+    }
+
+    /// Open `path` read-only with the retries and, when one was named
+    /// for it, its imager's map.
+    pub fn open(&self, path: &Path) -> std::io::Result<FileSource> {
+        let mut src = FileSource::open(path)?.with_retries(self.retries);
+        if let Some((_, file)) = self.maps.iter().find(|(m, _)| m == path) {
+            let text = std::fs::read_to_string(file)
+                .map_err(|e| std::io::Error::other(format!("--map {}: {e}", file.display())))?;
+            let map = ddrescue::Map::parse(&text)
+                .map_err(|e| std::io::Error::other(format!("--map {}: {e}", file.display())))?;
+            src = src.with_map(map);
+        }
+        Ok(src)
+    }
 }
 
 impl PoolSpec {
+    /// How the members are to be opened.
+    pub fn open_opts(&self) -> Result<OpenOpts, String> {
+        OpenOpts::parse(self.retries, &self.map)
+    }
+
     /// All members in command-line order, or a usage error when none were given.
     pub fn members(&self) -> Result<Vec<PathBuf>, String> {
         let all: Vec<PathBuf> = self.devices.iter().chain(&self.image).cloned().collect();

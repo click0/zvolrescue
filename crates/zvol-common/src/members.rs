@@ -32,9 +32,19 @@ pub struct Members {
     pub paths: Vec<PathBuf>,
     /// Where each member's vdev begins, indexed like the scans.
     pub base_offsets: Vec<u64>,
+    /// Files read besides the members: the imagers' maps (SPEC F-72).
+    pub map_files: Vec<PathBuf>,
 }
 
 impl Members {
+    /// Everything read from disk for the evidence record: the members,
+    /// and any imager's map read alongside one (SPEC F-72).
+    pub fn inputs(&self) -> Vec<PathBuf> {
+        let mut v = self.paths.clone();
+        v.extend(self.map_files.iter().cloned());
+        v
+    }
+
     /// Sources as trait objects, indexed like the scans.
     pub fn devices(&self) -> Vec<Option<&dyn BlockSource>> {
         self.sources
@@ -358,10 +368,33 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
             paths.len()
         );
     }
+    let open = spec.open_opts().map_err(|e| {
+        eprintln!("zvolrescue: {e}");
+        exit::USAGE
+    })?;
+    for (member, file) in &open.maps {
+        if !paths.contains(member) {
+            eprintln!(
+                "zvolrescue: --map {}={}: {} is not among the members given",
+                member.display(),
+                file.display(),
+                member.display()
+            );
+            return Err(exit::USAGE);
+        }
+    }
     let mut sources = Vec::with_capacity(paths.len());
     let mut scans = Vec::with_capacity(paths.len());
     for p in &paths {
-        let opened = FileSource::open(p).and_then(|src| {
+        let opened = open.open(p).and_then(|src| {
+            if let Some(m) = src.map() {
+                eprintln!(
+                    "zvolrescue: {}: the imager's map says {} byte(s) in {} range(s) were never read; they are refused, not trusted (SPEC F-72)",
+                    p.display(),
+                    m.unreadable_bytes(),
+                    m.unreadable().len()
+                );
+            }
             let scan = scan_with_recovered_base(&src)?;
             if scan.base != 0 {
                 eprintln!(
@@ -450,6 +483,7 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
         pools,
         paths,
         base_offsets: bases,
+        map_files: open.map_files(),
     })
 }
 

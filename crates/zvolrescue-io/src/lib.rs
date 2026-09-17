@@ -60,6 +60,19 @@ pub fn salvage(
     offset: u64,
     buf: &mut [u8],
 ) -> io::Result<Vec<(u64, u64)>> {
+    salvage_retrying(read, offset, buf, 0)
+}
+
+/// [`salvage`], with each refused sector read again up to `retries`
+/// more times before it is given up (SPEC F-33). A marginal sector on a
+/// live disk reads on the third try and not on the first; an image
+/// file never does, and pays nothing for the allowance.
+pub fn salvage_retrying(
+    read: &mut dyn FnMut(u64, &mut [u8]) -> io::Result<()>,
+    offset: u64,
+    buf: &mut [u8],
+    retries: u32,
+) -> io::Result<Vec<(u64, u64)>> {
     match read(offset, buf) {
         Ok(()) => return Ok(Vec::new()),
         Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Err(e),
@@ -86,13 +99,20 @@ pub fn salvage(
                 while s < piece_end {
                     let sector_end = next_edge(s, SALVAGE_SECTOR).min(piece_end);
                     let sector = &mut buf[s as usize..sector_end as usize];
-                    match read(offset + s, sector) {
-                        Ok(()) => {}
-                        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Err(e),
-                        Err(_) => {
-                            sector.fill(0);
-                            note(s, sector_end - s);
+                    let mut refused = false;
+                    for _ in 0..=retries {
+                        match read(offset + s, sector) {
+                            Ok(()) => {
+                                refused = false;
+                                break;
+                            }
+                            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Err(e),
+                            Err(_) => refused = true,
                         }
+                    }
+                    if refused {
+                        sector.fill(0);
+                        note(s, sector_end - s);
                     }
                     s = sector_end;
                 }
@@ -103,12 +123,143 @@ pub fn salvage(
     Ok(bad)
 }
 
+/// A GNU ddrescue mapfile (SPEC F-72): what an imager could and could
+/// not read of the disk this image came from.
+///
+/// An image of a failing disk is almost always made with `ddrescue`,
+/// and the mapfile beside it is the only record of which bytes the
+/// disk actually gave. Where it could not read, `ddrescue` leaves
+/// zeros — or, with `--fill`, whatever was asked for — and an image
+/// read without its map presents those bytes as data. A block that
+/// crosses them then fails its checksum for no reason a reader can
+/// name, when the truth is that the disk never produced them. With the
+/// map, those sectors are refused *before* the read, the way a disk
+/// refuses a bad sector, and the block takes the F-33 path: what the
+/// imager did read is kept, the rest is zeros with the reason.
+///
+/// The format is `ddrescue`'s own (`info ddrescue`, "Mapfile
+/// structure"): comment lines, one status line `current_pos
+/// current_status [current_pass]`, then one line per block `pos size
+/// status`, positions and sizes in hex. Status `+` is finished; `?`
+/// non-tried, `*` non-trimmed, `/` non-scraped and `-` bad-sector are
+/// all "the disk did not give these bytes", and are treated alike.
+pub mod ddrescue {
+    use std::collections::BTreeMap;
+
+    /// The map, reduced to what a reader needs.
+    #[derive(Debug, Clone, PartialEq, Eq, Default)]
+    pub struct Map {
+        /// Ranges the imager did not finish, merged and in order.
+        unreadable: Vec<(u64, u64)>,
+        /// Bytes per block status character, as the map has them.
+        pub by_status: BTreeMap<char, u64>,
+        /// One past the last byte the map describes.
+        pub extent: u64,
+    }
+
+    impl Map {
+        /// Parse the text of a mapfile.
+        pub fn parse(text: &str) -> Result<Map, String> {
+            let mut map = Map::default();
+            let mut seen_status_line = false;
+            let mut last_end = 0u64;
+            for (n, raw) in text.lines().enumerate() {
+                let line = raw.split('#').next().unwrap_or("").trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let fields: Vec<&str> = line.split_whitespace().collect();
+                if !seen_status_line {
+                    // `current_pos current_status [current_pass]`
+                    if fields.len() < 2 || fields.len() > 3 {
+                        return Err(format!("line {}: not a status line: {raw:?}", n + 1));
+                    }
+                    seen_status_line = true;
+                    continue;
+                }
+                if fields.len() != 3 {
+                    return Err(format!("line {}: want `pos size status`: {raw:?}", n + 1));
+                }
+                let pos = hex(fields[0])
+                    .ok_or_else(|| format!("line {}: bad position {:?}", n + 1, fields[0]))?;
+                let size = hex(fields[1])
+                    .ok_or_else(|| format!("line {}: bad size {:?}", n + 1, fields[1]))?;
+                let status = fields[2]
+                    .chars()
+                    .next()
+                    .ok_or_else(|| format!("line {}: no status", n + 1))?;
+                if !matches!(status, '+' | '?' | '*' | '/' | '-') {
+                    return Err(format!("line {}: unknown status {status:?}", n + 1));
+                }
+                if pos < last_end {
+                    return Err(format!("line {}: blocks out of order at {pos:#x}", n + 1));
+                }
+                *map.by_status.entry(status).or_insert(0) += size;
+                if status != '+' && size > 0 {
+                    match map.unreadable.last_mut() {
+                        Some((s, l)) if *s + *l == pos => *l += size,
+                        _ => map.unreadable.push((pos, size)),
+                    }
+                }
+                last_end = pos + size;
+                map.extent = last_end;
+            }
+            if !seen_status_line {
+                return Err("empty mapfile".into());
+            }
+            Ok(map)
+        }
+
+        /// Ranges the imager did not finish, merged and in order.
+        pub fn unreadable(&self) -> &[(u64, u64)] {
+            &self.unreadable
+        }
+
+        /// Bytes the imager did not finish, in total.
+        pub fn unreadable_bytes(&self) -> u64 {
+            self.unreadable.iter().map(|&(_, l)| l).sum()
+        }
+
+        /// Whether any byte of `[offset, offset + len)` is unfinished.
+        pub fn touches(&self, offset: u64, len: u64) -> bool {
+            let end = offset.saturating_add(len);
+            self.unreadable
+                .iter()
+                .any(|&(s, l)| s < end && offset < s + l)
+        }
+
+        /// The unfinished parts of `[offset, offset + len)`, clipped to
+        /// it and relative to `offset`.
+        pub fn within(&self, offset: u64, len: u64) -> Vec<(u64, u64)> {
+            let end = offset.saturating_add(len);
+            self.unreadable
+                .iter()
+                .filter(|&&(s, l)| s < end && offset < s + l)
+                .map(|&(s, l)| {
+                    let a = s.max(offset);
+                    let b = (s + l).min(end);
+                    (a - offset, b - a)
+                })
+                .collect()
+        }
+    }
+
+    fn hex(s: &str) -> Option<u64> {
+        let t = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))?;
+        u64::from_str_radix(t, 16).ok()
+    }
+}
+
 /// A device or image file opened read-only.
 #[derive(Debug)]
 pub struct FileSource {
     path: PathBuf,
     file: File,
     size: u64,
+    /// Refused sectors are read again this many more times (SPEC F-33).
+    retries: u32,
+    /// What the imager could not read of this image (SPEC F-72).
+    map: Option<ddrescue::Map>,
 }
 
 impl FileSource {
@@ -123,12 +274,44 @@ impl FileSource {
         if size == 0 {
             size = (&file).seek(SeekFrom::End(0))?;
         }
-        Ok(FileSource { path, file, size })
+        Ok(FileSource {
+            path,
+            file,
+            size,
+            retries: 0,
+            map: None,
+        })
     }
 
     /// The path this source was opened from.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Read a refused sector again up to `n` more times before giving
+    /// it up (SPEC F-33).
+    pub fn with_retries(mut self, n: u32) -> Self {
+        self.retries = n;
+        self
+    }
+
+    /// Refuse, before reading, every sector the imager's map says the
+    /// disk did not give (SPEC F-72).
+    pub fn with_map(mut self, map: ddrescue::Map) -> Self {
+        self.map = Some(map);
+        self
+    }
+
+    /// The imager's map, when one was given.
+    pub fn map(&self) -> Option<&ddrescue::Map> {
+        self.map.as_ref()
+    }
+
+    /// The error a read that touches what the imager could not read
+    /// fails with: an I/O error, as the disk's own would be, that says
+    /// whose refusal it is.
+    fn imager_refused() -> io::Error {
+        io::Error::other("sector(s) the imager could not read (ddrescue map)")
     }
 }
 
@@ -138,11 +321,26 @@ impl BlockSource for FileSource {
     }
 
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        if let Some(m) = &self.map {
+            if m.touches(offset, buf.len() as u64) {
+                return Err(Self::imager_refused());
+            }
+        }
         self.file.read_exact_at(buf, offset)
     }
 
     fn read_at_salvaging(&self, offset: u64, buf: &mut [u8]) -> io::Result<Vec<(u64, u64)>> {
-        salvage(&mut |o, b| self.file.read_exact_at(b, o), offset, buf)
+        // The imager's map first: what it could not read is not read
+        // again here, it is zeroed and named. Then the disk's own
+        // refusals, for what the map does not cover.
+        let map = self.map.as_ref();
+        let mut read = |o: u64, b: &mut [u8]| {
+            if map.is_some_and(|m| m.touches(o, b.len() as u64)) {
+                return Err(Self::imager_refused());
+            }
+            self.file.read_exact_at(b, o)
+        };
+        salvage_retrying(&mut read, offset, buf, self.retries)
     }
 }
 
@@ -299,6 +497,101 @@ mod tests {
         assert_eq!(reads[2], (4096, 4096));
         assert!(reads[3..].iter().all(|&(_, n)| n == 512));
         assert_eq!(buf.iter().filter(|&&b| b == 0).count(), 512);
+    }
+
+    /// A sector that gives on the third try is read with two retries
+    /// and lost with one.
+    #[test]
+    fn a_retry_allowance_is_spent_per_sector() {
+        let attempt = |retries: u32| {
+            let mut failures_left = 2;
+            let mut buf = vec![0u8; 4096];
+            salvage_retrying(
+                &mut |o, b| {
+                    if o < 1024 && o + b.len() as u64 > 512 && failures_left > 0 {
+                        // Anything touching sector 512..1024 fails twice.
+                        if b.len() == 512 {
+                            failures_left -= 1;
+                        }
+                        return Err(io::Error::from_raw_os_error(5));
+                    }
+                    b.fill(7);
+                    Ok(())
+                },
+                0,
+                &mut buf,
+                retries,
+            )
+            .unwrap()
+        };
+        assert_eq!(attempt(1), vec![(512, 512)]);
+        assert_eq!(attempt(2), Vec::<(u64, u64)>::new());
+    }
+
+    /// The map `ddrescue` writes, in its own format: the unfinished
+    /// blocks come out merged, the finished ones do not count, and the
+    /// status line and comments are skipped.
+    #[test]
+    fn a_ddrescue_mapfile_says_what_the_disk_did_not_give() {
+        let text = "\
+# Mapfile. Created by GNU ddrescue version 1.27
+# Command line: ddrescue -d -r3 /dev/sdb sdb.img sdb.map
+# Start time:   2026-09-16 10:00:00
+# Current time: 2026-09-16 11:30:00
+# Finished
+# current_pos  current_status  current_pass
+0x00100000     +               3
+#      pos        size  status
+0x00000000  0x00100000  +
+0x00100000  0x00000200  -
+0x00100200  0x00000200  -
+0x00100400  0x0000FC00  +
+0x00110000  0x00001000  /
+0x00111000  0x00001000  *
+0x00112000  0x00001000  ?
+0x00113000  0x000ED000  +
+";
+        let m = ddrescue::Map::parse(text).expect("a map");
+        assert_eq!(m.unreadable(), &[(0x100000, 0x400), (0x110000, 0x3000)]);
+        assert_eq!(m.unreadable_bytes(), 0x3400);
+        assert_eq!(m.extent, 0x200000);
+        assert_eq!(m.by_status[&'+'], 0x1FCC00);
+        assert_eq!(m.by_status[&'-'], 0x400);
+        assert!(m.touches(0x100300, 16));
+        assert!(!m.touches(0x100400, 0x1000));
+        assert_eq!(m.within(0x0FFE00, 0x400), vec![(0x200, 0x200)]);
+        assert_eq!(m.within(0x10F000, 0x5000), vec![(0x1000, 0x3000)]);
+        assert!(ddrescue::Map::parse("# only comments\n").is_err());
+        assert!(ddrescue::Map::parse("0x0 + 1\n0x0 0x100 x\n").is_err());
+        assert!(ddrescue::Map::parse("0x0 + 1\n0x100 0x100 +\n0x0 0x100 +\n").is_err());
+    }
+
+    /// With a map, the sectors the imager could not read are refused
+    /// without touching the file, and a salvaging read zeroes exactly
+    /// them.
+    #[test]
+    fn a_mapped_image_refuses_what_the_imager_could_not_read() {
+        let dir = std::env::temp_dir().join(format!("zvolrescue-io-map-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("img");
+        let data: Vec<u8> = (0..16384u32).map(|i| (i % 251) as u8 + 1).collect();
+        std::fs::write(&p, &data).unwrap();
+        let map = ddrescue::Map::parse("0x0 + 1\n0x0 0x1000 +\n0x1000 0x200 -\n0x1200 0x2e00 +\n")
+            .unwrap();
+        let f = FileSource::open(&p).unwrap().with_map(map);
+        let mut buf = vec![0u8; 8192];
+        let err = f.read_at(0, &mut buf).unwrap_err();
+        assert!(err.to_string().contains("imager could not read"), "{err}");
+        let bad = f.read_at_salvaging(0, &mut buf).unwrap();
+        assert_eq!(bad, vec![(0x1000, 0x200)]);
+        assert_eq!(&buf[..0x1000], &data[..0x1000]);
+        assert!(buf[0x1000..0x1200].iter().all(|&b| b == 0));
+        assert_eq!(&buf[0x1200..], &data[0x1200..8192]);
+        // Outside the map's holes the file reads as itself.
+        let mut tail = vec![0u8; 4096];
+        f.read_at(8192, &mut tail).unwrap();
+        assert_eq!(tail, data[8192..12288]);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

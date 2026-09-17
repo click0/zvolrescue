@@ -66,6 +66,15 @@ enum Cmd {
         /// sealed for.
         #[arg(long, value_name = "N", requires = "emit_label")]
         emit_label_index: Option<usize>,
+        /// The GNU ddrescue mapfile an image was made with, as
+        /// `MEMBER=MAPFILE` (SPEC F-72). Repeatable. What the imager
+        /// could not read is reported, and refused when read.
+        #[arg(long, value_name = "MEMBER=MAPFILE")]
+        map: Vec<String>,
+        /// Read a sector the device refuses this many more times (SPEC
+        /// F-33).
+        #[arg(long, value_name = "N", default_value_t = 1)]
+        retries: u32,
     },
     /// List datasets, zvols and snapshots at a TXG.
     List {
@@ -159,21 +168,30 @@ fn main() -> ExitCode {
             emit_label,
             emit_for,
             emit_label_index,
-        } => scan::run(
-            &cli.global,
-            &devices,
-            &scan::ZeroPointOpts {
-                always: zero_point || zero_point_whole || !psize.is_empty(),
-                whole: zero_point_whole,
-                psize_hints: psize,
-            },
-            &scan::EmitOpts {
-                hints,
-                emit_label,
-                emit_for,
-                emit_label_index,
-            },
-        ),
+            map,
+            retries,
+        } => match zvol_common::OpenOpts::parse(retries, &map) {
+            Err(e) => {
+                eprintln!("zvolrescue: {e}");
+                exit::USAGE
+            }
+            Ok(open) => scan::run(
+                &cli.global,
+                &devices,
+                &open,
+                &scan::ZeroPointOpts {
+                    always: zero_point || zero_point_whole || !psize.is_empty(),
+                    whole: zero_point_whole,
+                    psize_hints: psize,
+                },
+                &scan::EmitOpts {
+                    hints,
+                    emit_label,
+                    emit_for,
+                    emit_label_index,
+                },
+            ),
+        },
         Cmd::List {
             pool,
             txg,
