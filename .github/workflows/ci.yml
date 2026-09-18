@@ -1195,6 +1195,9 @@ jobs:
           bad=12296
           printf '0 %s linear %s 0\n%s 8 error\n%s %s linear %s %s\n' "$bad" "$loop" "$bad" "$((bad+8))" "$((size-bad-8))" "$loop" "$((bad+8))" | sudo dmsetup create zr-bad
           dev=/dev/mapper/zr-bad
+          # strace -y prints the path the fd resolves to, which for a
+          # device-mapper node is /dev/dm-N, not the /dev/mapper name.
+          real=$(readlink -f "$dev")
           set +e
           sudo ./target/release/zvolrescue -q dump tank/vm/disk0 "$dev" /tmp/dm/member1.img --txg 4816229 -o /tmp/dm/stop.img --evidence-log /tmp/dm/ev.jsonl 2>/tmp/dm/stop.err; code=$?
           set -e
@@ -1219,13 +1222,14 @@ jobs:
           cat /tmp/dm/heal.err
           cmp /tmp/dm/healed.img /tmp/dm/ref.img
           grep -q "skipped (--device-may-fail)" /tmp/dm/heal.err
-          sudo python3 - <<'EOF'
-          import json, re
+          sudo REAL="$real" python3 - <<'EOF'
+          import json, os, re
           r = json.loads(open("/tmp/dm/ev.jsonl").readlines()[-1])
           assert r["status"] == 0 and len(r["incidents"]) == 1 and not r["incidents"][0]["stopped"], r
           reads = []
+          pat = re.compile(r'pread64\(\d+<(?:/dev/mapper/zr-bad|' + re.escape(os.environ["REAL"]) + r')>, .*, (\d+), (\d+)\) = ')
           for line in open("/tmp/dm/trace.txt"):
-              m = re.search(r'pread64\(\d+</dev/mapper/zr-bad>, .*, (\d+), (\d+)\) = ', line)
+              m = pat.search(line)
               if m:
                   reads.append((int(m.group(2)), int(m.group(1))))
           assert reads, "no read of the device seen"
@@ -1237,7 +1241,7 @@ jobs:
           EOF
           # A scan reads the four labels and nothing else; carving refuses the device before opening it.
           sudo strace -f -y -e trace=pread64 -o /tmp/dm/scan.txt ./target/release/zvolrescue -q scan "$dev" | grep -q 'pool "tank"'
-          test "$(grep -c '</dev/mapper/zr-bad>' /tmp/dm/scan.txt)" = 4
+          test "$(grep -c -e "<$real>" -e '</dev/mapper/zr-bad>' /tmp/dm/scan.txt)" = 4
           set +e; sudo ./target/release/zvolcarve scan "$dev" -o /tmp/dm/carve 2>/tmp/dm/carve.err; code=$?; set -e
           test "$code" = 5 && grep -q "a block device is not scanned (SPEC N-10)" /tmp/dm/carve.err
           # With leave, the carve runs — and stops at the error target with exit 7, the incident on record.
