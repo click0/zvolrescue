@@ -34,7 +34,7 @@ const COMPRESS_CODE_BITS: u32 = 7;
 /// one is dropped. It is the only bit ever seen above the checksum code
 /// in a measured `dedup` value (`264` = sha256 and `268` = skein, both
 /// alongside bare `12` and `14`).
-const DEDUP_VERIFY: u64 = 0x100;
+pub const DEDUP_VERIFY: u64 = 0x100;
 
 /// A property value's meaning, where this build can give one.
 ///

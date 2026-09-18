@@ -44,6 +44,21 @@ fn plain_members() -> Vec<Vec<u8>> {
     members
 }
 
+/// [`plain_members`] with the volume deduplicated (SPEC F-28): the
+/// dedup bit on its data pointers, sha256 checksums, `dedup=sha256,verify`
+/// among its properties. The bytes are the same.
+fn dedup_members() -> Vec<Vec<u8>> {
+    let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1)]);
+    let mut members = vec![vec![0u8; SIZE as usize], vec![0u8; SIZE as usize]];
+    let mut a = Alloc::new(0x20_0000);
+    a.dedup = true;
+    build_sample_mos(&mut pool, &mut members, &mut a);
+    for (i, m) in members.iter_mut().enumerate() {
+        pool.write_labels(i, m);
+    }
+    members
+}
+
 fn write_members(dir: &Path, members: &[Vec<u8>]) -> Vec<String> {
     members
         .iter()
@@ -152,6 +167,63 @@ fn list_reports_properties_only_when_asked() {
     for d in json(&out)["datasets"].as_array().expect("datasets") {
         assert!(d.get("properties").is_none(), "{d}");
     }
+}
+
+#[test]
+fn a_deduplicated_volume_reads_like_any_other() {
+    // SPEC F-28: a dedup block pointer is a block pointer. The DDT is
+    // not consulted — there is none here to consult — and the bytes
+    // come out the same as from the volume that was never deduplicated.
+    let dir = scratch("dedup");
+    let plain = write_members(&scratch("dedup-plain"), &plain_members());
+    let dedup = write_members(&dir, &dedup_members());
+    assert_ne!(
+        std::fs::read(&plain[0]).unwrap(),
+        std::fs::read(&dedup[0]).unwrap(),
+        "the deduplicated pool is a different pool"
+    );
+
+    let (code, out, _) = run(&["-q", "-f", "json", "list", "-r", "-p", &dedup[0], &dedup[1]]);
+    assert_eq!(code, 0);
+    let disk0 = json(&out)["datasets"]
+        .as_array()
+        .expect("datasets")
+        .iter()
+        .find(|d| d["name"] == "tank/vm/disk0")
+        .expect("tank/vm/disk0")
+        .clone();
+    assert!(
+        disk0["properties"]
+            .as_array()
+            .expect("properties")
+            .contains(
+                &serde_json::json!({"name": "dedup", "value": 264, "means": "sha256,verify"})
+            ),
+        "{disk0}"
+    );
+
+    let mut images = Vec::new();
+    for (name, members) in [("plain", &plain), ("dedup", &dedup)] {
+        let img = dir.join(format!("{name}.img"));
+        let (code, out, err) = run(&[
+            "-q",
+            "-f",
+            "json",
+            "dump",
+            "tank/vm/disk0",
+            &members[0],
+            &members[1],
+            "-o",
+            &img.to_string_lossy(),
+        ]);
+        assert_eq!(code, 0, "{err}");
+        let v = &json(&out)["volumes"][0];
+        assert_eq!(v["aborted"], false, "{v}");
+        assert_eq!(v["blocks_read"], 2, "{v}");
+        images.push((std::fs::read(&img).expect("image"), v["sha256"].clone()));
+    }
+    assert_eq!(images[0].0, images[1].0, "the bytes differ");
+    assert_eq!(images[0].1, images[1].1);
 }
 
 #[test]

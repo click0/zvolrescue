@@ -637,6 +637,60 @@ mod tests {
         assert_eq!((r.bad[0].offset, r.bad[0].len), (0, 8192));
     }
 
+    /// A deduplicated volume (SPEC F-28): its pointers carry the dedup
+    /// bit and a dedup-capable checksum, and they are read as the
+    /// pointers they are — no table is consulted, and the image is the
+    /// one the plain volume gives.
+    #[test]
+    fn a_deduplicated_volume_is_read_through_its_pointers() {
+        let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1)]);
+        let mut members = vec![vec![0u8; SIZE as usize]];
+        let mut a = Alloc::new(0x20_0000);
+        a.dedup = true;
+        build_sample_mos(&mut pool, &mut members, &mut a);
+        pool.write_labels(0, &mut members[0]);
+        let sources: Vec<MemSource> = members.into_iter().map(MemSource::new).collect();
+        let scans: Vec<_> = sources.iter().map(|s| scan_device(s).ok()).collect();
+        let ub = scans[0].as_ref().unwrap().labels[0]
+            .best()
+            .unwrap()
+            .ub
+            .clone();
+        let assembly = assemble(&scans).into_iter().next().unwrap();
+        let reader = PoolReader::new(&assembly, vec![Some(&sources[0] as &dyn BlockSource)]);
+        let mos = open_mos(&reader, &ub).unwrap();
+        let tree = walk(&mos, "tank").unwrap();
+        let ds = tree.get("tank/vm/disk0").unwrap();
+        let (obj, _) = open_volume(&reader, ds).unwrap();
+        let bps: Vec<_> = obj
+            .dnode()
+            .blkptr
+            .iter()
+            .filter(|bp| !bp.is_hole())
+            .collect();
+        assert_eq!(bps.len(), 2);
+        for bp in &bps {
+            assert!(bp.dedup, "{bp:?}");
+            assert_eq!(bp.checksum, zfs_ondisk::blkptr::Checksum::Sha256);
+            assert!(bp.checksum.dedup_capable());
+        }
+        let mut sink = MemSink::default();
+        let r = extract(
+            &obj,
+            ds.volsize.unwrap(),
+            &mut sink,
+            OnError::Zero,
+            |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(
+            (r.blocks_read, r.blocks_salvaged, r.blocks_zeroed),
+            (2, 0, 0)
+        );
+        assert!(r.bad.is_empty());
+        assert_eq!(sink.data, expected_image());
+    }
+
     /// A mirror heals a bad sector from its other side, and nothing is
     /// salvaged: what could be read whole and verified is.
     #[test]

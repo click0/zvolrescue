@@ -347,6 +347,13 @@ pub struct Alloc {
     /// present under a real indirect tree, of this size, block size and
     /// compression, in place of the two-block sample.
     pub dense: Option<Dense>,
+    /// Build the sample volume deduplicated (SPEC F-28): its data
+    /// pointers carry the dedup bit and a dedup-capable checksum
+    /// (sha256), and its properties ZAP says `dedup=sha256,verify`.
+    /// A reader that resolved anything through the DDT would need a
+    /// table this fixture has none of; one that reads the pointers as
+    /// the pointers they are needs nothing more.
+    pub dedup: bool,
 }
 
 /// A dense volume for measurements (SPEC N-03, N-08): `bytes` of data
@@ -471,6 +478,7 @@ impl Alloc {
             members: None,
             data: None,
             dense: None,
+            dedup: false,
         }
     }
 
@@ -794,6 +802,7 @@ impl Alloc {
             .dva(0, self.vdev, offset, asize, false)
             .sizes(lsize, psize)
             .props(comp, self.checksum.code(), otype, level)
+            .flags(false, self.dedup && otype == ot::ZVOL && level == 0)
             .births(0, txg, 1)
             .cksum(self.cksum(padded))
             .bytes(Endian::Little)
@@ -898,6 +907,10 @@ pub fn build_sample_mos_variant(
     let plain = a.checksum;
     if a.salt.is_some() {
         a.checksum = zfs_ondisk::blkptr::Checksum::Blake3;
+    } else if a.dedup {
+        // Deduplicated blocks carry a dedup-capable checksum, as
+        // `dedup=sha256` makes them (SPEC F-28).
+        a.checksum = zfs_ondisk::blkptr::Checksum::Sha256;
     }
     // On another top-level vdev when the fixture has one for data.
     let (blk0, blk2) = match a.data.as_mut() {
@@ -1071,15 +1084,24 @@ pub fn build_sample_mos_variant(
         // forces a fatzap, which is what a ZAP holding a user property
         // really is: a microzap entry is one 64-bit integer and cannot
         // hold a string at all.
-        let hdr = zfs_ondisk::zap::encode::fat_header(4096, 1, 3);
-        let lf = zfs_ondisk::zap::encode::leaf(
-            4096,
-            &[
-                ("compression", 8, 15u64.to_be_bytes().to_vec()),
-                ("checksum", 8, 12u64.to_be_bytes().to_vec()),
-                ("org.example:ticket", 1, b"RT-4471\0".to_vec()),
-            ],
-        );
+        let mut entries = vec![
+            ("compression", 8, 15u64.to_be_bytes().to_vec()),
+            ("checksum", 8, 12u64.to_be_bytes().to_vec()),
+            ("org.example:ticket", 1, b"RT-4471\0".to_vec()),
+        ];
+        if a.dedup {
+            // `dedup=sha256,verify`: the zio_checksum code with the
+            // verify flag above it (SPEC F-14, F-28).
+            entries.push((
+                "dedup",
+                8,
+                (8u64 | zfs_ondisk::props::DEDUP_VERIFY)
+                    .to_be_bytes()
+                    .to_vec(),
+            ));
+        }
+        let hdr = zfs_ondisk::zap::encode::fat_header(4096, 1, entries.len() as u64);
+        let lf = zfs_ondisk::zap::encode::leaf(4096, &entries);
         let h = a.put(m, &hdr, ot::DSL_PROPS, 0, 100);
         let l = a.put(m, &lf, ot::DSL_PROPS, 0, 100);
         put(
@@ -1252,6 +1274,14 @@ pub fn two_top_mirror_members(
 /// older ones still do — the SPEC UC-1 scenario. Returns the member
 /// images and the TXGs `(destroyed_at, last_with_disk0)`.
 pub fn destroyed_zvol_members(pool: &mut Pool, size: u64) -> (Vec<Vec<u8>>, u64, u64) {
+    destroyed_zvol_members_with(pool, size, false)
+}
+
+fn destroyed_zvol_members_with(
+    pool: &mut Pool,
+    size: u64,
+    dedup: bool,
+) -> (Vec<Vec<u8>>, u64, u64) {
     let txgs: Vec<u64> = pool.uberblocks.iter().map(|(t, _)| *t).collect();
     assert!(txgs.len() >= 2, "need at least two uberblocks");
     let newest = *txgs.last().expect("non-empty");
@@ -1266,6 +1296,7 @@ pub fn destroyed_zvol_members(pool: &mut Pool, size: u64) -> (Vec<Vec<u8>>, u64,
         _ => Layout::Mirror,
     };
     let mut alloc = Alloc::with_layout(0x20_0000, layout);
+    alloc.dedup = dedup;
     let with = build_sample_mos_variant(&mut members, &mut alloc, true);
     let without = build_sample_mos_variant(&mut members, &mut alloc, false);
     pool.rootbp = Some(with);
@@ -1274,6 +1305,13 @@ pub fn destroyed_zvol_members(pool: &mut Pool, size: u64) -> (Vec<Vec<u8>>, u64,
         pool.write_labels(i, img);
     }
     (members, newest, previous)
+}
+
+/// [`destroyed_zvol_members`] with `tank/vm/disk0` deduplicated (SPEC
+/// F-28): the same bytes under pointers that carry the dedup bit and
+/// sha256 checksums, and `dedup=sha256,verify` set on the volume.
+pub fn dedup_zvol_members(pool: &mut Pool, size: u64) -> (Vec<Vec<u8>>, u64, u64) {
+    destroyed_zvol_members_with(pool, size, true)
 }
 
 /// A pool whose `tank/vm/disk0` is dense (SPEC N-03, N-08): `dense.bytes`

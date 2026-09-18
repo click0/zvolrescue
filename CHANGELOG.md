@@ -16,6 +16,14 @@ tagged. `v0.7.1` is the release that carries those six.
 ## Unreleased
 
 ### Added
+* **A deduplicated volume in the fixtures (SPEC F-28).** `mkfixture …
+  dedup` builds the sample pool with `tank/vm/disk0` deduplicated: its
+  data pointers carry the dedup bit and sha256 checksums, and
+  `dedup=sha256,verify` is set among its properties. There is no
+  deduplication table on the pool and none is looked for — a dedup
+  pointer is a pointer — so `list --properties` names the property
+  and `dump` gives the plain volume's image, byte for byte. Both are
+  tests now, in the library and on the command line.
 * **Memory and throughput, measured on every push (SPEC N-03, N-08,
   N-05).** Until now the 512 MiB bound and the throughput target were
   asserted and never measured. `mkfixture bench` and `bench-raidz2`

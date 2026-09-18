@@ -1,13 +1,15 @@
 //! Write fixture member images for smoke tests.
 //!
-//! `cargo run -p zfs-read --example mkfixture -- DIR [mirror|mirror3|raidz2|striped] [ashift] [carved|zpl|removed]`
+//! `cargo run -p zfs-read --example mkfixture -- DIR [mirror|mirror3|raidz2|striped] [ashift] [carved|zpl|removed|dedup]`
 //! writes `DIR/member0.img`, `DIR/member1.img`, … with sealed labels,
 //! three uberblocks each and, for mirrors, a small MOS with four datasets
 //! at the older TXGs and the volume destroyed at the newest one.
 //!
 //! With `removed`, the volume's data blocks are addressed on a top-level
 //! vdev the pool has since had removed, and the MOS carries the mapping
-//! that says where those bytes went (SPEC F-69).
+//! that says where those bytes went (SPEC F-69). With `dedup`, the
+//! volume's data pointers carry the dedup bit and sha256 checksums, and
+//! `dedup=sha256,verify` is set on it (SPEC F-28).
 //!
 //! With `carved` as the fourth argument, no uberblock mentions the volume
 //! at all, though its blocks are still on the member: the pool a carve
@@ -26,8 +28,8 @@
 use std::path::PathBuf;
 
 use zfs_read::fixture::{
-    carved_zvol_members, dense_volume_members, destroyed_zvol_members, removed_vdev_members,
-    two_top_mirror_members, zpl_members, Dense, Pool,
+    carved_zvol_members, dedup_zvol_members, dense_volume_members, destroyed_zvol_members,
+    removed_vdev_members, two_top_mirror_members, zpl_members, Dense, Pool,
 };
 
 fn main() {
@@ -46,6 +48,7 @@ fn main() {
     let carved = mode == "carved";
     let zpl = mode == "zpl";
     let removed = mode == "removed";
+    let dedup = mode == "dedup";
     // `bench` and `bench-raidz2`: a dense volume for measurements (SPEC
     // N-03, N-08). The fourth argument is the size in MiB, the fifth the
     // compression: off (the default), lz4, or gzip.
@@ -134,6 +137,12 @@ fn main() {
     } else if carved {
         println!("tank/vm/disk0 is on the members, and no uberblock leads to it");
         carved_zvol_members(&mut pool, size)
+    } else if dedup {
+        let (members, destroyed_at, last_with) = dedup_zvol_members(&mut pool, size);
+        println!(
+            "tank/vm/disk0 is deduplicated (dedup=sha256,verify), destroyed at txg {destroyed_at}, last present at txg {last_with}"
+        );
+        members
     } else {
         let (members, destroyed_at, last_with) = destroyed_zvol_members(&mut pool, size);
         println!("tank/vm/disk0 destroyed at txg {destroyed_at}, last present at txg {last_with}");
