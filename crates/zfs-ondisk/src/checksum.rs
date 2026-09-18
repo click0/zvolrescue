@@ -456,7 +456,7 @@ mod data_tests {
         // The same bytes seen as big-endian words give a different sum.
         assert_ne!(fletcher4(&d, Endian::Big), [3, 4, 5, 6]);
         // Sums wrap instead of overflowing.
-        let big = vec![0xffu8; 1 << 20];
+        let big = vec![0xffu8; if cfg!(miri) { 1 << 12 } else { 1 << 20 }];
         let _ = fletcher4(&big, Endian::Little);
     }
 

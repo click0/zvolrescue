@@ -402,7 +402,9 @@ mod tests {
         // is volume, not cryptographic quality.
         let mut state = 0x2545_f491_4f6c_dd1du64;
         let mut accepted = 0;
-        for _ in 0..20_000 {
+        // Under Miri a hundredth of the volume: the point there is the
+        // memory model, not the statistics.
+        for _ in 0..(if cfg!(miri) { 200 } else { 20_000 }) {
             let mut buf = [0u8; crate::dmu::DNODE_SIZE];
             for chunk in buf.chunks_mut(8) {
                 state ^= state << 13;

@@ -429,8 +429,11 @@ mod tests {
 
     #[test]
     fn parity_roundtrip_all_loss_patterns() {
-        for nparity in 1..=3usize {
-            for ndata in 1..=4usize {
+        // Under Miri the smaller geometries: every code path of the
+        // reconstruction is reached by two parities and two columns.
+        let (np_max, nd_max) = if cfg!(miri) { (2, 2) } else { (3, 4) };
+        for nparity in 1..=np_max {
+            for ndata in 1..=nd_max {
                 let data = sample_data(ndata, 96);
                 let parity = generate_parity(&data, nparity);
                 // Every subset of up to nparity data columns missing, with

@@ -555,7 +555,10 @@ mod tests {
     fn every_shipped_map_regenerates_with_its_checksum() {
         // The table's checksums are OpenZFS's own oracle for the PRNG and
         // the shuffle: one wrong rotation and none of these match.
-        for &(children, nperms, seed, checksum) in MAPS.iter() {
+        // Under Miri the first two maps: the point there is the memory
+        // model of the generator, which the small maps exercise in full.
+        let maps = if cfg!(miri) { &MAPS[..2] } else { &MAPS[..] };
+        for &(children, nperms, seed, checksum) in maps {
             let perms = generate_perms(children, nperms, seed);
             assert_eq!(
                 fletcher4(&perms, Endian::Little)[0],

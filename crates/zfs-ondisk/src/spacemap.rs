@@ -471,7 +471,9 @@ mod tests {
         let mut r = Ranges::new();
         let mut expected: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
         let mut state = 0x1234_5678_9abc_def0u64;
-        for _ in 0..2000 {
+        // A tenth of the operations under Miri: the set arithmetic is
+        // what is checked there, not the statistics of the mix.
+        for _ in 0..(if cfg!(miri) { 200 } else { 2000 }) {
             state ^= state << 13;
             state ^= state >> 7;
             state ^= state << 17;

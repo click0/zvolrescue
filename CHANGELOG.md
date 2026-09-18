@@ -76,6 +76,21 @@ tagged. `v0.7.1` is the release that carries those six.
   the workflow and the runner that built it — for `gh attestation
   verify`. Nothing changes for `sha256sum -c`.
 
+* **Miri on the on-disk parsers' unit tests, every push (SPEC §9).**
+  The workspace forbids unsafe code, so what the interpreter catches is
+  in the dependencies the parsers lean on and in the standard library's
+  contract as the tests use it: an uninitialised read, an aliasing
+  violation, an out-of-bounds access the native build happened to
+  survive. The 125 tests of `zfs-ondisk` that run there pass, in five
+  and a half minutes on a laptop core. A handful that
+  loop over megabytes of pure arithmetic — noise fed to the carver and
+  the filesystem signatures, the space-map replay, every RAIDZ loss
+  pattern, the dRAID permutation maps, a 1 MiB fletcher — run a tenth of
+  their volume there, and the `vdev_phys` round trip, three SHA-256
+  passes over 112 KiB that took six minutes interpreted, is skipped
+  there; each says so beside its loop, and every one runs in full on
+  the native build.
+
 ## v0.8.5 — 2026-09-17
 
 **What the disk never gave, and what the disk still says.**

@@ -312,6 +312,9 @@ mod phys_tests {
         ])
     }
 
+    // Six minutes under Miri: three SHA-256 passes over 112 KiB, pure
+    // arithmetic the checksum tests already run there on smaller input.
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn vdev_phys_roundtrip_with_checksum() {
         let mut phys = vec![0u8; VDEV_PHYS_SIZE as usize];

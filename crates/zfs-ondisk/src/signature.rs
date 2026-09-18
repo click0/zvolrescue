@@ -481,7 +481,7 @@ mod tests {
     #[test]
     fn noise_is_not_a_filesystem() {
         let mut state = 0x243f_6a88_85a3_08d3u64;
-        for _ in 0..200 {
+        for _ in 0..(if cfg!(miri) { 2 } else { 200 }) {
             let mut b = vec![0u8; 1 << 17];
             for chunk in b.chunks_mut(8) {
                 state ^= state << 13;

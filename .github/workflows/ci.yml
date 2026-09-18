@@ -1211,6 +1211,28 @@ jobs:
           path: fuzz/artifacts
           if-no-files-found: ignore
 
+  miri:
+    name: Miri on the zfs-ondisk unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - name: Every unit test of the on-disk parsers, interpreted (SPEC §9)
+        run: |
+          # The workspace forbids unsafe code, so what Miri catches here
+          # is in the dependencies the parsers lean on and in the
+          # standard library's contract as the tests use it: an
+          # uninitialised read, an aliasing violation, an out-of-bounds
+          # access that the native build happened to survive. A handful
+          # of tests that loop over megabytes of pure arithmetic run a
+          # tenth of their volume under Miri, and one that hashes
+          # 112 KiB three times is skipped there; each says so beside
+          # its loop. The whole crate takes a few minutes.
+          cargo miri setup
+          cargo miri test -p zfs-ondisk --lib
+
   crosscheck:
     name: Cross-check against OpenZFS userland (ztest + zdb)
     runs-on: ubuntu-latest
