@@ -174,7 +174,7 @@ writes.
 
 | ID | Pri | Requirement |
 |---|---|---|
-| C-01 | M | Scan every member (or `--range`) at `ashift` granularity, streaming, bounded memory; progress on stderr. |
+| C-01 | M | Scan every member (or `--range`) at `ashift` granularity, streaming, bounded memory; progress on stderr. A block device is refused (exit 5) without `--surface-scan-on-device`: a surface scan is what a failing disk survives least (SPEC N-10). |
 | C-02 | M | Recognise dnode blocks by structural validation: `dn_type` in the known set, `dn_indblkshift` 9–17, `dn_nlevels` 1–7, `dn_nblkptr` 1–3, known checksum/compression codes, DVAs inside the vdev; every field range from OpenZFS `dnode.h`. |
 | C-03 | M | Recognise indirect blocks: arrays of block pointers whose DVAs lie inside member vdevs and whose birth TXGs are mutually consistent. |
 | C-04 | M | From each `DMU_OT_ZVOL` dnode, walk its tree, verify checksums, and build a candidate: estimated `volsize`, birth-TXG range, share of blocks that verified, share of blocks already overwritten by newer data. |
