@@ -26,8 +26,8 @@
 use std::path::PathBuf;
 
 use zfs_read::fixture::{
-    carved_zvol_members, destroyed_zvol_members, removed_vdev_members, two_top_mirror_members,
-    zpl_members, Pool,
+    carved_zvol_members, dense_volume_members, destroyed_zvol_members, removed_vdev_members,
+    two_top_mirror_members, zpl_members, Dense, Pool,
 };
 
 fn main() {
@@ -46,6 +46,44 @@ fn main() {
     let carved = mode == "carved";
     let zpl = mode == "zpl";
     let removed = mode == "removed";
+    // `bench` and `bench-raidz2`: a dense volume for measurements (SPEC
+    // N-03, N-08). The fourth argument is the size in MiB, the fifth the
+    // compression: off (the default), lz4, or gzip.
+    if kind == "bench" || kind == "bench-raidz2" {
+        let mib: u64 = mode
+            .parse()
+            .expect("bench: size in MiB as the fourth argument");
+        let compression = match feature.as_deref().unwrap_or("off") {
+            "off" => zfs_ondisk::blkptr::Compression::Off,
+            "lz4" => zfs_ondisk::blkptr::Compression::Lz4,
+            "gzip" => zfs_ondisk::blkptr::Compression::Gzip(6),
+            other => panic!("bench: unknown compression {other}"),
+        };
+        let mut pool = if kind == "bench" {
+            Pool::mirror("tank", 0x5eed_0000_0000_0001, ashift)
+        } else {
+            Pool::raidz("tank", 0x5eed_0000_0000_0002, ashift, 4, 2)
+        }
+        .txgs(&[(4816229, 1757100005)]);
+        let dense = Dense {
+            bytes: mib << 20,
+            blocksize: 128 << 10,
+            compression,
+        };
+        let (members, sha256) = dense_volume_members(&mut pool, dense);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        println!(
+            "tank/vm/disk0 is {mib} MiB, dense, 128 KiB blocks, compression {}",
+            compression.name()
+        );
+        println!("sha256 {sha256}");
+        for (i, img) in members.iter().enumerate() {
+            let p = dir.join(format!("member{i}.img"));
+            std::fs::write(&p, img).expect("write");
+            println!("{}", p.display());
+        }
+        return;
+    }
     if kind == "striped" {
         assert!(mode.is_empty(), "striped takes no mode");
         let (_, members) = two_top_mirror_members(

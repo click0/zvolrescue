@@ -6,7 +6,7 @@
 //! writes evidence, so nothing here is reachable from the binaries except
 //! through explicit fixture generation.
 
-use zfs_ondisk::blkptr::{self, encode::Builder, LABEL_START_SIZE};
+use zfs_ondisk::blkptr::{self, encode::Builder, Compression, LABEL_START_SIZE};
 use zfs_ondisk::checksum::seal_label;
 use zfs_ondisk::dmu::encode::{objset, DnodeSpec};
 use zfs_ondisk::dmu::{ot, DNODE_CORE_SIZE, DNODE_SIZE};
@@ -343,6 +343,88 @@ pub struct Alloc {
     /// this allocator's top and the data on that one, so a read has to
     /// go through both.
     pub data: Option<Box<Alloc>>,
+    /// Build the sample volume dense (SPEC N-03, N-08): every block
+    /// present under a real indirect tree, of this size, block size and
+    /// compression, in place of the two-block sample.
+    pub dense: Option<Dense>,
+}
+
+/// A dense volume for measurements (SPEC N-03, N-08): `bytes` of data
+/// in blocks of `blocksize`, every one present, compressed as said.
+#[derive(Debug, Clone)]
+pub struct Dense {
+    /// Volume size; a whole number of blocks.
+    pub bytes: u64,
+    /// `volblocksize`.
+    pub blocksize: usize,
+    /// `off`, `lz4` or `gzip-N`; anything else is not encoded here.
+    pub compression: Compression,
+}
+
+impl Dense {
+    /// Bytes of block `blkid`: incompressible noise for `off`, so the
+    /// measurement reads what it reads; text-like bytes otherwise, so
+    /// the decompressor has work to do.
+    pub fn block(&self, blkid: u64) -> Vec<u8> {
+        let mut out = vec![0u8; self.blocksize];
+        let mut state = 0x9e37_79b9_7f4a_7c15u64 ^ (blkid.wrapping_mul(0x2545_f491_4f6c_dd1d) | 1);
+        if self.compression == Compression::Off {
+            for chunk in out.chunks_mut(8) {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                chunk.copy_from_slice(&state.to_le_bytes()[..chunk.len()]);
+            }
+        } else {
+            let words: [&[u8]; 8] = [
+                b"the quick ",
+                b"brown fox ",
+                b"jumps over ",
+                b"the lazy ",
+                b"dog while ",
+                b"the pool ",
+                b"resilvers ",
+                b"quietly. ",
+            ];
+            let mut at = 0;
+            let mut n = 0u64;
+            while at < out.len() {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let piece = if n % 16 == 0 {
+                    format!("[{blkid}:{n}] ").into_bytes()
+                } else {
+                    words[(state % 8) as usize].to_vec()
+                };
+                let take = piece.len().min(out.len() - at);
+                out[at..at + take].copy_from_slice(&piece[..take]);
+                at += take;
+                n += 1;
+            }
+        }
+        out
+    }
+
+    /// How many blocks the volume has.
+    pub fn blocks(&self) -> u64 {
+        self.bytes.div_ceil(self.blocksize as u64)
+    }
+
+    /// SHA-256 of the whole volume image, for the run that extracts it
+    /// to be checked against.
+    pub fn sha256(&self) -> String {
+        use sha2::Digest;
+        let mut h = sha2::Sha256::new();
+        let mut left = self.bytes;
+        for b in 0..self.blocks() {
+            let block = self.block(b);
+            let take = (left as usize).min(block.len());
+            h.update(&block[..take]);
+            left -= take as u64;
+        }
+        h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    }
 }
 
 /// MOS object holding the properties set on `tank/vm/disk0`.
@@ -388,6 +470,7 @@ impl Alloc {
             vdev: 0,
             members: None,
             data: None,
+            dense: None,
         }
     }
 
@@ -510,9 +593,76 @@ impl Alloc {
         level: u8,
         txg: u64,
     ) -> [u8; blkptr::SIZE] {
+        self.put_raw(members, data, data.len() as u64, 2, otype, level, txg)
+    }
+
+    /// [`put`](Self::put), with `data` compressed as `comp` first —
+    /// `lz4` in ZFS's framing (a big-endian length, then the block) or
+    /// `gzip` as the zlib stream ZFS stores — and the pointer carrying
+    /// the logical size and the compression code. A block that does not
+    /// shrink is stored as it is, as ZFS stores it.
+    pub fn put_compressed(
+        &mut self,
+        members: &mut [Vec<u8>],
+        data: &[u8],
+        comp: Compression,
+        otype: u8,
+        level: u8,
+        txg: u64,
+    ) -> [u8; blkptr::SIZE] {
+        let (payload, code) = match comp {
+            Compression::Off => (data.to_vec(), 2u8),
+            Compression::Lz4 => {
+                let block = lz4_flex::block::compress(data);
+                let mut v = (block.len() as u32).to_be_bytes().to_vec();
+                v.extend_from_slice(&block);
+                (v, 15)
+            }
+            Compression::Gzip(level) => {
+                use std::io::Write;
+                let mut enc = flate2::write::ZlibEncoder::new(
+                    Vec::new(),
+                    flate2::Compression::new(u32::from(level)),
+                );
+                enc.write_all(data).expect("in-memory");
+                (enc.finish().expect("in-memory"), 4 + level)
+            }
+            other => panic!("the fixture does not encode {other:?}"),
+        };
+        if payload.len() >= data.len() {
+            return self.put_raw(members, data, data.len() as u64, 2, otype, level, txg);
+        }
+        self.put_raw(
+            members,
+            &payload,
+            data.len() as u64,
+            code,
+            otype,
+            level,
+            txg,
+        )
+    }
+
+    /// Write `data` as one block and return its pointer, with `lsize`
+    /// as the logical size and `comp` as the compression code.
+    #[allow(clippy::too_many_arguments)]
+    fn put_raw(
+        &mut self,
+        members: &mut [Vec<u8>],
+        data: &[u8],
+        lsize: u64,
+        comp: u8,
+        otype: u8,
+        level: u8,
+        txg: u64,
+    ) -> [u8; blkptr::SIZE] {
         match self.layout {
             Layout::Mirror => {
                 let size = data.len().div_ceil(512) * 512;
+                // An uncompressed block is as long as what was written,
+                // padding included; only a compressed one has a logical
+                // size of its own.
+                let lsize = if comp == 2 { size as u64 } else { lsize };
                 let mut padded = data.to_vec();
                 padded.resize(size, 0);
                 let offset = self.next;
@@ -520,11 +670,22 @@ impl Alloc {
                 for m in self.mine(members).iter_mut() {
                     write_at_dva(m, offset, &padded);
                 }
-                self.bp(offset, size as u64, size as u64, &padded, otype, level, txg)
+                self.bp(
+                    offset,
+                    size as u64,
+                    size as u64,
+                    lsize,
+                    comp,
+                    &padded,
+                    otype,
+                    level,
+                    txg,
+                )
             }
             Layout::Raidz { ashift, nparity } => {
                 let unit = 1usize << ashift;
                 let size = data.len().div_ceil(unit) * unit;
+                let lsize = if comp == 2 { size as u64 } else { lsize };
                 let mut padded = data.to_vec();
                 padded.resize(size, 0);
                 let offset = self.next;
@@ -555,7 +716,17 @@ impl Alloc {
                     write_at_dva(&mut members[c.devidx as usize], c.offset, bytes);
                 }
                 self.next += m.asize;
-                self.bp(offset, m.asize, size as u64, &padded, otype, level, txg)
+                self.bp(
+                    offset,
+                    m.asize,
+                    size as u64,
+                    lsize,
+                    comp,
+                    &padded,
+                    otype,
+                    level,
+                    txg,
+                )
             }
         }
     }
@@ -606,11 +777,14 @@ impl Alloc {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn bp(
         &self,
         offset: u64,
         asize: u64,
-        size: u64,
+        psize: u64,
+        lsize: u64,
+        comp: u8,
         padded: &[u8],
         otype: u8,
         level: u8,
@@ -618,8 +792,8 @@ impl Alloc {
     ) -> [u8; blkptr::SIZE] {
         Builder::new()
             .dva(0, self.vdev, offset, asize, false)
-            .sizes(size, size)
-            .props(2, self.checksum.code(), otype, level)
+            .sizes(lsize, psize)
+            .props(comp, self.checksum.code(), otype, level)
             .births(0, txg, 1)
             .cksum(self.cksum(padded))
             .bytes(Endian::Little)
@@ -713,7 +887,7 @@ pub fn build_sample_mos_variant(
     let os_fs = a.put(m, &objset(&empty_meta, 2), ot::OBJSET, 0, 100);
     let mut zvol_dnodes = vec![0u8; 4096];
     // Data blocks 0 and 2 of the volume; 1 and 3 are holes.
-    if with_disk0 && a.layout == Layout::Mirror && a.data.is_none() {
+    if with_disk0 && a.layout == Layout::Mirror && a.data.is_none() && a.dense.is_none() {
         assert_eq!(
             a.next, SAMPLE_ZVOL_BLOCK0_OFFSET,
             "sample layout changed: update SAMPLE_ZVOL_BLOCK0_OFFSET"
@@ -737,18 +911,65 @@ pub fn build_sample_mos_variant(
         ),
     };
     a.checksum = plain;
-    let data_obj = DnodeSpec {
-        object_type: ot::ZVOL,
-        datablksz: 8192,
-        maxblkid: 3,
-        blkptrs: vec![blk0, [0u8; blkptr::SIZE], blk2],
-        ..DnodeSpec::default()
-    }
-    .build();
+    let (data_obj, volsize, volblocksize) = match a.dense.clone() {
+        // The dense volume (SPEC N-03, N-08): every block present, and
+        // an indirect tree of 128 KiB blocks above them, as many levels
+        // as it takes for one pointer to hold the lot. Indirect blocks
+        // are compressed the way the data is, as ZFS would.
+        Some(d) if with_disk0 => {
+            let mut bps: Vec<[u8; blkptr::SIZE]> = (0..d.blocks())
+                .map(|b| a.put_compressed(m, &d.block(b), d.compression, ot::ZVOL, 0, 100))
+                .collect();
+            let indblkshift = 17u8;
+            let per = (1usize << indblkshift) / blkptr::SIZE;
+            let mut level = 0u8;
+            while bps.len() > 1 {
+                level += 1;
+                bps = bps
+                    .chunks(per)
+                    .map(|chunk| {
+                        let mut blk = vec![0u8; 1 << indblkshift];
+                        for (i, bp) in chunk.iter().enumerate() {
+                            blk[i * blkptr::SIZE..(i + 1) * blkptr::SIZE].copy_from_slice(bp);
+                        }
+                        let comp = if d.compression == Compression::Off {
+                            Compression::Off
+                        } else {
+                            Compression::Lz4
+                        };
+                        a.put_compressed(m, &blk, comp, ot::ZVOL, level, 100)
+                    })
+                    .collect();
+            }
+            let obj = DnodeSpec {
+                object_type: ot::ZVOL,
+                indblkshift,
+                nlevels: level + 1,
+                datablksz: d.blocksize as u64,
+                maxblkid: d.blocks() - 1,
+                blkptrs: bps,
+                ..DnodeSpec::default()
+            }
+            .build();
+            (obj, d.bytes, d.blocksize as u64)
+        }
+        _ => (
+            DnodeSpec {
+                object_type: ot::ZVOL,
+                datablksz: 8192,
+                maxblkid: 3,
+                blkptrs: vec![blk0, [0u8; blkptr::SIZE], blk2],
+                ..DnodeSpec::default()
+            }
+            .build(),
+            32 << 20,
+            8192,
+        ),
+    };
     zvol_dnodes[DNODE_SIZE..2 * DNODE_SIZE].copy_from_slice(&data_obj);
     let props_blk = a.put(
         m,
-        &micro(4096, &[("size", 32 << 20)]),
+        &micro(4096, &[("size", volsize), ("volblocksize", volblocksize)]),
         ot::ZVOL_PROP,
         0,
         100,
@@ -1053,6 +1274,42 @@ pub fn destroyed_zvol_members(pool: &mut Pool, size: u64) -> (Vec<Vec<u8>>, u64,
         pool.write_labels(i, img);
     }
     (members, newest, previous)
+}
+
+/// A pool whose `tank/vm/disk0` is dense (SPEC N-03, N-08): `dense.bytes`
+/// of data in `dense.blocksize` blocks, every one present under a real
+/// indirect tree, compressed as `dense.compression` says. Present at
+/// every transaction group; nothing is destroyed. Returns the member
+/// images and the SHA-256 the extracted volume must have.
+pub fn dense_volume_members(pool: &mut Pool, dense: Dense) -> (Vec<Vec<u8>>, String) {
+    assert_eq!(
+        dense.bytes % dense.blocksize as u64,
+        0,
+        "a whole number of blocks"
+    );
+    let n = pool.members.len();
+    let (layout, per_member) = match pool.nparity {
+        Some(p) if pool.kind == "raidz" => (
+            Layout::Raidz {
+                ashift: pool.ashift,
+                nparity: p,
+            },
+            dense.bytes / (n as u64 - p),
+        ),
+        _ => (Layout::Mirror, dense.bytes),
+    };
+    // Room for the data, the tree above it, the MOS, and the labels at
+    // both ends, in whole MiB.
+    let size = (0x20_0000 + per_member + per_member / 32 + (8 << 20)).next_multiple_of(1 << 20);
+    let mut members: Vec<Vec<u8>> = (0..n).map(|_| vec![0u8; size as usize]).collect();
+    let mut alloc = Alloc::with_layout(0x20_0000, layout);
+    alloc.dense = Some(dense.clone());
+    let root = build_sample_mos_variant(&mut members, &mut alloc, true);
+    pool.rootbp = Some(root);
+    for (i, img) in members.iter_mut().enumerate() {
+        pool.write_labels(i, img);
+    }
+    (members, dense.sha256())
 }
 
 /// A pool in which `tank/vm/disk0` exists on disk but no uberblock leads

@@ -98,6 +98,11 @@ struct RunOut {
     /// Datasets under the tree that were skipped (not volumes) or failed.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     skipped: Vec<String>,
+    /// Peak resident set of the run, in KiB (SPEC N-03), where the
+    /// platform reports it. Like `seconds`, it varies from run to run
+    /// and is not part of what a reproducible run must repeat (N-05).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    peak_rss_kib: Option<u64>,
 }
 
 /// Resume state written next to the output image.
@@ -564,6 +569,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         recursive: opts.recursive,
         volumes: Vec::new(),
         skipped: Vec::new(),
+        peak_rss_kib: None,
     };
     let mut code = 0u8;
     let mut key_cache: std::collections::BTreeMap<u64, DatasetKeys> = Default::default();
@@ -632,6 +638,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             }
         }
     }
+    out.peak_rss_kib = zvol_common::peak_rss_kib();
     let json = serde_json::to_value(&out).expect("serialisable");
     if opts.recursive {
         let manifest = opts.output.join("manifest.json");

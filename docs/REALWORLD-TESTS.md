@@ -82,8 +82,8 @@ Run every scenario on every environment; record `zvolrescue --version`,
 
 | # | Scenario | Pass criterion |
 |---|---|---|
-| E1 | 2 TB volume on a 4-disk raidz2 of HDDs | throughput ≥ 40 % of raw read (SPEC N-08); RSS ≤ 512 MiB |
-| E2 | 200 GB volume on NVMe mirror | throughput ≥ 70 % of raw read |
+| E1 | 2 TB volume on a 4-disk raidz2 of HDDs | throughput ≥ 40 % of raw read (SPEC N-08); RSS ≤ 512 MiB. *Interim, in CI on every push (`tests/bench.sh`): 512 MiB dense volumes on a raidz2 of files, compression off/lz4/gzip — peak RSS about 70 MiB, rate printed against a plain copy; the ratio to a disk waits for the disk.* |
+| E2 | 200 GB volume on NVMe mirror | throughput ≥ 70 % of raw read. *Interim, in CI: the same on a mirror of files; the reader itself runs at several hundred MB/s single-threaded to tmpfs, so the NVMe target will need the worker pool N-08 allows.* |
 | E3 | static binary built on Ubuntu runs on mfsBSD (FreeBSD) — *no*, needs a FreeBSD build; verify the FreeBSD static build runs on mfsBSD 14 and 15 | `zvolrescue --version` and a `scan` |
 | E4 | `pkg`/ports build on FreeBSD; `.deb` on Debian/Ubuntu; AUR on CachyOS | installs, `man zvolrescue` present (*packaging pending*) |
 

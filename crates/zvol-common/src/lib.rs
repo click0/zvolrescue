@@ -595,6 +595,27 @@ mod tests {
     }
 }
 
+/// Peak resident set of this process so far, in KiB (SPEC N-03): Linux
+/// keeps it as `VmHWM` in `/proc/self/status`; elsewhere there is no
+/// answer without a system call this workspace does not make.
+pub fn peak_rss_kib() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    status
+        .lines()
+        .find_map(|l| l.strip_prefix("VmHWM:"))
+        .and_then(|v| v.split_whitespace().next())
+        .and_then(|n| n.parse().ok())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod rss_tests {
+    #[test]
+    fn linux_reports_a_peak_resident_set() {
+        let kib = super::peak_rss_kib().expect("VmHWM in /proc/self/status");
+        assert!(kib > 100, "{kib} KiB is not a running process");
+    }
+}
+
 /// Say what the medium did, and what to do about it (SPEC F-33, N-10):
 /// every incident of the run on stderr, and the stop — when one
 /// stopped the run — with the way forward. Returns [`exit::MEDIUM`]

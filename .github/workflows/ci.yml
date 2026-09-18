@@ -1250,6 +1250,47 @@ jobs:
           test "$code" = 7
           sudo dmsetup remove zr-bad
           sudo losetup -d "$loop"
+      - name: Memory and throughput on dense volumes (SPEC N-03, N-08)
+        run: |
+          # Six dense 512 MiB volumes — mirror and raidz2, compression
+          # off, lz4 and gzip — extracted and checked against the SHA-256
+          # the generator computed. The peak resident set of each run
+          # must stay under N-03's 512 MiB, and the rate above a floor;
+          # the rate against a plain copy is printed for the record (the
+          # N-08 ratios are against a disk's read rate, which a warm page
+          # cache is not — see tests/bench.sh).
+          cargo build --release -p zfs-read --examples
+          tests/bench.sh ./target/release/zvolrescue ./target/release/examples/mkfixture /tmp/bench 512 | tee /tmp/bench.md
+          rm -rf /tmp/bench
+      - name: The same inputs give the same bytes, twice (SPEC N-05)
+        run: |
+          # Reproducibility, checked rather than asserted: the same
+          # members, the same arguments, twice — the images are
+          # identical, and so are the JSON documents of scan, list and
+          # dump once the two fields that are meant to vary (`seconds`,
+          # `peak_rss_kib`) are set aside. The evidence record's own
+          # timestamp is the other designated field.
+          rm -rf /tmp/repro && ./target/release/examples/mkfixture /tmp/repro bench 12 32 lz4 > /dev/null
+          m="/tmp/repro/member0.img /tmp/repro/member1.img"
+          for i in 1 2; do
+            ./target/release/zvolrescue -q -f json dump tank/vm/disk0 $m -o /tmp/repro/out.img > /tmp/repro/dump$i.json
+            cp /tmp/repro/out.img /tmp/repro/out$i.img
+            ./target/release/zvolrescue -f json scan $m > /tmp/repro/scan$i.json
+            ./target/release/zvolrescue -f json list $m > /tmp/repro/list$i.json
+          done
+          cmp /tmp/repro/out1.img /tmp/repro/out2.img
+          cmp /tmp/repro/scan1.json /tmp/repro/scan2.json
+          cmp /tmp/repro/list1.json /tmp/repro/list2.json
+          python3 - <<'EOF'
+          import json
+          a, b = (json.load(open(f"/tmp/repro/dump{i}.json")) for i in (1, 2))
+          for x in (a, b):
+              x.pop("peak_rss_kib", None)
+              for v in x["volumes"]:
+                  v.pop("seconds", None)
+          assert a == b, "two dumps of the same volume differ beyond seconds and peak_rss_kib"
+          EOF
+          rm -rf /tmp/repro
 
   fuzz:
     name: Fuzz the parsers (bounded, every push)

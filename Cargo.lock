@@ -816,6 +816,7 @@ dependencies = [
  "aes",
  "aes-gcm",
  "ccm",
+ "flate2",
  "hkdf",
  "hmac",
  "lz4_flex",

@@ -21,9 +21,11 @@ hmac = { workspace = true }
 pbkdf2 = { workspace = true }
 sha1 = { workspace = true }
 md-5 = { workspace = true }
-
-[dev-dependencies]
+# The fixture module (a library module, used by the examples and by the
+# companions' tests) encodes lz4 and gzip blocks; both crates are
+# already in the graph through zfs-ondisk.
 lz4_flex = { workspace = true }
+flate2 = { workspace = true }
 
 [lints]
 workspace = true

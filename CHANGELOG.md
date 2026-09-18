@@ -13,6 +13,30 @@ development milestone that names what changed when — the sections below
 are their record — and ships inside the next version that does get
 tagged. `v0.7.1` is the release that carries those six.
 
+## Unreleased
+
+### Added
+* **Memory and throughput, measured on every push (SPEC N-03, N-08,
+  N-05).** Until now the 512 MiB bound and the throughput target were
+  asserted and never measured. `mkfixture bench` and `bench-raidz2`
+  build a dense volume — every block present under a real indirect
+  tree, 128 KiB blocks, of any size, with compression off, lz4 or gzip
+  (the fixture gained a compressing `put`) — and print the SHA-256 the
+  extracted image must have. `tests/bench.sh` extracts six such volumes
+  of 512 MiB and reports, per run, the extraction rate, the rate of a
+  plain copy of as many bytes through the same page cache, their ratio,
+  and the peak resident set, which `dump` now reports itself
+  (`peak_rss_kib`, from `/proc/self/status` on Linux). It fails on a
+  wrong hash, on a resident set over 512 MiB, or on a rate under a
+  floor; the N-08 ratios are to a disk's read rate and wait for the
+  disks of REALWORLD-TESTS E1 and E2, which now say so. Measured here:
+  peak resident set about 70 MiB on every volume, and the reader alone
+  — output to tmpfs, so the disk is out of it — about 460 MB/s on one
+  thread, mirror or single member alike. Reproducibility (N-05) is
+  checked the same way: the same volume dumped, scanned and listed
+  twice gives identical images and identical documents once `seconds`
+  and `peak_rss_kib`, the two fields meant to vary, are set aside.
+
 ## v0.9.1 — 2026-09-18
 
 **This tool reads healthy media.**
