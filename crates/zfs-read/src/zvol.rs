@@ -57,8 +57,12 @@ pub struct Report {
     pub bytes_written: u64,
     /// Unreadable ranges, in order.
     pub bad: Vec<BadRange>,
-    /// True when `OnError::Abort` stopped the extraction early.
+    /// True when `OnError::Abort` stopped the extraction early, or a
+    /// device's refusal did (SPEC F-33, N-10).
     pub aborted: bool,
+    /// The device refusal that stopped the extraction, when one did
+    /// (SPEC F-33, N-10): the incident, as the ledger recorded it.
+    pub stopped_by_medium: Option<String>,
     /// SHA-256 of the full `volsize` image (holes as zeros), lowercase hex.
     pub sha256: String,
     /// SHA-1 of the same image, when it was asked for (SPEC F-53).
@@ -188,6 +192,7 @@ pub fn extract_from(
         bytes_written: 0,
         bad: Vec::new(),
         aborted: false,
+        stopped_by_medium: None,
         sha256: String::new(),
         sha1: None,
         md5: None,
@@ -223,6 +228,21 @@ pub fn extract_from(
             }
             Err(e) => {
                 trace!("zvol", "blkid {blkid} @ {offset}: UNREADABLE: {e}");
+                // A device refused a read and the medium policy stops
+                // the run here: the range is logged, nothing is read
+                // again — not in pieces, not by sector, not from another
+                // copy — and the operator decides (SPEC F-33, N-10).
+                if let ReadError::Medium { stop: true, .. } = &e {
+                    report.bad.push(BadRange {
+                        offset,
+                        len: take as u64,
+                        blkid,
+                        reason: e.to_string(),
+                    });
+                    report.aborted = true;
+                    report.stopped_by_medium = Some(e.to_string());
+                    break;
+                }
                 if on_error == OnError::Abort {
                     report.bad.push(BadRange {
                         offset,
@@ -331,6 +351,8 @@ enum Salvaged {
 /// decompressed in part, ciphertext cannot be decrypted in part, and
 /// under parity a partial column is reconstructed rather than kept.
 fn salvage(reader: &PoolReader<'_>, bp: &BlkPtr, e: &ReadError) -> Option<Salvaged> {
+    // A device's refusal is never read around (N-10): with
+    // `--device-may-fail` the block is zeroed whole, once.
     if !matches!(e, ReadError::Io(_))
         || bp.compression != Compression::Off
         || bp.is_encrypted()
@@ -663,6 +685,212 @@ mod tests {
         );
         assert!(r.bad.is_empty());
         assert_eq!(sink.data, expected_image());
+    }
+
+    /// The mirror of [`a_mirror_heals_a_bad_sector_before_anything_is_salvaged`]
+    /// with the flaky side a *device*: a pool with one side reading
+    /// from a mirror member, the other from a disk that refuses a
+    /// read (SPEC F-33, N-10).
+    fn mirror_with_a_device(
+        ledger: std::sync::Arc<zvolrescue_io::medium::Ledger>,
+        bad: Vec<(u64, u64)>,
+    ) -> (
+        FlakySource<MemSource>,
+        MemSource,
+        crate::pool::PoolAssembly,
+        zfs_ondisk::uberblock::Uberblock,
+    ) {
+        let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1)]);
+        let mut members = vec![vec![0u8; SIZE as usize], vec![0u8; SIZE as usize]];
+        let mut a = Alloc::new(0x20_0000);
+        build_sample_mos(&mut pool, &mut members, &mut a);
+        for (i, m) in members.iter_mut().enumerate() {
+            pool.write_labels(i, m);
+        }
+        let sources: Vec<MemSource> = members.into_iter().map(MemSource::new).collect();
+        let scans: Vec<_> = sources.iter().map(|s| scan_device(s).ok()).collect();
+        let ub = scans[0].as_ref().unwrap().labels[0]
+            .best()
+            .unwrap()
+            .ub
+            .clone();
+        let assembly = assemble(&scans).into_iter().next().unwrap();
+        let device = FlakySource::new(sources[0].clone(), bad).as_device("/dev/da0", ledger);
+        (device, sources[1].clone(), assembly, ub)
+    }
+
+    fn extract_all(
+        reader: &PoolReader<'_>,
+        ub: &zfs_ondisk::uberblock::Uberblock,
+    ) -> (Report, MemSink) {
+        let mos = open_mos(reader, ub).unwrap();
+        let tree = walk(&mos, "tank").unwrap();
+        let ds = tree.get("tank/vm/disk0").unwrap();
+        let (obj, _) = open_volume(reader, ds).unwrap();
+        let mut sink = MemSink::default();
+        let r = extract(
+            &obj,
+            ds.volsize.unwrap(),
+            &mut sink,
+            OnError::Zero,
+            |_, _| {},
+        )
+        .unwrap();
+        (r, sink)
+    }
+
+    /// A device that refuses a read stops the extraction there, even
+    /// though the other side of the mirror holds the block: the
+    /// operator is told first and decides (SPEC F-33, N-10). The device
+    /// was asked once — no pieces, no sectors, no retry.
+    #[test]
+    fn a_device_that_refuses_a_read_stops_the_extraction_even_under_a_mirror() {
+        use zvolrescue_io::medium::Ledger;
+        let ledger = std::sync::Arc::new(Ledger::stop_at_first());
+        let data_off = crate::fixture::SAMPLE_ZVOL_BLOCK0_OFFSET;
+        let bad_at = LABEL_START_SIZE + data_off + 4096;
+        let (device, other, assembly, ub) =
+            mirror_with_a_device(ledger.clone(), vec![(bad_at, 512)]);
+        let reader = PoolReader::new(
+            &assembly,
+            vec![
+                Some(&device as &dyn BlockSource),
+                Some(&other as &dyn BlockSource),
+            ],
+        );
+        let (r, _sink) = extract_all(&reader, &ub);
+        assert!(r.aborted, "the run stops at the first refused read");
+        let why = r
+            .stopped_by_medium
+            .as_deref()
+            .expect("the incident is named");
+        assert!(
+            why.starts_with("medium refused a read, stopping: /dev/da0"),
+            "{why}"
+        );
+        assert!(
+            why.contains(&format!("at byte {}", LABEL_START_SIZE + data_off)),
+            "{why}"
+        );
+        assert_eq!(
+            (r.blocks_read, r.blocks_salvaged, r.blocks_zeroed),
+            (0, 0, 0)
+        );
+        assert_eq!(r.bad.len(), 1);
+        assert_eq!(
+            (r.bad[0].blkid, r.bad[0].offset, r.bad[0].len),
+            (0, 0, 8192)
+        );
+        assert_eq!(r.bad[0].reason, why);
+        assert_eq!(
+            device.reads_touching(bad_at),
+            1,
+            "the refused address was asked for once: {:?}",
+            device.reads()
+        );
+        assert_eq!(ledger.incidents().len(), 1);
+        assert!(ledger.stopped().is_some());
+        assert!(matches!(
+            reader.medium_stop(),
+            Some(ReadError::Medium { stop: true, .. })
+        ));
+    }
+
+    /// With `--device-may-fail` the refusal is skipped: the mirror heals
+    /// the block from its other side, the image is whole, the incident
+    /// is on record — and the device was still asked once.
+    #[test]
+    fn with_device_may_fail_the_mirror_heals_and_nothing_is_read_twice() {
+        use zvolrescue_io::medium::Ledger;
+        let ledger = std::sync::Arc::new(Ledger::may_fail());
+        let data_off = crate::fixture::SAMPLE_ZVOL_BLOCK0_OFFSET;
+        let bad_at = LABEL_START_SIZE + data_off + 4096;
+        let (device, other, assembly, ub) =
+            mirror_with_a_device(ledger.clone(), vec![(bad_at, 512)]);
+        let reader = PoolReader::new(
+            &assembly,
+            vec![
+                Some(&device as &dyn BlockSource),
+                Some(&other as &dyn BlockSource),
+            ],
+        );
+        let (r, sink) = extract_all(&reader, &ub);
+        assert!(!r.aborted);
+        assert!(r.stopped_by_medium.is_none());
+        assert_eq!(
+            (r.blocks_read, r.blocks_salvaged, r.blocks_zeroed),
+            (2, 0, 0)
+        );
+        assert!(r.bad.is_empty());
+        assert_eq!(sink.data, expected_image());
+        assert_eq!(device.reads_touching(bad_at), 1, "{:?}", device.reads());
+        let incidents = ledger.incidents();
+        assert_eq!(incidents.len(), 1);
+        assert!(!incidents[0].stopped);
+        assert!(reader.medium_stop().is_none());
+    }
+
+    /// With `--device-may-fail` and no other copy, the block is zeroed
+    /// whole, once, with the incident as its reason: nothing is salvaged
+    /// from a device, in pieces or by sector.
+    #[test]
+    fn with_device_may_fail_and_no_other_copy_the_block_is_zeroed_once() {
+        use zvolrescue_io::medium::Ledger;
+        let ledger = std::sync::Arc::new(Ledger::may_fail());
+        let (s, a, ub, data_off) = build();
+        let bad_at = LABEL_START_SIZE + data_off + 1024 + 7;
+        let device = FlakySource::new(s[0].clone(), vec![(bad_at, 100)])
+            .as_device("/dev/da0", ledger.clone());
+        let reader = PoolReader::new(&a, vec![Some(&device as &dyn BlockSource)]);
+        let (r, sink) = extract_all(&reader, &ub);
+        assert!(!r.aborted);
+        assert_eq!(
+            (r.blocks_read, r.blocks_salvaged, r.blocks_zeroed),
+            (1, 0, 1)
+        );
+        assert_eq!(r.bad.len(), 1);
+        assert_eq!((r.bad[0].offset, r.bad[0].len), (0, 8192));
+        assert!(
+            r.bad[0]
+                .reason
+                .starts_with("medium refused a read, skipped: /dev/da0"),
+            "{}",
+            r.bad[0].reason
+        );
+        assert_eq!(device.reads_touching(bad_at), 1, "{:?}", device.reads());
+        let mut want = expected_image();
+        want[..8192].fill(0);
+        assert_eq!(sink.data, want);
+    }
+
+    /// The allowance of `--device-may-fail` is spent per incident: the
+    /// one that reaches the limit stops the run like the first would
+    /// have without the flag.
+    #[test]
+    fn the_last_allowed_incident_stops_a_device_that_may_fail() {
+        use zvolrescue_io::medium::Ledger;
+        let ledger = std::sync::Arc::new(Ledger::may_fail());
+        for n in 1..Ledger::MAY_FAIL_LIMIT {
+            ledger.record(
+                std::path::Path::new("/dev/da0"),
+                (n as u64) << 20,
+                4096,
+                &std::io::Error::from_raw_os_error(5),
+            );
+        }
+        let (s, a, ub, data_off) = build();
+        let bad_at = LABEL_START_SIZE + data_off + 8192 + 4096;
+        let device = FlakySource::new(s[0].clone(), vec![(bad_at, 512)])
+            .as_device("/dev/da0", ledger.clone());
+        let reader = PoolReader::new(&a, vec![Some(&device as &dyn BlockSource)]);
+        let (r, _sink) = extract_all(&reader, &ub);
+        assert!(r.aborted);
+        assert!(r.stopped_by_medium.is_some());
+        // Block 0 came out; block 2 is where the disk was asked and refused.
+        assert_eq!((r.blocks_read, r.bad.len()), (1, 1));
+        assert_eq!(r.bad[0].blkid, 2);
+        assert_eq!(ledger.incidents().len(), Ledger::MAY_FAIL_LIMIT);
+        assert_eq!(device.reads_touching(bad_at), 1);
     }
 
     /// A read that fails once and then gives every sector is a block

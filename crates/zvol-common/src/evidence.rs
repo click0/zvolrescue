@@ -12,6 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use zvolrescue_io::medium::Incident;
 // Re-exported so a tool that only depends on this crate can name the
 // digests it is checking against (SPEC F-53).
 pub use zfs_read::hash::{DigestSet, Digests, Extra};
@@ -193,6 +194,10 @@ pub struct Record {
     pub outputs: Vec<FileRef>,
     /// The same document the run printed with `-f json`.
     pub result: serde_json::Value,
+    /// Reads a device refused during the run, each with whether it
+    /// stopped the run (SPEC F-33, N-10). Absent when there were none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub incidents: Vec<serde_json::Value>,
     /// Exit code the run is about to return.
     pub status: u8,
 }
@@ -213,6 +218,7 @@ impl Record {
             inputs: Vec::new(),
             outputs: Vec::new(),
             result: result.clone(),
+            incidents: Vec::new(),
             status,
         }
     }
@@ -231,6 +237,13 @@ impl Record {
                 }
             })
             .collect();
+        self
+    }
+
+    /// The device reads the run had refused (SPEC F-33, N-10).
+    #[must_use]
+    pub fn with_incidents(mut self, incidents: &[Incident]) -> Record {
+        self.incidents = crate::incidents_json(incidents);
         self
     }
 

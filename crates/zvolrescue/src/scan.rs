@@ -17,7 +17,7 @@ use zfs_read::dsl::removed_tops_of;
 use zfs_read::pool::{assemble, PoolAssembly};
 use zfs_read::vdev::{DeviceScan, LabelScan};
 use zfs_read::zeropoint::{
-    find as find_zero_point, geom_metadata, partition_table, scan_with_recovered_base, Search,
+    find as find_zero_point, geom_metadata, partition_table, scan_with_recovered_base_opts, Search,
 };
 use zvolrescue_io::{BlockSource, FileSource};
 
@@ -110,6 +110,11 @@ struct DeviceOut {
     /// in when the labels cannot say where the vdev starts, or on request.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     zero_point: Vec<ZeroPointOut>,
+    /// The labels do not verify and the surface was not searched for
+    /// anchors: a block device, without `--surface-scan-on-device`
+    /// (SPEC N-10).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    surface_scan_refused: bool,
     /// Where this device's vdev begins, when that is not offset 0.
     #[serde(skip_serializing_if = "Option::is_none")]
     vdev_base: Option<u64>,
@@ -515,6 +520,7 @@ fn device_out(
         newest_txg: None,
         oldest_txg: None,
         zero_point: Vec::new(),
+        surface_scan_refused: false,
         vdev_base: None,
         vdev_base_from: None,
         partitions: None,
@@ -678,6 +684,11 @@ fn print_text(out: &ScanOut, verbose: u8) {
         println!("{}: {} bytes", d.path.display(), d.size);
         if let Some(e) = &d.error {
             println!("  error: {e}");
+            if d.surface_scan_refused {
+                println!(
+                    "  zero point: not searched — a block device is not searched for anchors (SPEC N-10); image it and scan the image, or --surface-scan-on-device"
+                );
+            }
             continue;
         }
         if let Some(t) = &d.partitions {
@@ -839,7 +850,11 @@ fn print_text(out: &ScanOut, verbose: u8) {
                 z.rootbp_birth,
             );
         }
-        if d.config.is_none() && d.zero_point.is_empty() && d.error.is_none() {
+        if d.surface_scan_refused {
+            println!(
+                "  zero point: not searched — a block device is not searched for anchors (SPEC N-10); image it and scan the image, or --surface-scan-on-device"
+            );
+        } else if d.config.is_none() && d.zero_point.is_empty() && d.error.is_none() {
             println!("  zero point: no uberblock anchor found either");
         }
         if let Some(nv) = &d.nvlist {
@@ -949,7 +964,11 @@ impl TopOut {
 }
 
 /// Look for the vdev base of one member with [`zfs_read::zeropoint`].
-fn zero_points(src: &FileSource, opts: &ZeroPointOpts) -> Vec<ZeroPointOut> {
+fn zero_points(
+    src: &FileSource,
+    opts: &ZeroPointOpts,
+    surface_scan_on_device: bool,
+) -> (Vec<ZeroPointOut>, bool) {
     let search = Search {
         windows: if opts.whole {
             vec![(0, src.size())]
@@ -957,13 +976,17 @@ fn zero_points(src: &FileSource, opts: &ZeroPointOpts) -> Vec<ZeroPointOut> {
             Vec::new()
         },
         psize_hints: opts.psize_hints.clone(),
+        surface_scan_on_device,
         ..Search::default()
     };
     let found = match find_zero_point(src, &search) {
         Ok(f) => f,
-        Err(_) => return Vec::new(),
+        // The one refusal the search makes on its own: a block device
+        // without --surface-scan-on-device (SPEC N-10).
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return (Vec::new(), true),
+        Err(_) => return (Vec::new(), false),
     };
-    found
+    let out = found
         .iter()
         .map(|z| {
             let mut labels: Vec<String> = z
@@ -986,7 +1009,8 @@ fn zero_points(src: &FileSource, opts: &ZeroPointOpts) -> Vec<ZeroPointOut> {
                 rootbp_birth: z.best().map(|a| a.ub.rootbp_birth()).unwrap_or(0),
             }
         })
-        .collect()
+        .collect();
+    (out, false)
 }
 
 /// What `scan --emit-label` should write (SPEC F-67).
@@ -1116,28 +1140,41 @@ pub fn run(
     // missing one means asking the pool's MOS (SPEC F-69).
     let mut sources: Vec<Option<FileSource>> = Vec::with_capacity(devices.len());
     for path in devices {
-        let (scan, size, error, zero_point, table, source) = match open.open(path) {
-            Ok(src) => {
-                let (scan, error) = match scan_with_recovered_base(&src) {
-                    Ok(s) => (Some(s), None),
-                    Err(e) => (None, Some(e.to_string())),
-                };
-                let table = partition_table(&src).ok().flatten();
-                // A member whose four label configurations are all
-                // unusable still has its uberblock rings, and one slot
-                // fixes the base (SPEC F-61).
-                let unusable = scan.as_ref().is_none_or(|s| s.config().is_none());
-                let zero_point = if zp.always || unusable {
-                    zero_points(&src, zp)
-                } else {
-                    Vec::new()
-                };
-                (scan, src.size(), error, zero_point, table, Some(src))
-            }
-            Err(e) => (None, 0, Some(e.to_string()), Vec::new(), None, None),
-        };
+        let (scan, size, error, zero_point, surface_scan_refused, table, source) =
+            match open.open(path) {
+                Ok(src) => {
+                    let (scan, error) =
+                        match scan_with_recovered_base_opts(&src, open.surface_scan_on_device) {
+                            Ok(s) => (Some(s), None),
+                            Err(e) => (None, Some(e.to_string())),
+                        };
+                    let table = partition_table(&src).ok().flatten();
+                    // A member whose four label configurations are all
+                    // unusable still has its uberblock rings, and one slot
+                    // fixes the base (SPEC F-61).
+                    let unusable = scan.as_ref().is_none_or(|s| s.config().is_none());
+                    let (zero_point, surface_scan_refused) = if zp.always || unusable {
+                        zero_points(&src, zp, open.surface_scan_on_device)
+                    } else {
+                        (Vec::new(), false)
+                    };
+                    let surface_scan_refused = surface_scan_refused
+                        || scan.as_ref().is_some_and(|s| s.surface_scan_refused);
+                    (
+                        scan,
+                        src.size(),
+                        error,
+                        zero_point,
+                        surface_scan_refused,
+                        table,
+                        Some(src),
+                    )
+                }
+                Err(e) => (None, 0, Some(e.to_string()), Vec::new(), false, None, None),
+            };
         let mut out = device_out(path, &scan, size, error, g.verbose);
         out.zero_point = zero_point;
+        out.surface_scan_refused = surface_scan_refused;
         // What the disk says it is called (SPEC F-71): the GEOM class in
         // its last sector, and the name and GUID of each partition, with
         // any GEOM class configured on the partition itself.
@@ -1194,6 +1231,11 @@ pub fn run(
         outs.push(out);
         scans.push(scan);
         sources.push(source);
+        // The run is stopped: the devices after this one are not opened
+        // (SPEC F-33, N-10).
+        if open.ledger.stopped().is_some() {
+            break;
+        }
     }
     let mut assembled = assemble(&scans);
     {
@@ -1259,12 +1301,27 @@ pub fn run(
             }
         }
     }
-    let code = if out.devices.iter().any(|d| d.error.is_some()) {
+    let mut code = if out.devices.iter().any(|d| d.error.is_some()) {
         exit::EVIDENCE
     } else {
         0
     };
+    if out.devices.iter().any(|d| d.surface_scan_refused) {
+        code = code.max(exit::REFUSED);
+    }
+    // A device refused a read: every incident on stderr, and the stop —
+    // when one stopped the run — as the exit code (SPEC F-33, N-10).
+    if let Some(medium) = zvol_common::report_medium(&open.ledger) {
+        code = medium;
+    }
     let mut inputs = devices.to_vec();
     inputs.extend(open.map_files());
-    g.log_evidence("zvolrescue", &json, code, &inputs, written)
+    g.log_evidence_with_incidents(
+        "zvolrescue",
+        &json,
+        code,
+        &inputs,
+        written,
+        &open.ledger.incidents(),
+    )
 }

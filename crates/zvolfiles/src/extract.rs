@@ -299,9 +299,10 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
                 hardlinks,
             },
             opened.members.paths.clone(),
+            opened.members.ledger.clone(),
         ))
     });
-    let (out, paths) = match result {
+    let (out, paths, ledger) = match result {
         Ok(v) => v,
         Err(code) => return code,
     };
@@ -350,7 +351,17 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
     let written = FileRef::hashed(&manifest)
         .map(|f| vec![f])
         .unwrap_or_default();
-    g.log_evidence("zvolfiles", &json, code, &paths, written)
+    // A device refused a read: every incident on stderr, and the stop —
+    // when one stopped the run — as the exit code (SPEC F-33, N-10).
+    let code = zvol_common::report_medium(&ledger).unwrap_or(code);
+    g.log_evidence_with_incidents(
+        "zvolfiles",
+        &json,
+        code,
+        &paths,
+        written,
+        &ledger.incidents(),
+    )
 }
 
 /// Write one entry out and record what happened to it.

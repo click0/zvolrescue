@@ -189,6 +189,15 @@ pub struct PoolReader<'a> {
     /// How many leaf reads each device has served. Used when deciding
     /// whether a member really contributed to what was read (F-62).
     reads: RefCell<Vec<u64>>,
+    /// The device refusal that stopped the run, once one has (SPEC
+    /// F-33, N-10): every block read after it answers with this.
+    medium_stop: RefCell<Option<ReadError>>,
+    /// Metadata blocks already read, by device, offset and size, so
+    /// that no address on a device is asked for twice (SPEC N-10): the
+    /// MOS is walked through the same few blocks many times over.
+    /// Bounded — small blocks only, and dropped whole past a budget —
+    /// so that memory stays bounded on any pool (N-03).
+    cache: RefCell<ReadCache>,
     /// How many block checksums have failed on the data as first read.
     /// Zero on a healthy pool read through the right topology; a wrong
     /// member order shows up here before anything else does (F-66).
@@ -221,6 +230,14 @@ pub enum ReadError {
     Unrecoverable(String),
     /// I/O error on a member.
     Io(String),
+    /// A device refused a read (SPEC F-33, N-10). `stop` says whether
+    /// the run's medium policy stops here; the text is the incident.
+    Medium {
+        /// Whether this refusal stops the run.
+        stop: bool,
+        /// The incident, as the ledger recorded it.
+        what: String,
+    },
     /// All copies were read but none passed its checksum.
     AllCopiesBad,
     /// The block pointer is a hole (callers usually treat this as zeros).
@@ -249,6 +266,7 @@ impl fmt::Display for ReadError {
             ReadError::Gang(e) => write!(f, "gang block: {e}"),
             ReadError::Unrecoverable(e) => write!(f, "not recoverable: {e}"),
             ReadError::Io(e) => write!(f, "I/O error: {e}"),
+            ReadError::Medium { what, .. } => write!(f, "{what}"),
             ReadError::AllCopiesBad => write!(f, "every copy failed its checksum"),
             ReadError::Hole => write!(f, "block pointer is a hole"),
             ReadError::Decompress(e) => write!(f, "{e}"),
@@ -293,8 +311,49 @@ pub struct Block {
 /// member that is not there says nothing about the copy, so a failure
 /// on a member that *is* there — an I/O error, a checksum that did not
 /// match — is kept over it. Otherwise the later one wins, as before.
+/// Blocks read from the members, kept so that the same address is not
+/// asked for again (SPEC N-10). Only blocks up to [`ReadCache::MAX_ENTRY`]
+/// are kept — the metadata the walk keeps coming back to, not a
+/// volume's data, which is read once anyway — and the whole cache is
+/// dropped when it passes [`ReadCache::BUDGET`], so the memory it holds
+/// is bounded on any pool (N-03).
+#[derive(Default)]
+struct ReadCache {
+    map: std::collections::HashMap<(usize, u64, usize), Rc<Vec<u8>>>,
+    bytes: usize,
+}
+
+impl ReadCache {
+    /// The largest block kept: a MOS block is 16 KiB by default and an
+    /// indirect block 128 KiB.
+    const MAX_ENTRY: usize = 128 << 10;
+    /// Kept bytes past which the cache starts over.
+    const BUDGET: usize = 64 << 20;
+
+    fn get(&self, device: usize, at: u64, size: usize) -> Option<Vec<u8>> {
+        self.map.get(&(device, at, size)).map(|b| b.to_vec())
+    }
+
+    fn put(&mut self, device: usize, at: u64, bytes: &[u8]) {
+        if bytes.len() > Self::MAX_ENTRY {
+            return;
+        }
+        if self.bytes + bytes.len() > Self::BUDGET {
+            self.map.clear();
+            self.bytes = 0;
+        }
+        self.bytes += bytes.len();
+        self.map
+            .insert((device, at, bytes.len()), Rc::new(bytes.to_vec()));
+    }
+}
+
 fn more_telling(so_far: ReadError, next: ReadError) -> ReadError {
     match (&so_far, &next) {
+        // A medium's refusal is what the operator must hear about,
+        // whatever else went wrong beside it.
+        (ReadError::Medium { .. }, _) => so_far,
+        (_, ReadError::Medium { .. }) => next,
         (ReadError::NoMember, _) => next,
         (_, ReadError::NoMember) => so_far,
         _ => next,
@@ -336,6 +395,8 @@ impl<'a> PoolReader<'a> {
             devices,
             bases,
             reads,
+            medium_stop: RefCell::new(None),
+            cache: RefCell::new(ReadCache::default()),
             mismatches: Cell::new(0),
             tops,
             salt: Cell::new(None),
@@ -524,6 +585,34 @@ impl<'a> PoolReader<'a> {
         v
     }
 
+    /// The error a leaf read failed with, as the reader carries it. A
+    /// device's refusal (SPEC N-10) becomes [`ReadError::Medium`], and
+    /// one that stops the run is remembered: from then on every block
+    /// read answers with it, before any device is asked anything more.
+    fn io_error(&self, e: std::io::Error) -> ReadError {
+        match zvolrescue_io::medium::incident_of(&e) {
+            Some(i) => {
+                let err = ReadError::Medium {
+                    stop: i.stopped,
+                    what: e.to_string(),
+                };
+                if i.stopped {
+                    let mut stop = self.medium_stop.borrow_mut();
+                    if stop.is_none() {
+                        *stop = Some(err.clone());
+                    }
+                }
+                err
+            }
+            None => ReadError::Io(e.to_string()),
+        }
+    }
+
+    /// The refusal that stopped the run, once one has (SPEC F-33).
+    pub fn medium_stop(&self) -> Option<ReadError> {
+        self.medium_stop.borrow().clone()
+    }
+
     /// Read `size` bytes at vdev-relative `offset` from a leaf device.
     fn read_leaf(
         &self,
@@ -542,10 +631,17 @@ impl<'a> PoolReader<'a> {
         if let Some(n) = self.reads.borrow_mut().get_mut(index) {
             *n += 1;
         }
+        if let Some(stop) = self.medium_stop() {
+            return Err(stop);
+        }
+        let at = base + LABEL_START_SIZE + offset;
+        if let Some(hit) = self.cache.borrow().get(index, at, size) {
+            return Ok(hit);
+        }
         let mut buf = vec![0u8; size];
-        dev.read_at(base + LABEL_START_SIZE + offset, &mut buf)
-            .map(|()| buf)
-            .map_err(|e| ReadError::Io(e.to_string()))
+        dev.read_at(at, &mut buf).map_err(|e| self.io_error(e))?;
+        self.cache.borrow_mut().put(index, at, &buf);
+        Ok(buf)
     }
 
     /// [`read_leaf`](Self::read_leaf), reading around the sectors the
@@ -568,10 +664,20 @@ impl<'a> PoolReader<'a> {
         if let Some(n) = self.reads.borrow_mut().get_mut(index) {
             *n += 1;
         }
+        if let Some(stop) = self.medium_stop() {
+            return Err(stop);
+        }
+        let at = base + LABEL_START_SIZE + offset;
+        if let Some(hit) = self.cache.borrow().get(index, at, size) {
+            return Ok((hit, Vec::new()));
+        }
         let mut buf = vec![0u8; size];
         let bad = dev
-            .read_at_salvaging(base + LABEL_START_SIZE + offset, &mut buf)
-            .map_err(|e| ReadError::Io(e.to_string()))?;
+            .read_at_salvaging(at, &mut buf)
+            .map_err(|e| self.io_error(e))?;
+        if bad.is_empty() {
+            self.cache.borrow_mut().put(index, at, &buf);
+        }
         Ok((buf, bad))
     }
 
@@ -1274,6 +1380,12 @@ impl<'a> PoolReader<'a> {
         let mut attempts = Vec::new();
         let raw = self.read_raw_verified(bp, 0, &mut attempts);
         let _ = allow_unverified;
+        // A device that refused a read and stopped the run stops it here
+        // too, whatever the other copies made of the block: the operator
+        // is told first, and decides (SPEC F-33, N-10).
+        if let Some(stop) = self.medium_stop() {
+            return Err(stop);
+        }
         match raw {
             Ok(_) if bp.is_encrypted() && !self.has_keys() => Err(ReadError::Encrypted),
             Ok(raw) => {

@@ -353,5 +353,15 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             .unwrap_or_default(),
         None => Vec::new(),
     };
-    g.log_evidence("zvoltimeline", &json, code, &members.paths, written)
+    // A device refused a read: every incident on stderr, and the stop —
+    // when one stopped the run — as the exit code (SPEC F-33, N-10).
+    let code = zvol_common::report_medium(&members.ledger).unwrap_or(code);
+    g.log_evidence_with_incidents(
+        "zvoltimeline",
+        &json,
+        code,
+        &members.paths,
+        written,
+        &members.ledger.incidents(),
+    )
 }

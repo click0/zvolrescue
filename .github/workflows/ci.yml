@@ -1160,7 +1160,7 @@ jobs:
           EOF
           ./target/release/zvolrescue scan /tmp/fx/member0.img --map /tmp/fx/member0.img=/tmp/fx/member0.map
           ./target/release/zvolrescue -f json scan /tmp/fx/member0.img --map /tmp/fx/member0.img=/tmp/fx/member0.map | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"][0]; assert d["map"]["unreadable_bytes"] == 0x40400, d["map"]; assert d["map"]["labels_touched"] == [1], d["map"]; assert d["labels"][1]["config_checksum"] == "missing", d["labels"][1]'
-          if ./target/release/zvolrescue -f json dump tank/vm/disk0 /tmp/fx/member0.img --map /tmp/fx/member0.img=/tmp/fx/member0.map --retries 3 --txg 4816229 -o /tmp/fx/mapped.img --evidence-log /tmp/fx/map-ev.jsonl > /tmp/fx/mapped.json; then echo "must exit 4"; exit 1; else test $? = 4; fi
+          if ./target/release/zvolrescue -f json dump tank/vm/disk0 /tmp/fx/member0.img --map /tmp/fx/member0.img=/tmp/fx/member0.map --txg 4816229 -o /tmp/fx/mapped.img --evidence-log /tmp/fx/map-ev.jsonl > /tmp/fx/mapped.json; then echo "must exit 4"; exit 1; else test $? = 4; fi
           python3 -c '
           import json
           v = json.load(open("/tmp/fx/mapped.json"))["volumes"][0]
@@ -1173,6 +1173,79 @@ jobs:
           assert any(i["path"].endswith("member0.map") for i in ev["inputs"]), ev["inputs"]'
           ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/fx/member0.img /tmp/fx/member1.img --map /tmp/fx/member0.img=/tmp/fx/member0.map --txg 4816229 -o /tmp/fx/map-healed.img
           cmp /tmp/disk0.img /tmp/fx/map-healed.img
+      - name: A device that refuses a read stops the run (SPEC F-33, N-10)
+        run: |
+          # A real block device with a real refusal: a mirror member on a
+          # loop device, with the eight sectors of the volume's first data
+          # block mapped to device-mapper's error target. Without leave
+          # the first refused read stops the run with exit 7, names the
+          # device and the LBA, and the evidence record carries the
+          # incident. With --device-may-fail the mirror heals the block
+          # from its other side, the image is the reference, and no
+          # address on the device is read twice — strace shows every
+          # read of it, and none overlaps another. Carving refuses the
+          # device outright; a plain scan reads its four labels and no
+          # more.
+          sudo apt-get install -y -qq --no-install-recommends dmsetup strace
+          rm -rf /tmp/dm && cargo run -q -p zfs-read --example mkfixture -- /tmp/dm mirror 12
+          ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/dm/member0.img /tmp/dm/member1.img --txg 4816229 -o /tmp/dm/ref.img
+          loop=$(sudo losetup --find --show /tmp/dm/member0.img)
+          size=$(sudo blockdev --getsz "$loop")
+          # Block 0 of the volume: 4 MiB of front labels + 0x201000 = sector 12296.
+          bad=12296
+          printf '0 %s linear %s 0\n%s 8 error\n%s %s linear %s %s\n' "$bad" "$loop" "$bad" "$((bad+8))" "$((size-bad-8))" "$loop" "$((bad+8))" | sudo dmsetup create zr-bad
+          dev=/dev/mapper/zr-bad
+          set +e
+          sudo ./target/release/zvolrescue -q dump tank/vm/disk0 "$dev" /tmp/dm/member1.img --txg 4816229 -o /tmp/dm/stop.img --evidence-log /tmp/dm/ev.jsonl 2>/tmp/dm/stop.err; code=$?
+          set -e
+          cat /tmp/dm/stop.err
+          test "$code" = 7
+          grep -q "MEDIUM INCIDENT: $dev refused 8192 byte(s) at byte $((bad*512)) (LBA $bad, 16 sector(s) of 512): Input/output error" /tmp/dm/stop.err
+          grep -q "stopped here" /tmp/dm/stop.err
+          grep -q "image it with a tool made for failing media" /tmp/dm/stop.err
+          sudo python3 - <<'EOF'
+          import json
+          r = json.loads(open("/tmp/dm/ev.jsonl").readlines()[-1])
+          assert r["status"] == 7, r["status"]
+          i = r["incidents"]
+          assert len(i) == 1 and i[0]["stopped"] and i[0]["lba"] == 12296 and i[0]["sectors"] == 16 and i[0]["path"] == "/dev/mapper/zr-bad", i
+          assert [x["kind"] for x in r["inputs"]] == ["device", "file"], r["inputs"]
+          v = r["result"]["volumes"][0]
+          assert v["aborted"] and v["stopped_by_medium"].startswith("medium refused a read, stopping: /dev/mapper/zr-bad"), v
+          assert v["blocks_salvaged"] == 0 and v["blocks_read"] == 0, v
+          EOF
+          # --device-may-fail: the mirror heals, the image is whole, the incident is on record — and no address was read twice.
+          sudo strace -f -y -e trace=pread64 -o /tmp/dm/trace.txt ./target/release/zvolrescue -q dump tank/vm/disk0 "$dev" /tmp/dm/member1.img --txg 4816229 -o /tmp/dm/healed.img --device-may-fail --evidence-log /tmp/dm/ev.jsonl 2>/tmp/dm/heal.err
+          cat /tmp/dm/heal.err
+          cmp /tmp/dm/healed.img /tmp/dm/ref.img
+          grep -q "skipped (--device-may-fail)" /tmp/dm/heal.err
+          sudo python3 - <<'EOF'
+          import json, re
+          r = json.loads(open("/tmp/dm/ev.jsonl").readlines()[-1])
+          assert r["status"] == 0 and len(r["incidents"]) == 1 and not r["incidents"][0]["stopped"], r
+          reads = []
+          for line in open("/tmp/dm/trace.txt"):
+              m = re.search(r'pread64\(\d+</dev/mapper/zr-bad>, .*, (\d+), (\d+)\) = ', line)
+              if m:
+                  reads.append((int(m.group(2)), int(m.group(1))))
+          assert reads, "no read of the device seen"
+          reads.sort()
+          overlapping = [(a, b) for a, b in zip(reads, reads[1:]) if b[0] < a[0] + a[1]]
+          assert not overlapping, f"an address on the device was read twice: {overlapping}"
+          assert any(o <= 12296 * 512 < o + n for o, n in reads), "the refused block was asked for once"
+          print(f"{len(reads)} reads of the device, none overlapping")
+          EOF
+          # A scan reads the four labels and nothing else; carving refuses the device before opening it.
+          sudo strace -f -y -e trace=pread64 -o /tmp/dm/scan.txt ./target/release/zvolrescue -q scan "$dev" | grep -q 'pool "tank"'
+          test "$(grep -c '</dev/mapper/zr-bad>' /tmp/dm/scan.txt)" = 4
+          set +e; sudo ./target/release/zvolcarve scan "$dev" -o /tmp/dm/carve 2>/tmp/dm/carve.err; code=$?; set -e
+          test "$code" = 5 && grep -q "a block device is not scanned (SPEC N-10)" /tmp/dm/carve.err
+          # With leave, the carve runs — and stops at the error target with exit 7, the incident on record.
+          set +e; sudo ./target/release/zvolcarve scan "$dev" -o /tmp/dm/carve --surface-scan-on-device --evidence-log /tmp/dm/ev.jsonl 2>/tmp/dm/carve2.err; code=$?; set -e
+          cat /tmp/dm/carve2.err | tail -3
+          test "$code" = 7
+          sudo dmsetup remove zr-bad
+          sudo losetup -d "$loop"
 
   fuzz:
     name: Fuzz the parsers (bounded, every push)
@@ -1391,6 +1464,22 @@ jobs:
             ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/fx/member0.img --txg 4816229 -o /tmp/fx/plain.img
             ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/fx/label0.img --txg 4816229 -o /tmp/fx/labelled.img
             cmp /tmp/fx/plain.img /tmp/fx/labelled.img
+            # SPEC F-33, N-10 on a real FreeBSD device: gnop makes every
+            # read of the member fail with EIO, so the very first read —
+            # a label — is the incident, and the run stops there with
+            # exit 7 and the LBA, before anything else is asked of it.
+            md=$(mdconfig -a -t vnode -f /tmp/fx/member0.img)
+            gnop create -e 5 -r 100 "/dev/$md"
+            set +e
+            ./target/release/zvolrescue -q dump tank/vm/disk0 "/dev/$md.nop" /tmp/fx/member1.img --txg 4816229 -o /tmp/fx/nop.img 2>/tmp/fx/nop.err; code=$?
+            set -e
+            cat /tmp/fx/nop.err
+            test "$code" = 7
+            grep -q "MEDIUM INCIDENT: /dev/$md.nop refused" /tmp/fx/nop.err
+            grep -q "LBA 0," /tmp/fx/nop.err
+            grep -q "stopped here" /tmp/fx/nop.err
+            gnop destroy "/dev/$md.nop"
+            mdconfig -d -u "${md#md}"
 
   # 14.x on a best-effort footing (N-06): built and tested so a break is
   # visible, allowed to fail so it does not hold anything up. stable/14

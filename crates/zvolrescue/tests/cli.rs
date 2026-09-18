@@ -1030,8 +1030,6 @@ fn an_imagers_map_names_what_the_disk_never_gave() {
         &members[0],
         "--map",
         &spec,
-        "--retries",
-        "3",
         "-o",
         &dir.join("mapped.img").to_string_lossy(),
     ]);
@@ -1094,4 +1092,50 @@ fn an_imagers_map_names_what_the_disk_never_gave() {
     ]);
     assert_eq!(code, 1);
     assert!(err.contains("is not among the devices given"), "{err}");
+}
+
+/// A block device whose labels do not verify is not searched for
+/// anchors (SPEC N-10): the scan says so, the JSON carries it, and the
+/// exit code is 5. `/dev/null` is the one device every test host has
+/// — a character device of no size, which is what a wiped disk looks
+/// like to the label reader. With `--surface-scan-on-device` the search
+/// runs, finds nothing on nothing, and the run is an ordinary failure.
+#[test]
+fn a_block_device_is_not_searched_for_anchors_without_leave() {
+    if !std::path::Path::new("/dev/null").exists() {
+        return;
+    }
+    let (code, out, _err) = run(&["-q", "scan", "/dev/null"]);
+    assert_eq!(code, 5, "{out}");
+    assert!(
+        out.contains("zero point: not searched") && out.contains("SPEC N-10"),
+        "{out}"
+    );
+    let (code, out, _err) = run(&["-q", "-f", "json", "scan", "/dev/null"]);
+    assert_eq!(code, 5, "{out}");
+    assert_eq!(
+        json(&out)["devices"][0]["surface_scan_refused"],
+        true,
+        "{out}"
+    );
+    let (code, out, _err) = run(&["-q", "scan", "/dev/null", "--surface-scan-on-device"]);
+    assert_ne!(code, 5, "{out}");
+    assert!(!out.contains("not searched"), "{out}");
+}
+
+/// `--retries` is gone with the policy it served (SPEC F-33): a device
+/// is never asked twice, and an image never needs asking twice.
+#[test]
+fn retries_are_no_longer_an_option() {
+    let (code, _out, err) = run(&[
+        "dump",
+        "tank/vm/disk0",
+        "/dev/null",
+        "--retries",
+        "3",
+        "-o",
+        "/nonexistent/x.img",
+    ]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("--retries"), "{err}");
 }

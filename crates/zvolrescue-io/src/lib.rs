@@ -9,12 +9,16 @@
 //! now and will relax it to `deny` with per-block `// SAFETY:` comments only
 //! if raw `libc` calls become necessary (e.g. `O_EXCL` on block devices).
 
+pub mod medium;
 pub mod trace;
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Seek, SeekFrom};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use medium::{Kind, Ledger};
 
 /// A read-only, random-access source of bytes: a device, a partition, an
 /// image file, or an in-memory buffer in tests.
@@ -25,14 +29,21 @@ pub trait BlockSource {
     /// Fill `buf` from `offset`. Fails if the range is not fully readable.
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()>;
 
-    /// Fill `buf` from `offset`, reading around what the device refuses
-    /// (SPEC F-33). A disk with a bad sector fails the whole request
-    /// that touches it; this retries the request in pieces and then by
-    /// sector, leaves each sector the device still refuses as zeros,
-    /// and returns those ranges relative to `offset`, in order. A short
-    /// device is still an error: bytes past its end are not unreadable
-    /// sectors, they are not there. The default is a plain read: a
-    /// source that cannot fail per sector has nothing to salvage.
+    /// What this source is: an image, or the medium itself (SPEC N-10).
+    /// The default is an image, which is what every in-memory source is.
+    fn kind(&self) -> Kind {
+        Kind::Image
+    }
+
+    /// Fill `buf` from `offset`, keeping what can be kept of a request
+    /// that is refused (SPEC F-33). On an image with its imager's map
+    /// the map refuses ranges before they are read, so the request is
+    /// read again in pieces and then by sector around them, each
+    /// refused sector left as zeros and returned as a range relative to
+    /// `offset`, in order. On a device nothing is read twice: this is
+    /// one read, and its refusal is an incident (N-10). A short source
+    /// is still an error: bytes past its end are not unreadable sectors,
+    /// they are not there. The default is a plain read.
     fn read_at_salvaging(&self, offset: u64, buf: &mut [u8]) -> io::Result<Vec<(u64, u64)>> {
         self.read_at(offset, buf).map(|()| Vec::new())
     }
@@ -47,31 +58,19 @@ pub const SALVAGE_SECTOR: u64 = 512;
 const SALVAGE_PIECE: u64 = 4096;
 
 /// Read `buf` from `offset` with `read`, and when that fails for a
-/// reason other than the end of the device, again in pieces aligned to
+/// reason other than the end of the source, again in pieces aligned to
 /// [`SALVAGE_PIECE`] and, within a piece that fails, by
 /// [`SALVAGE_SECTOR`]. Sectors that still fail are zeroed and returned
 /// as `(start, len)` relative to `offset`, adjacent ones merged.
 ///
-/// Separate from any device so it can be tested against a read that
-/// fails where it is told to; a real bad sector is not something a test
-/// can make.
+/// For an image whose map refuses ranges (SPEC F-72): the refusals
+/// come from the map, and no medium is asked anything twice. A device
+/// never takes this path (N-10). Separate from any source so it can be
+/// tested against a read that fails where it is told to.
 pub fn salvage(
     read: &mut dyn FnMut(u64, &mut [u8]) -> io::Result<()>,
     offset: u64,
     buf: &mut [u8],
-) -> io::Result<Vec<(u64, u64)>> {
-    salvage_retrying(read, offset, buf, 0)
-}
-
-/// [`salvage`], with each refused sector read again up to `retries`
-/// more times before it is given up (SPEC F-33). A marginal sector on a
-/// live disk reads on the third try and not on the first; an image
-/// file never does, and pays nothing for the allowance.
-pub fn salvage_retrying(
-    read: &mut dyn FnMut(u64, &mut [u8]) -> io::Result<()>,
-    offset: u64,
-    buf: &mut [u8],
-    retries: u32,
 ) -> io::Result<Vec<(u64, u64)>> {
     match read(offset, buf) {
         Ok(()) => return Ok(Vec::new()),
@@ -99,20 +98,13 @@ pub fn salvage_retrying(
                 while s < piece_end {
                     let sector_end = next_edge(s, SALVAGE_SECTOR).min(piece_end);
                     let sector = &mut buf[s as usize..sector_end as usize];
-                    let mut refused = false;
-                    for _ in 0..=retries {
-                        match read(offset + s, sector) {
-                            Ok(()) => {
-                                refused = false;
-                                break;
-                            }
-                            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Err(e),
-                            Err(_) => refused = true,
+                    match read(offset + s, sector) {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Err(e),
+                        Err(_) => {
+                            sector.fill(0);
+                            note(s, sector_end - s);
                         }
-                    }
-                    if refused {
-                        sector.fill(0);
-                        note(s, sector_end - s);
                     }
                     s = sector_end;
                 }
@@ -256,13 +248,28 @@ pub struct FileSource {
     path: PathBuf,
     file: File,
     size: u64,
-    /// Refused sectors are read again this many more times (SPEC F-33).
-    retries: u32,
+    /// An image, or the medium itself (SPEC N-10).
+    kind: Kind,
+    /// Where a device's refusals are recorded and judged. Every source
+    /// of a run shares one; a device opened without one gets its own,
+    /// which stops at the first incident.
+    ledger: Arc<Ledger>,
     /// What the imager could not read of this image (SPEC F-72).
     map: Option<ddrescue::Map>,
+    /// The last few reads, kept so that a read inside one of them is
+    /// answered from memory and no address is asked of a device twice
+    /// (SPEC N-10): the labels are read whole first, and the partition
+    /// table, the GEOM sector and the rest of a scan's probes lie
+    /// inside them. Bounded: [`Self::WINDOWS`] entries of at most
+    /// [`Self::WINDOW_MAX`] bytes each.
+    windows: Mutex<std::collections::VecDeque<(u64, Arc<[u8]>)>>,
 }
 
 impl FileSource {
+    /// How many recent reads are kept.
+    const WINDOWS: usize = 8;
+    /// The largest read kept: a label, and a little more.
+    const WINDOW_MAX: usize = 512 << 10;
     /// Open `path` read-only and determine its size.
     ///
     /// Block devices report a zero length from `metadata()`, so the size is
@@ -270,7 +277,14 @@ impl FileSource {
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
         let file = OpenOptions::new().read(true).write(false).open(&path)?;
-        let mut size = file.metadata()?.len();
+        let meta = file.metadata()?;
+        let ft = meta.file_type();
+        let kind = if ft.is_block_device() || ft.is_char_device() {
+            Kind::Device
+        } else {
+            Kind::Image
+        };
+        let mut size = meta.len();
         if size == 0 {
             size = (&file).seek(SeekFrom::End(0))?;
         }
@@ -278,9 +292,37 @@ impl FileSource {
             path,
             file,
             size,
-            retries: 0,
+            kind,
+            ledger: Arc::new(Ledger::stop_at_first()),
             map: None,
+            windows: Mutex::new(std::collections::VecDeque::new()),
         })
+    }
+
+    /// Serve `buf` from a recent read that covers it, if one does.
+    fn served_from_windows(&self, offset: u64, buf: &mut [u8]) -> bool {
+        let windows = self.windows.lock().unwrap_or_else(|p| p.into_inner());
+        let end = offset + buf.len() as u64;
+        for (start, bytes) in windows.iter() {
+            if *start <= offset && end <= *start + bytes.len() as u64 {
+                let from = (offset - start) as usize;
+                buf.copy_from_slice(&bytes[from..from + buf.len()]);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Remember a read, dropping the oldest past [`Self::WINDOWS`].
+    fn remember(&self, offset: u64, buf: &[u8]) {
+        if buf.len() > Self::WINDOW_MAX {
+            return;
+        }
+        let mut windows = self.windows.lock().unwrap_or_else(|p| p.into_inner());
+        if windows.len() >= Self::WINDOWS {
+            windows.pop_front();
+        }
+        windows.push_back((offset, Arc::from(buf)));
     }
 
     /// The path this source was opened from.
@@ -288,11 +330,16 @@ impl FileSource {
         &self.path
     }
 
-    /// Read a refused sector again up to `n` more times before giving
-    /// it up (SPEC F-33).
-    pub fn with_retries(mut self, n: u32) -> Self {
-        self.retries = n;
+    /// Record this source's refusals in `ledger`, the run's, whose
+    /// policy decides whether one stops the run (SPEC N-10).
+    pub fn with_ledger(mut self, ledger: Arc<Ledger>) -> Self {
+        self.ledger = ledger;
         self
+    }
+
+    /// The ledger this source's refusals go to.
+    pub fn ledger(&self) -> &Arc<Ledger> {
+        &self.ledger
     }
 
     /// Refuse, before reading, every sector the imager's map says the
@@ -313,11 +360,36 @@ impl FileSource {
     fn imager_refused() -> io::Error {
         io::Error::other("sector(s) the imager could not read (ddrescue map)")
     }
+
+    /// One read of the file. On a device a refusal — anything but the
+    /// end of the device — is an incident: recorded, judged, and
+    /// returned as the error the reader acts on (SPEC N-10, F-33).
+    fn read_once(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        if self.served_from_windows(offset, buf) {
+            return Ok(());
+        }
+        match self.file.read_exact_at(buf, offset) {
+            Ok(()) => {
+                self.remember(offset, buf);
+                Ok(())
+            }
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Err(e),
+            Err(e) if self.kind == Kind::Device => {
+                let incident = self.ledger.record(&self.path, offset, buf.len() as u64, &e);
+                Err(medium::error_for(incident))
+            }
+            Err(e) => Err(e),
+        }
+    }
 }
 
 impl BlockSource for FileSource {
     fn size(&self) -> u64 {
         self.size
+    }
+
+    fn kind(&self) -> Kind {
+        self.kind
     }
 
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
@@ -326,13 +398,17 @@ impl BlockSource for FileSource {
                 return Err(Self::imager_refused());
             }
         }
-        self.file.read_exact_at(buf, offset)
+        self.read_once(offset, buf)
     }
 
     fn read_at_salvaging(&self, offset: u64, buf: &mut [u8]) -> io::Result<Vec<(u64, u64)>> {
-        // The imager's map first: what it could not read is not read
-        // again here, it is zeroed and named. Then the disk's own
-        // refusals, for what the map does not cover.
+        // A device is read once; its refusal is an incident, not a
+        // range to read around (N-10). An image is read around what its
+        // imager's map refuses: those bytes are zeroed and named, never
+        // read.
+        if self.kind == Kind::Device {
+            return self.read_at(offset, buf).map(|()| Vec::new());
+        }
         let map = self.map.as_ref();
         let mut read = |o: u64, b: &mut [u8]| {
             if map.is_some_and(|m| m.touches(o, b.len() as u64)) {
@@ -340,25 +416,55 @@ impl BlockSource for FileSource {
             }
             self.file.read_exact_at(b, o)
         };
-        salvage_retrying(&mut read, offset, buf, self.retries)
+        salvage(&mut read, offset, buf)
     }
 }
 
 /// A source that refuses every read touching the ranges it was given,
-/// as a disk with bad sectors does, and salvages around them the way a
-/// [`FileSource`] would. For tests: a real bad sector is not something
-/// a test can make, and this is the next best thing.
-#[derive(Debug, Clone)]
+/// as a disk with bad sectors does. As an image (the default) it
+/// salvages around them the way a mapped [`FileSource`] would; as a
+/// device ([`Self::as_device`]) each refusal is an incident in the
+/// ledger and nothing is read twice, the way a real device is treated.
+/// For tests: a real bad sector is not something a test can make, and
+/// this is the next best thing. Every read is counted, so a test can
+/// prove that an address was asked for once.
+#[derive(Debug)]
 pub struct FlakySource<S> {
     inner: S,
     bad: Vec<(u64, u64)>,
+    device: Option<(PathBuf, Arc<Ledger>)>,
+    reads: Mutex<Vec<(u64, u64)>>,
 }
 
 impl<S: BlockSource> FlakySource<S> {
     /// Wrap `inner`; reads touching any `(offset, len)` in `bad` fail
     /// with `EIO`.
     pub fn new(inner: S, bad: Vec<(u64, u64)>) -> Self {
-        FlakySource { inner, bad }
+        FlakySource {
+            inner,
+            bad,
+            device: None,
+            reads: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Behave as a device named `path` whose refusals go to `ledger`.
+    pub fn as_device(mut self, path: impl AsRef<Path>, ledger: Arc<Ledger>) -> Self {
+        self.device = Some((path.as_ref().to_path_buf(), ledger));
+        self
+    }
+
+    /// Every read asked of this source so far, as `(offset, len)`.
+    pub fn reads(&self) -> Vec<(u64, u64)> {
+        self.reads.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// How many reads touched `offset`.
+    pub fn reads_touching(&self, offset: u64) -> usize {
+        self.reads()
+            .iter()
+            .filter(|&&(o, l)| o <= offset && offset < o + l)
+            .count()
     }
 }
 
@@ -367,15 +473,36 @@ impl<S: BlockSource> BlockSource for FlakySource<S> {
         self.inner.size()
     }
 
+    fn kind(&self) -> Kind {
+        if self.device.is_some() {
+            Kind::Device
+        } else {
+            Kind::Image
+        }
+    }
+
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        self.reads
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push((offset, buf.len() as u64));
         let end = offset + buf.len() as u64;
         if self.bad.iter().any(|&(s, l)| s < end && offset < s + l) {
-            return Err(io::Error::from_raw_os_error(5)); // EIO
+            let eio = io::Error::from_raw_os_error(5);
+            return Err(match &self.device {
+                Some((path, ledger)) => {
+                    medium::error_for(ledger.record(path, offset, buf.len() as u64, &eio))
+                }
+                None => eio,
+            });
         }
         self.inner.read_at(offset, buf)
     }
 
     fn read_at_salvaging(&self, offset: u64, buf: &mut [u8]) -> io::Result<Vec<(u64, u64)>> {
+        if self.device.is_some() {
+            return self.read_at(offset, buf).map(|()| Vec::new());
+        }
         salvage(&mut |o, b| self.read_at(o, b), offset, buf)
     }
 }
@@ -470,7 +597,7 @@ mod tests {
     /// The retry reads in physical-sector pieces first, and only a piece
     /// that fails is read sector by sector.
     #[test]
-    fn salvage_retries_by_piece_then_by_sector() {
+    fn salvage_reads_by_piece_then_by_sector() {
         let mut reads: Vec<(u64, usize)> = Vec::new();
         let mut buf = vec![0u8; 8192];
         let bad = salvage(
@@ -499,33 +626,113 @@ mod tests {
         assert_eq!(buf.iter().filter(|&&b| b == 0).count(), 512);
     }
 
-    /// A sector that gives on the third try is read with two retries
-    /// and lost with one.
+    /// A device is asked once. Its refusal is an incident in the ledger
+    /// that stops the run, the error carries it, and the salvaging read
+    /// — the path a mapped image takes in pieces — is one read too.
     #[test]
-    fn a_retry_allowance_is_spent_per_sector() {
-        let attempt = |retries: u32| {
-            let mut failures_left = 2;
-            let mut buf = vec![0u8; 4096];
-            salvage_retrying(
-                &mut |o, b| {
-                    if o < 1024 && o + b.len() as u64 > 512 && failures_left > 0 {
-                        // Anything touching sector 512..1024 fails twice.
-                        if b.len() == 512 {
-                            failures_left -= 1;
-                        }
-                        return Err(io::Error::from_raw_os_error(5));
-                    }
-                    b.fill(7);
-                    Ok(())
-                },
-                0,
-                &mut buf,
-                retries,
-            )
-            .unwrap()
-        };
-        assert_eq!(attempt(1), vec![(512, 512)]);
-        assert_eq!(attempt(2), Vec::<(u64, u64)>::new());
+    fn a_device_is_asked_once_and_its_refusal_is_an_incident() {
+        let disk: Vec<u8> = (0..16384u32).map(|i| (i % 251) as u8).collect();
+        let ledger = Arc::new(Ledger::stop_at_first());
+        let dev = FlakySource::new(MemSource::new(disk), vec![(9000, 100)])
+            .as_device("/dev/da9", ledger.clone());
+        assert_eq!(dev.kind(), Kind::Device);
+        let mut buf = vec![0u8; 8192];
+        let e = dev.read_at_salvaging(4096, &mut buf).unwrap_err();
+        let i = medium::incident_of(&e).expect("a medium incident");
+        assert_eq!((i.offset, i.len, i.stopped), (4096, 8192, true));
+        assert_eq!(i.path, Path::new("/dev/da9"));
+        assert_eq!(
+            dev.reads(),
+            vec![(4096, 8192)],
+            "one read, no pieces, no sectors"
+        );
+        assert_eq!(ledger.incidents().len(), 1);
+        assert!(ledger.stopped().is_some());
+        // A clean read is a clean read.
+        assert!(dev.read_at_salvaging(0, &mut buf).unwrap().is_empty());
+        assert_eq!(dev.reads().len(), 2);
+    }
+
+    /// With `--device-may-fail` the refusal is skipped — the incident is
+    /// recorded and not a stop — and the device is still asked once.
+    #[test]
+    fn a_device_that_may_fail_is_still_asked_once() {
+        let ledger = Arc::new(Ledger::may_fail());
+        let dev = FlakySource::new(MemSource::new(vec![1u8; 8192]), vec![(512, 512)])
+            .as_device("/dev/sdz", ledger.clone());
+        let mut buf = vec![0u8; 4096];
+        let e = dev.read_at_salvaging(0, &mut buf).unwrap_err();
+        assert!(!medium::incident_of(&e).unwrap().stopped);
+        assert_eq!(dev.reads().len(), 1);
+        assert!(ledger.stopped().is_none());
+    }
+
+    /// A read inside a recent read is served from that read: after the
+    /// first 256 KiB are read whole, the first sector, the second and a
+    /// 32 KiB run at 1 KiB are all answered without asking the file, and
+    /// answered right. Only a bounded number of recent reads are kept.
+    #[test]
+    fn a_read_inside_a_recent_read_asks_nothing_more() {
+        let dir = std::env::temp_dir().join(format!("zvolrescue-io-win-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = dir.join("member.img");
+        let data: Vec<u8> = (0..(1u32 << 20)).map(|i| (i % 253) as u8).collect();
+        std::fs::write(&img, &data).unwrap();
+        let f = FileSource::open(&img).unwrap();
+        let mut label = vec![0u8; 256 << 10];
+        f.read_at(0, &mut label).unwrap();
+        assert_eq!(f.windows.lock().unwrap().len(), 1);
+        for (at, len) in [(0u64, 512usize), (512, 512), (1024, 32768), (4096, 4096)] {
+            let mut b = vec![0u8; len];
+            assert!(
+                f.served_from_windows(at, &mut b),
+                "{at}+{len} lies inside the label read"
+            );
+            assert_eq!(&b[..], &data[at as usize..at as usize + len]);
+            f.read_at(at, &mut b).unwrap();
+            assert_eq!(&b[..], &data[at as usize..at as usize + len]);
+        }
+        assert_eq!(
+            f.windows.lock().unwrap().len(),
+            1,
+            "served reads are not remembered again"
+        );
+        // Past the label: a fresh read, remembered; the queue is bounded.
+        for i in 0..(FileSource::WINDOWS as u64 + 4) {
+            let mut b = vec![0u8; 4096];
+            f.read_at((512 << 10) + i * 4096, &mut b).unwrap();
+        }
+        assert_eq!(f.windows.lock().unwrap().len(), FileSource::WINDOWS);
+        let mut b = vec![0u8; 4096];
+        assert!(
+            !f.served_from_windows(0, &mut b),
+            "the label read was dropped for newer ones"
+        );
+        // Too large to keep.
+        let mut big = vec![0u8; FileSource::WINDOW_MAX + 1];
+        f.read_at(0, &mut big).unwrap();
+        assert!(!f.served_from_windows(0, &mut b));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A regular file opened by path is an image, whatever it holds;
+    /// a character device is a device.
+    #[test]
+    fn what_was_opened_is_known() {
+        let dir = std::env::temp_dir().join(format!("zvolrescue-io-kind-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = dir.join("member.img");
+        std::fs::write(&img, vec![0u8; 4096]).unwrap();
+        let f = FileSource::open(&img).unwrap();
+        assert_eq!(f.kind(), Kind::Image);
+        let _ = std::fs::remove_dir_all(&dir);
+        if let Ok(null) = FileSource::open("/dev/null") {
+            assert_eq!(null.kind(), Kind::Device);
+            // Reading past the end of a device is the end, not an incident.
+            let mut b = [0u8; 16];
+            assert!(null.read_at(0, &mut b).is_err());
+            assert!(null.ledger().incidents().is_empty());
+        }
     }
 
     /// The map `ddrescue` writes, in its own format: the unfinished

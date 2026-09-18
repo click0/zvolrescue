@@ -164,3 +164,27 @@ fn a_carved_volume_is_hashed_in_the_same_pass_and_only_when_asked() {
     assert_eq!(code, 1);
     assert!(err.contains("--hash: unknown digest \"crc32\""), "{err}");
 }
+
+/// Carving is a surface scan, and a block device is refused one
+/// before it is even opened (SPEC N-10): exit 5 and the reason.
+#[test]
+fn a_block_device_is_not_carved_without_leave() {
+    if !std::path::Path::new("/dev/null").exists() {
+        return;
+    }
+    let (code, _out, err) = run(&["scan", "/dev/null", "-o", "/nonexistent/carve"]);
+    assert_eq!(code, 5, "{err}");
+    assert!(
+        err.contains("a block device is not scanned (SPEC N-10)"),
+        "{err}"
+    );
+    assert!(err.contains("--surface-scan-on-device"), "{err}");
+    let (code, _out, err) = run(&[
+        "scan",
+        "/dev/null",
+        "-o",
+        "/nonexistent/carve",
+        "--surface-scan-on-device",
+    ]);
+    assert_ne!(code, 5, "{err}");
+}

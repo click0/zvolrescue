@@ -44,6 +44,10 @@ pub struct Search {
     pub psize_hints: Vec<u64>,
     /// Stop once this many anchors have been confirmed. 0 means no limit.
     pub max_anchors: usize,
+    /// Search the surface of a block device (SPEC N-10). Off, a device
+    /// is refused: the search is what a disk with defects survives
+    /// least, and belongs on an image of it.
+    pub surface_scan_on_device: bool,
 }
 
 impl Default for Search {
@@ -53,8 +57,21 @@ impl Default for Search {
             stride: 512,
             psize_hints: Vec::new(),
             max_anchors: 0,
+            surface_scan_on_device: false,
         }
     }
+}
+
+/// The refusal a surface search of a block device fails with (SPEC N-10).
+pub fn surface_scan_refused(dev: &dyn BlockSource) -> Option<io::Error> {
+    (dev.kind() == zvolrescue_io::medium::Kind::Device).then(|| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "a block device is not searched (SPEC N-10): a surface scan is what a disk \
+             with defects survives least. Image the disk with a tool for failing media \
+             and search the image; --surface-scan-on-device overrides",
+        )
+    })
 }
 
 impl Search {
@@ -118,6 +135,11 @@ impl ZeroPoint {
 /// SHA-256 — so a lone result is not a weak one, but a whole ring pointing
 /// at the same base is what an intact front label looks like.
 pub fn find(dev: &dyn BlockSource, opts: &Search) -> io::Result<Vec<ZeroPoint>> {
+    if !opts.surface_scan_on_device {
+        if let Some(refused) = surface_scan_refused(dev) {
+            return Err(refused);
+        }
+    }
     let size = dev.size();
     let mut by_base: BTreeMap<u64, Vec<Anchor>> = BTreeMap::new();
     let psize_hints = opts.psize_hints_for(size);
@@ -300,6 +322,18 @@ pub fn partition_table(dev: &dyn BlockSource) -> io::Result<Option<PartitionTabl
 /// the wrong base looks like, and a base is only ever accepted when a
 /// checksum confirms it. The returned scan carries the base it used.
 pub fn scan_with_recovered_base(dev: &dyn BlockSource) -> io::Result<crate::vdev::DeviceScan> {
+    scan_with_recovered_base_opts(dev, false)
+}
+
+/// [`scan_with_recovered_base`], with the anchor search allowed on a
+/// block device when `surface_scan_on_device` says so (SPEC N-10). The
+/// labels, the partition table and the GEOM sector are read either way:
+/// those are a handful of fixed places, read once. Only the search of
+/// the surface is withheld, and the scan says so.
+pub fn scan_with_recovered_base_opts(
+    dev: &dyn BlockSource,
+    surface_scan_on_device: bool,
+) -> io::Result<crate::vdev::DeviceScan> {
     let scan = crate::vdev::scan_device(dev)?;
     // A GEOM class in the last sector means ZFS was given a provider one
     // sector shorter than this, and its rear labels sit against *that*
@@ -310,7 +344,12 @@ pub fn scan_with_recovered_base(dev: &dyn BlockSource) -> io::Result<crate::vdev
     // for a class that does not record it — and keep the reading that
     // verifies more labels. On a disk no GEOM class touched the sector
     // is data or zeros and this is a no-op.
-    if let Some(meta) = geom_metadata(dev, dev.size())? {
+    let meta = match &scan.last_sector {
+        // Already read, inside the last label: not read again (N-10).
+        Some(sector) => geom::parse(sector),
+        None => geom_metadata(dev, dev.size())?,
+    };
+    if let Some(meta) = meta {
         let provsize = meta
             .inner_size()
             .filter(|&p| p < dev.size())
@@ -362,7 +401,22 @@ pub fn scan_with_recovered_base(dev: &dyn BlockSource) -> io::Result<crate::vdev
             }
         }
     }
-    let found = find(dev, &Search::default())?;
+    if !surface_scan_on_device && surface_scan_refused(dev).is_some() {
+        trace!(
+            "zeropoint",
+            "labels do not verify and this is a block device: not searched for anchors (N-10)"
+        );
+        let mut scan = scan;
+        scan.surface_scan_refused = true;
+        return Ok(scan);
+    }
+    let found = find(
+        dev,
+        &Search {
+            surface_scan_on_device,
+            ..Search::default()
+        },
+    )?;
     let Some(zero) = found.first() else {
         return Ok(scan);
     };
@@ -461,6 +515,8 @@ fn scan_from_anchors(dev: &dyn BlockSource, zero: &ZeroPoint) -> crate::vdev::De
         base_source: Some("uberblock checksum"),
         labels,
         best_label: None,
+        surface_scan_refused: false,
+        last_sector: None,
     }
 }
 

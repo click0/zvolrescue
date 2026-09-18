@@ -88,6 +88,25 @@ fn byte_range(s: &str) -> Result<(u64, u64), String> {
 }
 
 pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
+    // A surface scan is what a disk with defects survives least: a
+    // block device is refused unless the operator allowed it (SPEC
+    // N-10) — before it is opened, so not even its labels are read.
+    if !spec.surface_scan_on_device {
+        if let Some(dev) = spec
+            .members()
+            .ok()
+            .into_iter()
+            .flatten()
+            .find(|p| zvol_common::evidence::Kind::of(p).is_device())
+        {
+            eprintln!(
+                "zvolcarve: {}: a block device is not scanned (SPEC N-10): a surface scan is what a disk with defects survives least. \
+                 Image it with a tool for failing media and scan the image; --surface-scan-on-device overrides.",
+                dev.display()
+            );
+            return exit::REFUSED;
+        }
+    }
     let members = match open_members(spec) {
         Ok(m) => m,
         Err(code) => return code,
@@ -210,11 +229,13 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         Format::Json => print!("{json}"),
         Format::Text => print(&doc),
     }
-    if doc.members.iter().all(|m| m.bases.is_empty()) {
+    let code = if doc.members.iter().all(|m| m.bases.is_empty()) {
         exit::UNRECOVERABLE
     } else {
         0
-    }
+    };
+    // A device refused a read (SPEC F-33, N-10): said, and the exit code.
+    zvol_common::report_medium(&members.ledger).unwrap_or(code)
 }
 
 fn print(doc: &ZeroPointOut) {

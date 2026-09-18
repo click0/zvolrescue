@@ -13,6 +13,55 @@ development milestone that names what changed when — the sections below
 are their record — and ships inside the next version that does get
 tagged. `v0.7.1` is the release that carries those six.
 
+## Unreleased
+
+### Changed
+* **This tool reads healthy media (SPEC N-10, F-33 rewritten).** A
+  data-recovery practitioner's reading of v0.9.0: re-reading a sector a
+  live disk refused — in pieces, then sector by sector, then again with
+  `--retries` — is what a failing disk survives least, and a surface
+  scan of one is worse. Physical and logical recovery are separate
+  trades: a disk with defects is imaged first, by a tool that knows the
+  kind of defect and when to stop, and the metadata is parsed from the
+  image. So: on a **device**, the first read it refuses stops the run
+  with a new exit code `7`. The incident — device, byte offset and LBA,
+  length, `errno`, time, and which volume and block — is on stderr, in
+  the JSON (`stopped_by_medium`) and in the evidence record
+  (`incidents`), and the message says what to do next: image the disk
+  with a map and continue on the image with `--map` and `--resume`.
+  Nothing is read twice: no retry, no pieces, no sectors, and not the
+  other side of a mirror either — the operator is told first and
+  decides. `--retries` is gone. `--device-may-fail` is the one way past
+  the first incident: the refused range is skipped once — the mirror
+  heals it if it can, else zeros with the incident as the reason — and
+  the run stops anyway after eight. On an **image with its map** (F-72)
+  nothing changes: the map refuses ranges before they are read, and a
+  bad sector still costs only its sector. Checked in CI on a real block
+  device: a mirror member on a loop device with eight sectors mapped to
+  device-mapper's `error` target stops the run with exit 7 and the LBA;
+  with `--device-may-fail` the mirror heals the block and `strace` shows
+  no address on the device read twice; on FreeBSD, `gnop -e 5` makes
+  the first label read the incident.
+
+* **No address on a device is read twice, anywhere (SPEC N-10).** The
+  metadata walk used to come back to the same MOS blocks over and over
+  — one block nineteen times in a small dump — and a scan read each
+  label twice, then its first and last sectors again for the partition
+  table and the GEOM check. The reader now keeps the metadata blocks it
+  has read (bounded: small blocks only, dropped whole past 64 MiB), each
+  label is read once, and a source answers any read that lies inside a
+  recent read from memory. A scan of a device is four reads, one per
+  label; a dump of a two-block volume off a mirror member is sixteen,
+  none overlapping.
+
+* **Surface scans refuse a block device (SPEC N-10).** The search for
+  uberblock anchors when a member's labels are gone (F-61), the root
+  search when no uberblock survives (F-64), pointer self-consistency
+  (F-63) and carving (`zvolcarve scan`) answer a block device with exit
+  `5` and the reason, unless `--surface-scan-on-device` is given. `scan`
+  reports it as `zero point: not searched` (JSON `surface_scan_refused`)
+  and exits 5 too. Image the disk, and search the image.
+
 ## v0.9.0 — 2026-09-18
 
 **Checked, fuzzed, interpreted, signed.**

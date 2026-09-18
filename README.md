@@ -34,6 +34,27 @@ unsatisfying:
 `zvolrescue` is meant to be the tool you can run on a rescue system, on
 read-only evidence, and defend the result of in a report.
 
+## Before you start: the disk, or an image of it?
+
+`zvolrescue` reads **healthy media**: image files, clones, or disks that
+read cleanly (SPEC N-10). It is not an imager, and it does not work on a
+failing disk. Physical and logical recovery are separate trades: a disk
+with defects — bad sectors, a degrading head, an SSD with holes in its
+translation — is imaged first, by a tool built for that, one that knows
+the kind of defect and when to stop (`ddrescue` with a mapfile for the
+simple case; PC-3000 with Data Extractor, or HDDSuperClone, where the
+defect has to be understood first). Then this tool works on the image
+and its map (`--map IMAGE=MAPFILE`, SPEC F-72).
+
+On a device, the tool reads sequentially, asks for no address twice, and
+never searches the surface. The first read a device refuses stops the run
+with exit code 7: the incident — the device, the byte offset and LBA, the
+length, the error, the time — is on stderr and in the evidence record,
+and the message says what to do next. Nothing is retried. `--device-may-fail`
+is the one way past that stop, for the operator who has weighed it and
+needs one small object off a disk that cannot be imaged: each refused
+range is skipped once, and the run stops anyway after eight incidents.
+
 ## One atomic utility
 
 `zvolrescue` does one job: turn ZFS on-disk structures into a plain image

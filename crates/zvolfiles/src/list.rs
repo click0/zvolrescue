@@ -135,9 +135,10 @@ pub fn run(
             },
             unreadable,
             opened.members.paths.clone(),
+            opened.members.ledger.clone(),
         ))
     });
-    let (out, unreadable, paths) = match result {
+    let (out, unreadable, paths, ledger) = match result {
         Ok(v) => v,
         Err(code) => return code,
     };
@@ -180,5 +181,15 @@ pub fn run(
         }
     }
     let code = if unreadable > 0 { exit::PARTIAL } else { 0 };
-    g.log_evidence("zvolfiles", &json, code, &paths, Vec::new())
+    // A device refused a read: every incident on stderr, and the stop —
+    // when one stopped the run — as the exit code (SPEC F-33, N-10).
+    let code = zvol_common::report_medium(&ledger).unwrap_or(code);
+    g.log_evidence_with_incidents(
+        "zvolfiles",
+        &json,
+        code,
+        &paths,
+        Vec::new(),
+        &ledger.incidents(),
+    )
 }

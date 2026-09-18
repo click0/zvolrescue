@@ -183,5 +183,15 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         report.sha1.as_deref(),
         report.md5.as_deref(),
     )];
-    g.log_evidence("zvolcarve", &out, code, &members.paths, written)
+    // A device refused a read: every incident on stderr, and the stop —
+    // when one stopped the run — as the exit code (SPEC F-33, N-10).
+    let code = zvol_common::report_medium(&members.ledger).unwrap_or(code);
+    g.log_evidence_with_incidents(
+        "zvolcarve",
+        &out,
+        code,
+        &members.paths,
+        written,
+        &members.ledger.incidents(),
+    )
 }

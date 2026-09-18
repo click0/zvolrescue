@@ -12,8 +12,10 @@ pub mod members;
 pub mod timefmt;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use clap::{Args, ValueEnum};
+use zvolrescue_io::medium::{Incident, Ledger};
 use zvolrescue_io::{ddrescue, FileSource};
 
 /// Exit codes from SPEC §7.
@@ -34,6 +36,11 @@ pub mod exit {
     /// A long scan was interrupted and left a resumable state file
     /// (COMPANIONS §1.2).
     pub const INTERRUPTED: u8 = 6;
+    /// The medium refused a read: a device, not an image, returned an
+    /// I/O error and the run stopped there (SPEC F-33, N-10). The
+    /// incident is on stderr and in the evidence record; the disk is
+    /// for an imager now.
+    pub const MEDIUM: u8 = 7;
     /// Command exists in the spec but is not implemented in this build.
     pub const NOT_IMPLEMENTED: u8 = 64;
 
@@ -266,12 +273,27 @@ impl Global {
         inputs: &[PathBuf],
         outputs: Vec<evidence::FileRef>,
     ) -> u8 {
+        self.log_evidence_with_incidents(tool, result, status, inputs, outputs, &[])
+    }
+
+    /// [`log_evidence`](Self::log_evidence), with the device reads the
+    /// run had refused on the record (SPEC F-33, N-10).
+    pub fn log_evidence_with_incidents(
+        &self,
+        tool: &str,
+        result: &serde_json::Value,
+        status: u8,
+        inputs: &[PathBuf],
+        outputs: Vec<evidence::FileRef>,
+        incidents: &[Incident],
+    ) -> u8 {
         let Some(log) = &self.evidence_log else {
             return status;
         };
         let rec = evidence::Record::new(tool, result, status)
             .with_inputs(inputs, self.hash_inputs)
-            .with_outputs(outputs);
+            .with_outputs(outputs)
+            .with_incidents(incidents);
         if let Err(e) = evidence::append(log, &rec) {
             eprintln!("{tool}: cannot write evidence log {}: {e}", log.display());
             return exit::USAGE;
@@ -341,25 +363,54 @@ pub struct PoolSpec {
     /// rest is zeros with the reason — not a checksum failure with none.
     #[arg(long, value_name = "MEMBER=MAPFILE")]
     pub map: Vec<String>,
-    /// Read a sector the device refuses this many more times before it
-    /// is given up as zeros (SPEC F-33). Costs nothing on an image file.
-    #[arg(long, value_name = "N", default_value_t = 1)]
-    pub retries: u32,
+    /// Go on after a device refuses a read (SPEC F-33, N-10). Without
+    /// this the first refused read on a device stops the run with exit
+    /// 7, and the disk is for an imager. With it the refused range is
+    /// skipped once — zeros, the reason logged, nothing read twice — and
+    /// the run stops anyway after 8 incidents. For the operator who has
+    /// weighed it and needs one small object off a disk that cannot be
+    /// imaged.
+    #[arg(long)]
+    pub device_may_fail: bool,
+    /// Search the surface of a block device — for uberblock anchors when
+    /// its labels are gone, for a root when no uberblock survives, for
+    /// carving (SPEC N-10). Refused without this: a surface scan is what
+    /// a disk with defects survives least. Image the disk first, and
+    /// scan the image.
+    #[arg(long)]
+    pub surface_scan_on_device: bool,
 }
 
-/// How members are opened: what to retry and what an imager's map says
-/// of them (SPEC F-33, F-72).
-#[derive(Debug, Clone, Default)]
+/// How members are opened: what a device's refusal does, whether its
+/// surface may be searched, and what an imager's map says of an image
+/// (SPEC N-10, F-33, F-72).
+#[derive(Debug, Clone)]
 pub struct OpenOpts {
-    /// Retries per refused sector.
-    pub retries: u32,
+    /// The run's ledger of refused device reads, shared by every member.
+    pub ledger: Arc<Ledger>,
+    /// `--surface-scan-on-device`.
+    pub surface_scan_on_device: bool,
     /// `(member, mapfile)` pairs.
     pub maps: Vec<(PathBuf, PathBuf)>,
 }
 
+impl Default for OpenOpts {
+    fn default() -> Self {
+        OpenOpts {
+            ledger: Arc::new(Ledger::stop_at_first()),
+            surface_scan_on_device: false,
+            maps: Vec::new(),
+        }
+    }
+}
+
 impl OpenOpts {
-    /// Parse `MEMBER=MAPFILE` specs.
-    pub fn parse(retries: u32, maps: &[String]) -> Result<OpenOpts, String> {
+    /// Parse `MEMBER=MAPFILE` specs and set the medium policy.
+    pub fn parse(
+        device_may_fail: bool,
+        surface_scan_on_device: bool,
+        maps: &[String],
+    ) -> Result<OpenOpts, String> {
         let maps = maps
             .iter()
             .map(|spec| match spec.split_once('=') {
@@ -369,7 +420,16 @@ impl OpenOpts {
                 _ => Err(format!("--map {spec}: want MEMBER=MAPFILE")),
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(OpenOpts { retries, maps })
+        let ledger = Arc::new(if device_may_fail {
+            Ledger::may_fail()
+        } else {
+            Ledger::stop_at_first()
+        });
+        Ok(OpenOpts {
+            ledger,
+            surface_scan_on_device,
+            maps,
+        })
     }
 
     /// The mapfiles, for the evidence record: they are inputs too.
@@ -377,10 +437,10 @@ impl OpenOpts {
         self.maps.iter().map(|(_, f)| f.clone()).collect()
     }
 
-    /// Open `path` read-only with the retries and, when one was named
-    /// for it, its imager's map.
+    /// Open `path` read-only on the run's ledger and, when one was named
+    /// for it, with its imager's map.
     pub fn open(&self, path: &Path) -> std::io::Result<FileSource> {
-        let mut src = FileSource::open(path)?.with_retries(self.retries);
+        let mut src = FileSource::open(path)?.with_ledger(self.ledger.clone());
         if let Some((_, file)) = self.maps.iter().find(|(m, _)| m == path) {
             let text = std::fs::read_to_string(file)
                 .map_err(|e| std::io::Error::other(format!("--map {}: {e}", file.display())))?;
@@ -395,7 +455,7 @@ impl OpenOpts {
 impl PoolSpec {
     /// How the members are to be opened.
     pub fn open_opts(&self) -> Result<OpenOpts, String> {
-        OpenOpts::parse(self.retries, &self.map)
+        OpenOpts::parse(self.device_may_fail, self.surface_scan_on_device, &self.map)
     }
 
     /// All members in command-line order, or a usage error when none were given.
@@ -533,4 +593,55 @@ mod tests {
         let s = spec(&["/dev/sda1", "--assume-member", "/dev/sdb1=abc"]);
         assert_eq!(s.assumed().unwrap(), [("/dev/sdb1".into(), Some(0xabc))]);
     }
+}
+
+/// Say what the medium did, and what to do about it (SPEC F-33, N-10):
+/// every incident of the run on stderr, and the stop — when one
+/// stopped the run — with the way forward. Returns [`exit::MEDIUM`]
+/// when the run was stopped, else `None`.
+pub fn report_medium(ledger: &Ledger) -> Option<u8> {
+    let incidents = ledger.incidents();
+    if incidents.is_empty() {
+        return None;
+    }
+    for i in &incidents {
+        eprintln!(
+            "zvolrescue: MEDIUM INCIDENT: {i}{}",
+            if i.stopped {
+                " — stopped here"
+            } else {
+                " — skipped (--device-may-fail)"
+            }
+        );
+    }
+    let stopped = ledger.stopped()?;
+    eprintln!(
+        "zvolrescue: {} refused a read and the run stopped there (SPEC F-33, N-10). \
+         Nothing on it was read twice. This tool reads healthy media; a disk with \
+         defects is for an imager: image it with a tool made for failing media, \
+         with a map (ddrescue -d -r0 with a mapfile for the simple case; PC-3000 \
+         Data Extractor or HDDSuperClone where the defect has to be understood \
+         first), then continue on the image with --map IMAGE=MAPFILE and --resume.",
+        stopped.path.display()
+    );
+    Some(exit::MEDIUM)
+}
+
+/// The incidents of a run as the evidence record carries them.
+pub fn incidents_json(incidents: &[Incident]) -> Vec<serde_json::Value> {
+    incidents
+        .iter()
+        .map(|i| {
+            serde_json::json!({
+                "path": i.path.display().to_string(),
+                "offset": i.offset,
+                "len": i.len,
+                "lba": i.lba(),
+                "sectors": i.sectors(),
+                "error": i.error,
+                "at": i.at,
+                "stopped": i.stopped,
+            })
+        })
+        .collect()
 }

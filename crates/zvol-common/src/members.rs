@@ -15,7 +15,8 @@ use zfs_read::dsl::removed_tops_of;
 use zfs_read::hints::{search_order, LayoutHints};
 use zfs_read::pool::{assemble, PoolAssembly};
 use zfs_read::vdev::DeviceScan;
-use zfs_read::zeropoint::scan_with_recovered_base;
+use zfs_read::zeropoint::scan_with_recovered_base_opts;
+use zvolrescue_io::medium::Ledger;
 use zvolrescue_io::{BlockSource, FileSource};
 
 use crate::{evidence, exit, hints, PoolSpec};
@@ -34,6 +35,9 @@ pub struct Members {
     pub base_offsets: Vec<u64>,
     /// Files read besides the members: the imagers' maps (SPEC F-72).
     pub map_files: Vec<PathBuf>,
+    /// The run's ledger of refused device reads (SPEC F-33, N-10):
+    /// what to report, and whether the run was stopped.
+    pub ledger: std::sync::Arc<Ledger>,
 }
 
 impl Members {
@@ -395,7 +399,14 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
                     m.unreadable().len()
                 );
             }
-            let scan = scan_with_recovered_base(&src)?;
+            let scan = scan_with_recovered_base_opts(&src, open.surface_scan_on_device)?;
+            if scan.surface_scan_refused {
+                eprintln!(
+                    "zvolrescue: {}: labels do not verify, and a block device is not searched for anchors (SPEC N-10) — \
+                     image it and scan the image, or --surface-scan-on-device",
+                    p.display()
+                );
+            }
             if scan.base != 0 {
                 eprintln!(
                     "zvolrescue: {}: vdev starts at byte {} ({})",
@@ -416,6 +427,11 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
                 scans.push(None);
                 sources.push(None);
             }
+        }
+        // A device that refused a label read has stopped the run
+        // already (SPEC F-33, N-10): say so, and go no further.
+        if let Some(code) = crate::report_medium(&open.ledger) {
+            return Err(code);
         }
     }
     if scans.iter().all(|s| s.is_none()) {
@@ -484,6 +500,7 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
         paths,
         base_offsets: bases,
         map_files: open.map_files(),
+        ledger: open.ledger.clone(),
     })
 }
 

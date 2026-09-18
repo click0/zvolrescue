@@ -105,6 +105,15 @@ pub struct DeviceScan {
     /// Index into `labels` of the label to trust: checksum-verified with
     /// the highest `txg`, else the highest `txg` of any parsed config.
     pub best_label: Option<usize>,
+    /// The labels did not verify and the surface was not searched for
+    /// anchors, because this is a block device and the operator did
+    /// not allow it (SPEC N-10): what a label-less member on a device
+    /// looks like without `--surface-scan-on-device`.
+    pub surface_scan_refused: bool,
+    /// The device's last sector, when the last label read covered it —
+    /// a device whose size is a whole number of labels — so that the
+    /// GEOM metadata check (F-71) needs no read of its own (SPEC N-10).
+    pub last_sector: Option<Vec<u8>>,
 }
 
 impl DeviceScan {
@@ -195,24 +204,35 @@ pub fn scan_device_range(dev: &dyn BlockSource, base: u64, psize: u64) -> io::Re
     // whose configuration is gone still has a ring, and it was written
     // with the same slot size as the others. Take it from whichever label
     // still says so before walking any ring.
-    let mut vdev_ashift = None;
-    let mut probe = vec![0u8; VDEV_PHYS_SIZE as usize];
+    // Each label is read once, whole (SPEC N-10: no address twice), and
+    // the probe for the ashift looks inside what was read. Around what
+    // the device — or the imager's map (SPEC F-72) — refuses: a label
+    // with a sector gone parses as far as it goes and verifies or not
+    // on its own; a scan does not stop for it.
+    let mut raw: Vec<Vec<u8>> = Vec::with_capacity(LABELS_PER_VDEV);
     for &offset in offsets.iter() {
-        // Around what the device — or the imager's map (SPEC F-72) —
-        // refuses: a label with a sector gone parses as far as it goes
-        // and verifies or not on its own; a scan does not stop for it.
-        dev.read_at_salvaging(base + offset + VDEV_PHYS_OFFSET, &mut probe)?;
-        if let Ok(c) = parse_vdev_phys(&probe, offset).config {
+        let mut label = vec![0u8; LABEL_SIZE as usize];
+        dev.read_at_salvaging(base + offset, &mut label)?;
+        raw.push(label);
+    }
+    let last_sector = offsets
+        .last()
+        .zip(raw.last())
+        .filter(|(&offset, _)| base + offset + LABEL_SIZE == dev.size())
+        .map(|(_, label)| label[label.len() - 512..].to_vec());
+    let mut vdev_ashift = None;
+    for (&offset, label) in offsets.iter().zip(&raw) {
+        let phys_start = VDEV_PHYS_OFFSET as usize;
+        let probe = &label[phys_start..phys_start + VDEV_PHYS_SIZE as usize];
+        if let Ok(c) = parse_vdev_phys(probe, offset).config {
             if let Some(a) = c.list("vdev_tree").and_then(|t| t.u64("ashift")) {
                 vdev_ashift = Some(a);
                 break;
             }
         }
     }
-    let mut label = vec![0u8; LABEL_SIZE as usize];
     let mut labels = Vec::with_capacity(LABELS_PER_VDEV);
-    for (index, &offset) in offsets.iter().enumerate() {
-        dev.read_at_salvaging(base + offset, &mut label)?;
+    for (index, (&offset, label)) in offsets.iter().zip(&raw).enumerate() {
         let phys_start = VDEV_PHYS_OFFSET as usize;
         let phys = parse_vdev_phys(
             &label[phys_start..phys_start + VDEV_PHYS_SIZE as usize],
@@ -304,6 +324,8 @@ pub fn scan_device_range(dev: &dyn BlockSource, base: u64, psize: u64) -> io::Re
         base_source: None,
         labels,
         best_label,
+        surface_scan_refused: false,
+        last_sector,
     })
 }
 

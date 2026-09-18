@@ -71,10 +71,17 @@ enum Cmd {
         /// could not read is reported, and refused when read.
         #[arg(long, value_name = "MEMBER=MAPFILE")]
         map: Vec<String>,
-        /// Read a sector the device refuses this many more times (SPEC
-        /// F-33).
-        #[arg(long, value_name = "N", default_value_t = 1)]
-        retries: u32,
+        /// Go on after a device refuses a read (SPEC F-33, N-10): the
+        /// refused range is skipped once, and the run stops anyway after
+        /// 8 incidents. Without this the first refusal stops the scan
+        /// with exit 7.
+        #[arg(long)]
+        device_may_fail: bool,
+        /// Search the surface of a block device for uberblock anchors
+        /// when its labels are gone (SPEC N-10). Refused without this:
+        /// image the disk first and scan the image.
+        #[arg(long)]
+        surface_scan_on_device: bool,
     },
     /// List datasets, zvols and snapshots at a TXG.
     List {
@@ -169,8 +176,9 @@ fn main() -> ExitCode {
             emit_for,
             emit_label_index,
             map,
-            retries,
-        } => match zvol_common::OpenOpts::parse(retries, &map) {
+            device_may_fail,
+            surface_scan_on_device,
+        } => match zvol_common::OpenOpts::parse(device_may_fail, surface_scan_on_device, &map) {
             Err(e) => {
                 eprintln!("zvolrescue: {e}");
                 exit::USAGE

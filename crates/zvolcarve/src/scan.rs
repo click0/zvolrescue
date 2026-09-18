@@ -184,6 +184,25 @@ fn build_profile(
 
 /// Run `scan`.
 pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
+    // A surface scan is what a disk with defects survives least: a
+    // block device is refused unless the operator allowed it (SPEC
+    // N-10) — before it is opened, so not even its labels are read.
+    if !spec.surface_scan_on_device {
+        if let Some(dev) = spec
+            .members()
+            .ok()
+            .into_iter()
+            .flatten()
+            .find(|p| zvol_common::evidence::Kind::of(p).is_device())
+        {
+            eprintln!(
+                "zvolcarve: {}: a block device is not scanned (SPEC N-10): a surface scan is what a disk with defects survives least. \
+                 Image it with a tool for failing media and scan the image; --surface-scan-on-device overrides.",
+                dev.display()
+            );
+            return exit::REFUSED;
+        }
+    }
     let members = match open_members(spec) {
         Ok(m) => m,
         Err(code) => return code,
@@ -523,7 +542,17 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         .iter()
         .filter_map(|p| FileRef::hashed(p).ok())
         .collect();
-    g.log_evidence("zvolcarve", &json, code, &members.paths, written)
+    // A device refused a read: every incident on stderr, and the stop —
+    // when one stopped the run — as the exit code (SPEC F-33, N-10).
+    let code = zvol_common::report_medium(&members.ledger).unwrap_or(code);
+    g.log_evidence_with_incidents(
+        "zvolcarve",
+        &json,
+        code,
+        &members.paths,
+        written,
+        &members.ledger.incidents(),
+    )
 }
 
 /// The dnode's own bytes, as the index stores them.
