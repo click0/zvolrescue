@@ -1291,6 +1291,16 @@ jobs:
           assert a == b, "two dumps of the same volume differ beyond seconds and peak_rss_kib"
           EOF
           rm -rf /tmp/repro
+      - name: The zstd decoder against libzstd, on the same blocks (SPEC §12 Q3, D-8)
+        run: |
+          # A fixture volume's bytes in 128 KiB blocks, compressed by
+          # the zstd command, decoded through the reader's own decoder
+          # and checked against the originals; libzstd's own benchmark
+          # on the same bytes. Nothing but correctness is enforced —
+          # the table is the record behind D-8.
+          zstd --version
+          cargo build --release -p zfs-ondisk --example zstd-bench
+          tests/zstd-bench.sh ./target/release/zvolrescue ./target/release/examples/mkfixture ./target/release/examples/zstd-bench /tmp/zstd 64 3 | tee /tmp/zstd.md
 
   fuzz:
     name: Fuzz the parsers (bounded, every push)

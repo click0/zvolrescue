@@ -16,6 +16,17 @@ tagged. `v0.7.1` is the release that carries those six.
 ## Unreleased
 
 ### Added
+* **The zstd decoder, measured against libzstd (SPEC §12 Q3, D-8).**
+  `tests/zstd-bench.sh` cuts a fixture volume's bytes into 128 KiB
+  blocks, compresses them with the `zstd` command, gives each the
+  framing OpenZFS gives a zstd block and decodes the lot through the
+  reader's own decoder (`zstd-bench`, an example of `zfs-ondisk`),
+  every block checked against its original; libzstd's built-in
+  benchmark runs on the same bytes. It runs on every push and prints
+  one table. Measured: about 400 MB/s for `ruzstd` on one thread
+  against about 1 GB/s for libzstd on the fixture text at level 3 —
+  more than the media this tool reads deliver, so `ruzstd` stays and
+  the question is closed as D-8.
 * **A deduplicated volume in the fixtures (SPEC F-28).** `mkfixture …
   dedup` builds the sample pool with `tank/vm/disk0` deduplicated: its
   data pointers carry the dedup bit and sha256 checksums, and
