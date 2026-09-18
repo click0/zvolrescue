@@ -621,8 +621,18 @@ and runs the matrix.
 | **4 — Filesystems** | Companion tool `zvolfiles`: object dump of fs datasets, then ZPL file-level recovery | ◇ F-29, F-30, F-43 | Files from a destroyed filesystem dataset recovered with correct names, sizes and hashes. |
 | **Later** | TUI, `zfs send` stream output, plugins for guest-fs carving, packaging in FreeBSD ports | — | — |
 
-Version numbering: phase N ships as `0.N.x`; `1.0.0` after phase 3 has
-been used on at least three real-world incidents with documented outcomes.
+Version numbering: phases 0–4 shipped as `0.N.x`, and the tag that
+closed the functional rows was `v0.8.5`. What remains is measured in
+three more tags. `v0.9.0` is the audit release: `cargo deny` and the
+binaries' import tables checked on every push, the parsers fuzzed, Miri
+on the unit tests, signed release files (§8.3, §9, N-07). `v0.9.5` is
+the measured release: memory and throughput on the cross-check pools in
+CI (N-03, N-08, §12 Q3), reproducibility checked byte for byte (N-05),
+deduplicated volumes in the fixtures. `1.0.0` is the full release, and
+waits for what no CI can supply: three real-world incidents with
+documented outcomes ([REALWORLD-TESTS.md](REALWORLD-TESTS.md)),
+packaging (ports, `.deb`, AUR, a manual page), and the open questions
+of §12 settled.
 
 ## 11. Risks and mitigations
 
