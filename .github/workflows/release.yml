@@ -20,6 +20,10 @@ on:
 
 permissions:
   contents: write
+  # The publish job signs the checksum file with Sigstore (keyless: the
+  # workflow's own OIDC identity) and attests the binaries' provenance.
+  id-token: write
+  attestations: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -119,6 +123,33 @@ jobs:
           ./zvolfiles-*-x86_64-linux-musl --version
           sha256sum zvol* > SHA256SUMS
           cat SHA256SUMS
+      # N-07: signed release files. Nobody holds a signing key: the
+      # signature is made with a short-lived certificate that Sigstore's
+      # Fulcio issues to this workflow run against GitHub's OIDC token,
+      # and the certificate names the workflow and the tag it ran for.
+      # Verifying it means checking that the file was signed by *this*
+      # workflow at *this* tag — not that a key someone keeps was not
+      # stolen. The bundle carries the signature, the certificate and
+      # the transparency-log entry in one file beside SHA256SUMS, which
+      # covers every binary, so one signature covers the release.
+      - uses: sigstore/cosign-installer@v3
+      - name: Sign SHA256SUMS (Sigstore, keyless)
+        run: |
+          cd dist
+          cosign sign-blob --yes --bundle SHA256SUMS.sigstore.json SHA256SUMS
+          # Verified here, the way a user would, before anything is
+          # published: a release whose signature does not verify is not
+          # a release.
+          cosign verify-blob --bundle SHA256SUMS.sigstore.json \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            SHA256SUMS
+      # And GitHub's own attestation of where each binary came from:
+      # the commit, the workflow and the runner that built it, checked
+      # with `gh attestation verify <file> --repo <owner>/<repo>`.
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/zvol*
       - name: Release notes
         run: |
           tag="$TAG"
@@ -195,10 +226,14 @@ jobs:
             echo
             echo "So the carver for Linux x86_64 is \`zvolcarve-$v-x86_64-linux-musl\`, and the FreeBSD main binary is \`zvolrescue-$v-amd64-freebsd\`."
             echo
-            echo "\`SHA256SUMS\` covers all $nbins of them:"
+            echo "\`SHA256SUMS\` covers all $nbins of them, and \`SHA256SUMS.sigstore.json\` is its signature — made by this release workflow at this tag, keylessly, through Sigstore:"
             echo
             echo '```sh'
             echo "sha256sum -c SHA256SUMS   # or, on FreeBSD: sha256 -c SHA256SUMS"
+            echo "cosign verify-blob --bundle SHA256SUMS.sigstore.json \\"
+            echo "  --certificate-identity https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF} \\"
+            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com SHA256SUMS"
+            echo "gh attestation verify zvolrescue-$v-x86_64-linux-musl --repo ${GITHUB_REPOSITORY}   # provenance of any one binary"
             echo '```'
             echo
             echo "No installation: \`chmod +x\` and run. Every program opens the members read-only and never writes to the pool."

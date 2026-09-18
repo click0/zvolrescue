@@ -62,6 +62,20 @@ tagged. `v0.7.1` is the release that carries those six.
   did was sliced past its end. Each now answers as damage — unmapped,
   a skipped slot, a truncated block — with a unit test beside it.
 
+* **Release files are signed (SPEC N-07).** Nobody holds a signing key:
+  the release workflow signs `SHA256SUMS` — which covers every binary —
+  with a short-lived certificate that Sigstore's Fulcio issues to that
+  workflow run against GitHub's OIDC token, and ships the signature,
+  the certificate and the transparency-log entry as one bundle beside
+  it, `SHA256SUMS.sigstore.json`. The certificate names this
+  repository's release workflow and the tag it ran for, and that is
+  what `cosign verify-blob` checks; the release notes carry the exact
+  line. The workflow verifies its own signature before publishing, so
+  a release whose signature does not verify is not published. Each
+  binary also gets a GitHub build-provenance attestation — the commit,
+  the workflow and the runner that built it — for `gh attestation
+  verify`. Nothing changes for `sha256sum -c`.
+
 ## v0.8.5 — 2026-09-17
 
 **What the disk never gave, and what the disk still says.**

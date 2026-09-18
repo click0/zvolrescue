@@ -225,7 +225,12 @@ tests/                      інтеграційні тести на fixture-п�
 `…-amd64-freebsd`, ті самі три для `zvoltimeline`, `zvolreport`,
 `zvolcarve` і `zvolfiles`, а також `SHA256SUMS`. Скопіюйте бінарник на
 рятувальний носій і запускайте; встановлювати нічого не треба. Перевірка:
-`sha256sum -c SHA256SUMS`. Передрелізи (`-alpha`, `-beta`) перевірено лише
+`sha256sum -c SHA256SUMS`, а сам `SHA256SUMS` — проти його підпису Sigstore:
+рядок `cosign verify-blob` для цього тега є в нотатках релізу; сертифікат
+називає release-workflow цього репозиторію і тег, і ніякого ключа підпису,
+який можна було б загубити, ніде немає. `gh attestation verify <файл>
+--repo click0/zvolrescue` перевіряє походження збірки будь-якого бінарника.
+Передрелізи (`-alpha`, `-beta`) перевірено лише
 на userland-пулах OpenZFS; що саме покриває кожен, описано в
 [CHANGELOG.md](CHANGELOG.md).
 

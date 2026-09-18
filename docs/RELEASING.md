@@ -71,9 +71,27 @@ moment of tagging, and everything below follows from that:
 
 7. `.github/workflows/release.yml` builds static binaries
    (`x86_64-linux-musl`, `aarch64-linux-musl`, `amd64-freebsd`), writes
-   `SHA256SUMS`, takes the tag's section of `CHANGELOG.md` as the release
-   notes and publishes a GitHub release — marked pre-release when the tag
-   carries a suffix (`-alpha.1`, `-rc.1`).
+   `SHA256SUMS`, signs it, takes the tag's section of `CHANGELOG.md` as
+   the release notes and publishes a GitHub release — marked pre-release
+   when the tag carries a suffix (`-alpha.1`, `-rc.1`).
+
+   The signature is keyless (SPEC N-07): `cosign sign-blob` with a
+   short-lived certificate that Sigstore's Fulcio issues to the workflow
+   run against GitHub's OIDC token, so nobody holds a key and there is
+   no secret to configure. The certificate names the workflow file and
+   the ref it ran for, and that is what a verifier checks:
+
+   ```sh
+   cosign verify-blob --bundle SHA256SUMS.sigstore.json \
+     --certificate-identity https://github.com/click0/zvolrescue/.github/workflows/release.yml@refs/tags/vX.Y.Z \
+     --certificate-oidc-issuer https://token.actions.githubusercontent.com SHA256SUMS
+   ```
+
+   A release re-cut by hand (step 6) is signed under `refs/heads/main`
+   instead, and its notes say so. The workflow verifies its own
+   signature before publishing, and each binary also gets a GitHub
+   build-provenance attestation (`gh attestation verify <file> --repo
+   click0/zvolrescue`).
 
    Two things in it are written by hand and have to be kept up. The
    release **title** is `zvolrescue vX.Y.Z — <the section's lead line>`,

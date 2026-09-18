@@ -223,7 +223,12 @@ Every tagged release ships static binaries with no runtime dependencies
 `zvolrescue-<version>-x86_64-linux-musl`, `…-aarch64-linux-musl`,
 `…-amd64-freebsd`, the same three for `zvoltimeline`, `zvolreport`,
 `zvolcarve` and `zvolfiles`, plus `SHA256SUMS`. Drop the binary on the rescue
-medium and run it; nothing to install. Verify with `sha256sum -c SHA256SUMS`.
+medium and run it; nothing to install. Verify with `sha256sum -c SHA256SUMS`,
+and `SHA256SUMS` itself against its Sigstore signature — the release notes
+carry the `cosign verify-blob` line for that tag; the certificate names
+this repository's release workflow and the tag, and there is no signing
+key anywhere to lose. `gh attestation verify <file> --repo click0/zvolrescue`
+checks any one binary's build provenance.
 The pre-releases (`-alpha`, `-beta`) have been validated against OpenZFS
 userland pools only; see [CHANGELOG.md](CHANGELOG.md) for what each one
 covers.
