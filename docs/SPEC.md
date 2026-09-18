@@ -1,6 +1,6 @@
 # zvolrescue — Technical Specification (ТЗ)
 
-**Status:** living document, revised 2026-09-18 (tool at v0.9.0) · **Owner:** Vladyslav V. Prodan
+**Status:** living document, revised 2026-09-18 (tool at v0.9.1) · **Owner:** Vladyslav V. Prodan
 
 **Ukrainian version:** [SPEC.uk.md](SPEC.uk.md) · **Companion tools:** [COMPANIONS.md](COMPANIONS.md)
 
@@ -637,7 +637,10 @@ Version numbering: phases 0–4 shipped as `0.N.x`, and the tag that
 closed the functional rows was `v0.8.5`. What remains is measured in
 three more tags. `v0.9.0` is the audit release: `cargo deny` and the
 binaries' import tables checked on every push, the parsers fuzzed, Miri
-on the unit tests, signed release files (§8.3, §9, N-07). `v0.9.5` is
+on the unit tests, signed release files (§8.3, §9, N-07); `v0.9.1`
+drew the line between physical and logical recovery — this tool reads
+healthy media, a device's first refused read stops the run, nothing is
+read twice (N-10, F-33). `v0.9.5` is
 the measured release: memory and throughput on the cross-check pools in
 CI (N-03, N-08, §12 Q3), reproducibility checked byte for byte (N-05),
 deduplicated volumes in the fixtures. `1.0.0` is the full release, and

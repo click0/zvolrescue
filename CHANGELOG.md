@@ -13,7 +13,20 @@ development milestone that names what changed when — the sections below
 are their record — and ships inside the next version that does get
 tagged. `v0.7.1` is the release that carries those six.
 
-## Unreleased
+## v0.9.1 — 2026-09-18
+
+**This tool reads healthy media.**
+A data-recovery practitioner read v0.9.0 and saw the danger in it: a
+sector a live disk refused was read again in pieces, then by sector,
+then again with `--retries`, and a surface scan read a device end to
+end. That is what a failing disk survives least. Physical and logical
+recovery are separate trades: a disk with defects is imaged first, by a
+tool that knows the kind of defect and when to stop, and this tool
+works on the image and its map. So now: on a device the first refused
+read stops the run with exit 7 and the incident, nothing is read twice
+anywhere, surface scans refuse a block device, and `--retries` is gone.
+Checked on real block devices in CI — device-mapper's error target on
+Linux, `gnop` on FreeBSD — with `strace` proving no address read twice.
 
 ### Changed
 * **This tool reads healthy media (SPEC N-10, F-33 rewritten).** A
