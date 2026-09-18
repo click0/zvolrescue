@@ -142,6 +142,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         "blocks_salvaged": report.blocks_salvaged,
         "bytes_written": report.bytes_written,
         "aborted": report.aborted,
+        "stopped_by_medium": report.stopped_by_medium,
         "sha256": report.sha256,
         "sha1": report.sha1,
         "md5": report.md5,

@@ -66,6 +66,10 @@ struct DumpOut {
     resumed_from_block: u64,
     strict: bool,
     aborted: bool,
+    /// The device refusal that stopped the extraction, when one did
+    /// (SPEC F-33, N-10): the incident, as the ledger recorded it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stopped_by_medium: Option<String>,
     sha256: String,
     /// SHA-1 and MD5, when `--hash` asked for them (SPEC F-53).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -389,6 +393,7 @@ fn dump_one(
         resumed_from_block: start_block,
         strict,
         aborted: report.aborted,
+        stopped_by_medium: report.stopped_by_medium.clone(),
         sha256: report.sha256.clone(),
         sha1: report.sha1.clone(),
         md5: report.md5.clone(),
@@ -466,7 +471,9 @@ fn print_text(out: &RunOut) {
                 b.blkid, b.offset, b.len, b.reason
             );
         }
-        if v.aborted {
+        if v.stopped_by_medium.is_some() {
+            println!("  STOPPED: a device refused a read (exit 7); the image is incomplete. Image the disk with a map, then --map and --resume continue on the image (SPEC F-33, N-10)");
+        } else if v.aborted {
             println!("  ABORTED at the first unreadable block (--strict); the image is incomplete, --resume continues after a repair");
         } else if !v.bad.is_empty() {
             println!(
