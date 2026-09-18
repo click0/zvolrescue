@@ -13,7 +13,17 @@ development milestone that names what changed when — the sections below
 are their record — and ships inside the next version that does get
 tagged. `v0.7.1` is the release that carries those six.
 
-## Unreleased
+## v0.9.0 — 2026-09-18
+
+**Checked, fuzzed, interpreted, signed.**
+The audit release, the first of the three tags between v0.8.5 and 1.0.0
+(SPEC §10). Nothing the tool reads or writes changes; what changes is
+what is known about it on every push. The dependency graph is held to a
+licence list and a ban list, and every binary's import table is read
+and found to ask for no socket, no exec and no dlopen. Every parser is
+fuzzed, and the four panics the fuzzer found on its first run are fixed.
+The unit tests of the on-disk parsers run under Miri. And the release
+files are signed, keylessly, by the workflow that built them.
 
 ### Added
 * **What the dependency graph carries, and what the binaries ask their
