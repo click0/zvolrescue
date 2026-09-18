@@ -641,9 +641,11 @@ on the unit tests, signed release files (§8.3, §9, N-07); `v0.9.1`
 drew the line between physical and logical recovery — this tool reads
 healthy media, a device's first refused read stops the run, nothing is
 read twice (N-10, F-33). `v0.9.5` is
-the measured release: memory and throughput on the cross-check pools in
-CI (N-03, N-08, §12 Q3), reproducibility checked byte for byte (N-05),
-deduplicated volumes in the fixtures. `1.0.0` is the full release, and
+the measured release: memory and throughput on dense fixture volumes in
+CI, every push (N-03, N-08), the zstd decoder against libzstd (§12 Q3,
+D-8), reproducibility checked byte for byte (N-05), deduplicated volumes
+in the fixtures (F-28), and a healthy raidz stripe read from its data
+columns alone. `1.0.0` is the full release, and
 waits for what no CI can supply: three real-world incidents with
 documented outcomes ([REALWORLD-TESTS.md](REALWORLD-TESTS.md)),
 packaging (ports, `.deb`, AUR, a manual page), and the open questions
