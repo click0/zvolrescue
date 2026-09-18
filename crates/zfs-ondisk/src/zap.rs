@@ -136,8 +136,17 @@ pub fn parse_micro(buf: &[u8], endian: Endian) -> Result<Vec<Entry>, ParseError>
             at: 0,
         });
     }
+    // The block type is read from the first eight bytes; the rest of the
+    // header chunk has to be there before the entries are walked. (The
+    // fuzzer found the slice.)
+    let Some(entries) = buf.get(MZAP_ENT_SIZE..) else {
+        return Err(ParseError::Truncated {
+            needed: MZAP_ENT_SIZE,
+            got: buf.len(),
+        });
+    };
     let mut out = Vec::new();
-    for chunk in buf[MZAP_ENT_SIZE..].chunks_exact(MZAP_ENT_SIZE) {
+    for chunk in entries.chunks_exact(MZAP_ENT_SIZE) {
         let name = &chunk[14..14 + MZAP_NAME_LEN];
         if name[0] == 0 {
             continue;
@@ -576,5 +585,22 @@ mod tests {
             Err(ParseError::BadMagic(_))
         ));
         assert!(parse_leaf(&[0u8; 4096], Endian::Little).is_err());
+    }
+
+    /// A block that says "microzap" in its first eight bytes and ends
+    /// before its header chunk does is truncated, not a panic. The
+    /// fuzzer found it.
+    #[test]
+    fn a_microzap_shorter_than_its_header_chunk_is_truncated() {
+        let mut b = vec![0u8; 44];
+        b[..8].copy_from_slice(&ZBT_MICRO.to_le_bytes());
+        assert!(matches!(
+            parse_micro(&b, Endian::Little),
+            Err(ParseError::Truncated {
+                needed: 64,
+                got: 44
+            })
+        ));
+        assert!(parse_micro(&b[..8], Endian::Little).is_err());
     }
 }

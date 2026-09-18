@@ -190,7 +190,9 @@ impl Mapping {
 
     /// Bytes of source address space the entries cover.
     pub fn mapped_bytes(&self) -> u64 {
-        self.entries.iter().map(|e| e.size).sum()
+        self.entries
+            .iter()
+            .fold(0u64, |sum, e| sum.saturating_add(e.size))
     }
 
     /// Where to read `size` bytes at `offset` of the removed vdev.
@@ -211,13 +213,31 @@ impl Mapping {
             })?;
             let within = at - e.src;
             let take = (e.size - within).min(left);
+            // An entry whose destination runs past the end of any
+            // address space is damage, not a place to read from: the
+            // bytes it claims to map are nowhere, which is what the
+            // caller is told. (Found by the fuzzer: the addition
+            // overflowed on a hostile entry.)
+            let offset = e.dst_offset.checked_add(within).ok_or(Unmapped {
+                offset: at,
+                size: left,
+            })?;
             out.push(Segment {
                 vdev: e.dst_vdev,
-                offset: e.dst_offset + within,
+                offset,
                 size: take,
             });
-            at += take;
             left -= take;
+            at = match at.checked_add(take) {
+                Some(next) => next,
+                None if left == 0 => break,
+                None => {
+                    return Err(Unmapped {
+                        offset: at,
+                        size: left,
+                    })
+                }
+            };
         }
         Ok(out)
     }
@@ -385,5 +405,40 @@ mod tests {
         let data = [0u8; ENTRY_SIZE * 2];
         let m = Mapping::parse(&data, 1000, Endian::Little).unwrap();
         assert_eq!(m.len(), 2);
+    }
+
+    /// An entry whose destination offset sits at the top of the address
+    /// space is damage; asking for bytes through it is answered with
+    /// "unmapped", not with a panic. The fuzzer found the addition.
+    #[test]
+    fn a_destination_past_the_end_of_the_address_space_is_unmapped() {
+        let m = Mapping::from_entries(vec![Entry {
+            src: 0,
+            size: 8192,
+            dst_vdev: 1,
+            dst_offset: u64::MAX - 100,
+        }]);
+        assert_eq!(m.remap(0, 50).unwrap().len(), 1);
+        assert!(m.remap(4096, 4096).is_err());
+        // The sizes' sum is saturated rather than overflowed.
+        let big = Mapping::from_entries(vec![
+            Entry {
+                src: 0,
+                size: u64::MAX,
+                dst_vdev: 0,
+                dst_offset: 0,
+            },
+            Entry {
+                src: u64::MAX,
+                size: 1,
+                dst_vdev: 0,
+                dst_offset: 0,
+            },
+        ]);
+        assert_eq!(big.mapped_bytes(), u64::MAX);
+        // The last byte of the address space is one no entry can end
+        // past, so it is unmapped; the byte before it reads.
+        assert_eq!(big.remap(u64::MAX - 1, 1).map(|s| s.len()), Ok(1));
+        assert!(big.remap(u64::MAX - 1, 2).is_err());
     }
 }

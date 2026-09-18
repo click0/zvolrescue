@@ -1174,6 +1174,43 @@ jobs:
           ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/fx/member0.img /tmp/fx/member1.img --map /tmp/fx/member0.img=/tmp/fx/member0.map --txg 4816229 -o /tmp/fx/map-healed.img
           cmp /tmp/disk0.img /tmp/fx/map-healed.img
 
+  fuzz:
+    name: Fuzz the parsers (bounded, every push)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - run: cargo install cargo-fuzz --locked
+      - name: Every target, 30 seconds each, from the committed seeds (SPEC §9)
+        run: |
+          # The parsers of zfs-ondisk on hostile input: a nvlist, a block
+          # pointer, a dnode, a ZAP, an uberblock, every bonus buffer,
+          # every decompressor, a partition table. Each starts from one
+          # well-formed instance (fuzz/seeds, written by the example
+          # `fuzz-seeds` and read back by the parser it feeds) and runs
+          # under the address sanitizer for a bounded time; a panic, an
+          # abort or a run past the time limit on one input fails the
+          # job with that input saved under fuzz/artifacts.
+          cargo fuzz build
+          fail=0
+          for t in $(cargo fuzz list); do
+            echo "== $t"
+            mkdir -p "fuzz/corpus/$t"
+            if ! cargo fuzz run "$t" "fuzz/corpus/$t" "fuzz/seeds/$t" -- -max_total_time=30 -timeout=10 2>&1 | tail -20; then
+              fail=1
+            fi
+          done
+          exit $fail
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+          if-no-files-found: ignore
+
   crosscheck:
     name: Cross-check against OpenZFS userland (ztest + zdb)
     runs-on: ubuntu-latest

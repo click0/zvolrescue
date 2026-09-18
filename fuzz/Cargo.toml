@@ -1,0 +1,78 @@
+# cargo-fuzz targets for the parsers of zfs-ondisk (SPEC §9, N-04).
+#
+# Not a workspace member: libFuzzer needs a nightly toolchain and
+# sanitizer flags, and the workspace builds on stable. Run one with
+#
+#     mkdir -p fuzz/corpus/nvlist
+#     cargo +nightly fuzz run nvlist fuzz/corpus/nvlist fuzz/seeds/nvlist
+#
+# from the repository root; CI runs every target for a bounded time on
+# every push (`cargo +nightly fuzz list` names them).
+[package]
+name = "zfs-ondisk-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+zfs-ondisk = { path = "../crates/zfs-ondisk" }
+
+[[bin]]
+name = "nvlist"
+path = "fuzz_targets/nvlist.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "blkptr"
+path = "fuzz_targets/blkptr.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dnode"
+path = "fuzz_targets/dnode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "zap"
+path = "fuzz_targets/zap.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "uberblock"
+path = "fuzz_targets/uberblock.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bonus"
+path = "fuzz_targets/bonus.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "compress"
+path = "fuzz_targets/compress.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "part"
+path = "fuzz_targets/part.rs"
+test = false
+doc = false
+bench = false

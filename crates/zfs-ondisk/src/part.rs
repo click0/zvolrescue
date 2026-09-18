@@ -149,8 +149,8 @@ pub fn parse_gpt(
     }
     let mut partitions = Vec::new();
     for i in 0..count {
-        let at = i * size;
-        if at + 128 > entries.len() {
+        let Some(at) = i.checked_mul(size) else { break };
+        if at.checked_add(128).is_none_or(|end| end > entries.len()) {
             break;
         }
         let e = &entries[at..at + size.min(entries.len() - at)];
@@ -163,10 +163,21 @@ pub fn parse_gpt(
         if last < first {
             continue;
         }
+        // LBAs that do not fit the byte address space are not on any
+        // disk: a slot carrying them is damage and is skipped, not
+        // multiplied out. (The fuzzer found the overflow.)
+        let (Some(start), Some(length)) = (
+            first.checked_mul(sector),
+            (last - first)
+                .checked_add(1)
+                .and_then(|sectors| sectors.checked_mul(sector)),
+        ) else {
+            continue;
+        };
         partitions.push(Partition {
             index: i + 1,
-            start: first * sector,
-            length: (last - first + 1) * sector,
+            start,
+            length,
             zfs: matches!(kind.as_str(), GPT_ZFS | GPT_FREEBSD_ZFS),
             kind,
             name: e.get(56..128).and_then(utf16_name),
@@ -348,5 +359,24 @@ mod tests {
         let mut h = gpt_header(1 << 20, 128);
         h[..8].copy_from_slice(GPT_SIGNATURE);
         assert_eq!(parse_gpt(&h, &[0u8; 128], 512, false), None);
+    }
+
+    /// LBAs that do not fit the byte address space belong to no disk:
+    /// the slot is skipped and the rest of the table is read. The
+    /// fuzzer found the multiplication.
+    #[test]
+    fn an_entry_whose_lbas_overflow_the_byte_address_space_is_skipped() {
+        let header = gpt_header(2, 128);
+        let mut entries = gpt_entry(GPT_ZFS, u64::MAX - 1, u64::MAX, "beyond");
+        entries.extend(gpt_entry(GPT_ZFS, 2048, 4095, "real"));
+        let t = parse_gpt(&header, &entries, 512, false).expect("a GPT");
+        assert_eq!(t.partitions.len(), 1);
+        assert_eq!(t.partitions[0].index, 2);
+        assert_eq!(t.partitions[0].start, 2048 * 512);
+        // The whole address space as one partition: its length is one
+        // more than fits, so it is skipped too.
+        let whole = gpt_entry(GPT_ZFS, 0, u64::MAX, "everything");
+        let t = parse_gpt(&gpt_header(1, 128), &whole, 512, false).expect("a GPT");
+        assert!(t.partitions.is_empty());
     }
 }

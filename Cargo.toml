@@ -12,6 +12,8 @@ members = [
     "crates/zvolcarve",
     "crates/zvolfiles",
 ]
+# The fuzz targets build on nightly with sanitizers (fuzz/Cargo.toml).
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.8.5"

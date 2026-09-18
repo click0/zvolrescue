@@ -35,6 +35,33 @@ tagged. `v0.7.1` is the release that carries those six.
   to mean something. A source grep for `process::Command` and
   `std::net` runs beside it. Today's binaries import none of it.
 
+* **The parsers are fuzzed on every push (SPEC §9).** Everything in
+  `zfs-ondisk` that reads bytes off a disk is now a `cargo fuzz` target
+  — a packed nvlist and the label configuration read out of it, a block
+  pointer and a gang header, a dnode and an objset header, the three ZAP
+  forms, an uberblock slot and a `vdev_phys`, every bonus buffer (space
+  map, indirect mapping, DSL directory and dataset, bpobj, deadlist,
+  znode, system-attribute header), every decompressor, and a GPT, an
+  MBR and a GEOM sector — in both byte orders where the structure has
+  one. Each starts from a well-formed seed built with the crate's own
+  encoders and read back through the parser before it is committed
+  (`fuzz/seeds`, from the example `fuzz-seeds`), and CI runs every
+  target for a bounded time under the address sanitizer on a nightly
+  toolchain, failing on a panic, an abort or an input that runs past
+  the time limit and keeping that input as an artifact. The workspace
+  itself stays on stable; the fuzz crate is outside it.
+
+  The first run found four ways to make a parser panic, all on input no
+  pool writes and every one of them a crash on a damaged disk: an
+  indirect-mapping entry whose destination offset sat at the top of the
+  address space overflowed the addition in `remap`, and the sum of
+  entry sizes could overflow too; a GPT slot whose LBAs did not fit the
+  byte address space overflowed the multiplication, and one spanning
+  the whole space overflowed its length by one; and a block whose first
+  eight bytes said "microzap" and which ended before its header chunk
+  did was sliced past its end. Each now answers as damage — unmapped,
+  a skipped slot, a truncated block — with a unit test beside it.
+
 ## v0.8.5 — 2026-09-17
 
 **What the disk never gave, and what the disk still says.**
