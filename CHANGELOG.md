@@ -15,6 +15,21 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ## Unreleased
 
+### Changed
+* **A healthy raidz stripe is read from its data columns alone.** The
+  first measurements (below) showed an uncompressed volume on raidz2
+  extracted at a third of the mirror's rate. Two causes, both in the
+  striped read: every row fetched its parity columns before anyone
+  knew whether they were needed, and the stripe was assembled one byte
+  at a time through an iterator. Now the data columns are read first;
+  the parity is fetched only for a row that lost a column or, after
+  the checksum fails, for the combinatorial reconstruction — as
+  OpenZFS reads a healthy stripe, and as a device asks (SPEC N-10):
+  half the reads. The assembly copies whole columns. Measured on the
+  same volume: about 290 MB/s on raidz2 against about 310 on the
+  mirror, from 130. A test counts the reads of an extract on a
+  four-wide raidz2 and finds none of the parity columns among them.
+
 ### Added
 * **The zstd decoder, measured against libzstd (SPEC §12 Q3, D-8).**
   `tests/zstd-bench.sh` cuts a fixture volume's bytes into 128 KiB

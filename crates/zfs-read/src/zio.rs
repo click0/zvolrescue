@@ -830,54 +830,56 @@ impl<'a> PoolReader<'a> {
         }
     }
 
-    /// Read every column of one row. A distributed spare column is read
+    /// Read one column of a row. A distributed spare column is read
     /// from the child the dRAID permutation assigns to it at that offset.
-    fn read_row(&self, m: raidz::Map, children: &[Node], cfg: Option<&draid::Config>) -> Columns {
-        let column = |c: &raidz::Column| -> Result<Vec<u8>, ReadError> {
-            if c.size == 0 {
-                // An empty column (dRAID short row): nothing on disk, but
-                // it keeps its place in the parity equations.
-                return Ok(Vec::new());
-            }
-            let mut devidx = c.devidx;
-            for _ in 0..children.len() {
-                let child = children
-                    .get(devidx as usize)
-                    .ok_or(ReadError::UnknownVdev(devidx as u32))?;
-                match (child, cfg) {
-                    (Node::Dspare { spare_id }, Some(cfg)) => {
-                        let target = cfg.spare_child(*spare_id, c.offset);
-                        trace!(
-                            "draid",
-                            "    dspare#{spare_id} at {:#x} -> child {target}",
-                            c.offset
-                        );
-                        devidx = target;
-                    }
-                    (Node::Dspare { .. }, None) => {
-                        return Err(ReadError::Unsupported("dspare outside dRAID".into()))
-                    }
-                    _ => return self.read_first(child, c.offset, c.size as usize),
-                }
-            }
-            Err(ReadError::Unsupported(
-                "distributed spare chain loops".into(),
-            ))
-        };
-        let mut parity = Vec::with_capacity(m.nparity);
-        for c in m.parity() {
-            parity.push(match column(c) {
-                Ok(b) => Some(b),
-                Err(e) => {
-                    trace!("raidz", "    parity column dev{}: {e}", c.devidx);
-                    None
-                }
-            });
+    fn read_column(
+        &self,
+        c: &raidz::Column,
+        children: &[Node],
+        cfg: Option<&draid::Config>,
+    ) -> Result<Vec<u8>, ReadError> {
+        if c.size == 0 {
+            // An empty column (dRAID short row): nothing on disk, but
+            // it keeps its place in the parity equations.
+            return Ok(Vec::new());
         }
+        let mut devidx = c.devidx;
+        for _ in 0..children.len() {
+            let child = children
+                .get(devidx as usize)
+                .ok_or(ReadError::UnknownVdev(devidx as u32))?;
+            match (child, cfg) {
+                (Node::Dspare { spare_id }, Some(cfg)) => {
+                    let target = cfg.spare_child(*spare_id, c.offset);
+                    trace!(
+                        "draid",
+                        "    dspare#{spare_id} at {:#x} -> child {target}",
+                        c.offset
+                    );
+                    devidx = target;
+                }
+                (Node::Dspare { .. }, None) => {
+                    return Err(ReadError::Unsupported("dspare outside dRAID".into()))
+                }
+                _ => return self.read_first(child, c.offset, c.size as usize),
+            }
+        }
+        Err(ReadError::Unsupported(
+            "distributed spare chain loops".into(),
+        ))
+    }
+
+    /// Read the data columns of one row. The parity columns are left
+    /// unread (`None`) until [`PoolReader::read_parity`] is asked for
+    /// them: a row whose data columns all read and verify has no use
+    /// for its parity, and on a device every read counts (SPEC N-10) —
+    /// OpenZFS itself reads only the data columns of a healthy stripe.
+    fn read_row(&self, m: raidz::Map, children: &[Node], cfg: Option<&draid::Config>) -> Columns {
+        let parity = vec![None; m.nparity];
         let mut data = Vec::with_capacity(m.acols.saturating_sub(m.nparity));
         let mut lost = Vec::new();
         for (i, c) in m.data().iter().enumerate() {
-            match column(c) {
+            match self.read_column(c, children, cfg) {
                 Ok(b) => data.push(b),
                 Err(e) => {
                     trace!("raidz", "    data column {i} dev{}: {e}", c.devidx);
@@ -887,6 +889,24 @@ impl<'a> PoolReader<'a> {
             }
         }
         (parity, data, lost, m)
+    }
+
+    /// Read the parity columns of a row that needs them — a data column
+    /// was lost, or the row read whole did not verify. Once.
+    fn read_parity(&self, row: &mut Columns, children: &[Node], cfg: Option<&draid::Config>) {
+        let (parity, _, _, m) = row;
+        for (i, c) in m.parity().iter().enumerate() {
+            if parity[i].is_some() {
+                continue;
+            }
+            parity[i] = match self.read_column(c, children, cfg) {
+                Ok(b) => Some(b),
+                Err(e) => {
+                    trace!("raidz", "    parity column dev{}: {e}", c.devidx);
+                    None
+                }
+            };
+        }
     }
 
     /// Read and verify the `psize` bytes behind a DVA on a raidz or dRAID
@@ -926,12 +946,19 @@ impl<'a> PoolReader<'a> {
             );
         }
         let assemble = |rows: &[Columns]| -> Vec<u8> {
-            let mut out: Vec<u8> = rows
-                .iter()
-                .flat_map(|(_, data, _, _)| data.iter().flatten().copied())
-                .collect();
+            let mut out: Vec<u8> = Vec::with_capacity(psize);
+            for (_, data, _, _) in rows {
+                for column in data {
+                    out.extend_from_slice(column);
+                }
+            }
             out.truncate(psize);
             out
+        };
+        let (children, cfg) = match node {
+            Node::Raidz { children, .. } => (children.as_slice(), None),
+            Node::Draid { children, cfg, .. } => (children.as_slice(), Some(cfg.as_ref())),
+            _ => (&[][..], None),
         };
         let record = |attempts: &mut Vec<Attempt>, result: Result<Verify, ReadError>| {
             attempts.push(Attempt {
@@ -941,7 +968,11 @@ impl<'a> PoolReader<'a> {
                 result,
             });
         };
-        for (parity, data, lost, _) in rows.iter_mut() {
+        for row in rows.iter_mut() {
+            if !row.2.is_empty() {
+                self.read_parity(row, children, cfg);
+            }
+            let (parity, data, lost, _) = row;
             let available = parity.iter().filter(|p| p.is_some()).count();
             if lost.len() > available {
                 let e = ReadError::Unrecoverable(format!(
@@ -974,7 +1005,10 @@ impl<'a> PoolReader<'a> {
             return Ok((raw, v));
         }
         // Combinatorial reconstruction, one row at a time (the other rows
-        // are kept as read).
+        // are kept as read). Now the parity is needed.
+        for row in rows.iter_mut() {
+            self.read_parity(row, children, cfg);
+        }
         for r in 0..rows.len() {
             let (parity, data, lost, _) = &rows[r];
             let available = parity.iter().filter(|p| p.is_some()).count();
@@ -1723,6 +1757,47 @@ mod tests {
             // Same image as the mirror fixture produces.
             assert_eq!(
                 sha,
+                "febfe0108392728dbde89ee63f9f25419a0192ac04420db3ad88b0032a088585"
+            );
+        }
+
+        /// A healthy stripe is read from its data columns alone: the
+        /// parity is not fetched until a column is lost or the checksum
+        /// fails, as OpenZFS reads it, and as a device asks (SPEC N-10).
+        #[test]
+        fn a_healthy_stripe_leaves_its_parity_unread() {
+            let present = [true; 4];
+            let (s, a, ub) = raidz2(&present);
+            let counted: Vec<zvolrescue_io::FlakySource<MemSource>> = s
+                .iter()
+                .map(|m| zvolrescue_io::FlakySource::new(m.clone(), Vec::new()))
+                .collect();
+            let devices: Vec<Option<&dyn BlockSource>> = counted
+                .iter()
+                .map(|c| Some(c as &dyn BlockSource))
+                .collect();
+            let reader = PoolReader::new(&a, devices);
+            let mos = open_mos(&reader, &ub).unwrap();
+            let tree = walk(&mos, "tank").unwrap();
+            let ds = tree.get("tank/vm/disk0").unwrap();
+            let (obj, _) = open_volume(&reader, ds).unwrap();
+            let before: usize = counted.iter().map(|c| c.reads().len()).sum();
+            let mut sink = MemSink::default();
+            let r = extract(
+                &obj,
+                ds.volsize.unwrap(),
+                &mut sink,
+                OnError::Abort,
+                |_, _| {},
+            )
+            .unwrap();
+            assert_eq!(r.blocks_read, 2);
+            let during: usize = counted.iter().map(|c| c.reads().len()).sum::<usize>() - before;
+            // Two 8 KiB blocks, each two 4 KiB data columns on a 4-wide
+            // raidz2: four reads, and none of the four parity columns.
+            assert_eq!(during, 4, "reads during the extract");
+            assert_eq!(
+                r.sha256,
                 "febfe0108392728dbde89ee63f9f25419a0192ac04420db3ad88b0032a088585"
             );
         }
