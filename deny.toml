@@ -1,0 +1,91 @@
+# cargo-deny: licences, advisories and banned crates (SPEC §8.3 (3), N-07).
+#
+# The tool reads evidence and writes images; it has no business on a
+# network and never runs another program. The dependency graph is where
+# that is easiest to lose quietly — a transitive crate that opens a
+# socket for telemetry, or one that shells out — so the graph is checked
+# on every push, here, where a new crate is still on a branch.
+
+[graph]
+all-features = true
+
+[advisories]
+# An advisory against a crate in the graph fails the check; the fix is
+# to update, or to record the ID below with a reason. Unmaintained and
+# yanked crates are a warning, not a failure: they do not change what the
+# binary does, and a maintained replacement is a decision, not a hotfix.
+version = 2
+yanked = "warn"
+ignore = []
+
+[licenses]
+# Every licence the graph carries today, and nothing more; a crate under
+# a new licence is a decision to take here. All are permissive: the
+# static binary is redistributed on rescue media, and a copyleft licence
+# in the graph would bind the whole file.
+version = 2
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-3-Clause",
+    "0BSD",
+    "CC0-1.0",
+    "Unlicense",
+    "Zlib",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.9
+# The one copyleft licence in the tree, on one crate of this workspace:
+# `edonr` is the Edon-R hash carried over from OpenZFS, whose files are
+# CDDL and stay CDDL. The CDDL binds those files, not the binary, and
+# the crate is where they are kept apart. No other crate may take it.
+exceptions = [{ crate = "edonr", allow = ["CDDL-1.0"] }]
+
+[bans]
+multiple-versions = "warn"
+# Not checked here: the workspace's own crates are taken by path, which
+# cargo-deny counts as a wildcard on a publishable crate, and a `*` from
+# the registry cannot get in past the committed Cargo.lock and `--locked`.
+wildcards = "allow"
+# Crates that exist to open a socket, run a program or load code at run
+# time. None is in the graph; the list is what keeps it that way. A
+# crate that merely could (`libc`) is not banned: the binary's imports
+# are checked separately (tests/support/imports.rs).
+deny = [
+    # network
+    { crate = "reqwest", reason = "no network (SPEC N-02, N-07, §8.3)" },
+    { crate = "ureq", reason = "no network" },
+    { crate = "hyper", reason = "no network" },
+    { crate = "hyper-util", reason = "no network" },
+    { crate = "h2", reason = "no network" },
+    { crate = "tokio", reason = "no network, no async runtime" },
+    { crate = "async-std", reason = "no network, no async runtime" },
+    { crate = "smol", reason = "no network, no async runtime" },
+    { crate = "mio", reason = "no network" },
+    { crate = "socket2", reason = "no network" },
+    { crate = "curl", reason = "no network" },
+    { crate = "curl-sys", reason = "no network" },
+    { crate = "native-tls", reason = "no network" },
+    { crate = "rustls", reason = "no network" },
+    { crate = "openssl", reason = "no network; pure Rust crypto only" },
+    { crate = "openssl-sys", reason = "no network; pure Rust crypto only" },
+    { crate = "tungstenite", reason = "no network" },
+    { crate = "hickory-resolver", reason = "no network" },
+    { crate = "trust-dns-resolver", reason = "no network" },
+    { crate = "git2", reason = "no network" },
+    # running programs
+    { crate = "subprocess", reason = "no shelling out (SPEC §8.3)" },
+    { crate = "duct", reason = "no shelling out" },
+    { crate = "xshell", reason = "no shelling out" },
+    { crate = "which", reason = "no shelling out" },
+    # loading code
+    { crate = "libloading", reason = "no code loaded at run time" },
+    { crate = "dlopen2", reason = "no code loaded at run time" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

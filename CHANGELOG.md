@@ -13,6 +13,28 @@ development milestone that names what changed when — the sections below
 are their record — and ships inside the next version that does get
 tagged. `v0.7.1` is the release that carries those six.
 
+## Unreleased
+
+### Added
+* **What the dependency graph carries, and what the binaries ask their
+  platform for, checked on every push (SPEC §8.3 (3), N-07).** The tool
+  reads evidence and writes images; it has no business on a network and
+  never runs another program. The source said so, and nothing checked
+  it. Now `deny.toml` holds the rule for the graph: every licence in the
+  tree is a permissive one on the list — the CDDL of the Edon-R port is
+  allowed on the `edonr` crate alone, where OpenZFS's files are kept
+  apart — no advisory stands against a crate, and the crates that exist
+  to open a socket, run a program or load code are named and banned, so
+  a dependency that grows one is stopped on the branch it arrives on.
+  And every binary the workspace builds — `zvolrescue` and the four
+  companions — has a test that reads its ELF symbol tables and fails on
+  any of `socket`, `connect`, `execve`, `fork`, `posix_spawn`, `dlopen`
+  and their kin, whether imported from the C library on a dynamic build
+  or linked in on a static one. The reader is checked against a program
+  that does connect and does run a program, so a clean result is known
+  to mean something. A source grep for `process::Command` and
+  `std::net` runs beside it. Today's binaries import none of it.
+
 ## v0.8.5 — 2026-09-17
 
 **What the disk never gave, and what the disk still says.**

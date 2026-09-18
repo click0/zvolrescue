@@ -19,6 +19,25 @@ jobs:
           components: rustfmt, clippy
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: The dependency graph — licences, advisories, banned crates (SPEC §8.3, N-07)
+        # deny.toml: every licence in the tree is a permissive one on the
+        # list (CDDL on `edonr` alone), no advisory stands against a
+        # crate, and no crate that exists to open a socket, run a program
+        # or load code is in the graph.
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features
+      - name: Nothing in the source runs a program or opens a socket (SPEC §8.3)
+        run: |
+          # The binaries' own import tables are read by the `imports`
+          # test of each binary crate (tests/support/imports.rs), which
+          # `cargo test` below runs. This is the same rule one level up,
+          # where a violation is a line with a file name.
+          if grep -rnE 'process::Command|std::net::' crates/*/src; then
+            echo "::error::a binary crate shells out or opens a socket"
+            exit 1
+          fi
       - run: cargo test --all-targets
       - run: cargo build --release
       - run: ./target/release/zvolrescue --version
