@@ -25,10 +25,17 @@ tagged. `v0.7.1` is the release that carries those six.
   the parity is fetched only for a row that lost a column or, after
   the checksum fails, for the combinatorial reconstruction — as
   OpenZFS reads a healthy stripe, and as a device asks (SPEC N-10):
-  half the reads. The assembly copies whole columns. Measured on the
-  same volume: about 290 MB/s on raidz2 against about 310 on the
-  mirror, from 130. A test counts the reads of an extract on a
-  four-wide raidz2 and finds none of the parity columns among them.
+  half the reads. Both read paths do it — the verified one and the
+  unverified one behind `read_dva`, gang headers and remapped blocks —
+  and each fetches the parity of a row that lost a column before it
+  reconstructs. The assembly copies whole columns. Measured on the same
+  volume: about 290 MB/s on raidz2 against about 310 on the mirror,
+  from 130; on a quiet machine raidz2 now extracts at the mirror's
+  rate, uncompressed, lz4 and gzip alike. Two tests: one counts the
+  reads of an extract on a four-wide raidz2 and finds none of the
+  parity columns among them; the other reads a pointer through the
+  unverified path with each one of the four members missing in turn,
+  and checks the reconstructed bytes against the pointer's checksum.
 
 ### Added
 * **The zstd decoder, measured against libzstd (SPEC §12 Q3, D-8).**

@@ -692,18 +692,31 @@ impl<'a> PoolReader<'a> {
                 .flat_map(|c| self.read_candidates(c, offset, size))
                 .collect(),
             Node::Raidz { .. } | Node::Draid { .. } => {
-                let rows = self.read_rows(node, offset, size);
+                let (children, cfg) = match node {
+                    Node::Raidz { children, .. } => (children.as_slice(), None),
+                    Node::Draid { children, cfg, .. } => (children.as_slice(), Some(cfg.as_ref())),
+                    _ => unreachable!("the arm matched raidz or draid"),
+                };
+                let mut rows = self.read_rows(node, offset, size);
                 let mut out = Vec::with_capacity(size);
-                for (parity, mut data, lost, _) in rows {
+                for row in rows.iter_mut() {
+                    // A row that lost a column needs its parity; a row
+                    // that read whole does not, and never fetches it.
+                    if !row.2.is_empty() {
+                        self.read_parity(row, children, cfg);
+                    }
+                    let (parity, data, lost, _) = row;
                     if !lost.is_empty() {
-                        if let Err(e) = raidz::reconstruct(&mut data, &parity, &lost) {
+                        if let Err(e) = raidz::reconstruct(data, parity, lost) {
                             return vec![(
                                 None,
                                 Err(ReadError::Unrecoverable(format!("reconstruct: {e:?}"))),
                             )];
                         }
                     }
-                    out.extend(data.iter().flatten());
+                    for column in data.iter() {
+                        out.extend_from_slice(column);
+                    }
                 }
                 out.truncate(size);
                 vec![(None, Ok(out))]
@@ -929,15 +942,14 @@ impl<'a> PoolReader<'a> {
             Node::Raidz { nparity, .. } => format!("raidz{nparity}"),
             _ => "?".into(),
         };
-        for (r, (parity, _, _, m)) in rows.iter().enumerate() {
+        for (r, (_, _, _, m)) in rows.iter().enumerate() {
             trace!(
                 "raidz",
-                "  dva {dva_index}: {label} row {r} -> {} cols ({} parity, {} big, nskip {}, {} parity readable): {}",
+                "  dva {dva_index}: {label} row {r} -> {} cols ({} parity, {} big, nskip {}): {}",
                 m.acols,
                 m.nparity,
                 m.bigcols,
                 m.nskip,
-                parity.iter().filter(|p| p.is_some()).count(),
                 m.cols[..m.acols]
                     .iter()
                     .map(|c| format!("dev{}@{:#x}+{}", c.devidx, c.offset, c.size))
@@ -1800,6 +1812,40 @@ mod tests {
                 r.sha256,
                 "febfe0108392728dbde89ee63f9f25419a0192ac04420db3ad88b0032a088585"
             );
+        }
+
+        /// The unverified read path reconstructs too. `read_dva` and
+        /// the gang and remapped reads go through `read_candidates`,
+        /// not `read_striped`, and that arm has to fetch the parity of
+        /// a row that lost a column just the same — a degraded raidz is
+        /// the case this tool exists for.
+        #[test]
+        fn a_degraded_stripe_reconstructs_on_the_unverified_path() {
+            for present in [
+                [false, true, true, true],
+                [true, false, true, true],
+                [true, true, false, true],
+                [true, true, true, false],
+            ] {
+                let (s, a, ub) = raidz2(&present);
+                let reader = PoolReader::new(&a, devices(&s, &present));
+                let rootbp =
+                    zfs_ondisk::blkptr::BlkPtr::parse(&ub.rootbp, ub.endian).expect("rootbp");
+                let dva = &rootbp.dva[0];
+                let psize = rootbp.psize as usize;
+                // Unverified: the bytes come back reconstructed.
+                let (raw, _) = reader
+                    .read_dva(dva, psize)
+                    .unwrap_or_else(|e| panic!("read_dva with {present:?}: {e}"));
+                assert_eq!(raw.len(), psize, "{present:?}");
+                // The bytes are right, not merely present: unverified
+                // as they are, they match the pointer's checksum.
+                assert_eq!(
+                    reader.verify(&rootbp, &raw),
+                    Verify::Ok,
+                    "unverified read of a degraded stripe does not match its checksum: {present:?}"
+                );
+            }
         }
 
         #[test]
