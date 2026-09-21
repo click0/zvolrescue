@@ -15,6 +15,31 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ## Unreleased
 
+### Changed
+* **A device that refused a read is closed for the rest of the run, in
+  the io layer (SPEC N-10).** The medium policy stopped the run at the
+  first refusal, and the pool reader refused every later read — but
+  only the pool reader. The io layer recorded the incident and went on
+  answering reads of the same device, so anything that read a member
+  without going through the pool reader (the label reads of a scan,
+  the zero-point search, carving) could still reach a disk that had
+  just refused, and a unit test pinned that a second read after the
+  stop goes through. Now the ledger knows which path the stopping
+  incident was on, and every source that is a device answers every
+  later read of that path with that incident before touching it —
+  memory hits included, so nothing masks a caller still trying. Other
+  devices and every image go on being read: the run is over, but the
+  report still wants their labels. `--device-may-fail` is unchanged in
+  spirit: a skipped refusal closes nothing, the flag exists so that the
+  device's other addresses are still read, and the incident that stops
+  the run closes it like any stop. Four tests, each failing without
+  the gate: the second read after a stop is refused and the device not
+  touched; the same path through another handle is closed while
+  another device and an image on the same ledger read on; with
+  `--device-may-fail` the device stays open until the limit and is
+  closed by it; and a real `FileSource` that is a device refuses
+  before the read it would otherwise answer.
+
 ### Fixed
 * **A device's refusal on the way to the dataset is exit 7 and an
   incident on record, on a single volume too (SPEC F-33, N-10).** The

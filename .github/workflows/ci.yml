@@ -1300,6 +1300,22 @@ jobs:
           EOF
           done
           sudo dmsetup remove zr-bad
+          # A device closed by its first refusal is not read again by
+          # anyone: the eight sectors of label 0 on the error target.
+          # The label read is the first thing a scan asks of a member,
+          # and it is refused — and a scan then goes on to probe the
+          # partition table and the GEOM sector of the same device
+          # directly, around the pool reader. The io layer refuses
+          # those too now: strace shows exactly one read of the device,
+          # and the run ends with exit 7 and the incident.
+          printf '0 8 error\n8 %s linear %s 8\n' "$((size-8))" "$loop" | sudo dmsetup create zr-bad
+          set +e; sudo strace -f -y -e trace=pread64 -o /tmp/dm/closed.txt ./target/release/zvolrescue -q scan "$dev" /tmp/dm/member1.img >/tmp/dm/closed.out 2>/tmp/dm/closed.err; code=$?; set -e
+          cat /tmp/dm/closed.err
+          test "$code" = 7
+          grep -q "MEDIUM INCIDENT: $dev refused .* at byte 0 (LBA 0, " /tmp/dm/closed.err
+          grep -q "stopped here" /tmp/dm/closed.err
+          test "$(grep -c -e "<$real>" -e '</dev/mapper/zr-bad>' /tmp/dm/closed.txt)" = 1
+          sudo dmsetup remove zr-bad
           sudo losetup -d "$loop"
       - name: Memory and throughput on dense volumes (SPEC N-03, N-08)
         run: |

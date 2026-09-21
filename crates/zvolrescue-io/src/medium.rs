@@ -147,6 +147,24 @@ impl Ledger {
     pub fn stopped(&self) -> Option<Incident> {
         self.incidents().into_iter().find(|i| i.stopped)
     }
+
+    /// The incident that closed the device at `path` for the rest of
+    /// the run, if one did: a refusal that stopped the run, on that
+    /// path. A device that refused is not read again, whatever asks
+    /// (SPEC N-10) — the io layer answers every later read of it with
+    /// this incident, before touching it. Other devices and every image
+    /// go on being read: the run is over, but the report still wants
+    /// their labels. A skipped refusal (`--device-may-fail`) closes
+    /// nothing; that flag exists so that the other addresses of the
+    /// device are still read.
+    pub fn stopped_on(&self, path: &Path) -> Option<Incident> {
+        self.incidents
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .find(|i| i.stopped && i.path == path)
+            .cloned()
+    }
 }
 
 /// The error a refused device read fails with: carries the incident,

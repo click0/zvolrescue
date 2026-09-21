@@ -365,6 +365,18 @@ impl FileSource {
     /// end of the device — is an incident: recorded, judged, and
     /// returned as the error the reader acts on (SPEC N-10, F-33).
     fn read_once(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        // A device that refused a read and stopped the run is closed
+        // for the rest of it: every later read, from whoever asks and
+        // whether or not memory could answer it, is refused with that
+        // incident before the device is touched (SPEC N-10). The guard
+        // is here, below every reader, so that no path around the pool
+        // reader — labels, the zero-point search, carving — can reach
+        // the device again.
+        if self.kind == Kind::Device {
+            if let Some(closed) = self.ledger.stopped_on(&self.path) {
+                return Err(medium::error_for(closed));
+            }
+        }
         if self.served_from_windows(offset, buf) {
             return Ok(());
         }
@@ -482,6 +494,14 @@ impl<S: BlockSource> BlockSource for FlakySource<S> {
     }
 
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        // As a device: closed once a refusal stopped the run, before
+        // the read is even counted — the count is what proves the
+        // device was not touched.
+        if let Some((path, ledger)) = &self.device {
+            if let Some(closed) = ledger.stopped_on(path) {
+                return Err(medium::error_for(closed));
+            }
+        }
         self.reads
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -648,9 +668,122 @@ mod tests {
         );
         assert_eq!(ledger.incidents().len(), 1);
         assert!(ledger.stopped().is_some());
-        // A clean read is a clean read.
-        assert!(dev.read_at_salvaging(0, &mut buf).unwrap().is_empty());
-        assert_eq!(dev.reads().len(), 2);
+        // The device is closed for the rest of the run: a read that
+        // would have been clean is refused with the same incident, and
+        // the device is not touched — one read on the counter, still.
+        let e = dev.read_at_salvaging(0, &mut buf).unwrap_err();
+        let again = medium::incident_of(&e).expect("the closing incident");
+        assert_eq!((again.offset, again.len, again.stopped), (4096, 8192, true));
+        assert_eq!(dev.reads(), vec![(4096, 8192)], "not touched again");
+        assert_eq!(
+            ledger.incidents().len(),
+            1,
+            "no new incident for a refused read"
+        );
+    }
+
+    /// The closing is per device, not per run: another device on the
+    /// same ledger and an image on the same ledger go on being read —
+    /// the run is over, but the report still wants their labels. A
+    /// second source on the same path is closed too, which is what a
+    /// ledger keyed by path buys over a flag on the source.
+    #[test]
+    fn a_stopped_device_is_closed_but_nothing_else_is() {
+        let disk: Vec<u8> = (0..16384u32).map(|i| (i % 251) as u8).collect();
+        let ledger = Arc::new(Ledger::stop_at_first());
+        let bad = FlakySource::new(MemSource::new(disk.clone()), vec![(9000, 100)])
+            .as_device("/dev/da9", ledger.clone());
+        let same_path_again = FlakySource::new(MemSource::new(disk.clone()), Vec::new())
+            .as_device("/dev/da9", ledger.clone());
+        let other = FlakySource::new(MemSource::new(disk.clone()), Vec::new())
+            .as_device("/dev/da10", ledger.clone());
+        let image = FlakySource::new(MemSource::new(disk.clone()), Vec::new());
+        let mut buf = vec![0u8; 8192];
+        bad.read_at(4096, &mut buf).unwrap_err();
+        assert!(ledger.stopped_on(Path::new("/dev/da9")).is_some());
+        assert!(ledger.stopped_on(Path::new("/dev/da10")).is_none());
+        // Same path, another handle: closed, untouched.
+        let e = same_path_again.read_at(0, &mut buf).unwrap_err();
+        assert!(medium::incident_of(&e).is_some());
+        assert!(same_path_again.reads().is_empty());
+        // Another device and an image: read as before.
+        other.read_at(0, &mut buf).unwrap();
+        assert_eq!(&buf[..], &disk[..8192]);
+        image.read_at(0, &mut buf).unwrap();
+        assert_eq!(&buf[..], &disk[..8192]);
+        assert_eq!(ledger.incidents().len(), 1);
+    }
+
+    /// `--device-may-fail`: a skipped refusal closes nothing — the flag
+    /// exists so that the device's other addresses are still read — and
+    /// the incident that stops the run closes the device like any stop.
+    #[test]
+    fn may_fail_keeps_reading_the_device_until_the_stop_closes_it() {
+        let disk: Vec<u8> = (0..(64u32 << 10)).map(|i| (i % 251) as u8).collect();
+        let ledger = Arc::new(Ledger::may_fail());
+        // One bad sector in each of the first MAY_FAIL_LIMIT blocks.
+        let bad: Vec<(u64, u64)> = (0..Ledger::MAY_FAIL_LIMIT as u64)
+            .map(|b| (b * 4096 + 100, 10))
+            .collect();
+        let dev = FlakySource::new(MemSource::new(disk.clone()), bad)
+            .as_device("/dev/da9", ledger.clone());
+        let mut buf = vec![0u8; 4096];
+        for b in 0..Ledger::MAY_FAIL_LIMIT as u64 - 1 {
+            let e = dev.read_at(b * 4096, &mut buf).unwrap_err();
+            assert!(
+                !medium::incident_of(&e).unwrap().stopped,
+                "block {b} is skipped"
+            );
+            assert!(
+                ledger.stopped_on(Path::new("/dev/da9")).is_none(),
+                "still open after block {b}"
+            );
+            // A clean block in between is read: the device is open.
+            let clean = (Ledger::MAY_FAIL_LIMIT as u64 + 1 + b) * 4096;
+            dev.read_at(clean, &mut buf).unwrap();
+            assert_eq!(&buf[..], &disk[clean as usize..clean as usize + 4096]);
+        }
+        let reads_before = dev.reads().len();
+        let last = (Ledger::MAY_FAIL_LIMIT as u64 - 1) * 4096;
+        let e = dev.read_at(last, &mut buf).unwrap_err();
+        assert!(
+            medium::incident_of(&e).unwrap().stopped,
+            "the limit stops the run"
+        );
+        assert!(ledger.stopped_on(Path::new("/dev/da9")).is_some());
+        // Closed: a clean address is refused and the device untouched.
+        let e = dev.read_at(0, &mut buf).unwrap_err();
+        assert_eq!(medium::incident_of(&e).unwrap().offset, last);
+        assert_eq!(dev.reads().len(), reads_before + 1);
+    }
+
+    /// The real source, gated the same way: a `FileSource` that is a
+    /// device refuses every read once its path is closed in the ledger,
+    /// without touching the file. `/dev/null` is the one device every
+    /// test host has; the refusal must come before the EOF it would
+    /// otherwise answer with.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_source_that_is_a_closed_device_refuses_before_reading() {
+        if !Path::new("/dev/null").exists() {
+            return;
+        }
+        let ledger = Arc::new(Ledger::stop_at_first());
+        let dev = match FileSource::open("/dev/null") {
+            Ok(d) => d.with_ledger(ledger.clone()),
+            Err(_) => return,
+        };
+        assert_eq!(dev.kind(), Kind::Device);
+        let mut buf = vec![0u8; 512];
+        // Open: EOF, an ordinary error, not a medium incident.
+        let e = dev.read_at(0, &mut buf).unwrap_err();
+        assert!(medium::incident_of(&e).is_none(), "{e}");
+        // Closed by a stop recorded on its path: refused with it.
+        let eio = io::Error::from_raw_os_error(5);
+        let i = ledger.record(Path::new("/dev/null"), 4096, 512, &eio);
+        assert!(i.stopped);
+        let e = dev.read_at(0, &mut buf).unwrap_err();
+        assert_eq!(medium::incident_of(&e).map(|i| i.offset), Some(4096), "{e}");
     }
 
     /// With `--device-may-fail` the refusal is skipped — the incident is
