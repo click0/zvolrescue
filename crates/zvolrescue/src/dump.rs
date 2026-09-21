@@ -498,6 +498,35 @@ fn print_text(out: &RunOut) {
     }
 }
 
+/// The end of every run, early or not: the medium incidents on stderr
+/// and the stop, when one stopped the run, as the exit code (SPEC F-33,
+/// N-10); then the evidence record, with them. A run that failed before
+/// it wrote a byte ends here too — a device that refused a read while
+/// the MOS was being opened is the same incident as one that refused a
+/// data block, and the operator is told the same way.
+fn finish(
+    g: &Global,
+    members: &zvol_common::members::Members,
+    json: &serde_json::Value,
+    code: u8,
+    written: Vec<evidence::FileRef>,
+) -> u8 {
+    let code = if code == 0 && members.any_failed() {
+        exit::EVIDENCE
+    } else {
+        code
+    };
+    let code = zvol_common::report_medium(&members.ledger).unwrap_or(code);
+    g.log_evidence_with_incidents(
+        "zvolrescue",
+        json,
+        code,
+        &members.inputs(),
+        written,
+        &members.ledger.incidents(),
+    )
+}
+
 /// Run `dump`.
 pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     let members = match open_members(spec) {
@@ -528,7 +557,30 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         &mut searched,
     ) {
         Ok(x) => x,
-        Err(code) => return code,
+        Err(code) => {
+            // Nothing was written, but the run still ends the way every
+            // run ends: a device may have refused a read on the way to
+            // the dataset, and that is reported the same way as one
+            // refused on the way to a data block.
+            let out = RunOut {
+                pool: pool.name.clone(),
+                pool_guid: format!("{:#018x}", pool.guid),
+                members: members.paths.clone(),
+                txgs_searched: searched,
+                recursive: opts.recursive,
+                volumes: Vec::new(),
+                skipped: Vec::new(),
+                peak_rss_kib: zvol_common::peak_rss_kib(),
+            };
+            let json = serde_json::to_value(&out).expect("serialisable");
+            if g.format == Format::Json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json).expect("serialisable")
+                );
+            }
+            return finish(g, &members, &json, code, Vec::new());
+        }
     };
     let txg = chosen.ub.txg;
     let time = iso8601(chosen.ub.timestamp);
@@ -633,7 +685,11 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                     out.skipped.push(format!("{}: failed (exit {c})", ds.name));
                     code = code.max(c);
                 } else {
-                    return c;
+                    // One target, and it failed: the run is over, but
+                    // it ends below like any other, where a device's
+                    // refusal becomes exit 7 and an incident on record.
+                    code = code.max(c);
+                    break;
                 }
             }
         }
@@ -657,14 +713,6 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         ),
         Format::Text => print_text(&out),
     }
-    let code = if code == 0 && members.any_failed() {
-        exit::EVIDENCE
-    } else {
-        code
-    };
-    // A device refused a read: every incident on stderr, and the stop —
-    // when one stopped the run — as the exit code (SPEC F-33, N-10).
-    let code = zvol_common::report_medium(&members.ledger).unwrap_or(code);
     // Every image this run wrote, with the hash `dump` already computed
     // over it — there is no reason to read a 32 GiB image back to hash
     // what was just hashed on the way out. The manifest of a bulk run is
@@ -682,12 +730,5 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             written.push(f);
         }
     }
-    g.log_evidence_with_incidents(
-        "zvolrescue",
-        &json,
-        code,
-        &members.inputs(),
-        written,
-        &members.ledger.incidents(),
-    )
+    finish(g, &members, &json, code, written)
 }

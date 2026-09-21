@@ -347,6 +347,12 @@ pub struct Alloc {
     /// present under a real indirect tree, of this size, block size and
     /// compression, in place of the two-block sample.
     pub dense: Option<Dense>,
+    /// `fill` written into the pointers from now on: the number of
+    /// non-hole level-0 blocks beneath. One for a data block; the dense
+    /// builder sets it to the sum of a chunk's fills for the indirect
+    /// pointer above the chunk, as ZFS keeps it, so `zdb`'s block
+    /// accounting on the dense fixtures adds up.
+    pub fill: u64,
     /// Build the sample volume deduplicated (SPEC F-28): its data
     /// pointers carry the dedup bit and a dedup-capable checksum
     /// (sha256), and its properties ZAP says `dedup=sha256,verify`.
@@ -478,6 +484,7 @@ impl Alloc {
             members: None,
             data: None,
             dense: None,
+            fill: 1,
             dedup: false,
         }
     }
@@ -847,7 +854,7 @@ impl Alloc {
             .sizes(lsize, psize)
             .props(comp, self.checksum.code(), otype, level)
             .flags(false, self.dedup && otype == ot::ZVOL && level == 0)
-            .births(0, txg, 1)
+            .births(0, txg, self.fill)
             .cksum(self.cksum(padded))
             .bytes(Endian::Little)
     }
@@ -977,14 +984,19 @@ pub fn build_sample_mos_variant(
             let mut bps: Vec<[u8; blkptr::SIZE]> = (0..d.blocks())
                 .map(|b| a.put_compressed(m, &d.block(b), d.compression, ot::ZVOL, 0, 100))
                 .collect();
+            // Every data block is present, so each pointer's fill is
+            // the number of level-0 blocks beneath it: 1 here, and the
+            // sum of a chunk's fills for the pointer above the chunk.
+            let mut fills: Vec<u64> = vec![1; bps.len()];
             let indblkshift = 17u8;
             let per = (1usize << indblkshift) / blkptr::SIZE;
             let mut level = 0u8;
             while bps.len() > 1 {
                 level += 1;
-                bps = bps
+                let (next_bps, next_fills): (Vec<_>, Vec<_>) = bps
                     .chunks(per)
-                    .map(|chunk| {
+                    .zip(fills.chunks(per))
+                    .map(|(chunk, chunk_fills)| {
                         let mut blk = vec![0u8; 1 << indblkshift];
                         for (i, bp) in chunk.iter().enumerate() {
                             blk[i * blkptr::SIZE..(i + 1) * blkptr::SIZE].copy_from_slice(bp);
@@ -994,9 +1006,15 @@ pub fn build_sample_mos_variant(
                         } else {
                             Compression::Lz4
                         };
-                        a.put_compressed(m, &blk, comp, ot::ZVOL, level, 100)
+                        let fill: u64 = chunk_fills.iter().sum();
+                        a.fill = fill;
+                        let bp = a.put_compressed(m, &blk, comp, ot::ZVOL, level, 100);
+                        a.fill = 1;
+                        (bp, fill)
                     })
-                    .collect();
+                    .unzip();
+                bps = next_bps;
+                fills = next_fills;
             }
             let obj = DnodeSpec {
                 object_type: ot::ZVOL,

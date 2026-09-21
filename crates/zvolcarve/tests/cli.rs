@@ -165,6 +165,29 @@ fn a_carved_volume_is_hashed_in_the_same_pass_and_only_when_asked() {
     assert!(err.contains("--hash: unknown digest \"crc32\""), "{err}");
 }
 
+/// The refusal follows what the path resolves to: a symlink to a
+/// device — the `/dev/mapper/NAME` and `/dev/disk/by-id/…` names an
+/// operator types — is refused like the device itself (SPEC N-10).
+#[cfg(unix)]
+#[test]
+fn a_symlink_to_a_device_is_not_carved_without_leave() {
+    if !std::path::Path::new("/dev/null").exists() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("zvolcarve-symlink-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let link = dir.join("disk");
+    std::os::unix::fs::symlink("/dev/null", &link).unwrap();
+    let link = link.to_string_lossy().into_owned();
+    let (code, _out, err) = run(&["scan", &link, "-o", "/nonexistent/carve"]);
+    assert_eq!(code, 5, "{err}");
+    assert!(
+        err.contains("a block device is not scanned (SPEC N-10)"),
+        "{err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Carving is a surface scan, and a block device is refused one
 /// before it is even opened (SPEC N-10): exit 5 and the reason.
 #[test]

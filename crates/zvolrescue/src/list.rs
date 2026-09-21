@@ -323,7 +323,28 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 "zvolrescue: cannot read the pool at txg {}: {e}",
                 chosen.ub.txg
             );
-            return exit::UNRECOVERABLE;
+            // The run ends the way every run ends: a device may have
+            // refused a read on the way to the dataset tree, and that
+            // is exit 7 and an incident on record, not a bare 3.
+            let out = ListOut {
+                pool: pool.name.clone(),
+                pool_guid: format!("{:#018x}", pool.guid),
+                members: members.paths.clone(),
+                txg: chosen.ub.txg,
+                time: iso8601(chosen.ub.timestamp),
+                available_txgs: candidates.iter().map(|c| c.ub.txg).collect(),
+                datasets: Vec::new(),
+                errors: Vec::new(),
+                diff: None,
+            };
+            let json = serde_json::to_value(&out).expect("serialisable");
+            if g.format == Format::Json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json).expect("serialisable")
+                );
+            }
+            return finish(g, &members, &json, exit::UNRECOVERABLE);
         }
     };
     let keep = |d: &Dataset| opts.recursive || !d.snapshot;
@@ -385,18 +406,28 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         ),
         Format::Text => print_text(&out),
     }
+    finish(g, &members, &json, code)
+}
+
+/// The end of every `list`, early or not: the medium incidents on
+/// stderr and the stop, when one stopped the run, as the exit code
+/// (SPEC F-33, N-10); then the evidence record, with them. `list`
+/// writes nothing but its report on stdout.
+fn finish(
+    g: &Global,
+    members: &zvol_common::members::Members,
+    json: &serde_json::Value,
+    code: u8,
+) -> u8 {
     let code = if code == 0 && members.any_failed() {
         exit::EVIDENCE
     } else {
         code
     };
-    // A device refused a read: every incident on stderr, and the stop —
-    // when one stopped the run — as the exit code (SPEC F-33, N-10).
     let code = zvol_common::report_medium(&members.ledger).unwrap_or(code);
-    // `list` writes nothing but its report on stdout.
     g.log_evidence_with_incidents(
         "zvolrescue",
-        &json,
+        json,
         code,
         &members.inputs(),
         Vec::new(),

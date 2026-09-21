@@ -1249,6 +1249,38 @@ jobs:
           cat /tmp/dm/carve2.err | tail -3
           test "$code" = 7
           sudo dmsetup remove zr-bad
+          # The refusal on the way to the dataset, not on a data block:
+          # the eight sectors of the MOS objset itself. Before this was
+          # tested, a single-volume dump and a list returned early from
+          # "cannot read the pool" with exit 3, printed no incident and
+          # wrote no evidence record — the ledger had the incident and
+          # nobody read it; only a bulk -r run reached the report. Now
+          # every early failure ends the way every run ends: exit 7,
+          # the incident on stderr and in the record. The MOS block's
+          # address comes from the reader's own trace, so this keeps
+          # pointing at it if the fixture's layout moves.
+          off=$(./target/release/zvolrescue --debug -q list /tmp/dm/member0.img /tmp/dm/member1.img --txg 4816229 2>&1 >/dev/null | sed -n 's/.*open MOS at txg 4816229:.*dva0 vdev 0 off \(0x[0-9a-f]*\).*/\1/p' | head -1)
+          test -n "$off"
+          mos=$(( (0x400000 + off) / 512 ))
+          echo "MOS objset at txg 4816229: DVA $off, sector $mos"
+          printf '0 %s linear %s 0\n%s 8 error\n%s %s linear %s %s\n' "$mos" "$loop" "$mos" "$((mos+8))" "$((size-mos-8))" "$loop" "$((mos+8))" | sudo dmsetup create zr-bad
+          for cmd in "dump tank/vm/disk0 $dev /tmp/dm/member1.img --txg 4816229 -o /tmp/dm/mos.img" "list $dev /tmp/dm/member1.img --txg 4816229"; do
+            set +e; sudo ./target/release/zvolrescue -q $cmd --evidence-log /tmp/dm/ev.jsonl >/tmp/dm/mos.out 2>/tmp/dm/mos.err; code=$?; set -e
+            cat /tmp/dm/mos.err
+            test "$code" = 7
+            grep -q "cannot read the pool at txg 4816229" /tmp/dm/mos.err
+            grep -q "MEDIUM INCIDENT: $dev refused 4096 byte(s) at byte $((mos*512)) (LBA $mos, 8 sector(s) of 512): Input/output error" /tmp/dm/mos.err
+            grep -q "stopped here" /tmp/dm/mos.err
+            sudo MOS="$mos" python3 - <<'EOF'
+          import json, os
+          r = json.loads(open("/tmp/dm/ev.jsonl").readlines()[-1])
+          assert r["status"] == 7, r["status"]
+          i = r["incidents"]
+          assert len(i) == 1 and i[0]["stopped"] and i[0]["lba"] == int(os.environ["MOS"]) and i[0]["sectors"] == 8, i
+          assert r["result"].get("volumes", []) == [] and r["result"].get("datasets", []) == [], r["result"]
+          EOF
+          done
+          sudo dmsetup remove zr-bad
           sudo losetup -d "$loop"
       - name: Memory and throughput on dense volumes (SPEC N-03, N-08)
         run: |

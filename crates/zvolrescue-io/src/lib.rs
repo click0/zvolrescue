@@ -697,6 +697,23 @@ mod tests {
             1,
             "served reads are not remembered again"
         );
+        // A read that only partly overlaps the window is not served from
+        // it — not the part that fits, not with the rest zeroed: it goes
+        // to the file whole. Straddling the window's end, and starting
+        // inside it but running past.
+        for (at, len) in [
+            ((256u64 << 10) - 512, 1024usize),
+            (1, 256 << 10),
+            (4096, 256 << 10),
+        ] {
+            let mut b = vec![0u8; len];
+            assert!(
+                !f.served_from_windows(at, &mut b),
+                "{at}+{len} straddles the label read and must not be served from it"
+            );
+            f.read_at(at, &mut b).unwrap();
+            assert_eq!(&b[..], &data[at as usize..at as usize + len]);
+        }
         // Past the label: a fresh read, remembered; the queue is bounded.
         for i in 0..(FileSource::WINDOWS as u64 + 4) {
             let mut b = vec![0u8; 4096];

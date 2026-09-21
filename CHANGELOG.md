@@ -15,7 +15,45 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ## Unreleased
 
+### Fixed
+* **A device's refusal on the way to the dataset is exit 7 and an
+  incident on record, on a single volume too (SPEC F-33, N-10).** The
+  medium policy of v0.9.1 reported a refused read after the run: every
+  incident on stderr, the stop as the exit code, both in the evidence
+  record. A single-volume `dump` and a `list` never got there when the
+  refusal landed on a metadata read — the MOS objset, the dataset tree,
+  the volume's dnode: "cannot read the pool" returned early with exit
+  3, no `MEDIUM INCIDENT` line, and no evidence record at all, while
+  the ledger held the incident and nobody read it. A bulk `-r` run
+  reached the report, so the one-volume case was strictly worse. Now
+  every early failure ends the way every run ends. Checked in CI on a
+  real block device: the eight sectors of the MOS objset mapped to
+  device-mapper's error target, `dump` and `list` both exit 7 with the
+  incident on stderr and in the record — the block's address taken
+  from the reader's own trace, so the test follows the fixture.
+* **The dense fixture's indirect pointers count the blocks beneath
+  them.** Every pointer the fixture wrote carried `fill = 1`, the
+  indirect ones included; ZFS keeps the number of non-hole level-0
+  blocks under an indirect pointer there. This tool never reads `fill`,
+  so nothing it does changed, but `zdb` reads it and a fixture that
+  lies to the cross-check is worse than none. A test builds 2048
+  blocks under two levels and checks every pointer at every level.
+
 ### Added
+* **The four inputs the fuzzer crashed on, committed as seeds.**
+  v0.9.0's fuzz commit fixed four panics and kept the crashing inputs
+  only under `fuzz/artifacts`, which is ignored; CI had to rediscover
+  them inside its thirty seconds. They are under `fuzz/seeds` now,
+  named for what they broke — the indirect mapping's address
+  arithmetic, a GPT entry's LBA arithmetic twice, a microzap shorter
+  than its header — beside the deterministic unit tests that already
+  guard each fix.
+* **Smaller guards from the same review.** A read that only partly
+  overlaps a remembered window is never served from it, asserted
+  rather than assumed; a symlink to a device — `/dev/mapper/NAME`,
+  `/dev/disk/by-id/…`, the names an operator types — is refused a
+  surface scan like the device itself, by `scan` and by `zvolcarve`;
+  and `scan --retries` is refused like `dump --retries`.
 * **Gang blocks and remapped blocks on a degraded raidz, tested.** The
   defect v0.9.5 caught before its tag lived on the unverified read
   path — the one a gang header, a block remapped by a vdev removal and

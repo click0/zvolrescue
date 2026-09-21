@@ -1196,7 +1196,9 @@ fn a_block_device_is_not_searched_for_anchors_without_leave() {
 }
 
 /// `--retries` is gone with the policy it served (SPEC F-33): a device
-/// is never asked twice, and an image never needs asking twice.
+/// is never asked twice, and an image never needs asking twice. On
+/// every subcommand — `scan` has its own flag wiring, so it is tried
+/// on its own.
 #[test]
 fn retries_are_no_longer_an_option() {
     let (code, _out, err) = run(&[
@@ -1210,4 +1212,32 @@ fn retries_are_no_longer_an_option() {
     ]);
     assert_eq!(code, 2, "{err}");
     assert!(err.contains("--retries"), "{err}");
+    let (code, _out, err) = run(&["scan", "/dev/null", "--retries", "3"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("--retries"), "{err}");
+}
+
+/// A device reached through a symlink — `/dev/mapper/NAME`,
+/// `/dev/disk/by-id/…`, the paths an operator actually types — is the
+/// device it points at: the refusal follows the file the open resolves
+/// to, not the name (SPEC N-10).
+#[cfg(unix)]
+#[test]
+fn a_symlink_to_a_device_is_still_a_device() {
+    if !std::path::Path::new("/dev/null").exists() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("zvolrescue-symlink-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let link = dir.join("disk");
+    std::os::unix::fs::symlink("/dev/null", &link).unwrap();
+    let link = link.to_string_lossy().into_owned();
+    let (code, out, _err) = run(&["-q", "-f", "json", "scan", &link]);
+    assert_eq!(code, 5, "{out}");
+    assert_eq!(
+        json(&out)["devices"][0]["surface_scan_refused"],
+        true,
+        "{out}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

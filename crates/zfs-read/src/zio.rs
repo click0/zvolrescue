@@ -2103,6 +2103,79 @@ mod tests {
     }
 }
 
+/// The dense fixture's indirect tree says what ZFS would say about it
+/// (SPEC N-03, N-08). This tool never reads `fill`, but `zdb` does, and
+/// a fixture that lies to the cross-check is worse than none.
+#[cfg(test)]
+mod dense_tree_tests {
+    use super::*;
+    use crate::dsl::{open_mos, walk};
+    use crate::fixture::{Dense, Pool};
+    use crate::pool::assemble;
+    use crate::vdev::scan_device;
+    use crate::zvol::open_volume;
+    use zfs_ondisk::blkptr::Compression;
+    use zvolrescue_io::{BlockSource, MemSource};
+
+    /// 2048 blocks of 4 KiB under 128 KiB indirect blocks of 1024
+    /// pointers each: two L1 blocks under one L2 pointer. Every level's
+    /// pointers carry the number of level-0 blocks beneath them.
+    #[test]
+    fn every_indirect_pointer_counts_the_blocks_beneath_it() {
+        let mut pool = Pool::mirror("tank", 0xf111, 12).txgs(&[(100, 1)]);
+        let dense = Dense {
+            bytes: 2048 * 4096,
+            blocksize: 4096,
+            compression: Compression::Off,
+        };
+        let (members, _) = crate::fixture::dense_volume_members(&mut pool, dense);
+        let sources: Vec<MemSource> = members.into_iter().map(MemSource::new).collect();
+        let scans: Vec<_> = sources.iter().map(|s| scan_device(s).ok()).collect();
+        let ub = scans[0].as_ref().unwrap().labels[0]
+            .best()
+            .unwrap()
+            .ub
+            .clone();
+        let a = assemble(&scans).into_iter().next().unwrap();
+        let reader = PoolReader::new(
+            &a,
+            sources
+                .iter()
+                .map(|m| Some(m as &dyn BlockSource))
+                .collect(),
+        );
+        let mos = open_mos(&reader, &ub).unwrap();
+        let tree = walk(&mos, "tank").unwrap();
+        let ds = tree.get("tank/vm/disk0").unwrap();
+        let (obj, _) = open_volume(&reader, ds).unwrap();
+        let dn = obj.dnode();
+        assert_eq!(dn.nlevels, 3, "2048 leaves need two indirect levels");
+        let top = &dn.blkptr[0];
+        assert_eq!((top.level, top.fill), (2, 2048), "the L2 pointer");
+        let l2 = reader.read_block(top, false).unwrap().data;
+        let l1: Vec<BlkPtr> = l2
+            .chunks(zfs_ondisk::blkptr::SIZE)
+            .map(|b| BlkPtr::parse(b, top.endian).unwrap())
+            .filter(|b| !b.is_hole())
+            .collect();
+        assert_eq!(l1.len(), 2);
+        for (i, bp) in l1.iter().enumerate() {
+            assert_eq!((bp.level, bp.fill), (1, 1024), "L1 pointer {i}");
+            let blk = reader.read_block(bp, false).unwrap().data;
+            let l0: Vec<BlkPtr> = blk
+                .chunks(zfs_ondisk::blkptr::SIZE)
+                .map(|b| BlkPtr::parse(b, bp.endian).unwrap())
+                .filter(|b| !b.is_hole())
+                .collect();
+            assert_eq!(l0.len(), 1024, "L1 block {i}");
+            assert!(
+                l0.iter().all(|b| b.level == 0 && b.fill == 1),
+                "every L0 pointer under L1 block {i} is one block"
+            );
+        }
+    }
+}
+
 /// Reading a pool a top-level vdev was removed from (SPEC F-69).
 #[cfg(test)]
 mod removed_vdev_tests {
