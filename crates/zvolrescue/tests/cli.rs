@@ -1241,3 +1241,77 @@ fn a_symlink_to_a_device_is_still_a_device() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A run that produces nothing — no such dataset, no such txg — still
+/// ends the way every run ends: the report on stdout, and a record in
+/// the evidence log with the status. Before this, such runs returned
+/// their code from the middle of `run` and wrote no record at all,
+/// which is how a device's refusal on the way to the dataset went
+/// unrecorded (SPEC F-33, N-10). Images here, so the status is 3; the
+/// device case is the same path and is checked in CI on a real device.
+#[test]
+fn a_run_that_produces_nothing_still_writes_its_record() {
+    let dir = scratch("early-record");
+    let members = write_members(&dir, &plain_members());
+    let log = dir.join("ev.jsonl");
+    let log_s = log.to_string_lossy().into_owned();
+    let img = dir.join("nothere.img");
+    let (code, out, err) = run(&[
+        "-q",
+        "-f",
+        "json",
+        "--evidence-log",
+        &log_s,
+        "dump",
+        "tank/nothere",
+        &members[0],
+        &members[1],
+        "-o",
+        &img.to_string_lossy(),
+    ]);
+    assert_eq!(code, 3, "{err}");
+    let v = json(&out);
+    assert_eq!(v["volumes"].as_array().map(Vec::len), Some(0), "{out}");
+    assert!(
+        v["txgs_searched"].as_array().is_some_and(|t| !t.is_empty()),
+        "{out}"
+    );
+    assert!(!img.exists(), "nothing was written");
+    let last = |log: &Path| -> serde_json::Value {
+        let text = std::fs::read_to_string(log).expect("evidence log");
+        serde_json::from_str(text.lines().last().expect("a record")).expect("a JSON record")
+    };
+    let rec = last(&log);
+    assert_eq!(rec["status"], 3, "{rec}");
+    assert_eq!(
+        rec["result"]["volumes"].as_array().map(Vec::len),
+        Some(0),
+        "{rec}"
+    );
+    assert!(
+        rec.get("incidents")
+            .is_none_or(|i| i.as_array().is_some_and(Vec::is_empty)),
+        "{rec}"
+    );
+    // A txg no member has: the run ends before the pool is read.
+    let (code, _out, err) = run(&[
+        "-q",
+        "--evidence-log",
+        &log_s,
+        "list",
+        &members[0],
+        &members[1],
+        "--txg",
+        "1",
+    ]);
+    assert_eq!(code, 3, "{err}");
+    let rec = last(&log);
+    assert_eq!(rec["status"], 3, "{rec}");
+    assert_eq!(rec["result"]["produced"], false, "{rec}");
+    assert_eq!(
+        rec["inputs"].as_array().map(Vec::len),
+        Some(2),
+        "both members are inputs: {rec}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

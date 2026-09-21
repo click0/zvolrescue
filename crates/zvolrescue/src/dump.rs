@@ -516,14 +516,14 @@ fn finish(
     } else {
         code
     };
-    let code = zvol_common::report_medium(&members.ledger).unwrap_or(code);
-    g.log_evidence_with_incidents(
+    zvol_common::end_run(
+        g,
         "zvolrescue",
         json,
         code,
         &members.inputs(),
         written,
-        &members.ledger.incidents(),
+        &members.ledger,
     )
 }
 
@@ -531,20 +531,20 @@ fn finish(
 pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     let members = match open_members(spec) {
         Ok(m) => m,
-        Err(code) => return code,
+        Err(code) => return zvol_common::end_early(g, "zvolrescue", spec, code),
     };
     if let Err(e) = refuse_if_evidence(&opts.output, &members.paths) {
         eprintln!("zvolrescue: refusing to write: {e}");
-        return exit::REFUSED;
+        return zvol_common::end_early(g, "zvolrescue", spec, exit::REFUSED);
     }
     let pool = match choose_pool(members.pools.clone(), spec.pool_guid.as_deref()) {
         Ok(p) => p,
-        Err(code) => return code,
+        Err(code) => return zvol_common::end_early(g, "zvolrescue", spec, code),
     };
     let candidates = uberblock_candidates(&members.scans, &pool);
     if candidates.is_empty() {
         eprintln!("zvolrescue: no verified uberblocks on the scanned members");
-        return exit::UNRECOVERABLE;
+        return zvol_common::end_early(g, "zvolrescue", spec, exit::UNRECOVERABLE);
     }
     let reader = PoolReader::new(&pool, members.devices()).with_base_offsets(&members.bases());
     let mut searched = Vec::new();
@@ -592,7 +592,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 "zvolrescue: cannot create directory {}: {e}",
                 opts.output.display()
             );
-            return exit::USAGE;
+            return zvol_common::end_early(g, "zvolrescue", spec, exit::USAGE);
         }
         let prefix = format!("{}/", opts.dataset);
         tree.datasets
@@ -646,7 +646,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                             code = code.max(c);
                             continue;
                         }
-                        return c;
+                        return zvol_common::end_early(g, "zvolrescue", spec, c);
                     }
                 },
             };

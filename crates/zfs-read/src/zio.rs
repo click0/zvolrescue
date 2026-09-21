@@ -1945,6 +1945,11 @@ mod tests {
         fn reads_gang_block_through_its_header() {
             let (s, a, bp, _) = build();
             assert!(bp.dva[0].gang);
+            // A gang header on a mirror takes one sector; nothing in the
+            // read path looks at the pointer's asize, so it is checked
+            // here, where a wrong one would otherwise go unseen until
+            // the zdb cross-check.
+            assert_eq!(bp.dva[0].asize, 512);
             let block = reader(&s, &a).read_block(&bp, false).unwrap();
             assert_eq!(block.data, payload());
             assert_eq!(block.verify, Verify::Ok);
@@ -2031,6 +2036,10 @@ mod tests {
         fn gang_block_on_a_degraded_raidz_reads_through_parity() {
             let (s, bp) = build_raidz2();
             assert!(bp.dva[0].gang);
+            // On a 4-wide raidz2 at ashift 12 the 512-byte header is one
+            // data column plus two parity columns: three units, which
+            // is what vdev_raidz_asize gives for that psize.
+            assert_eq!(bp.dva[0].asize, 3 * 4096);
             for present in [
                 [true; 4],
                 [false, true, true, true],

@@ -67,7 +67,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
 
     let members = match open_members(spec) {
         Ok(m) => m,
-        Err(code) => return code,
+        Err(code) => return zvol_common::end_early(g, "zvolcarve", spec, code),
     };
     if let Err(e) = refuse_if_evidence(&opts.output, &members.paths) {
         eprintln!("zvolcarve: {e}");
@@ -75,7 +75,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     }
     let pool = match choose_pool(members.pools.clone(), spec.pool_guid.as_deref()) {
         Ok(p) => p,
-        Err(code) => return code,
+        Err(code) => return zvol_common::end_early(g, "zvolcarve", spec, code),
     };
     let reader = PoolReader::new(&pool, members.devices()).with_base_offsets(&members.bases());
     let obj = ObjectReader::new(&reader, dnode, Endian::Little);

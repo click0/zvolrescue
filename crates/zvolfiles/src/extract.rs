@@ -304,7 +304,11 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
     });
     let (out, paths, ledger) = match result {
         Ok(v) => v,
-        Err(code) => return code,
+        // Nothing was produced — the members did not open, or the
+        // dataset was not reached — but a device may have refused a
+        // read on the way, and that ends the run the same way as one
+        // refused later (SPEC F-33, N-10).
+        Err(code) => return zvol_common::end_early(g, "zvolfiles", spec, code),
     };
 
     let json = serde_json::to_value(&out).expect("serialisable");

@@ -144,11 +144,11 @@ fn datasets_at(
 pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     let members = match open_members(spec) {
         Ok(x) => x,
-        Err(code) => return code,
+        Err(code) => return zvol_common::end_early(g, "zvoltimeline", spec, code),
     };
     let pool = match choose_pool(members.pools.clone(), spec.pool_guid.as_deref()) {
         Ok(p) => p,
-        Err(code) => return code,
+        Err(code) => return zvol_common::end_early(g, "zvoltimeline", spec, code),
     };
     // uberblock_candidates gives the newest first; history reads forward.
     let mut candidates = uberblock_candidates(&members.scans, &pool);
@@ -158,7 +158,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     });
     if candidates.is_empty() {
         eprintln!("zvoltimeline: no verified uberblock in that range");
-        return exit::UNRECOVERABLE;
+        return zvol_common::end_early(g, "zvoltimeline", spec, exit::UNRECOVERABLE);
     }
     let reader = PoolReader::new(&pool, members.devices()).with_base_offsets(&members.bases());
 
@@ -315,7 +315,15 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             Ok(f) => Box::new(f),
             Err(e) => {
                 eprintln!("zvoltimeline: {}: {e}", path.display());
-                return exit::USAGE;
+                return zvol_common::end_run(
+                    g,
+                    "zvoltimeline",
+                    &json,
+                    exit::USAGE,
+                    &members.paths,
+                    Vec::new(),
+                    &members.ledger,
+                );
             }
         },
         None => Box::new(std::io::stdout()),
@@ -337,7 +345,15 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             return 0;
         }
         eprintln!("zvoltimeline: writing the report: {e}");
-        return exit::USAGE;
+        return zvol_common::end_run(
+            g,
+            "zvoltimeline",
+            &json,
+            exit::USAGE,
+            &members.paths,
+            Vec::new(),
+            &members.ledger,
+        );
     }
     let txgs: BTreeSet<u64> = out.txgs.iter().copied().collect();
     let code = if txgs.is_empty() {

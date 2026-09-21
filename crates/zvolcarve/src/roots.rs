@@ -120,7 +120,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     }
     let members = match open_members(spec) {
         Ok(m) => m,
-        Err(code) => return code,
+        Err(code) => return zvol_common::end_early(g, "zvolcarve", spec, code),
     };
     // A pool is not needed to *find* a header — that is the point — but
     // it is needed to read anything the header points at, because a

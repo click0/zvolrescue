@@ -778,3 +778,66 @@ mod tests {
         assert_eq!(found[0].anchors.len(), 1);
     }
 }
+
+/// A device closed by its first refusal is closed to the readers that
+/// go around the pool reader too — the label scan, the partition-table
+/// and GEOM probes, the anchor search — because the gate is in the io
+/// layer beneath all of them (SPEC N-10). This is the unit-test half of
+/// what CI shows with strace on a real block device.
+#[cfg(test)]
+mod closed_device_tests {
+    use super::*;
+    use crate::fixture::Pool;
+    use crate::vdev::scan_device;
+    use std::sync::Arc;
+    use zfs_ondisk::label::LABEL_SIZE;
+    use zvolrescue_io::medium::{self, Ledger};
+    use zvolrescue_io::{FlakySource, MemSource};
+
+    #[test]
+    fn every_direct_reader_is_refused_after_the_first_refusal() {
+        let pool = Pool::mirror("tank", 0xc105ed, 12).txgs(&[(100, 1)]);
+        let img = pool.member_image(0, 64 * LABEL_SIZE);
+        let size = img.len() as u64;
+        let ledger = Arc::new(Ledger::stop_at_first());
+        // The first sector refuses: the label read that opens every
+        // scan is the first thing to touch it.
+        let dev = FlakySource::new(MemSource::new(img), vec![(0, 512)])
+            .as_device("/dev/fakeA", ledger.clone());
+        let e = scan_device(&dev).unwrap_err();
+        assert!(medium::incident_of(&e).is_some(), "{e}");
+        assert_eq!(
+            dev.reads(),
+            vec![(0, LABEL_SIZE)],
+            "one label read, refused"
+        );
+        assert!(ledger
+            .stopped_on(std::path::Path::new("/dev/fakeA"))
+            .is_some());
+        // What a scan asks of the same device next, each refused with
+        // the incident, none of them reaching the device.
+        let e = partition_table(&dev).unwrap_err();
+        assert!(medium::incident_of(&e).is_some(), "partition table: {e}");
+        let e = geom_metadata(&dev, size).unwrap_err();
+        assert!(medium::incident_of(&e).is_some(), "geom: {e}");
+        let e = find(
+            &dev,
+            &Search {
+                surface_scan_on_device: true,
+                ..Search::default()
+            },
+        )
+        .unwrap_err();
+        assert!(medium::incident_of(&e).is_some(), "anchor search: {e}");
+        assert_eq!(
+            dev.reads(),
+            vec![(0, LABEL_SIZE)],
+            "the device was not touched again"
+        );
+        assert_eq!(
+            ledger.incidents().len(),
+            1,
+            "refused reads are not new incidents"
+        );
+    }
+}

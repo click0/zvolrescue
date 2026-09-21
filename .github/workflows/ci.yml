@@ -1309,12 +1309,40 @@ jobs:
           # those too now: strace shows exactly one read of the device,
           # and the run ends with exit 7 and the incident.
           printf '0 8 error\n8 %s linear %s 8\n' "$((size-8))" "$loop" | sudo dmsetup create zr-bad
-          set +e; sudo strace -f -y -e trace=pread64 -o /tmp/dm/closed.txt ./target/release/zvolrescue -q scan "$dev" /tmp/dm/member1.img >/tmp/dm/closed.out 2>/tmp/dm/closed.err; code=$?; set -e
+          set +e; sudo strace -f -y -e trace=pread64 -o /tmp/dm/closed.txt ./target/release/zvolrescue -q -f json scan "$dev" /tmp/dm/member1.img >/tmp/dm/closed.out 2>/tmp/dm/closed.err; code=$?; set -e
           cat /tmp/dm/closed.err
           test "$code" = 7
           grep -q "MEDIUM INCIDENT: $dev refused .* at byte 0 (LBA 0, " /tmp/dm/closed.err
           grep -q "stopped here" /tmp/dm/closed.err
           test "$(grep -c -e "<$real>" -e '</dev/mapper/zr-bad>' /tmp/dm/closed.txt)" = 1
+          # The stop is for that device: the other member's labels are
+          # still in the report — the run is over, but the report still
+          # wants them.
+          sudo python3 - <<'EOF'
+          import json
+          d = json.load(open("/tmp/dm/closed.out"))
+          assert len(d["devices"]) == 2, d["devices"]
+          assert d["devices"][1]["labels"], d["devices"][1]
+          assert [p["name"] for p in d["pools"]] == ["tank"], d["pools"]
+          EOF
+          # Every tool ends the run the same way when the members do not
+          # open: exit 7, the incident on stderr, and a record in the
+          # evidence log that says nothing was produced. zvolfiles and
+          # zvoltimeline used to return the bare code with no record.
+          for cmd in "./target/release/zvolfiles list tank/fs $dev /tmp/dm/member1.img" "./target/release/zvoltimeline $dev /tmp/dm/member1.img"; do
+            set +e; sudo $cmd --evidence-log /tmp/dm/ev.jsonl >/tmp/dm/early.out 2>/tmp/dm/early.err; code=$?; set -e
+            cat /tmp/dm/early.err
+            test "$code" = 7
+            grep -q "MEDIUM INCIDENT: $dev refused .* at byte 0 (LBA 0, " /tmp/dm/early.err
+            test "$(grep -c 'MEDIUM INCIDENT' /tmp/dm/early.err)" = 1
+            sudo python3 - <<'EOF'
+          import json
+          r = json.loads(open("/tmp/dm/ev.jsonl").readlines()[-1])
+          assert r["status"] == 7, r["status"]
+          assert r["incidents"] and r["incidents"][0]["stopped"] and r["incidents"][0]["lba"] == 0, r["incidents"]
+          assert r["result"]["produced"] is False, r["result"]
+          EOF
+          done
           sudo dmsetup remove zr-bad
           sudo losetup -d "$loop"
       - name: Memory and throughput on dense volumes (SPEC N-03, N-08)

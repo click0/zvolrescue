@@ -109,7 +109,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     }
     let members = match open_members(spec) {
         Ok(m) => m,
-        Err(code) => return code,
+        Err(code) => return zvol_common::end_early(g, "zvolcarve", spec, code),
     };
     let codecs: Vec<Codec> = if opts.compressed == "none" {
         Vec::new()

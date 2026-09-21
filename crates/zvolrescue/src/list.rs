@@ -297,11 +297,11 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     };
     let members = match open_members(spec) {
         Ok(x) => x,
-        Err(code) => return code,
+        Err(code) => return zvol_common::end_early(g, "zvolrescue", spec, code),
     };
     let pool = match choose_pool(members.pools.clone(), spec.pool_guid.as_deref()) {
         Ok(p) => p,
-        Err(code) => return code,
+        Err(code) => return zvol_common::end_early(g, "zvolrescue", spec, code),
     };
     let candidates = uberblock_candidates(&members.scans, &pool);
     let Some(chosen) = select_uberblock(&candidates, sel) else {
@@ -313,7 +313,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 .collect::<Vec<_>>()
                 .join(" ")
         );
-        return exit::UNRECOVERABLE;
+        return zvol_common::end_early(g, "zvolrescue", spec, exit::UNRECOVERABLE);
     };
     let reader = PoolReader::new(&pool, members.devices()).with_base_offsets(&members.bases());
     let (mos, tree) = match walk_at(&reader, &chosen.ub, &pool.name) {
@@ -424,14 +424,14 @@ fn finish(
     } else {
         code
     };
-    let code = zvol_common::report_medium(&members.ledger).unwrap_or(code);
-    g.log_evidence_with_incidents(
+    zvol_common::end_run(
+        g,
         "zvolrescue",
         json,
         code,
         &members.inputs(),
         Vec::new(),
-        &members.ledger.incidents(),
+        &members.ledger,
     )
 }
 

@@ -379,6 +379,13 @@ pub struct PoolSpec {
     /// scan the image.
     #[arg(long)]
     pub surface_scan_on_device: bool,
+    /// The run's ledger of refused device reads (SPEC F-33, N-10): made
+    /// once, shared by every member opened from this spec, and read at
+    /// the end of every run — the ones that failed while opening or
+    /// before writing a byte included — so that a device's refusal is
+    /// on stderr and in the evidence record whichever way the run ended.
+    #[arg(skip)]
+    pub run_ledger: std::sync::OnceLock<Arc<Ledger>>,
 }
 
 /// How members are opened: what a device's refusal does, whether its
@@ -411,6 +418,20 @@ impl OpenOpts {
         surface_scan_on_device: bool,
         maps: &[String],
     ) -> Result<OpenOpts, String> {
+        let ledger = Arc::new(if device_may_fail {
+            Ledger::may_fail()
+        } else {
+            Ledger::stop_at_first()
+        });
+        Self::with_ledger(ledger, surface_scan_on_device, maps)
+    }
+
+    /// Parse `MEMBER=MAPFILE` specs onto a ledger the run already has.
+    pub fn with_ledger(
+        ledger: Arc<Ledger>,
+        surface_scan_on_device: bool,
+        maps: &[String],
+    ) -> Result<OpenOpts, String> {
         let maps = maps
             .iter()
             .map(|spec| match spec.split_once('=') {
@@ -420,11 +441,6 @@ impl OpenOpts {
                 _ => Err(format!("--map {spec}: want MEMBER=MAPFILE")),
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let ledger = Arc::new(if device_may_fail {
-            Ledger::may_fail()
-        } else {
-            Ledger::stop_at_first()
-        });
         Ok(OpenOpts {
             ledger,
             surface_scan_on_device,
@@ -453,9 +469,35 @@ impl OpenOpts {
 }
 
 impl PoolSpec {
-    /// How the members are to be opened.
+    /// How the members are to be opened: on this spec's one ledger.
     pub fn open_opts(&self) -> Result<OpenOpts, String> {
-        OpenOpts::parse(self.device_may_fail, self.surface_scan_on_device, &self.map)
+        OpenOpts::with_ledger(self.ledger(), self.surface_scan_on_device, &self.map)
+    }
+
+    /// The run's ledger (SPEC F-33, N-10), made on first use with the
+    /// medium policy the flags chose, and the same one every time after.
+    pub fn ledger(&self) -> Arc<Ledger> {
+        self.run_ledger
+            .get_or_init(|| {
+                Arc::new(if self.device_may_fail {
+                    Ledger::may_fail()
+                } else {
+                    Ledger::stop_at_first()
+                })
+            })
+            .clone()
+    }
+
+    /// Every file a run on this spec reads, for the evidence record:
+    /// the members and the imagers' maps named for them (SPEC F-72).
+    pub fn inputs(&self) -> Vec<PathBuf> {
+        let mut v = self.members().unwrap_or_default();
+        v.extend(
+            self.map
+                .iter()
+                .filter_map(|m| m.split_once('=').map(|(_, f)| PathBuf::from(f))),
+        );
+        v
     }
 
     /// All members in command-line order, or a usage error when none were given.
@@ -614,6 +656,37 @@ mod rss_tests {
         let kib = super::peak_rss_kib().expect("VmHWM in /proc/self/status");
         assert!(kib > 100, "{kib} KiB is not a running process");
     }
+}
+
+/// The end of every run, however it ended: the medium incidents on
+/// stderr and the stop, when one stopped the run, as the exit code
+/// (SPEC F-33, N-10); then the evidence record, with them. `code` is
+/// what the run would otherwise end with.
+pub fn end_run(
+    g: &Global,
+    tool: &str,
+    result: &serde_json::Value,
+    code: u8,
+    inputs: &[PathBuf],
+    written: Vec<evidence::FileRef>,
+    ledger: &Ledger,
+) -> u8 {
+    let code = report_medium(ledger).unwrap_or(code);
+    g.log_evidence_with_incidents(tool, result, code, inputs, written, &ledger.incidents())
+}
+
+/// [`end_run`] for a run that produced nothing: it failed opening or
+/// choosing among the members, or before the first byte of output. A
+/// device may have refused a read on the way, and that ends the run
+/// the same way as one refused later — exit 7, the incident on stderr
+/// and on record — instead of the bare code the failure came with.
+pub fn end_early(g: &Global, tool: &str, spec: &PoolSpec, code: u8) -> u8 {
+    let inputs = spec.inputs();
+    let result = serde_json::json!({
+        "members": inputs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+        "produced": false,
+    });
+    end_run(g, tool, &result, code, &inputs, Vec::new(), &spec.ledger())
 }
 
 /// Say what the medium did, and what to do about it (SPEC F-33, N-10):

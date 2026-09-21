@@ -429,9 +429,12 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
             }
         }
         // A device that refused a label read has stopped the run
-        // already (SPEC F-33, N-10): say so, and go no further.
-        if let Some(code) = crate::report_medium(&open.ledger) {
-            return Err(code);
+        // already (SPEC F-33, N-10): go no further. The caller ends the
+        // run through `end_early`, which reports the incident once and
+        // writes the record; nothing is printed here so that it is not
+        // printed twice.
+        if open.ledger.stopped().is_some() {
+            return Err(exit::MEDIUM);
         }
     }
     if scans.iter().all(|s| s.is_none()) {

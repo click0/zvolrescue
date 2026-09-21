@@ -205,7 +205,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     }
     let members = match open_members(spec) {
         Ok(m) => m,
-        Err(code) => return code,
+        Err(code) => return zvol_common::end_early(g, "zvolcarve", spec, code),
     };
     // A carve does not need a pool to assemble — that is rather the
     // point — but when one does, its ashift and its reader are what make

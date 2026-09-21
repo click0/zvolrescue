@@ -41,6 +41,27 @@ tagged. `v0.7.1` is the release that carries those six.
   before the read it would otherwise answer.
 
 ### Fixed
+* **Every run ends the same way, whichever way it failed (SPEC F-33,
+  N-10).** The fix below closed the early returns of `dump` and `list`;
+  a review of the line found the same door open elsewhere. `zvolfiles
+  list`, `objects` and `extract` returned a bare 3 when the MOS or the
+  dataset walk failed, with no incident on stderr and no record. And
+  when a device refused a *label* read, so that the members never
+  opened, every tool printed the incident and exited 7 but wrote no
+  evidence record at all. Now the ledger is made once per run, on the
+  pool spec, before anything is opened, and one `end_run` closes every
+  run — the report of the incidents, the stop as the exit code, the
+  record with them — including the runs that failed while opening,
+  choosing a pool or a transaction group, or before writing a byte:
+  `dump`, `list`, `zvoltimeline`, the three `zvolfiles` commands and
+  the four `zvolcarve` commands all go through it. A run that produced
+  nothing records that it produced nothing. Checked: in `cargo test`,
+  a `dump` of a dataset that does not exist and a `list` at a
+  transaction group nobody has both end with their record; in CI on a
+  real block device, `zvolfiles list` and `zvoltimeline` on a member
+  whose label 0 refuses exit 7 with one incident on stderr and the
+  record saying so, and a `scan` of that member still reports the
+  other member's labels.
 * **A device's refusal on the way to the dataset is exit 7 and an
   incident on record, on a single volume too (SPEC F-33, N-10).** The
   medium policy of v0.9.1 reported a refused read after the run: every
@@ -65,6 +86,14 @@ tagged. `v0.7.1` is the release that carries those six.
   blocks under two levels and checks every pointer at every level.
 
 ### Added
+* **The direct readers, tested against a closed device.** The io-layer
+  gate (above) was shown with `strace` in CI; now a unit test builds a
+  member whose first sector refuses, runs the label scan on it as a
+  device, and asks what a scan asks next — the partition table, the
+  GEOM sector, the anchor search with leave — and finds every one
+  refused with the incident and the device read exactly once. And a
+  gang header's `asize` is asserted on a mirror and on raidz2, where
+  nothing in the read path would notice a wrong one.
 * **The four inputs the fuzzer crashed on, committed as seeds.**
   v0.9.0's fuzz commit fixed four panics and kept the crashing inputs
   only under `fuzz/artifacts`, which is ignored; CI had to rediscover
