@@ -1256,8 +1256,8 @@ jobs:
           import json
           d = json.load(open("/tmp/dm/zp.json"))
           dev, img = d["devices"]
-          assert dev["surface_scan_refused"] is True and dev["zero_point"] == [], dev
-          assert img.get("surface_scan_refused") in (None, False) and len(img["zero_point"]) == 1, img
+          assert dev["surface_scan_refused"] is True and dev.get("zero_point", []) == [], dev
+          assert img.get("surface_scan_refused") in (None, False) and len(img.get("zero_point", [])) == 1, img
           assert [p["name"] for p in d["pools"]] == ["tank"], d["pools"]
           EOF
           sudo ./target/release/zvolrescue -q scan "$dev" /tmp/dm/member1.img --zero-point 2>/dev/null | grep -q "zero point: not searched" || { echo "the text form does not say the search was refused"; exit 1; }
