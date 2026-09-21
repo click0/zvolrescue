@@ -1242,6 +1242,25 @@ jobs:
           # A scan reads the four labels and nothing else; carving refuses the device before opening it.
           sudo strace -f -y -e trace=pread64 -o /tmp/dm/scan.txt ./target/release/zvolrescue -q scan "$dev" | grep -q 'pool "tank"'
           test "$(grep -c -e "<$real>" -e '</dev/mapper/zr-bad>' /tmp/dm/scan.txt)" = 4
+          # A healthy device asked for its zero point is refused the
+          # search and says so, with exit 5 — even though its labels
+          # verify and the pool is reported (SPEC N-10: a surface is
+          # never scanned on a device without leave). The decision is
+          # deliberate: the operator asked for a surface search and did
+          # not get one, and a script must be told. strace shows the
+          # refusal came before any read past the labels.
+          set +e; sudo strace -f -y -e trace=pread64 -o /tmp/dm/zp.txt ./target/release/zvolrescue -q -f json scan "$dev" /tmp/dm/member1.img --zero-point >/tmp/dm/zp.json 2>/tmp/dm/zp.err; code=$?; set -e
+          test "$code" = 5
+          test "$(grep -c -e "<$real>" -e '</dev/mapper/zr-bad>' /tmp/dm/zp.txt)" = 4
+          sudo python3 - <<'EOF'
+          import json
+          d = json.load(open("/tmp/dm/zp.json"))
+          dev, img = d["devices"]
+          assert dev["surface_scan_refused"] is True and dev["zero_point"] == [], dev
+          assert img.get("surface_scan_refused") in (None, False) and len(img["zero_point"]) == 1, img
+          assert [p["name"] for p in d["pools"]] == ["tank"], d["pools"]
+          EOF
+          sudo ./target/release/zvolrescue -q scan "$dev" /tmp/dm/member1.img --zero-point 2>/dev/null | grep -q "zero point: not searched" || { echo "the text form does not say the search was refused"; exit 1; }
           set +e; sudo ./target/release/zvolcarve scan "$dev" -o /tmp/dm/carve 2>/tmp/dm/carve.err; code=$?; set -e
           test "$code" = 5 && grep -q "a block device is not scanned (SPEC N-10)" /tmp/dm/carve.err
           # With leave, the carve runs — and stops at the error target with exit 7, the incident on record.

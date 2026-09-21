@@ -48,6 +48,15 @@ tagged. `v0.7.1` is the release that carries those six.
   arithmetic, a GPT entry's LBA arithmetic twice, a microzap shorter
   than its header — beside the deterministic unit tests that already
   guard each fix.
+* **A healthy device asked for its zero point is refused the search,
+  with exit 5 — pinned (SPEC N-10).** The labels verify, the pool is
+  reported, and `--zero-point` still gets `zero point: not searched`,
+  `surface_scan_refused` in the JSON and exit 5: the operator asked
+  for a surface search and did not get one, and a script must be told.
+  That was the behaviour; the only test covered a device whose labels
+  do not verify. Now the CI device job runs it on a real block device
+  with verified labels and shows through `strace` that the refusal
+  came before any read past the four labels.
 * **Smaller guards from the same review.** A read that only partly
   overlaps a remembered window is never served from it, asserted
   rather than assumed; a symlink to a device — `/dev/mapper/NAME`,
