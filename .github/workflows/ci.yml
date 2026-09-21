@@ -1315,15 +1315,17 @@ jobs:
           grep -q "MEDIUM INCIDENT: $dev refused .* at byte 0 (LBA 0, " /tmp/dm/closed.err
           grep -q "stopped here" /tmp/dm/closed.err
           test "$(grep -c -e "<$real>" -e '</dev/mapper/zr-bad>' /tmp/dm/closed.txt)" = 1
-          # The stop is for that device: the other member's labels are
-          # still in the report — the run is over, but the report still
-          # wants them.
+          # The report says what happened and no more: the refused
+          # device with its incident and no labels, and no further
+          # member opened after the stop (SPEC F-33: the first refused
+          # read stops the run — the devices after it are not touched).
           sudo python3 - <<'EOF'
           import json
           d = json.load(open("/tmp/dm/closed.out"))
-          assert len(d["devices"]) == 2, d["devices"]
-          assert d["devices"][1]["labels"], d["devices"][1]
-          assert [p["name"] for p in d["pools"]] == ["tank"], d["pools"]
+          assert len(d["devices"]) == 1, d["devices"]
+          dev = d["devices"][0]
+          assert dev["labels"] == [] and dev["surface_scan_refused"] is True, dev
+          assert "medium refused a read, stopping" in dev["error"] and "(LBA 0, " in dev["error"], dev["error"]
           EOF
           # Every tool ends the run the same way when the members do not
           # open: exit 7, the incident on stderr, and a record in the

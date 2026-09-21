@@ -60,8 +60,8 @@ tagged. `v0.7.1` is the release that carries those six.
   transaction group nobody has both end with their record; in CI on a
   real block device, `zvolfiles list` and `zvoltimeline` on a member
   whose label 0 refuses exit 7 with one incident on stderr and the
-  record saying so, and a `scan` of that member still reports the
-  other member's labels.
+  record saying so, and a `scan` of that member reports it refused,
+  with the incident, and opens no further member after the stop.
 * **A device's refusal on the way to the dataset is exit 7 and an
   incident on record, on a single volume too (SPEC F-33, N-10).** The
   medium policy of v0.9.1 reported a refused read after the run: every
