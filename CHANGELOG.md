@@ -13,6 +13,23 @@ development milestone that names what changed when — the sections below
 are their record — and ships inside the next version that does get
 tagged. `v0.7.1` is the release that carries those six.
 
+## Unreleased
+
+### Added
+* **Gang blocks and remapped blocks on a degraded raidz, tested.** The
+  defect v0.9.5 caught before its tag lived on the unverified read
+  path — the one a gang header, a block remapped by a vdev removal and
+  `read_dva` go through — and it survived every test because the gang
+  and removed-vdev fixtures were mirror-only. Now the fixture stripes a
+  gang header and a removed vdev's copied blocks onto a raidz layout
+  the way ZFS lays them out, and four tests read them back on a 4-wide
+  raidz2 with each member missing in turn and with two gone: the gang
+  block comes back whole and verified in seven configurations, the
+  remapped volume in six, three members gone is a clean error, and a
+  silently corrupted column under a gang header is a clean gang error
+  while the same damage to a parity column of a healthy row is never
+  read — the two halves of the lazy-parity rule, pinned.
+
 ## v0.9.5 — 2026-09-20
 
 **The measured release.**

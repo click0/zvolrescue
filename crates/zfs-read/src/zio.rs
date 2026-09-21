@@ -1917,7 +1917,7 @@ mod tests {
 
     mod gang_tests {
         use super::*;
-        use crate::fixture::{Alloc, Pool};
+        use crate::fixture::{Alloc, Layout, Pool};
         use zfs_ondisk::dmu::ot;
 
         fn payload() -> Vec<u8> {
@@ -1983,6 +1983,122 @@ mod tests {
                 reader(&s, &a).read_block(&bp, false).unwrap_err(),
                 ReadError::AllCopiesBad
             );
+        }
+
+        /// The same gang block on a 4-wide raidz2: header and children
+        /// striped with parity, as ZFS lays them out there.
+        fn build_raidz2() -> (Vec<MemSource>, BlkPtr) {
+            let pool = Pool::raidz("tank", 0x9b9b, 12, 4, 2).txgs(&[(100, 1)]);
+            let mut members: Vec<Vec<u8>> = (0..4).map(|i| pool.member_image(i, SIZE)).collect();
+            let mut a = Alloc::with_layout(
+                0x30_0000,
+                Layout::Raidz {
+                    ashift: 12,
+                    nparity: 2,
+                },
+            );
+            let bp = a.put_gang(&mut members, &payload(), &[4096, 4096, 4096], ot::ZVOL, 100);
+            let bp = BlkPtr::parse(&bp, Endian::Little).unwrap();
+            (members.into_iter().map(MemSource::new).collect(), bp)
+        }
+
+        /// The pool as assembled from the `present` members only, and
+        /// the device list with the others absent.
+        fn degraded<'a>(
+            s: &'a [MemSource],
+            present: &[bool],
+        ) -> (PoolAssembly, Vec<Option<&'a dyn BlockSource>>) {
+            let scans: Vec<_> = s
+                .iter()
+                .zip(present)
+                .map(|(m, &p)| if p { scan_device(m).ok() } else { None })
+                .collect();
+            let a = assemble(&scans).into_iter().next().unwrap();
+            let devs = s
+                .iter()
+                .zip(present)
+                .map(|(m, &p)| if p { Some(m as &dyn BlockSource) } else { None })
+                .collect();
+            (a, devs)
+        }
+
+        /// A gang block on a degraded raidz reads through parity: the
+        /// header goes through the unverified path (`read_candidates`),
+        /// which is the path the lazy-parity change once left without
+        /// its parity, and the children through the verified one. Each
+        /// member missing in turn, then two at once — raidz2's budget.
+        #[test]
+        fn gang_block_on_a_degraded_raidz_reads_through_parity() {
+            let (s, bp) = build_raidz2();
+            assert!(bp.dva[0].gang);
+            for present in [
+                [true; 4],
+                [false, true, true, true],
+                [true, false, true, true],
+                [true, true, false, true],
+                [true, true, true, false],
+                [false, true, false, true],
+                [true, false, true, false],
+            ] {
+                let (a, devs) = degraded(&s, &present);
+                let block = PoolReader::new(&a, devs)
+                    .read_block(&bp, false)
+                    .unwrap_or_else(|e| panic!("gang read with {present:?}: {e}"));
+                assert_eq!(block.data, payload(), "{present:?}");
+                assert_eq!(block.verify, Verify::Ok, "{present:?}");
+            }
+        }
+
+        /// Three members gone is past raidz2's budget: a clean error
+        /// from the header read, not a panic and not zeros.
+        #[test]
+        fn gang_block_past_the_parity_budget_fails_cleanly() {
+            let (s, bp) = build_raidz2();
+            let present = [true, false, false, false];
+            let (a, devs) = degraded(&s, &present);
+            let err = PoolReader::new(&a, devs)
+                .read_block(&bp, false)
+                .unwrap_err();
+            assert!(
+                matches!(err, ReadError::Unrecoverable(_) | ReadError::Gang(_)),
+                "{err}"
+            );
+        }
+
+        /// A silently corrupted *data* column under the header is not
+        /// healed: the unverified path reconstructs lost columns but does
+        /// not search for a bad one, and the header's own checksum is
+        /// what catches it. The result is a clean gang error. This pins
+        /// that limitation, so that changing it is a decision and not a
+        /// slip — and it pins the other half of the lazy-parity rule:
+        /// the same damage on a *parity* column of a healthy row is
+        /// never even read.
+        #[test]
+        fn gang_header_with_a_silently_bad_column_is_a_clean_error() {
+            let (s, bp) = build_raidz2();
+            let m = zfs_ondisk::raidz::map(bp.dva[0].offset, 4096, 12, 4, 2);
+            let corrupt = |s: &mut [MemSource], c: &zfs_ondisk::raidz::Column| {
+                let at = (LABEL_START_SIZE + c.offset) as usize;
+                for b in s[c.devidx as usize].bytes_mut()[at..at + c.size as usize].iter_mut() {
+                    *b ^= 0xa5;
+                }
+            };
+            // Parity column bad, row healthy: not read, so not noticed.
+            let mut sp = s.clone();
+            corrupt(&mut sp, &m.parity()[0]);
+            let present = [true; 4];
+            let (a, devs) = degraded(&sp, &present);
+            let block = PoolReader::new(&a, devs).read_block(&bp, false).unwrap();
+            assert_eq!(block.data, payload());
+            // Data column bad: the header checksum fails and nothing
+            // goes looking for which column to distrust.
+            let mut sd = s.clone();
+            corrupt(&mut sd, &m.data()[0]);
+            let (a, devs) = degraded(&sd, &present);
+            let err = PoolReader::new(&a, devs)
+                .read_block(&bp, false)
+                .unwrap_err();
+            assert!(matches!(err, ReadError::Gang(_)), "{err}");
         }
     }
 }
@@ -2090,6 +2206,73 @@ mod removed_vdev_tests {
             "expected refusals naming the removed vdev, got {:?}",
             r.bad.iter().map(|b| b.reason.clone()).collect::<Vec<_>>()
         );
+    }
+
+    /// The same removal, with the copied blocks landing on a 4-wide
+    /// raidz2 — the shape `zpool remove` of a mirror leaves when the
+    /// pool's other top is raidz. Read with each member missing in
+    /// turn: the remapped read goes through `read_candidates`, the
+    /// unverified path, and a lost column there is rebuilt from parity.
+    #[test]
+    fn a_volume_remapped_onto_a_degraded_raidz_reads() {
+        let mut pool = Pool::raidz("tank", 0x4343, 12, 4, 2).txgs(&[(100, 1)]);
+        let members = removed_vdev_members(&mut pool, SIZE);
+        let sources: Vec<MemSource> = members.into_iter().map(MemSource::new).collect();
+        for present in [
+            [true; 4],
+            [false, true, true, true],
+            [true, false, true, true],
+            [true, true, false, true],
+            [true, true, true, false],
+            [true, false, false, true],
+        ] {
+            let scans: Vec<_> = sources
+                .iter()
+                .zip(&present)
+                .map(|(m, &p)| if p { scan_device(m).ok() } else { None })
+                .collect();
+            let ub = scans
+                .iter()
+                .flatten()
+                .next()
+                .expect("a present member")
+                .labels[0]
+                .best()
+                .expect("a verified uberblock")
+                .ub
+                .clone();
+            let a = assemble(&scans).into_iter().next().expect("one pool");
+            assert_eq!(a.missing_tops(), vec![1], "{present:?}");
+            let devs: Vec<Option<&dyn BlockSource>> = sources
+                .iter()
+                .zip(&present)
+                .map(|(m, &p)| if p { Some(m as &dyn BlockSource) } else { None })
+                .collect();
+            let reader = PoolReader::new(&a, devs);
+            let mos =
+                open_mos(&reader, &ub).unwrap_or_else(|e| panic!("MOS with {present:?}: {e}"));
+            assert_eq!(reader.removed_vdevs(), vec![(1, 2)], "{present:?}");
+            let tree = walk(&mos, "tank").expect("dataset tree");
+            let ds = tree.get("tank/vm/disk0").expect("the volume");
+            let (obj, _) = open_volume(&reader, ds).expect("volume opens");
+            let mut sink = MemSink::default();
+            let r = extract(
+                &obj,
+                ds.volsize.expect("volsize"),
+                &mut sink,
+                OnError::Zero,
+                |_, _| {},
+            )
+            .expect("extraction");
+            assert!(r.bad.is_empty() && !r.aborted, "{present:?}: {:?}", r.bad);
+            assert_eq!(&sink.data[..8192], &zvol_pattern(0)[..], "{present:?}");
+            assert_eq!(
+                &sink.data[16384..24576],
+                &zvol_pattern(2)[..],
+                "{present:?}"
+            );
+            assert_eq!(reader.mismatches(), 0, "{present:?}");
+        }
     }
 }
 

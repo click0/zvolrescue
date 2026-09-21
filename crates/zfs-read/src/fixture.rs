@@ -517,18 +517,21 @@ impl Alloc {
         let Some(vdev) = self.removed_vdev else {
             return bytes;
         };
-        assert_eq!(
-            self.layout,
-            Layout::Mirror,
-            "removed-vdev fixtures are mirror-only"
-        );
         let asize = self.next - dst;
         let src = self.removed_next;
         self.removed_next += asize + REMOVED_GAP;
         // A range the removal copied in pieces is several entries, and
-        // the reader has to join them. Anything big enough to have been
-        // split is split, so both cases are covered by one fixture.
-        let first = if asize >= 8192 { asize / 2 } else { asize };
+        // the reader has to join them. On a mirror anything big enough to
+        // have been split is split, so both cases are covered by one
+        // fixture. On a raidz destination the block stays one entry: a
+        // stripe's column rotation depends on its offset, so half a block
+        // read from the middle of a stripe is not the tail of that
+        // stripe, and ZFS's removal copies allocated ranges whole there.
+        let first = if asize >= 8192 && self.layout == Layout::Mirror {
+            asize / 2
+        } else {
+            asize
+        };
         self.mapping.push(indirect::Entry {
             src,
             size: first,
@@ -739,11 +742,13 @@ impl Alloc {
         }
     }
 
-    /// Store `data` as a gang block on a mirror layout: the pieces become
-    /// ordinary blocks, and a sealed 512-byte gang header at the returned
-    /// pointer's DVA (gang bit set) lists them. `pieces` gives the byte
-    /// length of each of up to three children (they must sum to
-    /// `data.len()`).
+    /// Store `data` as a gang block: the pieces become ordinary blocks,
+    /// and a sealed 512-byte gang header at the returned pointer's DVA
+    /// (gang bit set) lists them. `pieces` gives the byte length of each
+    /// of up to three children (they must sum to `data.len()`). On a
+    /// raidz layout the header is striped like any block of its size —
+    /// one data column padded to the unit, plus parity — which is how
+    /// ZFS allocates a gang header there.
     pub fn put_gang(
         &mut self,
         members: &mut [Vec<u8>],
@@ -752,7 +757,6 @@ impl Alloc {
         otype: u8,
         txg: u64,
     ) -> [u8; blkptr::SIZE] {
-        assert_eq!(self.layout, Layout::Mirror, "gang fixtures are mirror-only");
         assert!(
             pieces.len() <= blkptr::GANG_NBLKPTRS && pieces.iter().sum::<usize>() == data.len()
         );
@@ -763,20 +767,60 @@ impl Alloc {
             at += n;
         }
         let offset = self.next;
-        self.next += blkptr::GANG_HEADER_SIZE as u64;
         let mut header = vec![0u8; blkptr::GANG_HEADER_SIZE];
         for (i, c) in children.iter().enumerate() {
             header[i * blkptr::SIZE..(i + 1) * blkptr::SIZE].copy_from_slice(c);
         }
         zfs_ondisk::checksum::seal_embedded(&mut header, [0, offset, txg, 0]);
-        for m in members.iter_mut() {
-            write_at_dva(m, offset, &header);
-        }
+        let asize = match self.layout {
+            Layout::Mirror => {
+                for m in members.iter_mut() {
+                    write_at_dva(m, offset, &header);
+                }
+                blkptr::GANG_HEADER_SIZE as u64
+            }
+            Layout::Raidz { ashift, nparity } => {
+                let unit = 1usize << ashift;
+                let mut row = header.clone();
+                row.resize(unit, 0);
+                let members = self.mine(members);
+                let m = zfs_ondisk::raidz::map(
+                    offset,
+                    unit as u64,
+                    ashift,
+                    members.len() as u64,
+                    nparity,
+                );
+                let cols: Vec<Vec<u8>> = m
+                    .data()
+                    .iter()
+                    .scan(0usize, |at, c| {
+                        let n = c.size as usize;
+                        let col = row[*at..*at + n].to_vec();
+                        *at += n;
+                        Some(col)
+                    })
+                    .collect();
+                let parity = zfs_ondisk::raidz::generate_parity(&cols, nparity as usize);
+                for (c, bytes) in m.parity().iter().zip(parity.iter()) {
+                    write_at_dva(
+                        &mut members[c.devidx as usize],
+                        c.offset,
+                        &bytes[..c.size as usize],
+                    );
+                }
+                for (c, bytes) in m.data().iter().zip(cols.iter()) {
+                    write_at_dva(&mut members[c.devidx as usize], c.offset, bytes);
+                }
+                m.asize
+            }
+        };
+        self.next += asize;
         let size = data.len().div_ceil(512) * 512;
         let mut padded = data.to_vec();
         padded.resize(size, 0);
         Builder::new()
-            .dva(0, 0, offset, blkptr::GANG_HEADER_SIZE as u64, true)
+            .dva(0, 0, offset, asize, true)
             .sizes(size as u64, size as u64)
             .props(2, self.checksum.code(), otype, 0)
             .births(0, txg, 1)
@@ -1205,7 +1249,14 @@ pub fn build_sample_mos_variant(
 pub fn removed_vdev_members(pool: &mut Pool, size: u64) -> Vec<Vec<u8>> {
     let n = pool.members.len();
     let mut members: Vec<Vec<u8>> = (0..n).map(|_| vec![0u8; size as usize]).collect();
-    let mut a = Alloc::new(0x20_0000);
+    let layout = match pool.nparity {
+        Some(p) if pool.kind == "raidz" => Layout::Raidz {
+            ashift: pool.ashift,
+            nparity: p,
+        },
+        _ => Layout::Mirror,
+    };
+    let mut a = Alloc::with_layout(0x20_0000, layout);
     a.removed_vdev = Some(1);
     build_sample_mos(pool, &mut members, &mut a);
     pool.vdev_children = 2;
