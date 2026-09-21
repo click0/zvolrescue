@@ -1,6 +1,6 @@
 # zvolrescue — Technical Specification (ТЗ)
 
-**Status:** living document, revised 2026-09-18 (tool at v0.9.1) · **Owner:** Vladyslav V. Prodan
+**Status:** living document, revised 2026-09-20 (tool at v0.9.5) · **Owner:** Vladyslav V. Prodan
 
 **Ukrainian version:** [SPEC.uk.md](SPEC.uk.md) · **Companion tools:** [COMPANIONS.md](COMPANIONS.md)
 
@@ -640,14 +640,13 @@ binaries' import tables checked on every push, the parsers fuzzed, Miri
 on the unit tests, signed release files (§8.3, §9, N-07); `v0.9.1`
 drew the line between physical and logical recovery — this tool reads
 healthy media, a device's first refused read stops the run, nothing is
-read twice (N-10, F-33). `v0.9.5` is
-the measured release: memory and throughput on dense fixture volumes in
-CI, every push (N-03, N-08), the zstd decoder against libzstd (§12 Q3,
-D-8), reproducibility checked byte for byte (N-05), deduplicated volumes
-in the fixtures (F-28), and a healthy raidz stripe read from its data
-columns alone. `1.0.0` is the full release, and
-waits for what no CI can supply: three real-world incidents with
-documented outcomes ([REALWORLD-TESTS.md](REALWORLD-TESTS.md)),
+read twice (N-10, F-33). `v0.9.5` is the measured release: memory and
+throughput on dense fixture volumes in CI, every push (N-03, N-08), the
+zstd decoder against libzstd (§12 Q3, D-8), reproducibility checked byte
+for byte (N-05), deduplicated volumes in the fixtures (F-28), and a
+healthy raidz stripe read from its data columns alone. `1.0.0` is the
+full release, and waits for what no CI can supply: three real-world
+incidents with documented outcomes ([REALWORLD-TESTS.md](REALWORLD-TESTS.md)),
 packaging (ports, `.deb`, AUR, a manual page), and the open questions
 of §12 settled.
 

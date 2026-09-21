@@ -13,7 +13,23 @@ development milestone that names what changed when — the sections below
 are their record — and ships inside the next version that does get
 tagged. `v0.7.1` is the release that carries those six.
 
-## Unreleased
+## v0.9.5 — 2026-09-20
+
+**The measured release.**
+The 512 MiB memory bound and the throughput target had been asserted
+and never measured, and zstd was decoded by a pure-Rust crate on the
+strength of an assumption. Now every push builds dense 512 MiB volumes,
+extracts them and prints the rate and the peak resident set; runs the
+reader's own zstd decoder against libzstd on the same blocks; and dumps
+one volume twice to check the bytes and the documents come back
+identical. The first measurement found its own defect: raidz2 read an
+uncompressed volume at a third of the mirror's rate, because every
+stripe fetched its parity before anything said it was needed. A healthy
+stripe now reads its data columns alone — and a review of the whole
+range before the tag caught what that change had broken on the other
+read path, a degraded raidz behind a gang or remapped pointer, which is
+fixed here and never shipped. Deduplicated volumes are in the
+fixtures.
 
 ### Changed
 * **A healthy raidz stripe is read from its data columns alone.** The
