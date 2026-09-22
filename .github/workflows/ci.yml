@@ -273,7 +273,7 @@ jobs:
           # those of a straight run. Job control is on for the launch so
           # the background job does not inherit SIGINT ignored, as a
           # non-interactive shell's background jobs otherwise do.
-          rm -rf /tmp/sigint && ./target/release/examples/mkfixture /tmp/sigint bench 12 512 off > /dev/null
+          rm -rf /tmp/sigint && cargo run -q --release -p zfs-read --example mkfixture -- /tmp/sigint bench 12 512 off > /dev/null
           ./target/release/zvolrescue -q -f json dump tank/vm/disk0 /tmp/sigint/member0.img /tmp/sigint/member1.img -o /tmp/sigint/ref.img | python3 -c 'import json,sys; open("/tmp/sigint/ref.sha","w").write(json.load(sys.stdin)["volumes"][0]["sha256"])'
           set -m
           ./target/release/zvolrescue -f json dump tank/vm/disk0 /tmp/sigint/member0.img /tmp/sigint/member1.img -o /tmp/sigint/cut.img --evidence-log /tmp/sigint/ev.jsonl > /tmp/sigint/first.json 2>/tmp/sigint/first.err &
