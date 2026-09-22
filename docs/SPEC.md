@@ -1,6 +1,6 @@
 # zvolrescue — Technical Specification (ТЗ)
 
-**Status:** living document, revised 2026-09-20 (tool at v0.9.5) · **Owner:** Vladyslav V. Prodan
+**Status:** living document, revised 2026-09-22 (tool at v0.9.6) · **Owner:** Vladyslav V. Prodan
 
 **Ukrainian version:** [SPEC.uk.md](SPEC.uk.md) · **Companion tools:** [COMPANIONS.md](COMPANIONS.md)
 
@@ -637,18 +637,23 @@ Version numbering: phases 0–4 shipped as `0.N.x`, and the tag that
 closed the functional rows was `v0.8.5`. What remains is measured in
 three more tags. `v0.9.0` is the audit release: `cargo deny` and the
 binaries' import tables checked on every push, the parsers fuzzed, Miri
-on the unit tests, signed release files (§8.3, §9, N-07); `v0.9.1`
-drew the line between physical and logical recovery — this tool reads
-healthy media, a device's first refused read stops the run, nothing is
-read twice (N-10, F-33). `v0.9.5` is the measured release: memory and
+on the unit tests, signed release files (§8.3, §9, N-07); `v0.9.1` drew
+the line between physical and logical recovery — this tool reads healthy
+media, a device's first refused read stops the run, nothing is read
+twice (N-10, F-33). `v0.9.5` is the measured release: memory and
 throughput on dense fixture volumes in CI, every push (N-03, N-08), the
 zstd decoder against libzstd (§12 Q3, D-8), reproducibility checked byte
 for byte (N-05), deduplicated volumes in the fixtures (F-28), and a
-healthy raidz stripe read from its data columns alone. `1.0.0` is the
-full release, and waits for what no CI can supply: three real-world
-incidents with documented outcomes ([REALWORLD-TESTS.md](REALWORLD-TESTS.md)),
-packaging (ports, `.deb`, AUR, a manual page), and the open questions
-of §12 settled.
+healthy raidz stripe read from its data columns alone. `v0.9.6` closed
+the two doors a review of that line found still open: a device that
+refused a read is closed for the rest of the run in the io layer itself,
+so no reader around the pool reader can reach it again, and a refusal on
+the way to the dataset is exit 7 with the incident on record on a single
+volume too, not only in a bulk run. `1.0.0` is the full release, and
+waits for what no CI can supply: three real-world incidents with
+documented outcomes ([REALWORLD-TESTS.md](REALWORLD-TESTS.md)),
+packaging (ports, `.deb`, AUR, a manual page), and the open questions of
+§12 settled.
 
 ## 11. Risks and mitigations
 

@@ -13,7 +13,20 @@ development milestone that names what changed when — the sections below
 are their record — and ships inside the next version that does get
 tagged. `v0.7.1` is the release that carries those six.
 
-## Unreleased
+## v0.9.6 — 2026-09-22
+
+**The review release.**
+Everything since v0.9.0 read again, with tests for what the reading
+found. Two defects, neither of which had shipped a wrong byte but both
+of which broke the medium policy's promise: a device that refused a
+read could still be reached by any reader that went around the pool
+reader, and a refusal on the way to the dataset came back as exit 3
+with no incident on record when the run was a single volume. Both are
+closed, in the io layer and at the end of every run, and pinned on a
+real block device in CI. The fixtures stripe gang blocks and remapped
+blocks onto raidz now, the dense fixture's indirect pointers count
+what is beneath them, and the fuzzer starts from the inputs that once
+crashed it.
 
 ### Changed
 * **A device that refused a read is closed for the rest of the run, in
