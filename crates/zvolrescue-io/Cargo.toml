@@ -1,5 +1,6 @@
 [package]
 name = "zvolrescue-io"
+publish = false
 description = "Read-only access to devices and disk images for zvolrescue. The only crate that may ever contain unsafe code."
 version.workspace = true
 edition.workspace = true

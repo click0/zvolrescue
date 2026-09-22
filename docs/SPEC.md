@@ -652,8 +652,8 @@ the way to the dataset is exit 7 with the incident on record on a single
 volume too, not only in a bulk run. `1.0.0` is the full release, and
 waits for what no CI can supply: three real-world incidents with
 documented outcomes ([REALWORLD-TESTS.md](REALWORLD-TESTS.md)),
-packaging (ports, `.deb`, AUR, a manual page), and the open questions of
-§12 settled.
+packaging (ports, `.deb`, AUR, a manual page); the open questions of §12
+are settled (D-8 to D-11).
 
 ## 11. Risks and mitigations
 
@@ -668,10 +668,10 @@ packaging (ports, `.deb`, AUR, a manual page), and the open questions of
 
 ## 12. Open questions
 
-1. Should phase 1 target FreeBSD *only* to move faster, with Linux CI added in phase 2? (Proposal: Linux CI from phase 0 — fixture generation is easier there and it keeps the code portable from day one.)
-2. RAIDZ expansion (`raidz_expansion` feature) reflowed layouts — support in phase 2 or defer?
+1. Should phase 1 target FreeBSD *only* to move faster, with Linux CI added in phase 2? (Proposal: Linux CI from phase 0 — fixture generation is easier there and it keeps the code portable from day one.) — *Settled by D-9: as proposed; both platforms from the start, both shipped.*
+2. RAIDZ expansion (`raidz_expansion` feature) reflowed layouts — support in phase 2 or defer? — *Settled by D-10: deferred past 1.0.0; refused with the reason (F-70).*
 3. `ruzstd` (pure Rust, decode-only) vs. `zstd` (bindings to libzstd): pure Rust keeps the static build trivial but is slower. Benchmark on phase 1 fixtures; a cargo feature can offer both. — *Settled by D-8: measured, `ruzstd` stays.*
-4. Crate naming and publication: keep `zfs-ondisk` / `zfs-read` as internal workspace members, or publish them to crates.io as reusable libraries once the API settles?
+4. Crate naming and publication: keep `zfs-ondisk` / `zfs-read` as internal workspace members, or publish them to crates.io as reusable libraries once the API settles? — *Settled by D-11: internal, `publish = false`, asked again after 1.0.0.*
 
 ## 13. Decision log
 
@@ -688,6 +688,9 @@ not have to be re-argued.
 | D-6 | 2026-09-08 | The bare-device case is solved as a **semi-automatic** workflow — user-supplied layout hints (a virtual `vdev_phys`), enumeration of what the hints leave open, checksum confirmation, export of the confirmed label (F-65–F-67) — and fully automatic topology inference (F-63) is only a "could". | Practitioner feedback: by hand the case reduces to editing a label template, after which standard tooling walks the metadata; the topology guess is what resists reliable automation. Keeping the human there and automating the enumeration (hundreds of permutations settled by checksums in seconds) is where a tool beats a hex editor. |
 | D-7 | 2026-09-08 | Recovery correctness is tested against **one golden image with a recorded oracle and a catalogue of damage manifests** applied combinatorially (§9.1); test data lives in a separate repository (`zvolrescue-testdata`). | A recovery test is only meaningful when the right answer is known beforehand; comparing against the tool's own output tunes the algorithm to the case at hand. Diversity must come from the kinds and combinations of damage, not from more images with different content, which add time and no failure modes. Multi-GiB artifacts do not belong in the source repository. |
 | D-8 | 2026-09-18 | zstd is decoded by **`ruzstd`, pure Rust**, and no libzstd binding is offered (§12 Q3). | Measured, not assumed: `tests/zstd-bench.sh` (run on every push) cuts a fixture volume's bytes into 128 KiB blocks, compresses them with the `zstd` command and decodes them through the reader's own decoder against the originals; libzstd's own benchmark runs on the same bytes. On the fixture text at level 3, `ruzstd` decodes about 400 MB/s on one thread and libzstd about 1 GB/s — a third of the speed. A third of libzstd is still more than a spinning disk or a SATA SSD delivers, and this tool reads media (N-08 is a ratio to the *disk's* rate); decode is not where a run's time goes. The binding would cost the static, toolchain-free build (§8.1, D-1) on every target for a gain only an NVMe source could show. If such a source ever makes the decoder the bottleneck, a cargo feature can add the binding then, with this benchmark to show the difference. |
+| D-9 | 2026-09-22 | **Linux CI from phase 0, FreeBSD beside it from the start, both shipped** (§12 Q1). No FreeBSD-only phase existed. | The proposal in the question is what happened: fixture generation and the userland cross-check against `ztest`/`zdb` live in Linux CI, where they are easiest, and the code stayed portable from the first commit because it was built on both every push — a Linux job, a FreeBSD 15 job on the ports `rust`, a FreeBSD 14 job as best effort. FreeBSD remains the primary target (N-06) and the rescue medium the tool is for (mfsBSD); every release carries static Linux binaries and FreeBSD binaries, signed the same way (N-07). Nothing was gained by narrowing, and a Linux-only start would have had to be undone. |
+| D-10 | 2026-09-22 | **`raidz_expansion` is deferred past 1.0.0; a pool with it active is refused, and the refusal says why** (§12 Q2, F-70). | A widened raidz has its rows reflowed: a block's columns are no longer where the original geometry puts them, so reading it with that geometry returns the wrong bytes while the checksums do not object, being the checksums of other blocks. That is the worst failure this tool can have, a silent one, and the feature list of §F-70 names it as known and not implemented for exactly that reason. Support would need the reflow's offset and the two geometries side by side, a fixture that reproduces a real expansion, and a real expanded pool (OpenZFS 2.3, FreeBSD 15) in the real-world matrix to cross-check against `zdb` — none of which exists, and no pool measured against this build has had the feature active. Until that pool is on the matrix, an honest refusal with the reason is worth more than code trusted on reasoning alone. |
+| D-11 | 2026-09-22 | **The library crates stay internal workspace members; nothing is published to crates.io before 1.0.0, and every crate says `publish = false`** (§12 Q4). Names are kept. | The API is not settled: v0.9.6 alone changed the pool spec, the open options and the ledger that every crate shares, and 1.0.0 waits on real-world incidents that may change more. Publishing freezes names and signatures and opens a release channel nobody has asked for, beside the one that exists — signed binaries for every platform (N-07). Anyone who needs the libraries today can depend on the workspace by `git`. The question is asked again after 1.0.0, with a settled API and users of it to ask. |
 
 ## 14. References
 

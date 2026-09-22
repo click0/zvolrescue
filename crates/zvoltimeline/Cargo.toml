@@ -1,5 +1,6 @@
 [package]
 name = "zvoltimeline"
+publish = false
 description = "What happened to a ZFS pool and when: the surviving TXGs turned into a history of its datasets, zvols and snapshots."
 version.workspace = true
 edition.workspace = true

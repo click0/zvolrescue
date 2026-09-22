@@ -1,5 +1,6 @@
 [package]
 name = "zfs-ondisk"
+publish = false
 description = "Pure parsers for ZFS on-disk structures (labels, uberblocks, block pointers). No I/O."
 version.workspace = true
 edition.workspace = true

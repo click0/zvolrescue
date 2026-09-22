@@ -1,5 +1,6 @@
 [package]
 name = "zvol-common"
+publish = false
 description = "The contract every zvolrescue binary shares: arguments, exit codes, member opening, evidence log, time formatting."
 version.workspace = true
 edition.workspace = true

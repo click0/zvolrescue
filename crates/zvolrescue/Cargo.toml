@@ -1,5 +1,6 @@
 [package]
 name = "zvolrescue"
+publish = false
 description = "Open-source ZFS forensic & recovery utility: read-only extraction of zvols and datasets from pools at any surviving TXG."
 version.workspace = true
 edition.workspace = true

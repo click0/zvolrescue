@@ -1,5 +1,6 @@
 [package]
 name = "zvolfiles"
+publish = false
 description = "Files out of ZFS filesystem datasets: directories, symlinks, ownership and times, or a raw object dump when the POSIX metadata is too damaged."
 version.workspace = true
 edition.workspace = true

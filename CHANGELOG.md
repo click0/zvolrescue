@@ -15,6 +15,19 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ## Unreleased
 
+### Documented
+* **The open questions of §12 are closed (D-9…D-11).** What the
+  repository already did is now a decision with its reasons: Linux CI
+  from phase 0 with FreeBSD beside it and both shipped (D-9);
+  `raidz_expansion` deferred past 1.0.0, a pool with it active refused
+  with the reason, because a reflowed layout returns wrong bytes with
+  checksums that do not object and no such pool has been measured
+  (D-10); the library crates internal and unpublished until 1.0.0,
+  every crate marked `publish = false` so that no stray `cargo
+  publish` can decide it first (D-11). With D-8 that leaves §12 with
+  nothing open, which was one of the three conditions §10 sets for
+  1.0.0.
+
 ### Fixed
 * **The fixtures' dnode and objset blocks carry the object counts ZFS
   keeps in `fill`.** v0.9.6 made the dense volume's indirect pointers

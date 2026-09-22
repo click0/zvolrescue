@@ -1,5 +1,6 @@
 [package]
 name = "zvolcarve"
+publish = false
 description = "Find zvols that no uberblock points at any more: scan raw vdev space for surviving metadata, rank what it finds, and extract it."
 version.workspace = true
 edition.workspace = true

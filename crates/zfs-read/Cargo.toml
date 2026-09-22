@@ -1,5 +1,6 @@
 [package]
 name = "zfs-read"
+publish = false
 description = "Walks a ZFS pool through a read-only BlockSource: vdev reconstruction, zio, dmu, dsl, zvol extraction, carving."
 version.workspace = true
 edition.workspace = true
