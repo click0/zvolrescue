@@ -2185,6 +2185,94 @@ mod dense_tree_tests {
     }
 }
 
+/// The fixtures' dnode and objset pointers carry the object counts ZFS
+/// keeps in `fill`, which `zdb -d` prints and this tool never reads: a
+/// fixture that lies to the cross-check is worse than none.
+#[cfg(test)]
+mod objset_fill_tests {
+    use super::*;
+    use crate::dsl::{open_mos, walk};
+    use crate::fixture::{destroyed_zvol_members, dnodes_allocated, Pool};
+    use crate::pool::assemble;
+    use crate::vdev::scan_device;
+    use zfs_ondisk::dmu::ObjsetPhys;
+    use zfs_ondisk::label::LABEL_SIZE;
+    use zvolrescue_io::{BlockSource, MemSource};
+
+    /// An objset pointer's fill is the number of allocated dnodes under
+    /// its meta dnode; the meta dnode's own pointer says the same; and
+    /// both equal what a count of the dnode block's slots finds.
+    fn check(reader: &PoolReader<'_>, bp: &BlkPtr, what: &str) -> u64 {
+        let os = ObjsetPhys::parse(&reader.read_block(bp, false).unwrap().data, bp.endian).unwrap();
+        let mut counted = 0u64;
+        let mut summed = 0u64;
+        for child in os.meta_dnode.blkptr.iter().filter(|b| !b.is_hole()) {
+            let block = reader.read_block(child, false).unwrap().data;
+            let n = dnodes_allocated(&block);
+            assert_eq!(
+                child.fill, n,
+                "{what}: a dnode block's fill is its allocated dnodes"
+            );
+            assert!(n > 0, "{what}: the sample dnode blocks are not empty");
+            counted += n;
+            summed += child.fill;
+        }
+        assert_eq!(
+            bp.fill, summed,
+            "{what}: the objset's fill is the sum under its meta dnode"
+        );
+        assert_eq!(bp.fill, counted, "{what}");
+        counted
+    }
+
+    #[test]
+    fn dnode_and_objset_pointers_count_their_objects() {
+        let mut pool = Pool::mirror("tank", 0xf1e1, 12).txgs(&[(100, 1), (101, 2)]);
+        let (members, _, _) = destroyed_zvol_members(&mut pool, 64 * LABEL_SIZE);
+        let sources: Vec<MemSource> = members.into_iter().map(MemSource::new).collect();
+        let scans: Vec<_> = sources.iter().map(|s| scan_device(s).ok()).collect();
+        let ub = scans[0].as_ref().unwrap().labels[0]
+            .uberblocks
+            .iter()
+            .find(|s| s.ub.txg == 100)
+            .unwrap()
+            .ub
+            .clone();
+        let a = assemble(&scans).into_iter().next().unwrap();
+        let reader = PoolReader::new(
+            &a,
+            sources
+                .iter()
+                .map(|m| Some(m as &dyn BlockSource))
+                .collect(),
+        );
+        // The MOS: its root pointer counts every object in it.
+        let rootbp = BlkPtr::parse(&ub.rootbp, ub.endian).unwrap();
+        let mos_objects = check(&reader, &rootbp, "MOS");
+        assert!(
+            mos_objects >= 8,
+            "the sample MOS has more than a handful of objects: {mos_objects}"
+        );
+        // The volume's objset: the data object and its properties ZAP.
+        let mos = open_mos(&reader, &ub).unwrap();
+        let tree = walk(&mos, "tank").unwrap();
+        let ds = tree.get("tank/vm/disk0").unwrap();
+        assert_eq!(check(&reader, &ds.phys.bp, "tank/vm/disk0"), 2);
+        // A filesystem with nothing in it: an empty meta dnode, fill 0.
+        let fs = tree.get("tank/vm").or_else(|| tree.get("tank")).unwrap();
+        if !fs.phys.bp.is_hole() {
+            let os = ObjsetPhys::parse(
+                &reader.read_block(&fs.phys.bp, false).unwrap().data,
+                fs.phys.bp.endian,
+            )
+            .unwrap();
+            if os.meta_dnode.blkptr.iter().all(|b| b.is_hole()) {
+                assert_eq!(fs.phys.bp.fill, 0, "an empty objset counts nothing");
+            }
+        }
+    }
+}
+
 /// Reading a pool a top-level vdev was removed from (SPEC F-69).
 #[cfg(test)]
 mod removed_vdev_tests {

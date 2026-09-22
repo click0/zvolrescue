@@ -13,6 +13,33 @@ development milestone that names what changed when — the sections below
 are their record — and ships inside the next version that does get
 tagged. `v0.7.1` is the release that carries those six.
 
+## Unreleased
+
+### Fixed
+* **The fixtures' dnode and objset blocks carry the object counts ZFS
+  keeps in `fill`.** v0.9.6 made the dense volume's indirect pointers
+  count the blocks beneath them; the level-0 blocks of dnode arrays
+  and every objset's root pointer still said `fill = 1`. ZFS writes
+  the number of allocated dnodes in a dnode block, a multi-slot dnode
+  counted once, and the sum of those under an objset's meta dnode —
+  which is what `zdb -d` prints as the object count. The fixture now
+  writes both, through two allocator calls that count what they
+  store, and a test reads the sample pool's MOS and the volume's
+  objset back and compares each pointer's `fill` with the dnodes it
+  finds in the block. This tool never reads `fill`; the cross-check
+  with `zdb` does.
+* **A device that refuses a read while the members are being bound
+  stops the run there too (SPEC F-33, N-10).** After every member's
+  labels are read, `open_members` still reads through the pool — a
+  removed vdev's mapping, a layout searched for, a leaf bound by
+  reading — past its own check for a stop. A refusal there was
+  recorded and swallowed, and the run went on into the command with a
+  stopped ledger, to end wherever it ended. Now a stop recorded by
+  those reads ends the open the way one during the labels does, and
+  the command's end of run reports it. `zvolcarve dump` refusing to
+  write over evidence goes through that end of run as well, like its
+  other early returns.
+
 ## v0.9.6 — 2026-09-22
 
 **The review release.**

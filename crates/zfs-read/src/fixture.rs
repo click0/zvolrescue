@@ -311,6 +311,25 @@ pub enum Layout {
     },
 }
 
+/// The number of allocated dnodes in a dnode-array block: every slot
+/// whose type is set, a multi-slot dnode counted once and its extra
+/// slots skipped — the rule `dbuf_write_ready` uses for the block's
+/// `fill`.
+pub fn dnodes_allocated(block: &[u8]) -> u64 {
+    let mut n = 0u64;
+    let mut i = 0usize;
+    while (i + 1) * DNODE_SIZE <= block.len() {
+        let d = &block[i * DNODE_SIZE..(i + 1) * DNODE_SIZE];
+        if d[0] != 0 {
+            n += 1;
+            i += 1 + d[12] as usize;
+        } else {
+            i += 1;
+        }
+    }
+    n
+}
+
 /// A bump allocator that stores uncompressed, fletcher4-checksummed
 /// blocks on the member images of top-level vdev 0 and hands back the
 /// block pointers.
@@ -749,6 +768,40 @@ impl Alloc {
         }
     }
 
+    /// Store a dnode-array block. Its pointer's `fill` is the number of
+    /// allocated dnodes in it, a multi-slot dnode counted once, as ZFS
+    /// writes it (`dbuf_write_ready`) and as `zdb` reads it back.
+    /// Returns the pointer and that count.
+    pub fn put_dnodes(
+        &mut self,
+        members: &mut [Vec<u8>],
+        dnodes: &[u8],
+        txg: u64,
+    ) -> ([u8; blkptr::SIZE], u64) {
+        let n = dnodes_allocated(dnodes);
+        self.fill = n;
+        let bp = self.put(members, dnodes, ot::DNODE, 0, txg);
+        self.fill = 1;
+        (bp, n)
+    }
+
+    /// Store an objset block whose meta dnode has `objects` allocated
+    /// dnodes beneath it: that is the pointer's `fill`, the sum over
+    /// the meta dnode's pointers, as `dmu_objset_write_ready` sets it
+    /// and as `zdb -d` reports the object count.
+    pub fn put_objset(
+        &mut self,
+        members: &mut [Vec<u8>],
+        data: &[u8],
+        objects: u64,
+        txg: u64,
+    ) -> [u8; blkptr::SIZE] {
+        self.fill = objects;
+        let bp = self.put(members, data, ot::OBJSET, 0, txg);
+        self.fill = 1;
+        bp
+    }
+
     /// Store `data` as a gang block: the pieces become ordinary blocks,
     /// and a sealed 512-byte gang header at the returned pointer's DVA
     /// (gang bit set) lists them. `pieces` gives the byte length of each
@@ -944,7 +997,7 @@ pub fn build_sample_mos_variant(
         ..DnodeSpec::default()
     }
     .build();
-    let os_fs = a.put(m, &objset(&empty_meta, 2), ot::OBJSET, 0, 100);
+    let os_fs = a.put_objset(m, &objset(&empty_meta, 2), 0, 100);
     let mut zvol_dnodes = vec![0u8; 4096];
     // Data blocks 0 and 2 of the volume; 1 and 3 are holes.
     if with_disk0 && a.layout == Layout::Mirror && a.data.is_none() && a.dense.is_none() {
@@ -1057,7 +1110,7 @@ pub fn build_sample_mos_variant(
     }
     .build();
     zvol_dnodes[2 * DNODE_SIZE..3 * DNODE_SIZE].copy_from_slice(&props_obj);
-    let zvol_dnode_blk = a.put(m, &zvol_dnodes, ot::DNODE, 0, 100);
+    let (zvol_dnode_blk, zvol_objects) = a.put_dnodes(m, &zvol_dnodes, 100);
     let zvol_meta = DnodeSpec {
         object_type: ot::DNODE,
         datablksz: 4096,
@@ -1065,7 +1118,7 @@ pub fn build_sample_mos_variant(
         ..DnodeSpec::default()
     }
     .build();
-    let os_zvol = a.put(m, &objset(&zvol_meta, 3), ot::OBJSET, 0, 100);
+    let os_zvol = a.put_objset(m, &objset(&zvol_meta, 3), zvol_objects, 100);
 
     let mut dnodes = vec![0u8; 16384];
     let mut put = |obj: u64, bytes: Vec<u8>| {
@@ -1245,7 +1298,7 @@ pub fn build_sample_mos_variant(
         );
     }
 
-    let dnode_blk = a.put(m, &dnodes, ot::DNODE, 0, 100);
+    let (dnode_blk, objects) = a.put_dnodes(m, &dnodes, 100);
     let meta = DnodeSpec {
         object_type: ot::DNODE,
         datablksz: 16384,
@@ -1253,7 +1306,7 @@ pub fn build_sample_mos_variant(
         ..DnodeSpec::default()
     }
     .build();
-    a.put(m, &objset(&meta, 1), ot::OBJSET, 0, 100)
+    a.put_objset(m, &objset(&meta, 1), objects, 100)
 }
 
 /// A mirror whose volume data blocks are addressed on a top-level vdev
@@ -2004,7 +2057,7 @@ fn build_zpl_objset(
         .build(),
     );
 
-    let dnode_blk = a.put(m, &dnodes, ot::DNODE, 0, 100);
+    let (dnode_blk, objects) = a.put_dnodes(m, &dnodes, 100);
     let meta_dnode = DnodeSpec {
         object_type: ot::DNODE,
         datablksz: 16384,
@@ -2012,7 +2065,7 @@ fn build_zpl_objset(
         ..DnodeSpec::default()
     }
     .build();
-    a.put(m, &objset(&meta_dnode, 2), ot::OBJSET, 0, 100)
+    a.put_objset(m, &objset(&meta_dnode, 2), objects, 100)
 }
 
 /// Bytes the parent block-pointer object of the ZPL fixture's deadlist
@@ -2112,7 +2165,7 @@ pub fn zpl_members_with(
         ..DnodeSpec::default()
     }
     .build();
-    let os_empty = a.put(m, &objset(&empty_meta, 2), ot::OBJSET, 0, 100);
+    let os_empty = a.put_objset(m, &objset(&empty_meta, 2), 0, 100);
 
     let mut dnodes = vec![0u8; 16384];
     let mut put = |obj: u64, bytes: Vec<u8>| {
@@ -2173,7 +2226,7 @@ pub fn zpl_members_with(
     put(10, u64_array_obj(&mut a, m, &[9]));
     put(12, deadlist_obj(&mut a, m, ZPL_DEADLIST_BYTES, &[("0", 8)]));
 
-    let dnode_blk = a.put(m, &dnodes, ot::DNODE, 0, 100);
+    let (dnode_blk, objects) = a.put_dnodes(m, &dnodes, 100);
     let meta = DnodeSpec {
         object_type: ot::DNODE,
         datablksz: 16384,
@@ -2181,7 +2234,7 @@ pub fn zpl_members_with(
         ..DnodeSpec::default()
     }
     .build();
-    let root = a.put(m, &objset(&meta, 1), ot::OBJSET, 0, 100);
+    let root = a.put_objset(m, &objset(&meta, 1), objects, 100);
     pool.rootbp = Some(root);
     pool.rootbp_by_txg = Vec::new();
     for (i, img) in members.iter_mut().enumerate() {

@@ -496,6 +496,14 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
     }
     bind_assumed(spec, &paths, &mut pools, &scans, &devices, &mut bases)?;
     drop(devices);
+    // The reads above — a removed vdev's mapping, a layout searched
+    // for, a leaf bound by reading — go through the pool, and a device
+    // may have refused one of them and stopped the run. That is the
+    // same stop as one during the labels: go no further, and let the
+    // caller's end of run report it (SPEC F-33, N-10).
+    if open.ledger.stopped().is_some() {
+        return Err(exit::MEDIUM);
+    }
     Ok(Members {
         sources,
         scans,

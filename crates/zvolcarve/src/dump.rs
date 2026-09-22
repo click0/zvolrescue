@@ -71,7 +71,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     };
     if let Err(e) = refuse_if_evidence(&opts.output, &members.paths) {
         eprintln!("zvolcarve: {e}");
-        return exit::REFUSED;
+        return zvol_common::end_early(g, "zvolcarve", spec, exit::REFUSED);
     }
     let pool = match choose_pool(members.pools.clone(), spec.pool_guid.as_deref()) {
         Ok(p) => p,
