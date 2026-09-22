@@ -265,6 +265,45 @@ jobs:
           ./target/release/zvolrescue -f json dump tank/vm/disk0 /tmp/fx/member0.img /tmp/fx/member1.img -o /tmp/resume.img --resume | python3 -c 'import json,sys; d=json.load(sys.stdin)["volumes"][0]; assert d["resumed_from_block"] == 2, d; assert d["blocks_read"] == 1, d; assert d["sha256"] == "febfe0108392728dbde89ee63f9f25419a0192ac04420db3ad88b0032a088585"'
           cmp /tmp/disk0.img /tmp/resume.img
           test ! -e /tmp/resume.img.resume.json
+      - name: A SIGINT ends a dump where --resume takes it up (SPEC F-32)
+        run: |
+          # A real signal, part-way through a 512 MiB dense volume: the
+          # run ends at the next block with its state written, exits 6,
+          # names the block; resumed there, the image and its hash are
+          # those of a straight run. Job control is on for the launch so
+          # the background job does not inherit SIGINT ignored, as a
+          # non-interactive shell's background jobs otherwise do.
+          rm -rf /tmp/sigint && ./target/release/examples/mkfixture /tmp/sigint bench 12 512 off > /dev/null
+          ./target/release/zvolrescue -q -f json dump tank/vm/disk0 /tmp/sigint/member0.img /tmp/sigint/member1.img -o /tmp/sigint/ref.img | python3 -c 'import json,sys; open("/tmp/sigint/ref.sha","w").write(json.load(sys.stdin)["volumes"][0]["sha256"])'
+          set -m
+          ./target/release/zvolrescue -f json dump tank/vm/disk0 /tmp/sigint/member0.img /tmp/sigint/member1.img -o /tmp/sigint/cut.img --evidence-log /tmp/sigint/ev.jsonl > /tmp/sigint/first.json 2>/tmp/sigint/first.err &
+          pid=$!
+          set +m
+          for _ in $(seq 1 6000); do
+            sz=$(stat -c %s /tmp/sigint/cut.img 2>/dev/null || echo 0)
+            [ "$sz" -ge $((128 * 1048576)) ] && break
+            kill -0 $pid 2>/dev/null || { echo "::error::the dump finished before 128 MiB were on disk"; exit 1; }
+            sleep 0.005
+          done
+          kill -INT $pid
+          set +e; wait $pid; code=$?; set -e
+          cat /tmp/sigint/first.err
+          test "$code" = 6
+          grep -q "interrupted at block" /tmp/sigint/first.err
+          python3 - <<'EOF'
+          import json
+          v = json.load(open("/tmp/sigint/first.json"))["volumes"][0]
+          at = v["interrupted_at"]
+          assert at > 0 and v["blocks_read"] == at and not v["aborted"], v
+          s = json.load(open("/tmp/sigint/cut.img.resume.json"))
+          assert s["blocks_done"] == at, (s, at)
+          r = json.loads(open("/tmp/sigint/ev.jsonl").readlines()[-1])
+          assert r["status"] == 6 and r["result"]["volumes"][0]["interrupted_at"] == at, r["status"]
+          open("/tmp/sigint/at", "w").write(str(at))
+          EOF
+          ./target/release/zvolrescue -f json dump tank/vm/disk0 /tmp/sigint/member0.img /tmp/sigint/member1.img -o /tmp/sigint/cut.img --resume --evidence-log /tmp/sigint/ev.jsonl | python3 -c 'import json,sys; v=json.load(sys.stdin)["volumes"][0]; assert v["resumed_from_block"] == int(open("/tmp/sigint/at").read()), v; assert "interrupted_at" not in v, v; assert v["sha256"] == open("/tmp/sigint/ref.sha").read(), v'
+          cmp /tmp/sigint/cut.img /tmp/sigint/ref.img
+          test ! -e /tmp/sigint/cut.img.resume.json
       - name: The pool's history from its transaction groups (COMPANIONS T-01…T-05, T-10)
         run: |
           ./target/release/zvoltimeline --version

@@ -585,43 +585,34 @@ if [ -n "$D5_SLOT" ]; then
     else result D5 FAIL "list exit $code, txg ${used:-?}, newest was $D5_TXG"; fi
 else result D5 FAIL "could not find the newest uberblock slot with zdb -lu"; fi
 
-# D6: SIGINT part-way, then --resume. The tool has no SIGINT handler:
-# the signal kills it (exit 130) and what --resume finds is the state
-# file the run writes every 5 seconds. A 512 MiB volume on loop devices
-# is read in a second or two, so the dump is pinned to one CPU next to a
-# busy loop to make it outlast the first checkpoint; if it still
-# finishes first, the scenario is skipped, not failed. Job control is
+# D6: SIGINT part-way, then --resume. The signal ends the run at the
+# next block with its state written (F-32, exit 6). Job control is
 # turned on for the launch so the background job does not inherit
 # SIGINT ignored, as a non-interactive shell's background jobs do.
 rm -f "$WORK/out/d6.img" "$WORK/out/d6.img.resume.json"
-slow=""; command -v taskset >/dev/null && slow="taskset -c 0 nice -n 15"
 set -m
-# shellcheck disable=SC2086
-$slow "$ZR" --evidence-log "$EV" -f json dump "${P}m/big" "$M0" "$M1" -o "$WORK/out/d6.img" > "$WORK/out/d6-first.log" 2>&1 &
+"$ZR" --evidence-log "$EV" -f json dump "${P}m/big" "$M0" "$M1" -o "$WORK/out/d6.img" > "$WORK/out/d6-first.log" 2>"$WORK/out/d6-first.err" &
 pid=$!
-hog=""
-if [ -n "$slow" ]; then taskset -c 0 sh -c 'while :; do :; done' & hog=$!; fi
 set +m
-t0=$(date +%s)
-for _ in $(seq 1 1200); do
-    [ -e "$WORK/out/d6.img.resume.json" ] && break
+for _ in $(seq 1 6000); do
+    sz=$(stat -c %s "$WORK/out/d6.img" 2>/dev/null || echo 0)
+    [ "$sz" -ge $((128 * 1048576)) ] && break
     kill -0 $pid 2>/dev/null || break
-    sleep 0.05
+    sleep 0.005
 done
-if [ -e "$WORK/out/d6.img.resume.json" ] && kill -0 $pid 2>/dev/null; then
+if kill -0 $pid 2>/dev/null; then
     kill -INT $pid; wait $pid; first=$?
-    [ -z "$hog" ] || { kill $hog 2>/dev/null; wait $hog 2>/dev/null; }
-    at=$(stat -c %s "$WORK/out/d6.img" 2>/dev/null || echo 0)
+    at=$(jsonq 'print(d["volumes"][0]["interrupted_at"])' < "$WORK/out/d6-first.log" 2>/dev/null)
+    state=$(python3 -c 'import json; print(json.load(open("'"$WORK/out/d6.img.resume.json"'"))["blocks_done"])' 2>/dev/null)
     run d6 -f json dump "${P}m/big" "$M0" "$M1" -o "$WORK/out/d6.img" --resume
     from=$(jsonq 'print(d["volumes"][0]["resumed_from_block"])' < "$WORK/out/d6.log" 2>/dev/null)
     got=$(jsonq 'print(d["volumes"][0]["sha256"])' < "$WORK/out/d6.log" 2>/dev/null)
-    if { [ "$first" = 130 ] || [ "$first" = 6 ]; } && [ "$code" = 0 ] && [ "${from:-0}" -gt 0 ] && [ "$got" = "${SHA[${P}m/big]}" ] && [ "$(sha_of "$WORK/out/d6.img")" = "${SHA[${P}m/big]}" ]; then
-        result D6 PASS "SIGINT after $((at / 1048576)) MiB (exit $first), resumed from block $from, hash matches"
-    else result D6 FAIL "first exit $first, resume exit $code, resumed_from_block ${from:-?}, hash $got"; fi
+    if [ "$first" = 6 ] && [ -n "$at" ] && [ "$state" = "$at" ] && [ "$code" = 0 ] && [ "${from:-0}" = "$at" ] && [ "$got" = "${SHA[${P}m/big]}" ] && [ "$(sha_of "$WORK/out/d6.img")" = "${SHA[${P}m/big]}" ]; then
+        result D6 PASS "SIGINT after $((sz / 1048576)) MiB: exit 6, interrupted at block $at, state file agrees, resumed there, hash matches"
+    else result D6 FAIL "first exit $first, interrupted_at ${at:-?}, state ${state:-?}, resume exit $code from ${from:-?}, hash $got"; fi
 else
     wait $pid; first=$?
-    [ -z "$hog" ] || { kill $hog 2>/dev/null; wait $hog 2>/dev/null; }
-    result D6 SKIP "the 512 MiB dump finished in $(( $(date +%s) - t0 )) s (exit $first), before the 5 s resume checkpoint; nothing to interrupt on loop devices this fast"
+    result D6 FAIL "the 512 MiB dump finished (exit $first) before 128 MiB were seen on disk; nothing was interrupted"
 fi
 
 # D7: recursive dump of vm/ (images are named after the dataset, / as _)

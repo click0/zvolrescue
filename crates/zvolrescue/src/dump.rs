@@ -70,6 +70,11 @@ struct DumpOut {
     /// (SPEC F-33, N-10): the incident, as the ledger recorded it.
     #[serde(skip_serializing_if = "Option::is_none")]
     stopped_by_medium: Option<String>,
+    /// The block the run was about to read when a SIGINT stopped it
+    /// (exit 6): the image holds every block before it, and `--resume`
+    /// starts here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    interrupted_at: Option<u64>,
     sha256: String,
     /// SHA-1 and MD5, when `--hash` asked for them (SPEC F-53).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -347,6 +352,7 @@ fn dump_one(
     } else {
         OnError::Zero
     };
+    let interrupt = zvol_common::interrupt_flag();
     let report: Report = match extract_from(
         &obj,
         volsize,
@@ -354,6 +360,7 @@ fn dump_one(
         on_error,
         start_block,
         hasher,
+        Some(&interrupt),
         progress,
     ) {
         Ok(r) => r,
@@ -368,9 +375,19 @@ fn dump_one(
     if !quiet {
         eprintln!();
     }
-    if report.aborted {
-        // Leave a state file so --resume can continue past the fix.
-        let done = report.bad.first().map(|b| b.blkid).unwrap_or(start_block);
+    if let Some(at) = report.interrupted_at {
+        eprintln!(
+            "zvolrescue: {}: interrupted at block {at} of {}; the image holds the blocks before it, --resume continues there (exit 6)",
+            ds.name, report.blocks_total
+        );
+    }
+    if report.aborted || report.interrupted_at.is_some() {
+        // Leave a state file so --resume can continue past the fix — or,
+        // after an interrupt, from the block that was next.
+        let done = report
+            .interrupted_at
+            .or_else(|| report.bad.first().map(|b| b.blkid))
+            .unwrap_or(start_block);
         let s = ResumeState {
             blocks_done: done,
             ..expected_state.clone_for_compare()
@@ -399,6 +416,7 @@ fn dump_one(
         strict,
         aborted: report.aborted,
         stopped_by_medium: report.stopped_by_medium.clone(),
+        interrupted_at: report.interrupted_at,
         sha256: report.sha256.clone(),
         sha1: report.sha1.clone(),
         md5: report.md5.clone(),
@@ -478,6 +496,8 @@ fn print_text(out: &RunOut) {
         }
         if v.stopped_by_medium.is_some() {
             println!("  STOPPED: a device refused a read (exit 7); the image is incomplete. Image the disk with a map, then --map and --resume continue on the image (SPEC F-33, N-10)");
+        } else if let Some(at) = v.interrupted_at {
+            println!("  INTERRUPTED at block {at} (exit 6); the image is incomplete, --resume continues there");
         } else if v.aborted {
             println!("  ABORTED at the first unreadable block (--strict); the image is incomplete, --resume continues after a repair");
         } else if !v.bad.is_empty() {
@@ -529,6 +549,9 @@ fn finish(
 
 /// Run `dump`.
 pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
+    // From here a SIGINT sets the flag the extraction looks at between
+    // blocks; before the first block it is the default action still.
+    let _ = zvol_common::interrupt_flag();
     let members = match open_members(spec) {
         Ok(m) => m,
         Err(code) => return zvol_common::end_early(g, "zvolrescue", spec, code),
@@ -678,7 +701,15 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 // the JSON and in the evidence record; now it says so
                 // in the one place a `dump || fail` can see.
                 code = exit::after_extraction(code, v.aborted, v.blocks_zeroed + v.blocks_salvaged);
+                // An interrupt ends the run, not just the volume: the
+                // operator asked for it to stop, and a bulk run that went
+                // on to the next volume would not have stopped.
+                let interrupted = v.interrupted_at.is_some();
                 out.volumes.push(v);
+                if interrupted {
+                    code = code.max(exit::INTERRUPTED);
+                    break;
+                }
             }
             Err(c) => {
                 if opts.recursive {

@@ -12,7 +12,8 @@ pub mod members;
 pub mod timefmt;
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, OnceLock};
 
 use clap::{Args, ValueEnum};
 use zvolrescue_io::medium::{Incident, Ledger};
@@ -635,6 +636,33 @@ mod tests {
         let s = spec(&["/dev/sda1", "--assume-member", "/dev/sdb1=abc"]);
         assert_eq!(s.assumed().unwrap(), [("/dev/sdb1".into(), Some(0xabc))]);
     }
+}
+
+/// The flag a SIGINT or SIGTERM sets, installed on first use.
+///
+/// A long extraction looks at it between blocks and ends there with its
+/// state written, so `--resume` continues from the block it was about to
+/// read (exit 6) — instead of the default action, which kills the run
+/// with whatever the last five seconds' checkpoint said. A second signal
+/// while the flag is already set is the default action after all: a run
+/// that does not come round to the flag can still be stopped.
+///
+/// The same `Arc` comes back on every call; the handlers are installed
+/// once, by the first.
+pub fn interrupt_flag() -> Arc<AtomicBool> {
+    static FLAG: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+    FLAG.get_or_init(|| {
+        let flag = Arc::new(AtomicBool::new(false));
+        for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
+            // Order matters: the conditional default first, so that the
+            // plain registration below is what sets the flag the first
+            // time and the default runs only the second time.
+            let _ = signal_hook::flag::register_conditional_default(signal, Arc::clone(&flag));
+            let _ = signal_hook::flag::register(signal, Arc::clone(&flag));
+        }
+        flag
+    })
+    .clone()
 }
 
 /// Peak resident set of this process so far, in KiB (SPEC N-03): Linux

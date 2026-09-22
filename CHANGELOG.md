@@ -27,13 +27,27 @@ tagged. `v0.7.1` is the release that carries those six.
   `zdb -d`, `zdb -lu`, `zfs get -s local`), and prints the row for the
   Results table. `raidz_expansion` (C12) needs OpenZFS 2.3 and is
   skipped on 2.2; dRAID is skipped where `zpool` builds none. Found
-  while writing it: `dump` has no SIGINT handler, so an interrupt
-  kills the run (exit 130, not the documented 6) and `--resume` relies
-  on the state file written every 5 seconds — the D6 row says so now,
-  and the script outlasts the checkpoint by pinning the run to a busy
-  CPU rather than pretending. The matrix has a section describing what
-  every scenario becomes on loop devices and what a loop device cannot
-  give (E1/E2, F1–F6, F8–F10 stay for a machine with drives).
+  while writing it: `dump` had no SIGINT handler (the next entry). The
+  matrix has a section describing what every scenario becomes on loop
+  devices and what a loop device cannot give (E1/E2, F1–F6, F8–F10
+  stay for a machine with drives).
+* **A SIGINT ends `dump` where `--resume` can take it up (F-32).** The
+  signal used to kill the run: exit 130, the image cut wherever the
+  kernel happened to be, and `--resume` starting from whatever the
+  checkpoint five seconds earlier had said — or from nothing, when the
+  run was younger than that. Now SIGINT and SIGTERM set a flag the
+  extraction reads before every block: the run ends at that block
+  boundary, writes its state naming the block it was about to read,
+  reports `interrupted_at` in the output and the evidence record, and
+  exits 6 as SPEC §7 has said since 0.1; a bulk `-r` run stops there
+  instead of starting the next volume. A second signal is the default
+  action again, for a run that does not come round to the flag. The
+  five-second checkpoint stays, for a kill no handler sees. The flag
+  lives in `zvol-common` on the `signal-hook` crate (no `unsafe` of
+  ours; the workspace still forbids it); `extract_from` takes it as an
+  optional `AtomicBool`. Unit-tested in `zfs-read`, and CI sends a
+  real SIGINT to a 512 MiB dump once 128 MiB are on disk, then resumes
+  it to the same hash.
 
 ### Documented
 * **The open questions of §12 are closed (D-9…D-11).** What the

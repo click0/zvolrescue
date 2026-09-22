@@ -74,7 +74,7 @@ Run every scenario on every environment; record `zvolrescue --version`,
 | D3 | `zpool destroy pool` | `scan` shows state DESTROYED; `list`/`dump` still work |
 | D4 | pool that does not import (`zpool import` → "I/O error") after zeroing labels L0/L1 on one member | `scan` uses L2/L3; `dump` works |
 | D5 | pool whose newest uberblock is damaged (zero the slot) | `list` uses the previous verified txg and says so |
-| D6 | interrupt `dump` with SIGINT at ~50 %, then `--resume` | final hash matches, `resumed_from_block` > 0. *What `--resume` finds is the state file the run writes every 5 seconds; there is no SIGINT handler, so the signal kills the run (exit 130, not the documented 6) and an interrupt before the first checkpoint starts over. On loop devices a 512 MiB volume is read in a second or two, which is why the Debian script pins the run to one busy CPU to outlast the checkpoint, and skips the scenario when it cannot* |
+| D6 | interrupt `dump` with SIGINT at ~50 %, then `--resume` | exit 6 with `interrupted_at` in the output and the evidence record, the state file naming that block; after `--resume` the final hash matches and `resumed_from_block` > 0 (F-32; CI does this on a 512 MiB fixture, this does it on a kernel-written pool) |
 | D7 | `dump -r pool/vm` with 5 volumes | 5 images + manifest, hashes match |
 | D8 | `dump --hash md5,sha1` of a volume (F-53) | the three digests printed equal `sha256sum`, `sha1sum` and `md5sum` of the written image; all three land in the evidence record and `zvolreport verify` checks each |
 
@@ -192,7 +192,7 @@ What each scenario becomes on loop devices:
 | D3 | `zpool destroy` a single-disk pool | `scan` says `state: DESTROYED`; `dump` matches |
 | D4 | L0 and L1 zeroed after export | `scan` reports L0/L1 `missing` and L2/L3 `ok`; `dump` matches; whether the kernel still imports it is noted (expected to, since ZFS reads all four labels) |
 | D5 | the newest uberblock slot, found with `zdb -lu`, zeroed in all four labels | `list` reports the previous TXG; `dump` matches the last state |
-| D6 | see the note in the table above | `resumed_from_block` > 0; hash matches |
+| D6 | SIGINT once the image has passed 128 MiB of 512 | exit 6, `interrupted_at` set, the state file names that block; `--resume` gives `resumed_from_block` > 0 and the kernel's hash |
 | D7 | `dump -r` of the eight C1 volumes | eight images named after their datasets plus `manifest.json`; every hash matches |
 | D8 | `--hash md5,sha1` | the three digests equal `sha256sum`, `sha1sum`, `md5sum` of the image |
 | F7 | `dm-error` over 8 sectors at the first data block of a volume (its DVA from `zdb -dddddd`, plus the 4 MiB of labels) under one mirror member | exit 7 and `MEDIUM INCIDENT … (LBA n, …)`; the evidence record carries the incident with `stopped: true`; `--device-may-fail` heals from the other member, hash matches, one incident not stopped; `strace` shows no address on the device read twice |

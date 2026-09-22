@@ -127,8 +127,11 @@ enum Cmd {
         /// Encryption key: raw:FILE | hex:HEX | passphrase:FILE | prompt.
         #[arg(long, value_name = "KEYSPEC")]
         key: Option<String>,
-        /// Continue an interrupted extraction of the same dataset and TXG
-        /// (state is kept in OUT.img.resume.json while a run is in progress).
+        /// Continue an interrupted extraction of the same dataset and TXG.
+        /// A SIGINT (Ctrl-C) or SIGTERM ends a run at the next block with
+        /// its state written (exit 6); the state is kept in
+        /// OUT.img.resume.json while a run is in progress, and a second
+        /// signal kills the run the usual way.
         #[arg(long)]
         resume: bool,
         /// Extract every volume under DATASET into the directory OUT, one

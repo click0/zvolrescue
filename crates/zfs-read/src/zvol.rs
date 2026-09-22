@@ -1,5 +1,7 @@
 //! Extracting a volume's data object into a sparse image.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use zfs_ondisk::blkptr::{BlkPtr, Compression};
 use zfs_ondisk::dmu::{ObjsetPhys, ObjsetType};
 use zfs_ondisk::Endian;
@@ -63,6 +65,11 @@ pub struct Report {
     /// The device refusal that stopped the extraction, when one did
     /// (SPEC F-33, N-10): the incident, as the ledger recorded it.
     pub stopped_by_medium: Option<String>,
+    /// The block the extraction was about to read when it was asked to
+    /// stop (a SIGINT, through the flag [`extract_from`] takes): every
+    /// block before it is in the image, and a resume starts here. `None`
+    /// when nothing asked.
+    pub interrupted_at: Option<u64>,
     /// SHA-256 of the full `volsize` image (holes as zeros), lowercase hex.
     pub sha256: String,
     /// SHA-1 of the same image, when it was asked for (SPEC F-53).
@@ -134,6 +141,7 @@ pub fn extract(
         on_error,
         0,
         Digests::new(Extra::none()),
+        None,
         progress,
     )
 }
@@ -155,6 +163,7 @@ pub fn extract_hashing(
         on_error,
         0,
         Digests::new(extra),
+        None,
         progress,
     )
 }
@@ -163,6 +172,12 @@ pub fn extract_hashing(
 /// already fed the first `start_block * blocksize` bytes of the image
 /// (read back from the partial output). Counters cover only the blocks
 /// visited now.
+///
+/// `stop` is looked at before every block: once it is set the loop ends
+/// there, the report says so in `interrupted_at`, and everything before
+/// that block is in the sink. It is how a SIGINT ends a run that can be
+/// resumed instead of killing one that cannot.
+#[allow(clippy::too_many_arguments)]
 pub fn extract_from(
     obj: &ObjectReader<'_, '_>,
     volsize: u64,
@@ -170,6 +185,7 @@ pub fn extract_from(
     on_error: OnError,
     start_block: u64,
     mut digests: Digests,
+    stop: Option<&AtomicBool>,
     mut progress: impl FnMut(u64, u64),
 ) -> Result<Report, ReadError> {
     let bs = obj.dnode().datablksz();
@@ -193,6 +209,7 @@ pub fn extract_from(
         bad: Vec::new(),
         aborted: false,
         stopped_by_medium: None,
+        interrupted_at: None,
         sha256: String::new(),
         sha1: None,
         md5: None,
@@ -205,6 +222,11 @@ pub fn extract_from(
         obj.dnode().maxblkid
     );
     for blkid in start_block..blocks_total {
+        if stop.is_some_and(|s| s.load(Ordering::Relaxed)) {
+            trace!("zvol", "blkid {blkid}: interrupted, stopping here");
+            report.interrupted_at = Some(blkid);
+            break;
+        }
         let offset = blkid * bs;
         let take = (volsize - offset).min(bs) as usize;
         let located = obj.locate(blkid);
@@ -1098,8 +1120,17 @@ mod tests {
         };
         let mut h = Digests::new(extra);
         h.update(&partial.data);
-        let rest =
-            extract_from(&obj, volsize, &mut partial, OnError::Zero, 2, h, |_, _| {}).unwrap();
+        let rest = extract_from(
+            &obj,
+            volsize,
+            &mut partial,
+            OnError::Zero,
+            2,
+            h,
+            None,
+            |_, _| {},
+        )
+        .unwrap();
         assert_eq!(partial.data, full.data);
         assert_eq!(rest.sha256, whole.sha256);
         let mut direct = Digests::new(extra);
@@ -1107,5 +1138,84 @@ mod tests {
         let direct = direct.finish();
         assert_eq!((rest.sha1, rest.md5), (direct.sha1, direct.md5));
         assert_eq!((rest.blocks_read, rest.blocks_holes), (1, 1)); // blocks 2 and 3 only
+    }
+
+    /// A SIGINT reaches the loop as a flag, and the loop ends at the
+    /// block it was about to read: the report names that block, the
+    /// sink holds every block before it, and an extraction resumed
+    /// there completes the image with the hash of a straight run — the
+    /// state a killed run could only have written five seconds ago.
+    #[test]
+    fn an_interrupt_ends_the_run_where_a_resume_can_take_it_up() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (s, a, ub, _) = build();
+        let reader = PoolReader::new(&a, vec![Some(&s[0] as &dyn BlockSource)]);
+        let mos = open_mos(&reader, &ub).unwrap();
+        let tree = walk(&mos, "tank").unwrap();
+        let ds = tree.get("tank/vm/disk0").unwrap();
+        let (obj, _) = open_volume(&reader, ds).unwrap();
+        let volsize = ds.volsize.unwrap();
+        let mut full = MemSink::default();
+        let whole = extract(&obj, volsize, &mut full, OnError::Zero, |_, _| {}).unwrap();
+
+        // The flag goes up once block 0 is done — as a signal would
+        // between two blocks — and block 1 is never looked at.
+        let flag = AtomicBool::new(false);
+        let mut sink = MemSink::default();
+        let stopped = extract_from(
+            &obj,
+            volsize,
+            &mut sink,
+            OnError::Zero,
+            0,
+            Digests::new(Extra::none()),
+            Some(&flag),
+            |done, _| {
+                if done == 1 {
+                    flag.store(true, Ordering::Relaxed);
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(stopped.interrupted_at, Some(1));
+        assert_eq!((stopped.blocks_read, stopped.blocks_holes), (1, 0));
+        assert!(!stopped.aborted && stopped.bad.is_empty());
+        assert_eq!(sink.writes, vec![(0, 8192)]);
+
+        // A flag already up before the first block stops before it.
+        let mut none = MemSink::default();
+        let at_once = extract_from(
+            &obj,
+            volsize,
+            &mut none,
+            OnError::Zero,
+            0,
+            Digests::new(Extra::none()),
+            Some(&flag),
+            |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(at_once.interrupted_at, Some(0));
+        assert!(none.writes.is_empty());
+
+        // Resumed at the block the report names, with the prefix hashed
+        // back: the image and its hash are those of the straight run.
+        let mut h = Digests::new(Extra::none());
+        h.update(&sink.data[..8192]);
+        let rest = extract_from(
+            &obj,
+            volsize,
+            &mut sink,
+            OnError::Zero,
+            stopped.interrupted_at.unwrap(),
+            h,
+            None,
+            |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(rest.interrupted_at, None);
+        assert_eq!(sink.data, full.data);
+        assert_eq!(rest.sha256, whole.sha256);
+        assert_eq!((rest.blocks_read, rest.blocks_holes), (1, 2));
     }
 }
