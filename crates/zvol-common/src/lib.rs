@@ -9,6 +9,7 @@
 pub mod evidence;
 pub mod hints;
 pub mod members;
+pub mod resume;
 pub mod timefmt;
 
 use std::path::{Path, PathBuf};

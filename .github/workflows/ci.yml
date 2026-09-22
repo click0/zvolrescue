@@ -304,6 +304,51 @@ jobs:
           ./target/release/zvolrescue -f json dump tank/vm/disk0 /tmp/sigint/member0.img /tmp/sigint/member1.img -o /tmp/sigint/cut.img --resume --evidence-log /tmp/sigint/ev.jsonl | python3 -c 'import json,sys; v=json.load(sys.stdin)["volumes"][0]; assert v["resumed_from_block"] == int(open("/tmp/sigint/at").read()), v; assert "interrupted_at" not in v, v; assert v["sha256"] == open("/tmp/sigint/ref.sha").read(), v'
           cmp /tmp/sigint/cut.img /tmp/sigint/ref.img
           test ! -e /tmp/sigint/cut.img.resume.json
+          # zvolcarve scan: a SIGINT a second in ends it at the next
+          # chunk (exit 6), the state file says where each member got
+          # to, and --resume goes on from there to the end of a range.
+          # The members are sparse 4 GiB copies — the 512 MiB ones scan
+          # in under a second, which leaves nothing to interrupt.
+          cp --sparse=always /tmp/sigint/member0.img /tmp/sigint/big0.img
+          cp --sparse=always /tmp/sigint/member1.img /tmp/sigint/big1.img
+          truncate -s 4G /tmp/sigint/big0.img /tmp/sigint/big1.img
+          set -m
+          ./target/release/zvolcarve -f json scan /tmp/sigint/big0.img /tmp/sigint/big1.img -o /tmp/sigint/carve > /tmp/sigint/scan1.json 2>/tmp/sigint/scan1.err &
+          pid=$!
+          set +m
+          sleep 1
+          kill -INT $pid
+          set +e; wait $pid; code=$?; set -e
+          cat /tmp/sigint/scan1.err
+          test "$code" = 6
+          python3 -c 'import json; s=json.load(open("/tmp/sigint/carve/state.json")); assert not s["complete"], s; assert s["reached"][0] < 4294967296 and s["reached"][1] == 0, s'
+          ./target/release/zvolcarve -q -f json scan /tmp/sigint/big0.img /tmp/sigint/big1.img -o /tmp/sigint/carve --resume --range 0-805306368 > /tmp/sigint/scan2.json
+          python3 -c 'import json; s=json.load(open("/tmp/sigint/carve/state.json")); assert s["complete"] and s["reached"][0] >= 805306368 and s["reached"][1] == 805306368, s'
+          rm -f /tmp/sigint/big0.img /tmp/sigint/big1.img
+          # zvolcarve dump: the candidate is the volume itself, found in
+          # the range its dnode lives in; interrupted at 128 MiB, the
+          # state file is the one zvolrescue would have written, and
+          # --resume ends with zvolrescue's hash.
+          ./target/release/zvolcarve -q -f json scan /tmp/sigint/member0.img /tmp/sigint/member1.img -o /tmp/sigint/carve-tail --range 536870912-564133888 > /tmp/sigint/scan3.json
+          id=$(python3 -c 'import json; c=[c for c in json.load(open("/tmp/sigint/carve-tail/candidates.json"))["candidates"] if c["dnode_type_code"] == 23]; assert c, "no zvol candidate"; print(c[0]["id"])')
+          set -m
+          ./target/release/zvolcarve -f json dump /tmp/sigint/carve-tail "$id" /tmp/sigint/member0.img /tmp/sigint/member1.img -o /tmp/sigint/carved.img > /tmp/sigint/carved1.json 2>/tmp/sigint/carved1.err &
+          pid=$!
+          set +m
+          for _ in $(seq 1 6000); do
+            sz=$(stat -c %s /tmp/sigint/carved.img 2>/dev/null || echo 0)
+            [ "$sz" -ge $((128 * 1048576)) ] && break
+            kill -0 $pid 2>/dev/null || { echo "::error::the carve dump finished before 128 MiB were on disk"; exit 1; }
+            sleep 0.005
+          done
+          kill -INT $pid
+          set +e; wait $pid; code=$?; set -e
+          cat /tmp/sigint/carved1.err
+          test "$code" = 6
+          python3 -c 'import json; v=json.load(open("/tmp/sigint/carved1.json")); at=v["interrupted_at"]; s=json.load(open("/tmp/sigint/carved.img.resume.json")); assert at > 0 and s["blocks_done"] == at and s["dataset"] == v["candidate"] and s["dataset_guid"] == "candidate", (v, s); open("/tmp/sigint/cat","w").write(str(at))'
+          ./target/release/zvolcarve -f json dump /tmp/sigint/carve-tail "$id" /tmp/sigint/member0.img /tmp/sigint/member1.img -o /tmp/sigint/carved.img --resume | python3 -c 'import json,sys; v=json.load(sys.stdin); assert v["resumed_from_block"] == int(open("/tmp/sigint/cat").read()), v; assert v["interrupted_at"] is None, v; assert v["sha256"] == open("/tmp/sigint/ref.sha").read(), v'
+          cmp /tmp/sigint/carved.img /tmp/sigint/ref.img
+          test ! -e /tmp/sigint/carved.img.resume.json
       - name: The pool's history from its transaction groups (COMPANIONS T-01…T-05, T-10)
         run: |
           ./target/release/zvoltimeline --version

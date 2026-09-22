@@ -6,6 +6,7 @@
 //! first one instead.
 
 use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -116,6 +117,12 @@ struct ManifestOut {
     failed: usize,
     /// Files written as hard links to an earlier path.
     hardlinks: usize,
+    /// A SIGINT ended the run (exit 6): every entry listed before it is
+    /// as recorded, the one it cut is `failed` with the reason, and
+    /// nothing after it was looked at. Re-run with `--path` for the
+    /// rest.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    interrupted: bool,
 }
 
 /// One path component, as the operating system spells names.
@@ -171,6 +178,7 @@ fn copy_file(
     size: u64,
     to: &Path,
     strict: bool,
+    stop: &AtomicBool,
 ) -> Result<(String, u64), String> {
     let obj = fs.object(object).map_err(|e| e.to_string())?;
     let bs = obj.dnode().datablksz().max(512);
@@ -180,6 +188,9 @@ fn copy_file(
     let mut errors = 0u64;
     let zeros = vec![0u8; bs as usize];
     while written < size {
+        if stop.load(Ordering::Relaxed) {
+            return Err(format!("interrupted after {written} of {size} bytes"));
+        }
         let want = (size - written).min(bs) as usize;
         let blkid = written / bs;
         let chunk = match obj.read_blkid(blkid) {
@@ -211,6 +222,9 @@ fn copy_file(
 
 /// Run `extract`.
 pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Options) -> u8 {
+    // From here a SIGINT ends the run at the next entry, or the next
+    // block of the file being written, with the manifest saying which.
+    let interrupt = zvol_common::interrupt_flag();
     let preserve: Vec<&str> = opts.preserve.split(',').map(str::trim).collect();
     let result = with_dataset(spec, dataset, at, |fs, opened| {
         if let Err(e) = refuse_if_evidence(&opts.output, &opened.members.paths) {
@@ -249,12 +263,18 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
         // to rather than copied, so the tree keeps the shape it had.
         let mut written_objects: WrittenObjects = std::collections::BTreeMap::new();
         for (obj, raw_prefix) in roots {
+            if interrupt.load(Ordering::Relaxed) {
+                break;
+            }
             let prefix = String::from_utf8_lossy(&raw_prefix).into_owned();
             // A path that names a file rather than a directory is
             // extracted on its own.
             let z = fs.znode(obj).ok();
             if z.as_ref().map(|z| z.file_type()) == Some(FileType::Dir) {
                 for e in walk_from(fs, obj, &prefix, &raw_prefix, true) {
+                    if interrupt.load(Ordering::Relaxed) {
+                        break;
+                    }
                     extract_entry(
                         fs,
                         &e,
@@ -263,6 +283,7 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
                         &mut files,
                         &mut directories,
                         &mut written_objects,
+                        &interrupt,
                     );
                 }
             } else {
@@ -281,8 +302,15 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
                     &mut files,
                     &mut directories,
                     &mut written_objects,
+                    &interrupt,
                 );
             }
+        }
+        let interrupted = interrupt.load(Ordering::Relaxed);
+        if interrupted {
+            eprintln!(
+                "zvolfiles: interrupted; the manifest lists what was written, re-run with --path for the rest (exit 6)"
+            );
         }
         let incomplete = files.iter().filter(|f| f.errors > 0).count();
         let failed = files.iter().filter(|f| f.error.is_some()).count();
@@ -297,6 +325,7 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
                 incomplete,
                 failed,
                 hardlinks,
+                interrupted,
             },
             opened.members.paths.clone(),
             opened.members.ledger.clone(),
@@ -344,10 +373,15 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
             if out.hardlinks > 0 {
                 println!("  {} hard link(s)", out.hardlinks);
             }
+            if out.interrupted {
+                println!("  INTERRUPTED (exit 6): the entries above are what was written; re-run with --path for the rest");
+            }
             println!("  manifest: {}", manifest.display());
         }
     }
-    let code = if out.failed > 0 || out.incomplete > 0 {
+    let code = if out.interrupted {
+        exit::INTERRUPTED
+    } else if out.failed > 0 || out.incomplete > 0 {
         exit::PARTIAL
     } else {
         0
@@ -378,6 +412,7 @@ fn extract_entry(
     files: &mut Vec<Extracted>,
     directories: &mut usize,
     written_objects: &mut WrittenObjects,
+    stop: &AtomicBool,
 ) {
     let Some(z) = &e.znode else {
         files.push(failed(e, "metadata unreadable"));
@@ -445,7 +480,7 @@ fn extract_entry(
                 files.push(record);
                 return;
             }
-            match copy_file(fs, e.object, z.size, &to, opts.strict) {
+            match copy_file(fs, e.object, z.size, &to, opts.strict, stop) {
                 Ok((hash, errors)) => {
                     record.sha256 = Some(hash.clone());
                     record.errors = errors;

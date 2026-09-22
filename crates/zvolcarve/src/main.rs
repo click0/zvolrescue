@@ -137,6 +137,12 @@ enum Command {
         /// SHA-256 is always taken (SPEC F-53).
         #[arg(long, value_name = "LIST")]
         hash: Option<String>,
+        /// Continue an interrupted extraction of the same candidate. A
+        /// SIGINT (Ctrl-C) or SIGTERM ends a run at the next block with
+        /// its state written (exit 6); the state is kept in
+        /// OUT.img.resume.json while a run is in progress.
+        #[arg(long)]
+        resume: bool,
     },
 }
 
@@ -212,6 +218,7 @@ fn main() -> ExitCode {
             strict,
             size,
             hash,
+            resume,
         } => {
             let hash = match hash.as_deref().map(zfs_read::hash::Extra::parse) {
                 None => zfs_read::hash::Extra::none(),
@@ -231,6 +238,7 @@ fn main() -> ExitCode {
                     strict,
                     size,
                     hash,
+                    resume,
                 },
             )
         }

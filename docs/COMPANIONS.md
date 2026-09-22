@@ -40,7 +40,10 @@ library crate and inherited by all five binaries.
 Identical to SPEC §7: `0` ok, `1` usage, `2` evidence unreadable, `3` pool
 unrecoverable at TXG, `4` completed with errors, `5` refused (would write
 to evidence). Tools that scan for a long time add `6` = interrupted with a
-resumable state file written.
+resumable state file written: a SIGINT or SIGTERM ends `zvolcarve scan` at
+the next chunk and `zvolcarve dump` at the next block with the state
+written, and `zvolfiles extract` at the next entry or block with the
+manifest saying what was written; a second signal is the default action.
 
 ### 1.3 Evidence log record (format version 1)
 
@@ -180,8 +183,8 @@ writes.
 | C-04 | M | From each `DMU_OT_ZVOL` dnode, walk its tree, verify checksums, and build a candidate: estimated `volsize`, birth-TXG range, share of blocks that verified, share of blocks already overwritten by newer data. |
 | C-05 | M | Score candidates (checksum agreement, contiguity, birth consistency, overwrite share) and sort by score; explain the score in `-v`. |
 | C-06 | S | Detect overwritten blocks by checking each DVA against the space map of the newest importable TXG when available. |
-| C-07 | M | `dump` is byte-for-byte the `zvolrescue dump` pipeline (sparse output, `--strict`, resume, evidence record); unreadable blocks become zeros and are logged. |
-| C-08 | M | `scan --resume` continues from the state file; interruption exits 6. |
+| C-07 | M | `dump` is byte-for-byte the `zvolrescue dump` pipeline (sparse output, `--strict`, `--resume` from the same state file — the candidate id where the dataset name goes — a SIGINT ending the run at the next block with the state written and exit 6, evidence record); unreadable blocks become zeros and are logged. |
+| C-08 | M | `scan --resume` continues from the state file; interruption exits 6, whether the cap on candidates stopped the scan or a SIGINT did (at the next chunk; members not reached keep what an earlier run reached). |
 | C-09 | S | Mirror members are scanned once (identical copies), RAIDZ/dRAID members are scanned with parity reconstruction (phase 3+). |
 | C-10 | S | Compressed metadata: try lz4/zstd/gzip/lzjb on candidate blocks whose plaintext validation fails. |
 | C-11 | S | Also record `DMU_OT_OBJSET`/dataset dnodes found, so a candidate can be named when its DSL metadata survived. |
@@ -445,6 +448,7 @@ zvolfiles objects  DATASET POOLSPEC [--txg N] [--key KEYSPEC] -o DIR
 | Z-08 | S | `objects` (SPEC F-29): one file per object plus `objects.json` with dnode metadata — the fallback when Z-01 fails. |
 | Z-09 | S | `casesensitivity`, `normalization` and `utf8only` dataset properties honoured when matching `PATH`. |
 | Z-10 | C | Large dnodes, the spill block a layout overflows into, and project ids; other feature-flag extensions to the SA layout. |
+| Z-11 | M | A SIGINT or SIGTERM ends `extract` at the next entry, or the next block of the file being written: that file is recorded as failed with how much of it was written, nothing after it is looked at, the manifest says `interrupted`, and the exit code is 6. There is no state file to resume from — the manifest lists what was written whole, and `--path` asks for the rest. |
 
 ### 5.4 Acceptance
 

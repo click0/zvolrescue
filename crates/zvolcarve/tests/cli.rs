@@ -165,6 +165,113 @@ fn a_carved_volume_is_hashed_in_the_same_pass_and_only_when_asked() {
     assert!(err.contains("--hash: unknown digest \"crc32\""), "{err}");
 }
 
+/// C-07, SPEC F-32: `dump --resume` takes up the state file `zvolrescue
+/// dump` would have written — the same shape, the candidate id where
+/// the dataset name goes — hashes the prefix already there, and ends
+/// with the hash of a straight run; a state that names another
+/// candidate starts over and says so.
+#[test]
+fn a_carved_dump_resumes_from_its_state_file() {
+    let dir = scratch("resume");
+    let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1)]);
+    let members: Vec<String> = carved_zvol_members(&mut pool, SIZE)
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let p = dir.join(format!("member{i}.img"));
+            std::fs::write(&p, m).expect("write member");
+            p.to_string_lossy().into_owned()
+        })
+        .collect();
+    let carve = dir.join("carve");
+    let carve_s = carve.to_string_lossy().into_owned();
+    let (code, _, err) = run(&["-q", "scan", &members[0], &members[1], "-o", &carve_s]);
+    assert_eq!(code, 0, "{err}");
+    let index: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(carve.join("candidates.json")).expect("candidates.json"),
+    )
+    .expect("index");
+    let id = index["candidates"][0]["id"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+
+    // A straight run, for the image and its hash.
+    let whole = dir.join("whole.img");
+    let (code, out, err) = run(&[
+        "-q",
+        "-f",
+        "json",
+        "dump",
+        &carve_s,
+        &id,
+        &members[0],
+        &members[1],
+        "-o",
+        &whole.to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "{out}{err}");
+    let v = json(&out);
+    assert_eq!(v["resumed_from_block"], 0, "{v}");
+    assert!(v["interrupted_at"].is_null(), "{v}");
+    let blocksize = v["blocksize"].as_u64().expect("blocksize");
+    assert!(!dir.join("whole.img.resume.json").exists());
+    let image = std::fs::read(&whole).expect("image");
+
+    // A run that stopped after two blocks: its prefix, and a state
+    // file in the shared shape saying so.
+    let cut = dir.join("cut.img");
+    std::fs::write(&cut, &image[..2 * blocksize as usize]).expect("prefix");
+    let state = serde_json::json!({
+        "version": 1, "dataset": id, "dataset_guid": "candidate", "txg": 0,
+        "volsize": 32 << 20, "blocksize": blocksize, "blocks_done": 2,
+    });
+    std::fs::write(dir.join("cut.img.resume.json"), state.to_string()).expect("state");
+    let (code, out, err) = run(&[
+        "-f",
+        "json",
+        "dump",
+        &carve_s,
+        &id,
+        &members[0],
+        &members[1],
+        "-o",
+        &cut.to_string_lossy(),
+        "--resume",
+    ]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(err.contains(&format!("resuming {id} at block 2")), "{err}");
+    let v = json(&out);
+    assert_eq!(v["resumed_from_block"], 2, "{v}");
+    assert_eq!(v["sha256"], FIXTURE_SHA256, "{v}");
+    assert_eq!(std::fs::read(&cut).expect("image"), image);
+    assert!(!dir.join("cut.img.resume.json").exists());
+
+    // The same state against another candidate id starts over.
+    let state = serde_json::json!({
+        "version": 1, "dataset": "c9999", "dataset_guid": "candidate", "txg": 0,
+        "volsize": 32 << 20, "blocksize": blocksize, "blocks_done": 2,
+    });
+    std::fs::write(dir.join("cut.img.resume.json"), state.to_string()).expect("state");
+    let (code, out, err) = run(&[
+        "-f",
+        "json",
+        "dump",
+        &carve_s,
+        &id,
+        &members[0],
+        "-o",
+        &cut.to_string_lossy(),
+        "--resume",
+    ]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(
+        err.contains("describes a different dataset/txg/size"),
+        "{err}"
+    );
+    assert_eq!(json(&out)["resumed_from_block"], 0);
+}
+
 /// The refusal follows what the path resolves to: a symlink to a
 /// device — the `/dev/mapper/NAME` and `/dev/disk/by-id/…` names an
 /// operator types — is refused like the device itself (SPEC N-10).

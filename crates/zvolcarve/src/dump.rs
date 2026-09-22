@@ -7,17 +7,18 @@
 //! list and nothing else.
 
 use std::path::PathBuf;
+use std::time::Instant;
 
 use zfs_ondisk::dmu::DnodePhys;
 use zfs_ondisk::Endian;
 use zfs_read::dmu::ObjectReader;
 use zfs_read::hash::Extra;
 use zfs_read::zio::PoolReader;
-use zfs_read::zvol::{extract_hashing, OnError};
+use zfs_read::zvol::{extract_from, OnError};
 use zvol_common::evidence::FileRef;
 use zvol_common::members::{choose_pool, open_members};
-use zvol_common::{exit, Format, Global, PoolSpec};
-use zvolrescue_io::{refuse_if_evidence, SparseFile};
+use zvol_common::{exit, resume, Format, Global, PoolSpec};
+use zvolrescue_io::refuse_if_evidence;
 
 use crate::model::{from_hex, load_index};
 
@@ -30,10 +31,15 @@ pub struct Options {
     pub size: Option<u64>,
     /// Legacy digests to take alongside SHA-256 (SPEC F-53).
     pub hash: Extra,
+    /// Continue an interrupted extraction (C-07, SPEC F-32).
+    pub resume: bool,
 }
 
 /// Run `dump`.
 pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
+    // From here a SIGINT ends the extraction at the next block with its
+    // state written; before the first block it is the default action.
+    let interrupt = zvol_common::interrupt_flag();
     let index = match load_index(&opts.dir) {
         Ok(i) => i,
         Err(e) => {
@@ -110,10 +116,31 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             c.volblocksize,
         );
     }
-    let mut sink = match SparseFile::create(&opts.output) {
-        Ok(s) => s,
+    // The same state file, the same resume, as `zvolrescue dump`
+    // (C-07): a candidate has no dataset GUID or TXG to record, and
+    // says so rather than inventing them.
+    let state_path = resume::path(&opts.output);
+    let expected_state = resume::State {
+        version: 1,
+        dataset: c.id.clone(),
+        dataset_guid: "candidate".into(),
+        txg: 0,
+        volsize: size,
+        blocksize: obj.dnode().datablksz(),
+        blocks_done: 0,
+    };
+    let (start_block, digests, mut sink) = match resume::open(
+        "zvolcarve",
+        &c.id,
+        &opts.output,
+        &expected_state,
+        opts.hash,
+        opts.resume,
+        g.quiet,
+    ) {
+        Ok(x) => x,
         Err(e) => {
-            eprintln!("zvolcarve: {}: {e}", opts.output.display());
+            eprintln!("zvolcarve: {e}");
             return exit::USAGE;
         }
     };
@@ -122,13 +149,45 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     } else {
         OnError::Zero
     };
-    let report = match extract_hashing(&obj, size, &mut sink, on_error, opts.hash, |_, _| {}) {
+    let mut last_state = Instant::now();
+    let state_file = state_path.clone();
+    let progress = |done: u64, total: u64| {
+        if last_state.elapsed().as_secs() >= 5 && done < total {
+            resume::write(&state_file, &expected_state, done);
+            last_state = Instant::now();
+        }
+    };
+    let report = match extract_from(
+        &obj,
+        size,
+        &mut sink,
+        on_error,
+        start_block,
+        digests,
+        Some(&interrupt),
+        progress,
+    ) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("zvolcarve: {}: {e}", c.id);
             return exit::UNRECOVERABLE;
         }
     };
+    if let Some(at) = report.interrupted_at {
+        eprintln!(
+            "zvolcarve: {}: interrupted at block {at} of {}; the image holds the blocks before it, --resume continues there (exit 6)",
+            c.id, report.blocks_total
+        );
+    }
+    if report.aborted || report.interrupted_at.is_some() {
+        let done = report
+            .interrupted_at
+            .or_else(|| report.bad.first().map(|b| b.blkid))
+            .unwrap_or(start_block);
+        resume::write(&state_path, &expected_state, done);
+    } else {
+        resume::clear(&state_path);
+    }
 
     let out = serde_json::json!({
         "candidate": c.id,
@@ -141,8 +200,10 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         "blocks_zeroed": report.blocks_zeroed,
         "blocks_salvaged": report.blocks_salvaged,
         "bytes_written": report.bytes_written,
+        "resumed_from_block": start_block,
         "aborted": report.aborted,
         "stopped_by_medium": report.stopped_by_medium,
+        "interrupted_at": report.interrupted_at,
         "sha256": report.sha256,
         "sha1": report.sha1,
         "md5": report.md5,
@@ -169,6 +230,9 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             if let Some(h) = &report.md5 {
                 println!("  md5:    {h}");
             }
+            if let Some(at) = report.interrupted_at {
+                println!("  INTERRUPTED at block {at} (exit 6); the image is incomplete, --resume continues there");
+            }
         }
     }
     // Either way the image is not the whole volume: say so with the
@@ -178,6 +242,11 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         report.aborted,
         report.blocks_zeroed + report.blocks_salvaged,
     );
+    let code = if report.interrupted_at.is_some() {
+        code.max(exit::INTERRUPTED)
+    } else {
+        code
+    };
     let written = vec![FileRef::known_with(
         &opts.output,
         &report.sha256,

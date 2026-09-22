@@ -21,6 +21,8 @@
 //! size, and nothing is written anywhere.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use zfs_ondisk::blkptr;
 use zfs_ondisk::carve::{plausible_dnode, plausible_head, Profile, Reject};
@@ -211,6 +213,11 @@ pub struct Options {
     pub collect_hits: bool,
     /// Read this many bytes at a time.
     pub chunk: usize,
+    /// Looked at before every chunk: once it is set the scan stops
+    /// where that chunk begins, says so in `stopped_early`, and
+    /// `resume_at` names the offset — how a SIGINT ends a scan that
+    /// `--resume` continues (C-08) instead of killing one.
+    pub stop: Option<Arc<AtomicBool>>,
 }
 
 impl Default for Options {
@@ -235,6 +242,7 @@ impl Default for Options {
             max_hits: 100_000,
             collect_hits: true,
             chunk: 4 << 20,
+            stop: None,
         }
     }
 }
@@ -516,6 +524,19 @@ pub fn scan_member(
     let mut at = start;
     let mut buf = vec![0u8; opts.chunk + overlap];
     while at < end {
+        if opts
+            .stop
+            .as_ref()
+            .is_some_and(|s| s.load(Ordering::Relaxed))
+        {
+            trace!(
+                "carve",
+                "device {device} offset {at:#x}: interrupted, stopping here"
+            );
+            scan.stopped_early = true;
+            scan.resume_at = at;
+            break;
+        }
         let want = ((end - at) as usize + overlap).min(buf.len());
         let readable = (size - at).min(want as u64) as usize;
         if readable < DNODE_SIZE {
@@ -906,6 +927,31 @@ mod tests {
             .expect("a hit");
         assert_eq!(best.dnode.datablksz(), 8192);
         assert_eq!(best.dnode.maxblkid, 3);
+    }
+
+    /// A stop flag already up ends the scan before its first chunk,
+    /// with the offset to go on from and nothing read; one that is not
+    /// up changes nothing about the scan.
+    #[test]
+    fn a_stop_flag_ends_the_scan_where_a_resume_takes_it_up() {
+        let members = carved();
+        let src = MemSource::new(members[0].clone());
+        let flag = Arc::new(AtomicBool::new(true));
+        let opts = Options {
+            range: Some((1 << 20, SIZE)),
+            stop: Some(Arc::clone(&flag)),
+            ..Options::default()
+        };
+        let scan = scan_member(&src, 0, 12, &opts).expect("scan");
+        assert!(scan.stopped_early);
+        assert_eq!(scan.resume_at, 1 << 20);
+        assert_eq!((scan.bytes_read, scan.hits.len()), (0, 0));
+
+        flag.store(false, Ordering::Relaxed);
+        let scan = scan_member(&src, 0, 12, &opts).expect("scan");
+        assert!(!scan.stopped_early);
+        assert_eq!(scan.resume_at, SIZE);
+        assert!(scan.bytes_read > 0);
     }
 
     /// C-14: a profile that matches nothing must be visibly a rejection.

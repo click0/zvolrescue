@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 
 use clap::Args;
 use zfs_ondisk::carve::{Profile, Reject};
@@ -184,6 +185,9 @@ fn build_profile(
 
 /// Run `scan`.
 pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
+    // From here a SIGINT ends the scan at the next chunk with the state
+    // file saying where; before that it is the default action still.
+    let interrupt = zvol_common::interrupt_flag();
     // A surface scan is what a disk with defects survives least: a
     // block device is refused unless the operator allowed it (SPEC
     // N-10) — before it is opened, so not even its labels are read.
@@ -349,6 +353,13 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             continue;
         };
         let from = previous.reached.get(i).copied().unwrap_or(0);
+        // Interrupted on an earlier member: this one keeps what an
+        // earlier run reached, and the state says the scan is not done.
+        if interrupt.load(Ordering::Relaxed) {
+            reached[i] = from;
+            complete = false;
+            continue;
+        }
         let member_range = match (range, from) {
             (Some((a, b)), f) => Some((a.max(f), b)),
             (None, 0) => None,
@@ -372,6 +383,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 range: member_range,
                 codecs: codecs.clone(),
                 max_hits: opts.sample.unwrap_or(opts.max_hits),
+                stop: Some(interrupt.clone()),
                 ..ScanOptions::default()
             },
         ) {
@@ -513,6 +525,11 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     ) {
         eprintln!("zvolcarve: {}: {e}", index_path.display());
         return exit::USAGE;
+    }
+    if interrupt.load(Ordering::Relaxed) {
+        eprintln!(
+            "zvolcarve: interrupted; the state file says where each member's scan stopped, --resume continues there (exit 6)"
+        );
     }
     let state_path = opts.output.join(STATE);
     let state = State {

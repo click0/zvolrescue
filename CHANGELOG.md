@@ -48,6 +48,20 @@ tagged. `v0.7.1` is the release that carries those six.
   optional `AtomicBool`. Unit-tested in `zfs-read`, and CI sends a
   real SIGINT to a 512 MiB dump once 128 MiB are on disk, then resumes
   it to the same hash.
+* **The companions stop the same way.** `zvolcarve dump` gains the
+  `--resume` COMPANIONS §3.2 had promised, on the very state file
+  `zvolrescue dump` writes — the mechanics moved into
+  `zvol_common::resume`, so there is one extraction pipeline and not
+  two that agree by luck — and a SIGINT ends it at the next block with
+  the state written, exit 6. `zvolcarve scan` stops at the next chunk:
+  the state file says where each member got to, members not reached
+  keep what an earlier run reached, and `--resume` goes on from there
+  (C-08 covered the candidate cap; now it covers the operator too).
+  `zvolfiles extract` stops at the next entry, or the next block of
+  the file being written: that file is recorded as failed with how
+  much of it was written, the manifest says `interrupted`, exit 6, and
+  `--path` asks for the rest (Z-11). CI interrupts a real carve scan
+  and a real carve dump and resumes both.
 
 ### Documented
 * **The open questions of §12 are closed (D-9…D-11).** What the

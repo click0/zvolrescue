@@ -1,22 +1,22 @@
 //! `dump`: extract a volume — or every volume under a dataset with `-r` —
 //! to raw sparse images.
 
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use zfs_read::crypt::{unwrap_keys, wrapping_key, DatasetKeys, KeyMaterial};
 use zfs_read::dsl::{open_mos, walk, Dataset, DatasetTree, Encryption};
-use zfs_read::hash::{Digests, Extra};
+use zfs_read::hash::Extra;
 use zfs_read::pool::{select_uberblock, uberblock_candidates, Candidate, TxgSelect};
 use zfs_read::zio::PoolReader;
 use zfs_read::zvol::{extract_from, open_volume, volume_facts, OnError, Report};
-use zvolrescue_io::{refuse_if_evidence, SparseFile};
+use zvolrescue_io::refuse_if_evidence;
 
 use zvol_common::members::{choose_pool, open_members};
 use zvol_common::timefmt::iso8601;
-use zvol_common::{evidence, exit, Format, Global, PoolSpec};
+use zvol_common::{evidence, exit, resume, Format, Global, PoolSpec};
 
 /// Options of the `dump` command.
 pub struct Options {
@@ -108,25 +108,6 @@ struct RunOut {
     /// and is not part of what a reproducible run must repeat (N-05).
     #[serde(skip_serializing_if = "Option::is_none")]
     peak_rss_kib: Option<u64>,
-}
-
-/// Resume state written next to the output image.
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-struct ResumeState {
-    version: u32,
-    dataset: String,
-    dataset_guid: String,
-    txg: u64,
-    volsize: u64,
-    blocksize: u64,
-    /// Blocks `0..blocks_done` are complete in the output.
-    blocks_done: u64,
-}
-
-fn resume_path(output: &Path) -> PathBuf {
-    let mut p = output.as_os_str().to_owned();
-    p.push(".resume.json");
-    PathBuf::from(p)
 }
 
 fn find_dataset<'c>(
@@ -252,8 +233,8 @@ fn dump_one(
         }
     };
     let blocksize = obj.dnode().datablksz();
-    let state_path = resume_path(output);
-    let expected_state = ResumeState {
+    let state_path = resume::path(output);
+    let expected_state = resume::State {
         version: 1,
         dataset: ds.name.clone(),
         dataset_guid: format!("{:#018x}", ds.guid),
@@ -262,66 +243,18 @@ fn dump_one(
         blocksize,
         blocks_done: 0,
     };
-
     // Where to start, and the hash of what is already there.
-    let mut start_block = 0u64;
-    let mut hasher = Digests::new(hash);
-    let mut sink = if resume {
-        let state: Option<ResumeState> = std::fs::read(&state_path)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok());
-        match state {
-            Some(s) if ResumeState { blocks_done: 0, ..s.clone_for_compare() } == expected_state => {
-                start_block = s.blocks_done;
-                let prefix = start_block * blocksize;
-                match std::fs::File::open(output) {
-                    Ok(mut f) => {
-                        let mut left = prefix;
-                        let mut buf = vec![0u8; 1 << 20];
-                        while left > 0 {
-                            let n = (left as usize).min(buf.len());
-                            if f.read_exact(&mut buf[..n]).is_err() {
-                                eprintln!(
-                                    "zvolrescue: {}: shorter than the {prefix} bytes the resume state claims; starting over",
-                                    output.display()
-                                );
-                                start_block = 0;
-                                hasher = Digests::new(hash);
-                                break;
-                            }
-                            hasher.update(&buf[..n]);
-                            left -= n as u64;
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("zvolrescue: cannot read {} to resume: {e}; starting over", output.display());
-                        start_block = 0;
-                    }
-                }
-                if !g.quiet {
-                    eprintln!("  resuming {} at block {start_block}", ds.name);
-                }
-                if start_block > 0 {
-                    SparseFile::open_existing(output)
-                } else {
-                    SparseFile::create(output)
-                }
-            }
-            Some(_) => {
-                eprintln!(
-                    "zvolrescue: {} describes a different dataset/txg/size than {}; starting over",
-                    state_path.display(),
-                    ds.name
-                );
-                SparseFile::create(output)
-            }
-            None => SparseFile::create(output),
-        }
-    } else {
-        SparseFile::create(output)
-    }
+    let (start_block, hasher, mut sink) = resume::open(
+        "zvolrescue",
+        &ds.name,
+        output,
+        &expected_state,
+        hash,
+        resume,
+        g.quiet,
+    )
     .map_err(|e| {
-        eprintln!("zvolrescue: cannot open {}: {e}", output.display());
+        eprintln!("zvolrescue: {e}");
         exit::USAGE
     })?;
 
@@ -337,13 +270,7 @@ fn dump_one(
             last_report = Instant::now();
         }
         if last_state.elapsed().as_secs() >= 5 && done < total {
-            let s = ResumeState {
-                blocks_done: done,
-                ..expected_state.clone_for_compare()
-            };
-            if let Ok(json) = serde_json::to_vec(&s) {
-                let _ = std::fs::write(&state_file, json);
-            }
+            resume::write(&state_file, &expected_state, done);
             last_state = Instant::now();
         }
     };
@@ -388,15 +315,9 @@ fn dump_one(
             .interrupted_at
             .or_else(|| report.bad.first().map(|b| b.blkid))
             .unwrap_or(start_block);
-        let s = ResumeState {
-            blocks_done: done,
-            ..expected_state.clone_for_compare()
-        };
-        if let Ok(json) = serde_json::to_vec(&s) {
-            let _ = std::fs::write(&state_path, json);
-        }
+        resume::write(&state_path, &expected_state, done);
     } else {
-        let _ = std::fs::remove_file(&state_path);
+        resume::clear(&state_path);
     }
     Ok(DumpOut {
         dataset: ds.name.clone(),
@@ -439,20 +360,6 @@ fn dump_one(
             .collect(),
         encryption: ds.encryption.as_ref().map(Encryption::suite_name),
     })
-}
-
-impl ResumeState {
-    fn clone_for_compare(&self) -> ResumeState {
-        ResumeState {
-            version: self.version,
-            dataset: self.dataset.clone(),
-            dataset_guid: self.dataset_guid.clone(),
-            txg: self.txg,
-            volsize: self.volsize,
-            blocksize: self.blocksize,
-            blocks_done: self.blocks_done,
-        }
-    }
 }
 
 fn print_text(out: &RunOut) {

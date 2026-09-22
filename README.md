@@ -127,7 +127,7 @@ zvolcarve scan    POOLSPEC -o DIR [--volblocksize BYTES] [--levels N] [--txg FRO
                                   [--size MIN..MAX] [--like DATASET] [--strict-profile] [--resume]
                                   [--compressed lz4,lzjb,gzip,zstd|none]
 zvolcarve list    DIR
-zvolcarve dump    DIR CANDIDATE POOLSPEC -o OUT.img [--size BYTES] [--strict]
+zvolcarve dump    DIR CANDIDATE POOLSPEC -o OUT.img [--size BYTES] [--strict] [--resume]
                                                            volumes no uberblock points at any more
 ```
 
