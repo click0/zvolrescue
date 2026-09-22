@@ -16,7 +16,7 @@ Status legend: ☐ not run · ◐ partial · ☑ passed · ✗ failed (link the 
 | **mfsBSD** (FreeBSD rescue image, RAM-resident) | The realistic rescue medium: no disk to install on, tool must be a static binary copied over the network | FreeBSD base OpenZFS | statically linked `zvolrescue`; `mdconfig` for images; no `ztest` |
 | **FreeBSD 14.x** | primary target (SPEC N-06) | base OpenZFS 2.2 | `lang/rust` from ports/pkg; `zdb`, `ztest` in base |
 | **FreeBSD 15.x** | next release, newer feature flags | base OpenZFS 2.3+ | expect `raidz_expansion`, `fast_dedup`, `longname` feature flags |
-| **Debian stable** | most common Linux host with `zfs-dkms` | zfs-dkms 2.2 (bookworm) | `apt install zfsutils-linux zfs-dkms`; loop devices |
+| **Debian stable** | most common Linux host with `zfs-dkms`; the cheapest real kernel: loop devices in a VM | zfs-dkms 2.2 (12 bookworm), 2.3 (13 trixie: `raidz_expansion`) | `apt install zfsutils-linux zfs-dkms`; loop devices; scripted — see [Running on Debian with zfs-dkms and loop devices](#running-on-debian-with-zfs-dkms-and-loop-devices) |
 | **Ubuntu LTS** | ships ZFS in-kernel, common on hosts | zfs 2.2/2.3 | the CI cross-check runs here already (userland only) |
 | **CachyOS** (Arch-based) | bleeding-edge kernel and OpenZFS git; catches new on-disk features first | OpenZFS latest | `zfs-dkms` or `linux-cachyos-zfs`; `zstd`/`blake3` defaults common |
 
@@ -70,11 +70,11 @@ Run every scenario on every environment; record `zvolrescue --version`,
 | # | Scenario | Pass criterion |
 |---|---|---|
 | D1 | `zfs destroy vol`, export immediately | `list --diff` shows it destroyed; `dump` recovers from the previous txg, hash matches |
-| D2 | `zfs destroy vol`, then keep writing 500 MiB elsewhere, export | either recovered from an older txg still in the ring, or a clean "not found at any of N txgs" |
+| D2 | `zfs destroy vol`, then keep writing 500 MiB elsewhere, export | either recovered from an older txg still in the ring, or a clean "not found at any of N txgs", or — when the MOS of an older txg survived but the volume's blocks were reused — a partial image with every lost block zeroed and counted (exit 4) |
 | D3 | `zpool destroy pool` | `scan` shows state DESTROYED; `list`/`dump` still work |
 | D4 | pool that does not import (`zpool import` → "I/O error") after zeroing labels L0/L1 on one member | `scan` uses L2/L3; `dump` works |
 | D5 | pool whose newest uberblock is damaged (zero the slot) | `list` uses the previous verified txg and says so |
-| D6 | interrupt `dump` with SIGINT at ~50 %, then `--resume` | final hash matches, `resumed_from_block` > 0 |
+| D6 | interrupt `dump` with SIGINT at ~50 %, then `--resume` | final hash matches, `resumed_from_block` > 0. *What `--resume` finds is the state file the run writes every 5 seconds; there is no SIGINT handler, so the signal kills the run (exit 130, not the documented 6) and an interrupt before the first checkpoint starts over. On loop devices a 512 MiB volume is read in a second or two, which is why the Debian script pins the run to one busy CPU to outlast the checkpoint, and skips the scenario when it cannot* |
 | D7 | `dump -r pool/vm` with 5 volumes | 5 images + manifest, hashes match |
 | D8 | `dump --hash md5,sha1` of a volume (F-53) | the three digests printed equal `sha256sum`, `sha1sum` and `md5sum` of the written image; all three land in the evidence record and `zvolreport verify` checks each |
 
@@ -123,6 +123,86 @@ the evidence log) / refused cleanly (exit 3) / tool defect.
 | G5 | Read-only invariant on every run | input copies' hashes unchanged |
 
 How to run: build the image once with `tests/golden/build-image.sh OUT` in a real-kernel VM, publish `OUT/release` and `OUT/oracle` in `zvolrescue-testdata`, then `tests/golden/run-matrix.py --image OUT/members --oracle OUT/oracle --manifests <testdata>/manifests --tool ./target/release/zvolrescue` (add `--held-out` before a release). The report lands in `golden-report/report.md`.
+
+## Running on Debian with zfs-dkms and loop devices
+
+The cheapest environment with a real kernel ZFS, and the first one to
+run: a Debian VM with `zfs-dkms`, pools the kernel itself makes on loop
+devices. A loop device is a block device as far as the tool is concerned
+(SPEC N-10: `kind: device` in the record, the first refused read stops
+the run, no surface scan without `--surface-scan-on-device`), so
+everything the device policy promises is exercised here, on pools whose
+every byte OpenZFS wrote. What it cannot give is a disk: E1/E2 (a read
+rate relative to a disk), F1–F6 and F8–F10 (sector sizes, controllers,
+bridges) stay ☐ until a machine with drives runs them.
+
+`tests/realworld/debian-loop.sh` does the whole run: builds the pools,
+takes every oracle from OpenZFS (`sha256sum /dev/zvol/...` before export,
+`zdb -d`, `zdb -lu`, `zfs get -s local`), exports them, runs the tool
+against the loop devices, and prints the row for the Results table.
+
+Setting up (Debian 12 or 13, `contrib` enabled; a VM with 2 CPUs, 2 GiB
+of RAM and 8 GiB of free disk is enough):
+
+```
+apt install linux-headers-$(uname -r) zfsutils-linux zfs-dkms dmsetup strace python3 openssl
+modprobe zfs
+cargo build --release
+sudo bash tests/realworld/debian-loop.sh /var/tmp/rw ./target/release/zvolrescue
+```
+
+`zfs-dkms` builds the module for the running kernel, so the headers have
+to match it (reboot into the kernel the headers are for, first); with
+Secure Boot on, the unsigned module will not load. The work directory
+must be reachable by the user `nobody` (A3 runs the tool as that user
+with read access to the two devices and nothing else), which `/var/tmp`
+is and a home directory usually is not. The script refuses to start if a
+pool named `zrw*` is imported, creates only such pools, and removes its
+loop and device-mapper devices on exit; nothing it does touches another
+pool.
+
+What each scenario becomes on loop devices:
+
+| Scenario | How it is built | What is compared |
+|---|---|---|
+| A1, G5 | the first and last 4 MiB of every loop device hashed before the tool runs and after; every pool imported with `-N` and exported again at the end | hashes equal; every import succeeds |
+| A2 | `dump -o /dev/loopN` onto an input | exit 5 |
+| A3 | `runuser -u nobody` with `chmod o+r` on the two mirror members | `list -r` succeeds |
+| B1 | three single-disk pools at `ashift` 9, 12, 13 | `list -r` = `zdb -d` (names and creation TXGs); image SHA-256 = the kernel's |
+| B2 | mirror-2, the tool given one member | same |
+| B3 | raidz1 of 3, raidz2 of 4, raidz3 of 7, the tool given `nparity` fewer members | same |
+| B4 | 1 MiB of `/dev/urandom` at 8 MiB into one raidz2 member | image matches; the `--debug-log` shows the reconstruction |
+| B5 | mirror + raidz1 in one pool, also with one member of each absent | same as B1 |
+| B6 | mirror with a `log` and a `cache` device | `scan` of all four exits 0; `dump` from the two data members matches |
+| B7 | `draid1:2d:5c:1s`, also with one member absent | same as B1 (skipped if this `zpool` builds no dRAID) |
+| B8 | attach a second member, export, copy the original to another loop device, import, `detach` the original | `scan` of the copy and the survivor lists the copy under `stale` and only the survivor under `devices`; `dump` from both matches the pool after the detach. The copy stands in for a disk pulled before the detach: `zpool detach` erases the labels of the device it detaches |
+| B9 | a whole loop device (`losetup -P`) given to `zpool create`, which writes the GPT itself | `scan` finds the GPT and the ZFS partition; `dump` from the whole disk and from `-p1` both match |
+| C1–C3 | one volume per value: 8 compressions, 7 checksums, 6 block sizes | each image matches the kernel's hash |
+| C4 | `zfs create -s -V 1G`, 64 MiB written at 300 MiB | matches; the image is sparse (`du` under 200 MiB) |
+| C5 | `dedup=on`, four copies of the same 4 MiB | matches |
+| C6 | two snapshots and a clone of one volume | the head, each snapshot and the clone match their own hashes (`snapdev=visible` for the kernel's side) |
+| C7 | `encryption=aes-256-gcm`, `keyformat=raw` | matches with `--key raw:FILE`; without one, a non-zero exit and `encrypted block: no key` |
+| C8 | `dnodesize=auto` on the parent | matches |
+| C9 | 100 datasets, 12 levels deep, one 80-character name | `list -r` = `zdb -d` |
+| C10 | two single-disk tops, `zpool remove` the second, then write more | `scan` says `removed_tops: [1]`; `list` and `dump` match |
+| C11 | `org.example:ticket` and `compression` on a filesystem and a volume | the set of (dataset, property) from `list --properties` equals `zfs get -s local`; `volblocksize` is left out on the tool's side, since the kernel writes it into the property ZAP at creation but `zfs get` shows its source as `-` |
+| C12 | `zpool attach` a fourth member to a raidz1 (OpenZFS 2.3) | `list` exits 3 naming `raidz_expansion`; `scan` exits 0; `--ignore-unknown-features` reads. Skipped on 2.2 |
+| D1 | `zfs destroy`, export at once; the TXG before from `zdb -u` | `list --diff` shows it under `destroyed_since`; `dump --txg` matches |
+| D2 | `zfs destroy`, then 500 MiB written elsewhere over six TXGs | either the hash matches from an older TXG, or exit 3 with `not found at any of N verified TXG(s)`, or exit 4 with `blocks_zeroed` counted |
+| D3 | `zpool destroy` a single-disk pool | `scan` says `state: DESTROYED`; `dump` matches |
+| D4 | L0 and L1 zeroed after export | `scan` reports L0/L1 `missing` and L2/L3 `ok`; `dump` matches; whether the kernel still imports it is noted (expected to, since ZFS reads all four labels) |
+| D5 | the newest uberblock slot, found with `zdb -lu`, zeroed in all four labels | `list` reports the previous TXG; `dump` matches the last state |
+| D6 | see the note in the table above | `resumed_from_block` > 0; hash matches |
+| D7 | `dump -r` of the eight C1 volumes | eight images named after their datasets plus `manifest.json`; every hash matches |
+| D8 | `--hash md5,sha1` | the three digests equal `sha256sum`, `sha1sum`, `md5sum` of the image |
+| F7 | `dm-error` over 8 sectors at the first data block of a volume (its DVA from `zdb -dddddd`, plus the 4 MiB of labels) under one mirror member | exit 7 and `MEDIUM INCIDENT … (LBA n, …)`; the evidence record carries the incident with `stopped: true`; `--device-may-fail` heals from the other member, hash matches, one incident not stopped; `strace` shows no address on the device read twice |
+| R | `zvolreport build` over every run's evidence, then `verify` | verifies |
+
+The row it prints (`WORKDIR/row.md`) goes into Results below; the
+per-scenario lines are in `WORKDIR/results.txt`, the tool's output of
+every run in `WORKDIR/out/`, and the evidence log of the whole session in
+`WORKDIR/evidence.jsonl`. A failure is a tool defect until shown
+otherwise: file it with the `out/*.log` and `out/*.err` of that scenario.
 
 ## Results
 

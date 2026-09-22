@@ -15,6 +15,26 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ## Unreleased
 
+### Added
+* **The real-world matrix on Debian with `zfs-dkms` and loop devices,
+  scripted (`tests/realworld/debian-loop.sh`).** The cheapest
+  environment with a real kernel ZFS, and the first one REALWORLD-TESTS
+  should see run: pools the kernel makes on loop devices, which the
+  tool treats as the block devices they are (N-10). The script builds
+  every layout of B, every property of C, every recovery of D, the
+  `dm-error` member of F7 and the read-only checks of A, takes every
+  oracle from OpenZFS alone (`sha256sum` of the zvol before export,
+  `zdb -d`, `zdb -lu`, `zfs get -s local`), and prints the row for the
+  Results table. `raidz_expansion` (C12) needs OpenZFS 2.3 and is
+  skipped on 2.2; dRAID is skipped where `zpool` builds none. Found
+  while writing it: `dump` has no SIGINT handler, so an interrupt
+  kills the run (exit 130, not the documented 6) and `--resume` relies
+  on the state file written every 5 seconds — the D6 row says so now,
+  and the script outlasts the checkpoint by pinning the run to a busy
+  CPU rather than pretending. The matrix has a section describing what
+  every scenario becomes on loop devices and what a loop device cannot
+  give (E1/E2, F1–F6, F8–F10 stay for a machine with drives).
+
 ### Documented
 * **The open questions of §12 are closed (D-9…D-11).** What the
   repository already did is now a decision with its reasons: Linux CI
