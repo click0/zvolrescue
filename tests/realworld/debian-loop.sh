@@ -49,7 +49,7 @@ die() { printf 'debian-loop: %s\n' "$*" >&2; exit 1; }
 # ---------------------------------------------------------------- checks
 [ "$(id -u)" = 0 ] || die "run as root (zpool, losetup and dmsetup need it)"
 [ -x "$ZR" ] || die "$ZR is not executable (build with cargo build --release)"
-for c in zpool zfs zdb losetup dmsetup sha256sum sha1sum md5sum python3 openssl blockdev; do
+for c in zpool zfs zdb losetup sfdisk dmsetup sha256sum sha1sum md5sum python3 openssl blockdev; do
     command -v "$c" >/dev/null || die "$c not found"
 done
 [ -e /dev/zfs ] || modprobe zfs 2>/dev/null || die "the zfs kernel module is not loaded (apt install zfs-dkms; modprobe zfs)"
