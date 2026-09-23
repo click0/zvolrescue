@@ -68,6 +68,11 @@ HAVE_STRACE=1; command -v strace >/dev/null || HAVE_STRACE=0
     echo "strace: $HAVE_STRACE"
 } | tee "$WORK/env.txt"
 ZFS_VER=$(zfs version 2>/dev/null | sed -n 's/^zfs-\([0-9][0-9.]*\).*/\1/p' | head -1)
+# The module's version where it differs from userland's (Ubuntu ships a
+# newer in-tree module than its tools), and where the module came from.
+KMOD_VER=$(zfs version 2>/dev/null | sed -n 's/^zfs-kmod-\([0-9][0-9.]*\).*/\1/p' | head -1)
+[ -z "$KMOD_VER" ] || [ "$KMOD_VER" = "$ZFS_VER" ] || ZFS_VER="$ZFS_VER (kmod $KMOD_VER)"
+MODULE_FROM="in-tree module"; dkms status 2>/dev/null | grep -q '^zfs' && MODULE_FROM="zfs-dkms"
 TOOL_VER=$("$ZR" --version | awk '{print $2}')
 
 # ---------------------------------------------------------------- teardown
@@ -805,7 +810,7 @@ note="tests/realworld/debian-loop.sh, kernel $(uname -r)"
 [ -z "$FAILED" ] || note="$note; failed:$FAILED"
 [ -z "$SKIPPED" ] || note="$note; skipped:$SKIPPED"
 # shellcheck disable=SC2086
-printf '| %s | %s (zfs-dkms, loop devices) | %s | `%s` | %s | %s | %s |\n' "$(date -u +%Y-%m-%d)" "$os" "$ZFS_VER" "$TOOL_VER" "$(echo $PASSED)" "$mark" "$note" | tee "$WORK/row.md"
+printf '| %s | %s (%s, loop devices) | %s | `%s` | %s | %s | %s |\n' "$(date -u +%Y-%m-%d)" "$os" "$MODULE_FROM" "$ZFS_VER" "$TOOL_VER" "$(echo $PASSED)" "$mark" "$note" | tee "$WORK/row.md"
 echo "passed:$PASSED"
 echo "failed:$FAILED"
 echo "skipped:$SKIPPED"

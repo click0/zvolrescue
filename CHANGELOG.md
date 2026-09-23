@@ -62,7 +62,16 @@ tagged. `v0.7.1` is the release that carries those six.
   keeps it in the volume's own object, not the property ZAP, which
   C11 now allows for alongside `volblocksize`. B4's corruption is
   aimed at the volume's own blocks through their DVA, since 1 MiB at a
-  round offset landed in free space on OpenZFS 2.1.
+  round offset landed in free space on OpenZFS 2.1. D1 accepts a
+  partial image when the export's own TXGs reused a block of the
+  volume destroyed just before it — compared byte for byte against a
+  copy taken before the destroy — and D2 the clean exit 3 the `dump`
+  fix above gives. With that, both environments pass every applicable
+  scenario (34 of the matrix; C12 needs OpenZFS 2.3), and the two rows
+  are in the Results table of REALWORLD-TESTS. The row the script
+  prints now names where the module came from (`zfs-dkms` or the
+  in-tree module) and the module's version where it differs from
+  userland's.
 
 ## v0.9.7 — 2026-09-23
 

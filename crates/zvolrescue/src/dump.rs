@@ -102,6 +102,16 @@ struct UnreadableAt {
     error: String,
 }
 
+/// What the search for the dataset went through, for the record.
+#[derive(Debug, Default)]
+struct Searched {
+    /// TXGs walked, newest first.
+    txgs: Vec<u64>,
+    /// Those among them that name the dataset but cannot read its
+    /// object set.
+    unreadable: Vec<UnreadableAt>,
+}
+
 #[derive(Debug, Serialize)]
 struct RunOut {
     pool: String,
@@ -149,8 +159,7 @@ fn find_dataset<'c>(
     pool_name: &str,
     name: &str,
     quiet: bool,
-    searched: &mut Vec<u64>,
-    unreadable: &mut Vec<UnreadableAt>,
+    searched: &mut Searched,
 ) -> Result<(&'c Candidate, DatasetTree), u8> {
     let pick: Vec<&Candidate> = match sel {
         Some(txg) => match select_uberblock(candidates, TxgSelect::Exact(txg)) {
@@ -171,7 +180,7 @@ fn find_dataset<'c>(
     };
     let mut last_err = None;
     for c in pick {
-        searched.push(c.ub.txg);
+        searched.txgs.push(c.ub.txg);
         match open_mos(reader, &c.ub).and_then(|mos| walk(&mos, pool_name)) {
             Ok(tree) => {
                 let Some(ds) = tree.get(name) else { continue };
@@ -188,7 +197,7 @@ fn find_dataset<'c>(
                                 if stopped { "" } else { "; trying an older TXG" }
                             );
                         }
-                        unreadable.push(UnreadableAt {
+                        searched.unreadable.push(UnreadableAt {
                             txg: c.ub.txg,
                             error: e.to_string(),
                         });
@@ -201,20 +210,22 @@ fn find_dataset<'c>(
             Err(e) => last_err = Some(format!("txg {}: {e}", c.ub.txg)),
         }
     }
-    if let Some(u) = unreadable.first() {
+    if let Some(u) = searched.unreadable.first() {
         eprintln!(
             "zvolrescue: dataset {name:?} is named at txg {} but its object set does not read there ({}); readable at none of {} verified TXG(s)",
             u.txg,
             u.error,
-            searched.len()
+            searched.txgs.len()
         );
         return Err(exit::UNRECOVERABLE);
     }
     match last_err {
-        Some(e) if searched.len() == 1 => eprintln!("zvolrescue: cannot read the pool at {e}"),
+        Some(e) if searched.txgs.len() == 1 => {
+            eprintln!("zvolrescue: cannot read the pool at {e}")
+        }
         _ => eprintln!(
             "zvolrescue: dataset {name:?} not found at any of {} verified TXG(s){}",
-            searched.len(),
+            searched.txgs.len(),
             last_err
                 .map(|e| format!(" (last error: {e})"))
                 .unwrap_or_default()
@@ -540,8 +551,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         return zvol_common::end_early(g, "zvolrescue", spec, exit::UNRECOVERABLE);
     }
     let reader = PoolReader::new(&pool, members.devices()).with_base_offsets(&members.bases());
-    let mut searched = Vec::new();
-    let mut unreadable = Vec::new();
+    let mut searched = Searched::default();
     let (chosen, tree) = match find_dataset(
         &reader,
         &candidates,
@@ -550,7 +560,6 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         &opts.dataset,
         g.quiet,
         &mut searched,
-        &mut unreadable,
     ) {
         Ok(x) => x,
         Err(code) => {
@@ -562,8 +571,8 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 pool: pool.name.clone(),
                 pool_guid: format!("{:#018x}", pool.guid),
                 members: members.paths.clone(),
-                txgs_searched: searched,
-                unreadable_at: unreadable,
+                txgs_searched: searched.txgs,
+                unreadable_at: searched.unreadable,
                 recursive: opts.recursive,
                 volumes: Vec::new(),
                 skipped: Vec::new(),
@@ -614,8 +623,8 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         pool: pool.name.clone(),
         pool_guid: format!("{:#018x}", pool.guid),
         members: members.paths.clone(),
-        txgs_searched: searched,
-        unreadable_at: unreadable,
+        txgs_searched: searched.txgs,
+        unreadable_at: searched.unreadable,
         recursive: opts.recursive,
         volumes: Vec::new(),
         skipped: Vec::new(),
