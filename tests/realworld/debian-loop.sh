@@ -107,7 +107,7 @@ wait_dev_soft() { # the same, as a verdict rather than an exit
 }
 # A property value this ZFS does not have (blake3 needs OpenZFS 2.2)
 # skips its volume with a note instead of ending the run.
-NOT_HERE=""
+NOT_HERE_C1=""; NOT_HERE_C2=""; NOT_HERE_C3=""
 fill() { # fill POOL/VOL BYTES [SEEK_MIB]  — deterministic content
     wait_dev "$(zdev "$1")"
     stream "$1@${3:-0}" "$2" | dd of="$(zdev "$1")" bs=1M seek="${3:-0}" conv=notrunc,fsync status=none
@@ -168,7 +168,7 @@ for l in sys.stdin:
     if m and m.group(1) != "mos":
         print(m.group(1), m.group(3))' | sort > "$WORK/out/$id-zdb.txt"
     run "$id-list" -f json list -r "$@"
-    jsonq 'print("\n".join(f"{x[\"name\"]} {x[\"creation_txg\"]}" for x in d["datasets"]))' < "$WORK/out/$id-list.log" 2>/dev/null | sort > "$WORK/out/$id-zr.txt"
+    jsonq 'print("\n".join(x["name"] + " " + str(x["creation_txg"]) for x in d["datasets"]))' < "$WORK/out/$id-list.log" 2>/dev/null | sort > "$WORK/out/$id-zr.txt"
     if [ "$code" = 0 ] && [ -s "$WORK/out/$id-zdb.txt" ] && diff -u "$WORK/out/$id-zdb.txt" "$WORK/out/$id-zr.txt" > "$WORK/out/$id-diff.txt"; then
         return 0
     fi
@@ -208,21 +208,21 @@ for c in off lz4 zstd zstd-19 gzip-1 gzip-9 lzjb zle; do
         wait_dev "$(zdev "${P}m/vm/c-$c")"
         # compressible and incompressible halves
         { stream "c-$c" 6M; head -c 6M /dev/zero; stream "c-$c-2" 4M; } | dd of="$(zdev "${P}m/vm/c-$c")" bs=1M conv=notrunc,fsync status=none
-    else NOT_HERE="$NOT_HERE compression=$c"; fi
+    else NOT_HERE_C1="${NOT_HERE_C1:-} compression=$c"; fi
 done
 # C2 checksums
 C2_KEYS=""
 for k in fletcher2 fletcher4 sha256 sha512 skein edonr blake3; do
     if zfs create -V 16M -b 16K -o checksum=$k "${P}m/k-$k" 2>"$WORK/out/c2-create-$k.err"; then
         C2_KEYS="$C2_KEYS $k"; fill "${P}m/k-$k" 12M
-    else NOT_HERE="$NOT_HERE checksum=$k"; fi
+    else NOT_HERE_C2="${NOT_HERE_C2:-} checksum=$k"; fi
 done
 # C3 volblocksize
 C3_KEYS=""
 for b in 4K 8K 16K 64K 128K 1M; do
     if zfs create -V 32M -b $b "${P}m/b-$b" 2>"$WORK/out/c3-create-$b.err"; then
         C3_KEYS="$C3_KEYS $b"; fill "${P}m/b-$b" 24M
-    else NOT_HERE="$NOT_HERE volblocksize=$b"; fi
+    else NOT_HERE_C3="${NOT_HERE_C3:-} volblocksize=$b"; fi
 done
 # C4 sparse, C5 dedup, C6 snapshots and a clone, C8 large dnodes, C11 properties
 zfs create -s -V 1G -b 16K "${P}m/sparse"; fill "${P}m/sparse" 64M 300
@@ -258,7 +258,9 @@ zpool sync "${P}m"
 for v in $(zfs list -H -o name -t volume -r "${P}m"); do SHA[$v]=$(oracle "$v"); done
 SHA["${P}m/snapped@one"]=$(oracle "${P}m/snapped@one")
 SHA["${P}m/snapped@two"]=$(oracle "${P}m/snapped@two")
-zfs get -H -s local -o name,property,value all "${P}m/bigdnode" "${P}m/bigdnode/vol" | sort > "$WORK/out/c11-zfs.txt"
+# volsize is answered from the zvol's own object, not the property ZAP,
+# though `zfs get` calls it local; volblocksize the other way round.
+zfs get -H -s local -o name,property,value all "${P}m/bigdnode" "${P}m/bigdnode/vol" | awk -F'\t' '$2 != "volsize"' | sort > "$WORK/out/c11-zfs.txt"
 zfs list -H -o name -r "${P}m" | wc -l > "$WORK/out/c9-count.txt"
 # The TXG before the destroys, from the kernel's own uberblock.
 TXG_BEFORE=$(zdb -u "${P}m" 2>/dev/null | sed -n 's/^[[:space:]]*txg = //p' | head -1)
@@ -461,10 +463,20 @@ for z in z1:1 z2:2 z3:3; do
 done
 if [ -z "$b3fail" ]; then result B3 PASS "raidz1/2/3 with nparity members absent"; else result B3 FAIL "$b3fail"; fi
 
-# B4: a raidz2 member silently corrupted over 1 MiB inside its data area
+# B4: a raidz2 member silently corrupted over 1 MiB of the volume's own
+# blocks: the first L0 block's DVA from zdb, spread over the four columns
+# (a member holds a quarter of the vdev's address space, after the 4 MiB
+# of labels), and 1 MiB from there on member 0.
 # shellcheck disable=SC2086
 set -- $RZ2
-dd if=/dev/urandom of="$1" bs=1M count=1 seek=8 conv=notrunc,fsync status=none
+b4_dva=$(zdb -e -p "$WORK/img" -dddddd "${P}z2/vol" 1 2>/dev/null | python3 -c '
+import re,sys
+for l in sys.stdin:
+    m = re.search(r"\bL0 (\d+):([0-9a-f]+):([0-9a-f]+)\b", l)
+    if m and m.group(1) == "0":
+        print(int(m.group(2), 16)); break')
+b4_at=$(( ${b4_dva:-33554432} / 4 + 4194304 ))
+dd if=/dev/urandom of="$1" bs=1M count=1 seek=$(( b4_at / 1048576 )) conv=notrunc,fsync status=none
 EDGE[$1]=$(edges "$1")
 rm -f "$WORK/out/b4.img"
 "$ZR" --evidence-log "$EV" -f json dump "${P}z2/vol" "$@" -o "$WORK/out/b4.img" --debug-log "$WORK/out/b4-debug.log" > "$WORK/out/b4-dump.log" 2>"$WORK/out/b4-dump.err"; code=$?
@@ -494,8 +506,8 @@ else result B7 SKIP "this zpool does not create draid ($(head -c 120 "$WORK/out/
 # B8: the copy of the detached original is set aside, not mixed in
 run b8-scan -f json scan "$AOLD" "$A1"
 if [ "$code" = 0 ] && jsonq '
-p=d["pools"][0]; assert p["devices"]==["'"$A1"'"], p["devices"]
-assert p["stale"] and p["stale"][0]["device"]=="'"$AOLD"'", p["stale"]' < "$WORK/out/b8-scan.log" 2>"$WORK/out/b8-assert.err" \
+p=d["pools"][0]; assert p["stale"] and p["stale"][0]["device"]=="'"$AOLD"'", p["stale"]
+assert [m["present"] for t in p["tops"] for m in t["members"]] == ["'"$A1"'"], p["tops"]' < "$WORK/out/b8-scan.log" 2>"$WORK/out/b8-assert.err" \
     && dump_matches b8 "${P}a/vol" "${SHA[a]}" "$AOLD" "$A1"; then
     result B8 PASS "the older copy is stale; dump from both matches the pool after the detach"
 else result B8 FAIL "scan exit $code; $(tail -1 "$WORK/out/b8-assert.err" 2>/dev/null)"; fi
@@ -512,16 +524,16 @@ else result B9 FAIL "scan exit $code; $(tail -1 "$WORK/out/b9-assert.err" 2>/dev
 
 # C1, C2, C3: one dump per property value
 # What this ZFS does not have is said, not counted either way.
-here() { [ -z "$NOT_HERE" ] || printf '; not in this ZFS:%s' "$NOT_HERE"; }
+here() { [ -z "$1" ] || printf '; not in this ZFS:%s' "$1"; }
 cfail=""
 for c in $C1_KEYS; do dump_matches "c1-$c" "${P}m/vm/c-$c" "${SHA[${P}m/vm/c-$c]}" "$M0" "$M1" || cfail="$cfail $c"; done
-if [ -z "$cfail" ]; then result C1 PASS "$(echo $C1_KEYS | wc -w) compressions$(here)"; else result C1 FAIL "$cfail"; fi
+if [ -z "$cfail" ]; then result C1 PASS "$(echo $C1_KEYS | wc -w) compressions$(here "$NOT_HERE_C1")"; else result C1 FAIL "$cfail"; fi
 cfail=""
 for k in $C2_KEYS; do dump_matches "c2-$k" "${P}m/k-$k" "${SHA[${P}m/k-$k]}" "$M0" "$M1" || cfail="$cfail $k"; done
-if [ -z "$cfail" ]; then result C2 PASS "$(echo $C2_KEYS | wc -w) checksums$(here)"; else result C2 FAIL "$cfail"; fi
+if [ -z "$cfail" ]; then result C2 PASS "$(echo $C2_KEYS | wc -w) checksums$(here "$NOT_HERE_C2")"; else result C2 FAIL "$cfail"; fi
 cfail=""
 for b in $C3_KEYS; do dump_matches "c3-$b" "${P}m/b-$b" "${SHA[${P}m/b-$b]}" "$M0" "$M1" || cfail="$cfail $b"; done
-if [ -z "$cfail" ]; then result C3 PASS "$(echo $C3_KEYS | wc -w) block sizes$(here)"; else result C3 FAIL "$cfail"; fi
+if [ -z "$cfail" ]; then result C3 PASS "$(echo $C3_KEYS | wc -w) block sizes$(here "$NOT_HERE_C3")"; else result C3 FAIL "$cfail"; fi
 
 # C4: sparse image
 if dump_matches c4 "${P}m/sparse" "${SHA[${P}m/sparse]}" "$M0" "$M1"; then
@@ -539,8 +551,8 @@ rm -f "$WORK/out/c7.img"
 run c7-dump -f json dump "${P}m/secret/vol" "$M0" "$M1" -o "$WORK/out/c7.img" --key "raw:$WORK/raw.key"
 got=$(jsonq 'print(d["volumes"][0]["sha256"])' < "$WORK/out/c7-dump.log" 2>/dev/null)
 run c7-nokey -f json dump "${P}m/secret/vol" "$M0" "$M1" -o "$WORK/out/c7-nokey.img"; nokey=$code
-if [ "$got" = "${SHA[${P}m/secret/vol]}" ] && [ "$nokey" != 0 ] && grep -q "no key" "$WORK/out/c7-nokey.log" "$WORK/out/c7-nokey.log.err" 2>/dev/null; then
-    result C7 PASS "aes-256-gcm with the raw key; exit $nokey and 'no key' without it"
+if [ "$got" = "${SHA[${P}m/secret/vol]}" ] && [ "$nokey" = 1 ] && grep -q "is encrypted (aes-256-gcm" "$WORK/out/c7-nokey.log.err" && grep -q "supply --key" "$WORK/out/c7-nokey.log.err" && [ ! -s "$WORK/out/c7-nokey.img" ]; then
+    result C7 PASS "aes-256-gcm with the raw key; without one a refusal naming the suite (exit 1), nothing written"
 else result C7 FAIL "with key: $got (wanted ${SHA[${P}m/secret/vol]}); without: exit $nokey"; fi
 if dump_matches c8 "${P}m/bigdnode/vol" "${SHA[${P}m/bigdnode/vol]}" "$M0" "$M1"; then result C8 PASS "dnodesize=auto parent"; else result C8 FAIL "see out/c8-*"; fi
 
@@ -733,7 +745,7 @@ imports=""
 for p in $POOLS; do
     case $p in "${P}k"|"${P}4"|"${P}5") continue ;; esac
     # shellcheck disable=SC2046
-    if zpool import $(import_args "$p") -N "$p" >/dev/null 2>"$WORK/out/import-$p.err"; then zpool export "$p"; else imports="$imports $p"; fi
+    if zpool import $(import_args "$p") -N "$p" >/dev/null 2>"$WORK/out/import-$p.err"; then zpool export "$p" 2>/dev/null || { sleep 2; zpool export "$p"; }; else imports="$imports $p"; fi
 done
 if [ -z "$changed" ] && [ -z "$imports" ]; then result A1 PASS "every device's ends unchanged; every pool still imports"
 else result A1 FAIL "changed:$changed; do not import:$imports"; fi

@@ -58,11 +58,11 @@ Run every scenario on every environment; record `zvolrescue --version`,
 | C4 | sparse volume with holes, `zfs create -s -V 100G`, 1 GiB written | image is sparse, `du` small, hash matches |
 | C5 | `dedup=on` volume with repeated content | matches |
 | C6 | volume with snapshots and a clone; `dump` of `vol@snap` and of the clone | each matches its own hash |
-| C7 | encrypted volume (`encryption=aes-256-gcm`) with `--key raw:FILE` | matches with the key; without one every ciphertext block is refused as `encrypted: no key` and nothing is reported as verified |
+| C7 | encrypted volume (`encryption=aes-256-gcm`) with `--key raw:FILE` | matches with the key; without one the run is refused before a block is read (exit 1), naming the suite and the key formats it takes, and nothing is written |
 | C8 | large dnodes (`dnodesize=auto`) on the parent filesystem | `list` unaffected |
 | C9 | pool with 100+ datasets, deep nesting, long names (`longname` on FreeBSD 15) | `list -r` complete, matches `zdb -d` |
 | C10 | `zpool remove` a top-level vdev, then export (F-69) | `list`/`dump` read the blocks that still name the removed vdev and match `zdb`; `scan` says the vdev is counted but has no member. `ztest` reaches this only by chance — a real kernel does it on demand, which is the point of running it here |
-| C11 | `zfs set` several properties, including a user property (`org.example:ticket`), on a volume and on its parent (F-14) | `list --properties` reports exactly what `zfs get -s local` reports for that dataset — no more, since inherited values are not on disk, and no less |
+| C11 | `zfs set` several properties, including a user property (`org.example:ticket`), on a volume and on its parent (F-14) | `list --properties` reports exactly what `zfs get -s local` reports for that dataset — no more, since inherited values are not on disk, and no less — with two exceptions the kernel keeps outside the property ZAP: `volsize` lives in the volume's own object (`zfs get` calls it local, the ZAP does not have it) and `volblocksize` the other way round (in the ZAP at creation, source `-` to `zfs get`) |
 | C12 | a pool whose active `features_for_read` include one this build does not implement (`raidz_expansion` on FreeBSD 15 / OpenZFS 2.3) (F-70) | `list`/`dump` refuse with exit 3 and name the feature; `scan` says so without refusing; `--ignore-unknown-features` reads and states the cost |
 
 ### D. Recovery
@@ -171,7 +171,7 @@ What each scenario becomes on loop devices:
 | B1 | three single-disk pools at `ashift` 9, 12, 13 | `list -r` = `zdb -d` (names and creation TXGs); image SHA-256 = the kernel's |
 | B2 | mirror-2, the tool given one member | same |
 | B3 | raidz1 of 3, raidz2 of 4, raidz3 of 7, the tool given `nparity` fewer members | same |
-| B4 | 1 MiB of `/dev/urandom` at 8 MiB into one raidz2 member | image matches; the `--debug-log` shows the reconstruction |
+| B4 | 1 MiB of `/dev/urandom` over the volume's own blocks on one raidz2 member: the first data block's DVA from `zdb`, spread over the four columns, plus the labels | image matches; the `--debug-log` shows the reconstruction |
 | B5 | mirror + raidz1 in one pool, also with one member of each absent | same as B1 |
 | B6 | mirror with a `log` and a `cache` device | `scan` of all four exits 0; `dump` from the two data members matches |
 | B7 | `draid1:2d:5c:1s`, also with one member absent | same as B1 (skipped if this `zpool` builds no dRAID) |
@@ -181,11 +181,11 @@ What each scenario becomes on loop devices:
 | C4 | `zfs create -s -V 1G`, 64 MiB written at 300 MiB | matches; the image is sparse (`du` under 200 MiB) |
 | C5 | `dedup=on`, four copies of the same 4 MiB | matches |
 | C6 | two snapshots and a clone of one volume | the head, each snapshot and the clone match their own hashes (`snapdev=visible` for the kernel's side) |
-| C7 | `encryption=aes-256-gcm`, `keyformat=raw` | matches with `--key raw:FILE`; without one, a non-zero exit and `encrypted block: no key` |
+| C7 | `encryption=aes-256-gcm`, `keyformat=raw` | matches with `--key raw:FILE`; without one, exit 1 with `is encrypted (aes-256-gcm …); supply --key` and an empty output |
 | C8 | `dnodesize=auto` on the parent | matches |
 | C9 | 100 datasets, 12 levels deep, one 80-character name | `list -r` = `zdb -d` |
 | C10 | two single-disk tops, `zpool remove` the second, then write more | `scan` says `removed_tops: [1]`; `list` and `dump` match |
-| C11 | `org.example:ticket` and `compression` on a filesystem and a volume | the set of (dataset, property) from `list --properties` equals `zfs get -s local`; `volblocksize` is left out on the tool's side, since the kernel writes it into the property ZAP at creation but `zfs get` shows its source as `-` |
+| C11 | `org.example:ticket` and `compression` on a filesystem and a volume | the set of (dataset, property) from `list --properties` equals `zfs get -s local`; `volblocksize` is left out on the tool's side and `volsize` on the kernel's: the first is in the property ZAP at creation but shown by `zfs get` with source `-`, the second is answered from the volume's own object though `zfs get` calls it local |
 | C12 | `zpool attach` a fourth member to a raidz1 (OpenZFS 2.3) | `list` exits 3 naming `raidz_expansion`; `scan` exits 0; `--ignore-unknown-features` reads. Skipped on 2.2 |
 | D1 | `zfs destroy`, export at once; the TXG before from `zdb -u` | `list --diff` shows it under `destroyed_since`; `dump --txg` matches |
 | D2 | `zfs destroy`, then 500 MiB written elsewhere over six TXGs | either the hash matches from an older TXG, or exit 3 with `not found at any of N verified TXG(s)`, or exit 4 with `blocks_zeroed` counted |

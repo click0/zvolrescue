@@ -310,6 +310,36 @@ pub fn assemble(scans: &[Option<DeviceScan>]) -> Vec<PoolAssembly> {
                 }
             }
         }
+        // A label whose own leaf the newest configuration of its top-level
+        // vdev no longer names: the disk was detached or replaced while it
+        // was out of the machine, and it kept the labels it had —
+        // vdev_label_init erases them only on a device that is there. The
+        // top-level vdev is the same one (a detach hands the mirror's guid
+        // to the survivor), so the newer tree describes it and this device
+        // is set aside, not listed beside the survivor as if it belonged.
+        for (i, c) in &entries {
+            if stale.iter().any(|m| m.device == *i) {
+                continue;
+            }
+            let (Some(top_guid), Some(leaf)) = (c.top_guid, c.guid) else {
+                continue;
+            };
+            if let Some((newest_txg, tree)) = tops.get(&top_guid) {
+                let named = tree.guid == leaf || tree.leaves().iter().any(|l| l.guid == leaf);
+                if !named {
+                    stale.push(StaleMember {
+                        device: *i,
+                        guid: c.guid,
+                        txg: c.txg,
+                        reason: format!(
+                            "label txg {} names leaf {leaf:#x} that top-level vdev #{}'s newest configuration (txg {newest_txg}) no longer has: detached or replaced",
+                            c.txg.unwrap_or(0),
+                            tree.id
+                        ),
+                    });
+                }
+            }
+        }
         let leaf_owner = |leaf_guid: u64| -> Option<usize> {
             entries
                 .iter()
@@ -499,6 +529,45 @@ mod tests {
         assert_eq!(p.stale[0].txg, Some(0));
         assert!(p.stale[0].reason.contains("txg 0"));
         assert_eq!(p.devices.len(), 3);
+    }
+
+    /// A disk pulled from a mirror before `zpool detach` ran keeps the
+    /// labels it had as a mirror member: the same top-level guid, an
+    /// older txg, a leaf the survivor's configuration no longer names
+    /// (a detach hands the mirror's guid to the survivor, which is then
+    /// a plain disk). Met on a kernel-made pool in REALWORLD-TESTS B8:
+    /// the copy was listed beside the survivor as if it belonged.
+    #[test]
+    fn a_member_detached_while_out_is_stale() {
+        let before = Pool::mirror("tank", 0x2000, 12).txgs(&[(34, 1)]);
+        let mut after = Pool::mirror("tank", 0x2000, 12).txgs(&[(59, 2)]);
+        after.kind = "disk".into();
+        let survivor_guid = after.top_guid();
+        after.members = vec![crate::fixture::Member {
+            guid: survivor_guid,
+            path: "/dev/gpt/tank-d1".into(),
+        }];
+        let scans = vec![
+            scan(before.member_image(0, 8 * LABEL_SIZE)),
+            scan(after.member_image(0, 8 * LABEL_SIZE)),
+        ];
+        let pools = assemble(&scans);
+        assert_eq!(pools.len(), 1);
+        let p = &pools[0];
+        assert_eq!(p.txg, Some(59));
+        assert_eq!(p.tops.len(), 1);
+        assert_eq!(p.tops[0].kind, "disk");
+        assert_eq!(p.tops[0].members.len(), 1);
+        assert_eq!(p.tops[0].members[0].present, Some(1));
+        assert_eq!(p.stale.len(), 1);
+        assert_eq!(p.stale[0].device, 0);
+        assert_eq!(p.stale[0].txg, Some(34));
+        assert!(
+            p.stale[0].reason.contains("detached"),
+            "{}",
+            p.stale[0].reason
+        );
+        assert!(p.readable());
     }
 
     #[test]

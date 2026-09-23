@@ -13,6 +13,44 @@ development milestone that names what changed when — the sections below
 are their record — and ships inside the next version that does get
 tagged. `v0.7.1` is the release that carries those six.
 
+## Unreleased
+
+### Fixed
+* **A member detached while it was out of the machine is set aside,
+  not listed beside the survivor.** `zpool detach` erases the labels
+  of the device it detaches — but only of a device that is there. A
+  disk pulled from a mirror before the detach keeps its labels: the
+  same top-level guid (a detach hands the mirror's guid to the
+  survivor), an older txg, a leaf the survivor's configuration no
+  longer names. The assembler treated the two labels as the same
+  top-level vdev, took the newer tree, and then listed the old disk
+  under `devices` as though it belonged, with nothing in `stale` to
+  say otherwise. Found on a kernel-made pool in the first real-kernel
+  run of the matrix (REALWORLD-TESTS B8, Ubuntu 24.04 and Debian 12);
+  reproduced with a fixture, and such a label is now stale with the
+  reason: it names a leaf the top-level vdev's newest configuration no
+  longer has — detached or replaced.
+
+### Documented
+* **The first real-kernel runs of the matrix, and what they taught the
+  script.** `.github/workflows/realworld.yml` runs
+  `tests/realworld/debian-loop.sh` on demand in two environments:
+  the Ubuntu runner's in-tree OpenZFS, and a Debian 12 cloud image
+  under QEMU/KVM with `zfs-dkms` built against Debian's kernel. The
+  first runs found the script's expectations wrong in four places and
+  the tool's in one (above): `zpool create` on a bare loop device
+  labels it but the partition node it then waits for never appears on
+  either kernel, so B9 writes the GPT itself; Debian 12 carries
+  OpenZFS 2.1.11, which has no `blake3`, so a property value this ZFS
+  lacks is noted rather than fatal; without a key `dump` refuses an
+  encrypted volume up front (exit 1, naming the suite) instead of
+  writing zeros, which is the better behaviour and what C7 now says;
+  and `zfs get -s local` reports `volsize` as local though the kernel
+  keeps it in the volume's own object, not the property ZAP, which
+  C11 now allows for alongside `volblocksize`. B4's corruption is
+  aimed at the volume's own blocks through their DVA, since 1 MiB at a
+  round offset landed in free space on OpenZFS 2.1.
+
 ## v0.9.7 — 2026-09-23
 
 **The interruptible release.**
