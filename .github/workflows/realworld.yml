@@ -1,0 +1,164 @@
+name: Real-world (kernel ZFS)
+
+# The real-world matrix on a kernel ZFS (docs/REALWORLD-TESTS.md), on
+# demand: pools the kernel itself makes on loop devices, every oracle
+# from OpenZFS, the tool reading the devices as devices. Two
+# environments from the matrix's table:
+#
+#  * Ubuntu LTS: the runner's own kernel and its in-tree OpenZFS module —
+#    the cheap check that the script and the tool hold up on a real
+#    kernel at all;
+#  * Debian 12 with zfs-dkms: a real Debian VM under QEMU/KVM on the
+#    runner, the module built by dkms against Debian's kernel, the
+#    static musl binaries copied in — the environment the script was
+#    written for.
+#
+# Each job uploads the run's record (results, the row for the matrix,
+# the evidence log, every log of a failed scenario) whether it passed
+# or not; the job's own status is the script's exit code.
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ubuntu-kernel:
+    name: Ubuntu LTS, in-tree OpenZFS (runner kernel)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release -p zvolrescue -p zvolreport
+      - name: Kernel ZFS on the runner
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends zfsutils-linux dmsetup strace python3 openssl
+          sudo modprobe zfs || { sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)" && sudo modprobe zfs; }
+          zfs version
+          uname -r
+      - name: The matrix on loop devices
+        id: run
+        run: |
+          set +e
+          sudo bash tests/realworld/debian-loop.sh /var/tmp/rw ./target/release/zvolrescue 2>&1 | tee /var/tmp/run.log
+          code=${PIPESTATUS[0]}
+          echo "exit=$code" >> "$GITHUB_OUTPUT"
+          echo "## Ubuntu LTS (runner kernel)" >> "$GITHUB_STEP_SUMMARY"
+          cat /var/tmp/rw/env.txt >> "$GITHUB_STEP_SUMMARY" 2>/dev/null
+          echo >> "$GITHUB_STEP_SUMMARY"
+          cat /var/tmp/rw/row.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null
+          echo >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"; cat /var/tmp/rw/results.txt >> "$GITHUB_STEP_SUMMARY" 2>/dev/null; echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit "$code"
+      - name: The record, whatever the verdict was
+        if: always()
+        run: |
+          sudo mkdir -p /var/tmp/record
+          sudo cp /var/tmp/run.log /var/tmp/record/ 2>/dev/null || true
+          for f in env.txt results.txt row.md evidence.jsonl report.md; do sudo cp "/var/tmp/rw/$f" /var/tmp/record/ 2>/dev/null || true; done
+          sudo mkdir -p /var/tmp/record/out
+          sudo find /var/tmp/rw/out -maxdepth 1 -type f \( -name '*.log' -o -name '*.err' -o -name '*.txt' -o -name '*.json' \) -exec cp {} /var/tmp/record/out/ \; 2>/dev/null || true
+          sudo chown -R "$USER" /var/tmp/record
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: realworld-ubuntu-lts
+          path: /var/tmp/record
+
+  debian-vm:
+    name: Debian 12, zfs-dkms (QEMU/KVM)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - name: Static binaries for the guest
+        run: |
+          cargo build --release --target x86_64-unknown-linux-musl -p zvolrescue -p zvolreport
+          mkdir -p guest
+          cp target/x86_64-unknown-linux-musl/release/zvolrescue target/x86_64-unknown-linux-musl/release/zvolreport tests/realworld/debian-loop.sh guest/
+      - name: QEMU with KVM
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends qemu-system-x86 qemu-utils genisoimage openssh-client
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+      - name: A Debian 12 cloud image, and a seed that lets us in
+        run: |
+          mkdir -p vm && cd vm
+          curl -sSL -o disk.qcow2 https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2
+          qemu-img resize disk.qcow2 24G
+          ssh-keygen -q -N '' -t ed25519 -f key
+          printf 'instance-id: rw-1\nlocal-hostname: rw\n' > meta-data
+          {
+            echo '#cloud-config'
+            echo 'users:'
+            echo '  - name: debian'
+            echo '    sudo: ALL=(ALL) NOPASSWD:ALL'
+            echo '    shell: /bin/bash'
+            echo '    ssh_authorized_keys:'
+            echo "      - $(cat key.pub)"
+            echo 'growpart:'
+            echo '  mode: auto'
+            echo '  devices: ["/"]'
+          } > user-data
+          genisoimage -quiet -output seed.iso -volid cidata -joliet -rock user-data meta-data
+          qemu-system-x86_64 -enable-kvm -cpu host -m 4096 -smp 2 \
+            -drive file=disk.qcow2,if=virtio,format=qcow2 \
+            -drive file=seed.iso,if=virtio,format=raw \
+            -netdev user,id=n0,hostfwd=tcp:127.0.0.1:2222-:22 -device virtio-net-pci,netdev=n0 \
+            -display none -serial file:serial.log -daemonize -pidfile qemu.pid
+          for i in $(seq 1 120); do
+            if ssh -q -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=3 -i key -p 2222 debian@127.0.0.1 true 2>/dev/null; then echo "ssh up after $((i*5)) s"; break; fi
+            sleep 5
+          done
+          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i key -p 2222 debian@127.0.0.1 'uname -r; cat /etc/os-release | head -2; df -h / | tail -1'
+      - name: zfs-dkms in the guest
+        run: |
+          cd vm
+          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i key -p 2222 debian@127.0.0.1 'bash -s' <<'EOF'
+          set -e
+          export DEBIAN_FRONTEND=noninteractive
+          sudo sed -i 's/^Components: main$/Components: main contrib non-free-firmware/' /etc/apt/sources.list.d/debian.sources
+          sudo apt-get update -qq
+          sudo -E apt-get install -y -qq --no-install-recommends "linux-headers-$(uname -r)" dkms zfs-dkms zfsutils-linux dmsetup strace python3 openssl
+          sudo modprobe zfs
+          zfs version
+          ls -l /dev/zfs
+          EOF
+      - name: The matrix in the guest
+        id: run
+        run: |
+          cd vm
+          SSH="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i key -p 2222"
+          scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i key -P 2222 ../guest/zvolrescue ../guest/zvolreport ../guest/debian-loop.sh debian@127.0.0.1:/var/tmp/
+          set +e
+          $SSH debian@127.0.0.1 'chmod +x /var/tmp/zvolrescue /var/tmp/zvolreport && sudo bash /var/tmp/debian-loop.sh /var/tmp/rw /var/tmp/zvolrescue' 2>&1 | tee run.log
+          code=${PIPESTATUS[0]}
+          echo "exit=$code" >> "$GITHUB_OUTPUT"
+          # The record, without the images.
+          $SSH debian@127.0.0.1 'cd /var/tmp/rw && sudo tar czf /var/tmp/record.tgz env.txt results.txt row.md evidence.jsonl report.md $(cd out && ls | grep -E "\.(log|err|txt|json)$" | sed "s|^|out/|") 2>/dev/null; sudo chmod 644 /var/tmp/record.tgz'
+          scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i key -P 2222 debian@127.0.0.1:/var/tmp/record.tgz .
+          mkdir -p record && tar xzf record.tgz -C record && cp run.log serial.log record/
+          echo "## Debian 12 (zfs-dkms, QEMU/KVM)" >> "$GITHUB_STEP_SUMMARY"
+          cat record/env.txt >> "$GITHUB_STEP_SUMMARY" 2>/dev/null
+          echo >> "$GITHUB_STEP_SUMMARY"
+          cat record/row.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null
+          echo >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"; cat record/results.txt >> "$GITHUB_STEP_SUMMARY" 2>/dev/null; echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit "$code"
+      - name: The guest's console, when nothing else came back
+        if: always()
+        run: |
+          mkdir -p vm/record && cp vm/serial.log vm/record/ 2>/dev/null || true
+          test -f vm/run.log && cp vm/run.log vm/record/ || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: realworld-debian-12
+          path: vm/record
