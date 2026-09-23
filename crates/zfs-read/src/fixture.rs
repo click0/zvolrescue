@@ -372,6 +372,10 @@ pub struct Alloc {
     /// pointer above the chunk, as ZFS keeps it, so `zdb`'s block
     /// accounting on the dense fixtures adds up.
     pub fill: u64,
+    /// The pointer to the sample volume's object set block, once the
+    /// sample builder has put it: where a fixture that wants that block
+    /// gone finds it.
+    pub last_zvol_objset: Option<[u8; blkptr::SIZE]>,
     /// Build the sample volume deduplicated (SPEC F-28): its data
     /// pointers carry the dedup bit and a dedup-capable checksum
     /// (sha256), and its properties ZAP says `dedup=sha256,verify`.
@@ -503,6 +507,7 @@ impl Alloc {
             members: None,
             data: None,
             dense: None,
+            last_zvol_objset: None,
             fill: 1,
             dedup: false,
         }
@@ -1000,7 +1005,15 @@ pub fn build_sample_mos_variant(
     let os_fs = a.put_objset(m, &objset(&empty_meta, 2), 0, 100);
     let mut zvol_dnodes = vec![0u8; 4096];
     // Data blocks 0 and 2 of the volume; 1 and 3 are holes.
-    if with_disk0 && a.layout == Layout::Mirror && a.data.is_none() && a.dense.is_none() {
+    // The first sample this allocator builds is where the constant
+    // points; a second one (a fixture with the volume at two TXGs)
+    // lands further on.
+    if with_disk0
+        && a.layout == Layout::Mirror
+        && a.data.is_none()
+        && a.dense.is_none()
+        && a.last_zvol_objset.is_none()
+    {
         assert_eq!(
             a.next, SAMPLE_ZVOL_BLOCK0_OFFSET,
             "sample layout changed: update SAMPLE_ZVOL_BLOCK0_OFFSET"
@@ -1119,6 +1132,7 @@ pub fn build_sample_mos_variant(
     }
     .build();
     let os_zvol = a.put_objset(m, &objset(&zvol_meta, 3), zvol_objects, 100);
+    a.last_zvol_objset = Some(os_zvol);
 
     let mut dnodes = vec![0u8; 16384];
     let mut put = |obj: u64, bytes: Vec<u8>| {
@@ -1427,6 +1441,38 @@ fn destroyed_zvol_members_with(
         pool.write_labels(i, img);
     }
     (members, newest, previous)
+}
+
+/// A mirror on which `tank/vm/disk0` was destroyed at the newest TXG,
+/// the TXG before it still names the volume but the block its object
+/// set was in is for the caller to overwrite, and the TXGs before that
+/// hold it whole — what a `zfs destroy` followed by more writes leaves
+/// in the uberblock ring once the freed block is reused. Returns the
+/// member images, the TXGs `(destroyed_at, reused_at, last_whole)` and
+/// the DVA offset of that object set block (the same in every member).
+pub fn objset_reused_members(pool: &mut Pool, size: u64) -> (Vec<Vec<u8>>, u64, u64, u64, u64) {
+    let txgs: Vec<u64> = pool.uberblocks.iter().map(|(t, _)| *t).collect();
+    assert!(txgs.len() >= 3, "need at least three uberblocks");
+    let newest = txgs[txgs.len() - 1];
+    let reused = txgs[txgs.len() - 2];
+    let whole = txgs[txgs.len() - 3];
+    let n = pool.members.len();
+    let mut members: Vec<Vec<u8>> = (0..n).map(|_| vec![0u8; size as usize]).collect();
+    let mut alloc = Alloc::with_layout(0x20_0000, Layout::Mirror);
+    let with = build_sample_mos_variant(&mut members, &mut alloc, true);
+    let with_again = build_sample_mos_variant(&mut members, &mut alloc, true);
+    let objset = alloc
+        .last_zvol_objset
+        .expect("the sample builder records the volume's object set");
+    let without = build_sample_mos_variant(&mut members, &mut alloc, false);
+    pool.rootbp = Some(with);
+    pool.rootbp_by_txg = vec![(newest, without), (reused, with_again)];
+    for (i, img) in members.iter_mut().enumerate() {
+        pool.write_labels(i, img);
+    }
+    let w1 = u64::from_le_bytes(objset[8..16].try_into().expect("8 bytes"));
+    let offset = blkptr::Dva::from_words(0, w1).offset;
+    (members, newest, reused, whole, offset)
 }
 
 /// [`destroyed_zvol_members`] with `tank/vm/disk0` deduplicated (SPEC

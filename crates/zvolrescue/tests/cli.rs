@@ -8,8 +8,8 @@ use std::process::Command;
 use zfs_ondisk::blkptr::LABEL_START_SIZE;
 use zfs_ondisk::label::LABEL_SIZE;
 use zfs_read::fixture::{
-    build_sample_mos, destroyed_zvol_members, removed_vdev_members, two_top_mirror_members, Alloc,
-    Pool, SAMPLE_ZVOL_BLOCK0_OFFSET,
+    build_sample_mos, destroyed_zvol_members, objset_reused_members, removed_vdev_members,
+    two_top_mirror_members, Alloc, Pool, SAMPLE_ZVOL_BLOCK0_OFFSET,
 };
 use zfs_read::hash::{Digests, Extra};
 
@@ -403,6 +403,100 @@ fn list_diff_names_what_the_newest_txg_no_longer_has() {
     assert!(
         err.contains("--diff txg 150 has no verified uberblock"),
         "{err}"
+    );
+}
+
+/// A destroyed volume's object set block is free to reuse from the next
+/// txg on. When the ring names the volume at a txg whose object set is
+/// gone and at an older one whose object set still reads, `dump` passes
+/// the first over — said on stderr and in the record — and extracts at
+/// the second, the same bytes; asked for the first by `--txg`, it
+/// refuses with the reason.
+#[test]
+fn a_txg_whose_object_set_was_reused_is_passed_over_for_an_older_one() {
+    let dir = scratch("objset-reused");
+    let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1), (200, 2), (300, 3)]);
+    let (mut members, newest, reused, whole, objset) = objset_reused_members(&mut pool, SIZE);
+    assert_eq!((newest, reused, whole), (300, 200, 100));
+    // The reference: the volume at the txg about to lose its object
+    // set, while that still reads.
+    let paths = write_members(&dir, &members);
+    let (code, out, _) = run(&[
+        "-q",
+        "-f",
+        "json",
+        "dump",
+        "tank/vm/disk0",
+        &paths[0],
+        &paths[1],
+        "--txg",
+        "200",
+        "-o",
+        &dir.join("ref.img").to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "{out}");
+    let reference = json(&out)["volumes"][0]["sha256"].clone();
+
+    // Both copies of that object set block reused.
+    let at = (LABEL_START_SIZE + objset) as usize;
+    for m in members.iter_mut() {
+        for b in &mut m[at..at + 512] {
+            *b ^= 0x5a;
+        }
+    }
+    let paths = write_members(&dir, &members);
+    let (code, out, err) = run(&[
+        "-f",
+        "json",
+        "dump",
+        "tank/vm/disk0",
+        &paths[0],
+        &paths[1],
+        "-o",
+        &dir.join("older.img").to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    let v = json(&out);
+    assert_eq!(v["txgs_searched"], serde_json::json!([300, 200, 100]));
+    assert_eq!(v["unreadable_at"][0]["txg"], 200, "{v}");
+    assert!(
+        v["unreadable_at"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("checksum"),
+        "{v}"
+    );
+    assert_eq!(v["volumes"][0]["txg"], 100);
+    assert_eq!(v["volumes"][0]["sha256"], reference);
+    assert!(
+        err.contains("txg 200: object set unreadable") && err.contains("trying an older TXG"),
+        "{err}"
+    );
+
+    // Asked for that txg by name: refused, with the reason, and the
+    // record still says which txg it was.
+    let (code, out, err) = run(&[
+        "-q",
+        "-f",
+        "json",
+        "dump",
+        "tank/vm/disk0",
+        &paths[0],
+        &paths[1],
+        "--txg",
+        "200",
+        "-o",
+        &dir.join("exact.img").to_string_lossy(),
+    ]);
+    assert_eq!(code, 3, "{out}");
+    assert!(
+        err.contains("is named at txg 200 but its object set does not read there"),
+        "{err}"
+    );
+    assert_eq!(json(&out)["unreadable_at"][0]["txg"], 200);
+    assert!(
+        !dir.join("exact.img").exists(),
+        "nothing written on a refusal"
     );
 }
 

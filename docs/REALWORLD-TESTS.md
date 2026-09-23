@@ -69,8 +69,8 @@ Run every scenario on every environment; record `zvolrescue --version`,
 
 | # | Scenario | Pass criterion |
 |---|---|---|
-| D1 | `zfs destroy vol`, export immediately | `list --diff` shows it destroyed; `dump` recovers from the previous txg, hash matches |
-| D2 | `zfs destroy vol`, then keep writing 500 MiB elsewhere, export | either recovered from an older txg still in the ring, or a clean "not found at any of N txgs", or — when the MOS of an older txg survived but the volume's blocks were reused — a partial image with every lost block zeroed and counted (exit 4) |
+| D1 | `zfs destroy vol`, export immediately | `list --diff` shows it destroyed; `dump` recovers from the previous txg, hash matches — or, when the export's own few txgs already reused a block of the freed volume, a partial image that is the kernel's bytes with exactly the lost blocks zeroed and counted (exit 4) |
+| D2 | `zfs destroy vol`, then keep writing 500 MiB elsewhere, export | either recovered from an older txg still in the ring, or a clean "not found at any of N txgs", or — named at a txg whose object set the writes reused and readable at no older one — a clean exit 3 saying so, or — when the MOS of an older txg survived but the volume's blocks were reused — a partial image with every lost block zeroed and counted (exit 4) |
 | D3 | `zpool destroy pool` | `scan` shows state DESTROYED; `list`/`dump` still work |
 | D4 | pool that does not import (`zpool import` → "I/O error") after zeroing labels L0/L1 on one member | `scan` uses L2/L3; `dump` works |
 | D5 | pool whose newest uberblock is damaged (zero the slot) | `list` uses the previous verified txg and says so |
@@ -187,8 +187,8 @@ What each scenario becomes on loop devices:
 | C10 | two single-disk tops, `zpool remove` the second, then write more | `scan` says `removed_tops: [1]`; `list` and `dump` match |
 | C11 | `org.example:ticket` and `compression` on a filesystem and a volume | the set of (dataset, property) from `list --properties` equals `zfs get -s local`; `volblocksize` is left out on the tool's side and `volsize` on the kernel's: the first is in the property ZAP at creation but shown by `zfs get` with source `-`, the second is answered from the volume's own object though `zfs get` calls it local |
 | C12 | `zpool attach` a fourth member to a raidz1 (OpenZFS 2.3) | `list` exits 3 naming `raidz_expansion`; `scan` exits 0; `--ignore-unknown-features` reads. Skipped on 2.2 |
-| D1 | `zfs destroy`, export at once; the TXG before from `zdb -u` | `list --diff` shows it under `destroyed_since`; `dump --txg` matches |
-| D2 | `zfs destroy`, then 500 MiB written elsewhere over six TXGs | either the hash matches from an older TXG, or exit 3 with `not found at any of N verified TXG(s)`, or exit 4 with `blocks_zeroed` counted |
+| D1 | `zfs destroy`, export at once; the TXG before from `zdb -u` | `list --diff` shows it under `destroyed_since`; `dump --txg` matches, or exits 4 with an image equal to the volume as the kernel read it with exactly the `bad` blocks zeroed (Debian 12's OpenZFS 2.1 reused one block of 768 in the export's own TXGs) |
+| D2 | `zfs destroy`, then 500 MiB written elsewhere over six TXGs | either the hash matches from an older TXG, or exit 3 with `not found at any of N verified TXG(s)`, or exit 3 with `is named at txg N but its object set does not read there` and the TXG in `unreadable_at`, or exit 4 with `blocks_zeroed` counted |
 | D3 | `zpool destroy` a single-disk pool | `scan` says `state: DESTROYED`; `dump` matches |
 | D4 | L0 and L1 zeroed after export | `scan` reports L0/L1 `missing` and L2/L3 `ok`; `dump` matches; whether the kernel still imports it is noted (expected to, since ZFS reads all four labels) |
 | D5 | the newest uberblock slot, found with `zdb -lu`, zeroed in all four labels | `list` reports the previous TXG; `dump` matches the last state |

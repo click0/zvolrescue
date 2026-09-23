@@ -10,7 +10,7 @@ use zfs_read::crypt::{unwrap_keys, wrapping_key, DatasetKeys, KeyMaterial};
 use zfs_read::dsl::{open_mos, walk, Dataset, DatasetTree, Encryption};
 use zfs_read::hash::Extra;
 use zfs_read::pool::{select_uberblock, uberblock_candidates, Candidate, TxgSelect};
-use zfs_read::zio::PoolReader;
+use zfs_read::zio::{PoolReader, ReadError};
 use zfs_read::zvol::{extract_from, open_volume, volume_facts, OnError, Report};
 use zvolrescue_io::refuse_if_evidence;
 
@@ -24,7 +24,8 @@ pub struct Options {
     pub dataset: String,
     /// Output image path, or a directory with `recursive`.
     pub output: PathBuf,
-    /// Exact TXG; default is the newest that still has the dataset.
+    /// Exact TXG; default is the newest that still names the dataset
+    /// and can read its object set.
     pub txg: Option<u64>,
     /// Abort on the first unreadable block.
     pub strict: bool,
@@ -91,6 +92,16 @@ struct DumpOut {
     encryption: Option<String>,
 }
 
+/// A TXG that names the dataset but at which its object set does not
+/// read: a destroyed dataset's blocks are free to reuse from the next
+/// txg on, and the ring may still name it at one whose object set is
+/// gone while an older one's reads. Passed over for that older one.
+#[derive(Debug, Serialize)]
+struct UnreadableAt {
+    txg: u64,
+    error: String,
+}
+
 #[derive(Debug, Serialize)]
 struct RunOut {
     pool: String,
@@ -98,6 +109,10 @@ struct RunOut {
     members: Vec<PathBuf>,
     /// TXGs that were walked before the dataset was found (newest first).
     txgs_searched: Vec<u64>,
+    /// TXGs among them that name the dataset but cannot read its
+    /// object set (newest first), passed over for an older one.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    unreadable_at: Vec<UnreadableAt>,
     recursive: bool,
     volumes: Vec<DumpOut>,
     /// Datasets under the tree that were skipped (not volumes) or failed.
@@ -110,13 +125,32 @@ struct RunOut {
     peak_rss_kib: Option<u64>,
 }
 
+/// Whether the dataset's object set block is still on disk: read and
+/// verified, or verified ciphertext waiting for a key — either way the
+/// dataset can be opened once the run gets that far.
+fn objset_reads(reader: &PoolReader<'_>, ds: &Dataset) -> Result<(), ReadError> {
+    match reader.read_block(&ds.phys.bp, false) {
+        Ok(_) | Err(ReadError::Encrypted) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// The newest verified TXG that names `name` and whose object set still
+/// reads — or the one `sel` asks for, if it does. A TXG that names the
+/// dataset but has lost its object set is passed over, said on stderr
+/// and recorded in `unreadable`, and an older one is tried: after a
+/// `zfs destroy` the pool goes on writing, and the freed object set
+/// block is among the first to be reused while older uberblocks still
+/// lead to it whole.
 fn find_dataset<'c>(
     reader: &PoolReader<'_>,
     candidates: &'c [Candidate],
     sel: Option<u64>,
     pool_name: &str,
     name: &str,
+    quiet: bool,
     searched: &mut Vec<u64>,
+    unreadable: &mut Vec<UnreadableAt>,
 ) -> Result<(&'c Candidate, DatasetTree), u8> {
     let pick: Vec<&Candidate> = match sel {
         Some(txg) => match select_uberblock(candidates, TxgSelect::Exact(txg)) {
@@ -140,12 +174,41 @@ fn find_dataset<'c>(
         searched.push(c.ub.txg);
         match open_mos(reader, &c.ub).and_then(|mos| walk(&mos, pool_name)) {
             Ok(tree) => {
-                if tree.get(name).is_some() {
-                    return Ok((c, tree));
+                let Some(ds) = tree.get(name) else { continue };
+                match objset_reads(reader, ds) {
+                    Ok(()) => return Ok((c, tree)),
+                    Err(e) => {
+                        // A device that refused a read has stopped the
+                        // run (N-10): no older TXG is tried on it.
+                        let stopped = matches!(e, ReadError::Medium { .. });
+                        if !quiet {
+                            eprintln!(
+                                "zvolrescue: {name}: txg {}: object set unreadable ({e}){}",
+                                c.ub.txg,
+                                if stopped { "" } else { "; trying an older TXG" }
+                            );
+                        }
+                        unreadable.push(UnreadableAt {
+                            txg: c.ub.txg,
+                            error: e.to_string(),
+                        });
+                        if stopped {
+                            break;
+                        }
+                    }
                 }
             }
             Err(e) => last_err = Some(format!("txg {}: {e}", c.ub.txg)),
         }
+    }
+    if let Some(u) = unreadable.first() {
+        eprintln!(
+            "zvolrescue: dataset {name:?} is named at txg {} but its object set does not read there ({}); readable at none of {} verified TXG(s)",
+            u.txg,
+            u.error,
+            searched.len()
+        );
+        return Err(exit::UNRECOVERABLE);
     }
     match last_err {
         Some(e) if searched.len() == 1 => eprintln!("zvolrescue: cannot read the pool at {e}"),
@@ -478,13 +541,16 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     }
     let reader = PoolReader::new(&pool, members.devices()).with_base_offsets(&members.bases());
     let mut searched = Vec::new();
+    let mut unreadable = Vec::new();
     let (chosen, tree) = match find_dataset(
         &reader,
         &candidates,
         opts.txg,
         &pool.name,
         &opts.dataset,
+        g.quiet,
         &mut searched,
+        &mut unreadable,
     ) {
         Ok(x) => x,
         Err(code) => {
@@ -497,6 +563,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 pool_guid: format!("{:#018x}", pool.guid),
                 members: members.paths.clone(),
                 txgs_searched: searched,
+                unreadable_at: unreadable,
                 recursive: opts.recursive,
                 volumes: Vec::new(),
                 skipped: Vec::new(),
@@ -548,6 +615,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         pool_guid: format!("{:#018x}", pool.guid),
         members: members.paths.clone(),
         txgs_searched: searched,
+        unreadable_at: unreadable,
         recursive: opts.recursive,
         volumes: Vec::new(),
         skipped: Vec::new(),

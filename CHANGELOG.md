@@ -30,6 +30,19 @@ tagged. `v0.7.1` is the release that carries those six.
   reproduced with a fixture, and such a label is now stale with the
   reason: it names a leaf the top-level vdev's newest configuration no
   longer has — detached or replaced.
+* **`dump` passes over a TXG that names the dataset but has lost its
+  object set, and takes an older one.** After a `zfs destroy` the pool
+  goes on writing, and the freed object set block is among the first
+  to be reused; the uberblock ring may then name the dataset at a TXG
+  whose object set is gone while an older one still leads to it whole.
+  `dump` stopped at the first TXG that named the dataset and reported
+  `every copy failed its checksum` (exit 3) without looking further.
+  Found in the Debian 12 run of the matrix (REALWORLD-TESTS D2, OpenZFS
+  2.1.11); reproduced with a fixture. Now such a TXG is said on stderr,
+  listed under `unreadable_at` in the record, and the search goes on to
+  the next older verified TXG; readable at none, the run says at which
+  TXG the dataset was named and why it does not read there. `--txg`
+  still means that TXG and no other.
 
 ### Documented
 * **The first real-kernel runs of the matrix, and what they taught the

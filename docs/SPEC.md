@@ -198,7 +198,7 @@ Priority: **M** = must (v1), **S** = should (v1 if time permits), **C** = could 
 
 | ID | Pri | Requirement |
 |---|---|---|
-| F-20 | M | Extract a zvol object at a chosen TXG to a raw image file, preserving holes as sparse regions. |
+| F-20 | M | Extract a zvol object at a chosen TXG to a raw image file, preserving holes as sparse regions. Without `--txg` the TXG is the newest verified one that names the dataset *and* still reads its object set: after a `zfs destroy` the pool goes on writing, the freed object set block is among the first reused, and the ring may name the dataset at a TXG whose object set is gone while an older one's reads. Such a TXG is passed over — said on stderr and listed under `unreadable_at` in the record — and the older one is used; readable at none, the run says at which TXG it was named and why it does not read there (exit 3). |
 | F-21 | M | Support all standard checksums: `fletcher2`, `fletcher4`, `sha256`, `sha512`, `skein`, `edonr`, `blake3`; verify every block and record mismatches. |
 | F-22 | M | Support all standard compression algorithms: `lzjb`, `lz4`, `gzip-1..9`, `zle`, `zstd` (all levels), `off`. |
 | F-23 | M | Read from stripe and mirror vdevs, trying all DVA copies on checksum failure. |

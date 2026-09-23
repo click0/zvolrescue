@@ -156,6 +156,26 @@ dump_matches() {
     echo "   $id: dump exit $code, reported $got, file $file, kernel $want" >&2
     return 1
 }
+# partial_matches IMG REF LOG: an exit-4 image tells the truth about what
+# it lost — it is REF (the volume as the kernel read it) with exactly the
+# blocks LOG lists under "bad" zeroed, and its hash is the one reported.
+partial_matches() {
+    python3 - "$1" "$2" "$3" <<'PY'
+import hashlib, json, sys
+img, ref, log = sys.argv[1:]
+v = json.load(open(log))["volumes"][0]
+data = bytearray(open(ref, "rb").read())
+for b in v["bad"]:
+    data[b["offset"]:b["offset"] + b["len"]] = bytes(b["len"])
+want = hashlib.sha256(data).hexdigest()
+got = hashlib.sha256(open(img, "rb").read()).hexdigest()
+if got == want == v["sha256"]:
+    print("%d of %d blocks lost" % (v["blocks_zeroed"], v["blocks_total"]))
+    sys.exit(0)
+print("image %s, reference with the bad blocks zeroed %s, reported %s" % (got, want, v["sha256"]), file=sys.stderr)
+sys.exit(1)
+PY
+}
 # datasets_match ID POOL DEVS...: `list -r` names and creation TXGs equal
 # `zdb -e -d` over the backing files (a loop device and its file are the
 # same bytes; zdb reads the files, the tool reads the devices).
@@ -253,6 +273,9 @@ zfs create -V 512M -b 16K "${P}m/big"; fill "${P}m/big" 512M
 zfs create -V 16M -b 16K "${P}m/f7"; fill "${P}m/f7" 16M
 # D1, D2: volumes that will be destroyed
 zfs create -V 16M -b 16K "${P}m/doomed1"; fill "${P}m/doomed1" 12M
+# D1 compares block by block when a block was reused: the bytes as the
+# kernel read them, not only their hash.
+dd if="$(zdev "${P}m/doomed1")" of="$WORK/doomed1.raw" bs=1M status=none
 zfs create -V 16M -b 16K "${P}m/doomed2"; fill "${P}m/doomed2" 12M
 zpool sync "${P}m"
 for v in $(zfs list -H -o name -t volume -r "${P}m"); do SHA[$v]=$(oracle "$v"); done
@@ -272,11 +295,18 @@ export_pool "${P}m"
 # reused by those writes, which is D2's point and would rob D1 of its
 # older TXG for no reason the scenario names.
 say "D1: destroyed and exported at once"
-# D1: destroyed and exported at once
+# D1: destroyed and exported at once. The export still writes a few
+# TXGs of its own, and a block the destroy freed may be reused by them
+# — Debian 12's OpenZFS 2.1 did that to one block of 768 — so a partial
+# image passes too, if it is the kernel's bytes with exactly the lost
+# blocks zeroed and counted (exit 4).
 run d1-diff -f json list -r --diff "$TXG_BEFORE" "$M0" "$M1"
-if [ "$code" = 0 ] && jsonq 'names=[x["name"] for x in d["diff"]["destroyed_since"]]; assert "'"${P}m/doomed1"'" in names, names' < "$WORK/out/d1-diff.log" 2>"$WORK/out/d1-assert.err" \
-    && dump_matches d1 "${P}m/doomed1" "${SHA[${P}m/doomed1]}" "$M0" "$M1" --txg "$TXG_BEFORE"; then
-    result D1 PASS "--diff $TXG_BEFORE shows it destroyed; dump --txg $TXG_BEFORE matches"
+if [ "$code" = 0 ] && jsonq 'names=[x["name"] for x in d["diff"]["destroyed_since"]]; assert "'"${P}m/doomed1"'" in names, names' < "$WORK/out/d1-diff.log" 2>"$WORK/out/d1-assert.err"; then
+    if dump_matches d1 "${P}m/doomed1" "${SHA[${P}m/doomed1]}" "$M0" "$M1" --txg "$TXG_BEFORE"; then
+        result D1 PASS "--diff $TXG_BEFORE shows it destroyed; dump --txg $TXG_BEFORE matches"
+    elif [ "$code" = 4 ] && lost=$(partial_matches "$WORK/out/d1.img" "$WORK/doomed1.raw" "$WORK/out/d1-dump.log" 2>"$WORK/out/d1-partial.err"); then
+        result D1 PASS "--diff $TXG_BEFORE shows it destroyed; dump --txg $TXG_BEFORE is partial: $lost to the export's own TXGs, zeroed and counted, the rest the kernel's bytes (exit 4)"
+    else result D1 FAIL "dump exit $code; $(tail -1 "$WORK/out/d1-partial.err" 2>/dev/null)"; fi
 else result D1 FAIL "list exit $code; $(tail -1 "$WORK/out/d1-assert.err" 2>/dev/null)"; fi
 
 # D2: destroy, then keep writing elsewhere before exporting
@@ -592,13 +622,19 @@ if [ "$HAVE_EXPAND" = 1 ]; then
     else result C12 FAIL "list $l, scan $s, ignore $g"; fi
 else result C12 SKIP "raidz_expansion not available in this ZFS (needs OpenZFS 2.3)"; fi
 
-# D2: destroyed, then 500 MiB written elsewhere over several TXGs
+# D2: destroyed, then 500 MiB written elsewhere over several TXGs. Four
+# honest answers: whole from an older TXG; named at no TXG left in the
+# ring; named at one whose object set the writes reused, readable at
+# none (exit 3 either way); or an older MOS intact but data blocks
+# reused, zeroed and counted (exit 4).
 rm -f "$WORK/out/d2.img"
 run d2 -f json dump "${P}m/doomed2" "$M0" "$M1" -o "$WORK/out/d2.img"
 got=$(jsonq 'print(d["volumes"][0]["sha256"])' < "$WORK/out/d2.log" 2>/dev/null)
 zeroed=$(jsonq 'v=d["volumes"][0]; print(v["blocks_zeroed"], "of", v["blocks_total"])' < "$WORK/out/d2.log" 2>/dev/null)
+unreadable=$(jsonq 'print(" ".join(str(u["txg"]) for u in d.get("unreadable_at", [])))' < "$WORK/out/d2.log" 2>/dev/null)
 if [ "$code" = 0 ] && [ "$got" = "${SHA[${P}m/doomed2]}" ]; then result D2 PASS "recovered whole from an older TXG"
 elif [ "$code" = 3 ] && grep -q "not found at any of" "$WORK/out/d2.log.err"; then result D2 PASS "a clean 'not found at any of N verified TXGs' (exit 3)"
+elif [ "$code" = 3 ] && [ -n "$unreadable" ] && grep -q "object set does not read there" "$WORK/out/d2.log.err"; then result D2 PASS "named at txg $unreadable, object set reused by the later writes, readable at no older TXG: a clean exit 3 naming it"
 elif [ "$code" = 4 ] && [ -n "$zeroed" ]; then result D2 PASS "the MOS of an older TXG survived but the data was reused: partial image, $zeroed blocks zeroed and counted (exit 4)"
 else result D2 FAIL "exit $code, hash $got"; fi
 
