@@ -1,6 +1,6 @@
 # zvolrescue — Technical Specification (ТЗ)
 
-**Status:** living document, revised 2026-09-22 (tool at v0.9.6) · **Owner:** Vladyslav V. Prodan
+**Status:** living document, revised 2026-09-23 (tool at v0.9.7) · **Owner:** Vladyslav V. Prodan
 
 **Ukrainian version:** [SPEC.uk.md](SPEC.uk.md) · **Companion tools:** [COMPANIONS.md](COMPANIONS.md)
 
@@ -649,8 +649,13 @@ the two doors a review of that line found still open: a device that
 refused a read is closed for the rest of the run in the io layer itself,
 so no reader around the pool reader can reach it again, and a refusal on
 the way to the dataset is exit 7 with the incident on record on a single
-volume too, not only in a bulk run. `1.0.0` is the full release, and
-waits for what no CI can supply: three real-world incidents with
+volume too, not only in a bulk run. `v0.9.7` is the interruptible
+release: a SIGINT ends `dump`, the carver's scan and dump, and the file
+extractor at the next block, chunk or entry with the state written and
+exit 6, as §7 had promised since 0.1 (F-32, COMPANIONS §1.2); and the
+first real-kernel environment of the matrix — Debian with `zfs-dkms` and
+loop devices — is a script whose every oracle comes from OpenZFS alone.
+`1.0.0` is the full release, and waits for what no CI can supply: three real-world incidents with
 documented outcomes ([REALWORLD-TESTS.md](REALWORLD-TESTS.md)),
 packaging (ports, `.deb`, AUR, a manual page); the open questions of §12
 are settled (D-8 to D-11).

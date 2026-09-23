@@ -13,7 +13,21 @@ development milestone that names what changed when — the sections below
 are their record — and ships inside the next version that does get
 tagged. `v0.7.1` is the release that carries those six.
 
-## Unreleased
+## v0.9.7 — 2026-09-23
+
+**The interruptible release.**
+A run can now be stopped and taken up where it stopped, in every tool
+that runs long: SPEC §7 had promised exit 6 for an interrupted run
+since 0.1 and nothing produced it — a SIGINT killed the run, and
+`--resume` had whatever the checkpoint five seconds earlier had said.
+`zvolrescue dump`, `zvolcarve dump` and `zvolcarve scan` end at the
+next block or chunk with their state written; `zvolfiles extract` at
+the next entry with the manifest saying what was written; `zvolcarve
+dump` gains the `--resume` its spec had promised, on the very state
+file `zvolrescue dump` writes. And the first real-kernel environment
+of the matrix is scripted: Debian with `zfs-dkms` and loop devices,
+every oracle from OpenZFS alone, ready to run on a VM — which is the
+step 1.0.0 waits on.
 
 ### Added
 * **The real-world matrix on Debian with `zfs-dkms` and loop devices,

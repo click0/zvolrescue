@@ -344,7 +344,7 @@ dependencies = [
 
 [[package]]
 name = "edonr"
-version = "0.9.6"
+version = "0.9.7"
 
 [[package]]
 name = "errno"
@@ -829,7 +829,7 @@ checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
 
 [[package]]
 name = "zfs-ondisk"
-version = "0.9.6"
+version = "0.9.7"
 dependencies = [
  "blake3",
  "edonr",
@@ -841,7 +841,7 @@ dependencies = [
 
 [[package]]
 name = "zfs-read"
-version = "0.9.6"
+version = "0.9.7"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -867,7 +867,7 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zvol-common"
-version = "0.9.6"
+version = "0.9.7"
 dependencies = [
  "clap",
  "serde",
@@ -881,7 +881,7 @@ dependencies = [
 
 [[package]]
 name = "zvolcarve"
-version = "0.9.6"
+version = "0.9.7"
 dependencies = [
  "clap",
  "serde",
@@ -894,7 +894,7 @@ dependencies = [
 
 [[package]]
 name = "zvolfiles"
-version = "0.9.6"
+version = "0.9.7"
 dependencies = [
  "clap",
  "serde",
@@ -908,7 +908,7 @@ dependencies = [
 
 [[package]]
 name = "zvolreport"
-version = "0.9.6"
+version = "0.9.7"
 dependencies = [
  "clap",
  "ed25519-dalek",
@@ -919,7 +919,7 @@ dependencies = [
 
 [[package]]
 name = "zvolrescue"
-version = "0.9.6"
+version = "0.9.7"
 dependencies = [
  "clap",
  "serde",
@@ -933,11 +933,11 @@ dependencies = [
 
 [[package]]
 name = "zvolrescue-io"
-version = "0.9.6"
+version = "0.9.7"
 
 [[package]]
 name = "zvoltimeline"
-version = "0.9.6"
+version = "0.9.7"
 dependencies = [
  "clap",
  "serde",
