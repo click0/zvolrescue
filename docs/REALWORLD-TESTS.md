@@ -16,7 +16,7 @@ Status legend: ☐ not run · ◐ partial · ☑ passed · ✗ failed (link the 
 | **mfsBSD** (FreeBSD rescue image, RAM-resident) | The realistic rescue medium: no disk to install on, tool must be a static binary copied over the network | FreeBSD base OpenZFS | statically linked `zvolrescue`; `mdconfig` for images; no `ztest` |
 | **FreeBSD 14.x** | primary target (SPEC N-06) | base OpenZFS 2.2 | `lang/rust` from ports/pkg; `zdb`, `ztest` in base |
 | **FreeBSD 15.x** | next release, newer feature flags | base OpenZFS 2.3+ | expect `raidz_expansion`, `fast_dedup`, `longname` feature flags |
-| **Debian stable** | most common Linux host with `zfs-dkms`; the cheapest real kernel: loop devices in a VM | zfs-dkms 2.2 (12 bookworm), 2.3 (13 trixie: `raidz_expansion`) | `apt install zfsutils-linux zfs-dkms`; loop devices; scripted — see [Running on Debian with zfs-dkms and loop devices](#running-on-debian-with-zfs-dkms-and-loop-devices) |
+| **Debian stable** | most common Linux host with `zfs-dkms`; the cheapest real kernel: loop devices in a VM | zfs-dkms 2.1.11 (12 bookworm), 2.3 (13 trixie: `raidz_expansion`) | `apt install zfsutils-linux zfs-dkms`; loop devices; scripted — see [Running on Debian with zfs-dkms and loop devices](#running-on-debian-with-zfs-dkms-and-loop-devices) |
 | **Ubuntu LTS** | ships ZFS in-kernel, common on hosts | zfs 2.2/2.3 | the CI cross-check runs here already (userland only) |
 | **CachyOS** (Arch-based) | bleeding-edge kernel and OpenZFS git; catches new on-disk features first | OpenZFS latest | `zfs-dkms` or `linux-cachyos-zfs`; `zstd`/`blake3` defaults common |
 
@@ -176,8 +176,8 @@ What each scenario becomes on loop devices:
 | B6 | mirror with a `log` and a `cache` device | `scan` of all four exits 0; `dump` from the two data members matches |
 | B7 | `draid1:2d:5c:1s`, also with one member absent | same as B1 (skipped if this `zpool` builds no dRAID) |
 | B8 | attach a second member, export, copy the original to another loop device, import, `detach` the original | `scan` of the copy and the survivor lists the copy under `stale` and only the survivor under `devices`; `dump` from both matches the pool after the detach. The copy stands in for a disk pulled before the detach: `zpool detach` erases the labels of the device it detaches |
-| B9 | a whole loop device (`losetup -P`) given to `zpool create`, which writes the GPT itself | `scan` finds the GPT and the ZFS partition; `dump` from the whole disk and from `-p1` both match |
-| C1–C3 | one volume per value: 8 compressions, 7 checksums, 6 block sizes | each image matches the kernel's hash |
+| B9 | a loop device with a GPT written by `sfdisk`, one partition of the type ZFS uses, the pool made on `p1` (`zpool create` on the bare device labels it the same way, but the partition node it then waits for did not appear on either kernel tried) | `scan` of the whole disk finds the GPT and the ZFS partition; `dump` from the whole disk and from `p1` both match |
+| C1–C3 | one volume per value: 8 compressions, 7 checksums, 6 block sizes; a value this ZFS does not have (`blake3` needs OpenZFS 2.2) is noted and left out | each image matches the kernel's hash |
 | C4 | `zfs create -s -V 1G`, 64 MiB written at 300 MiB | matches; the image is sparse (`du` under 200 MiB) |
 | C5 | `dedup=on`, four copies of the same 4 MiB | matches |
 | C6 | two snapshots and a clone of one volume | the head, each snapshot and the clone match their own hashes (`snapdev=visible` for the kernel's side) |

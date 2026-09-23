@@ -101,6 +101,13 @@ wait_dev() {
     i=0; while [ ! -e "$1" ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i+1)); done
     [ -e "$1" ] || die "device $1 did not appear"
 }
+wait_dev_soft() { # the same, as a verdict rather than an exit
+    i=0; while [ ! -e "$1" ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i+1)); done
+    [ -e "$1" ]
+}
+# A property value this ZFS does not have (blake3 needs OpenZFS 2.2)
+# skips its volume with a note instead of ending the run.
+NOT_HERE=""
 fill() { # fill POOL/VOL BYTES [SEEK_MIB]  — deterministic content
     wait_dev "$(zdev "$1")"
     stream "$1@${3:-0}" "$2" | dd of="$(zdev "$1")" bs=1M seek="${3:-0}" conv=notrunc,fsync status=none
@@ -194,19 +201,28 @@ M0=$(mkloop mirror0 3G); M1=$(mkloop mirror1 3G)
 newpool "${P}m" "$M0 $M1" -o ashift=12 -O compression=off -O snapdev=visible -O mountpoint=none mirror "$M0" "$M1"
 zfs create "${P}m/vm"
 # C1 compression, under vm (D7 dumps them all)
+C1_KEYS=""
 for c in off lz4 zstd zstd-19 gzip-1 gzip-9 lzjb zle; do
-    zfs create -V 16M -b 16K -o compression=$c "${P}m/vm/c-$c"
-    wait_dev "$(zdev "${P}m/vm/c-$c")"
-    # compressible and incompressible halves
-    { stream "c-$c" 6M; head -c 6M /dev/zero; stream "c-$c-2" 4M; } | dd of="$(zdev "${P}m/vm/c-$c")" bs=1M conv=notrunc,fsync status=none
+    if zfs create -V 16M -b 16K -o compression=$c "${P}m/vm/c-$c" 2>"$WORK/out/c1-create-$c.err"; then
+        C1_KEYS="$C1_KEYS $c"
+        wait_dev "$(zdev "${P}m/vm/c-$c")"
+        # compressible and incompressible halves
+        { stream "c-$c" 6M; head -c 6M /dev/zero; stream "c-$c-2" 4M; } | dd of="$(zdev "${P}m/vm/c-$c")" bs=1M conv=notrunc,fsync status=none
+    else NOT_HERE="$NOT_HERE compression=$c"; fi
 done
 # C2 checksums
+C2_KEYS=""
 for k in fletcher2 fletcher4 sha256 sha512 skein edonr blake3; do
-    zfs create -V 16M -b 16K -o checksum=$k "${P}m/k-$k" && fill "${P}m/k-$k" 12M
+    if zfs create -V 16M -b 16K -o checksum=$k "${P}m/k-$k" 2>"$WORK/out/c2-create-$k.err"; then
+        C2_KEYS="$C2_KEYS $k"; fill "${P}m/k-$k" 12M
+    else NOT_HERE="$NOT_HERE checksum=$k"; fi
 done
 # C3 volblocksize
+C3_KEYS=""
 for b in 4K 8K 16K 64K 128K 1M; do
-    zfs create -V 32M -b $b "${P}m/b-$b" && fill "${P}m/b-$b" 24M
+    if zfs create -V 32M -b $b "${P}m/b-$b" 2>"$WORK/out/c3-create-$b.err"; then
+        C3_KEYS="$C3_KEYS $b"; fill "${P}m/b-$b" 24M
+    else NOT_HERE="$NOT_HERE volblocksize=$b"; fi
 done
 # C4 sparse, C5 dedup, C6 snapshots and a clone, C8 large dnodes, C11 properties
 zfs create -s -V 1G -b 16K "${P}m/sparse"; fill "${P}m/sparse" 64M 300
@@ -331,14 +347,22 @@ DEVS[${P}a]=$A1
 fill "${P}a/vol" 8M 16
 SHA[a]=$(oracle "${P}a/vol"); export_pool "${P}a"
 
-# ---- B9: whole disk — the kernel writes the GPT and uses -part1
-say "pool: whole-disk vdev with the kernel's GPT (B9)"
+# ---- B9: a whole disk with a GPT, the pool in its ZFS partition. The
+# GPT is written by sfdisk with the partition type ZFS itself uses —
+# `zpool create` on the bare loop device labels it the same way, but
+# the partition node it then expects did not appear on either kernel
+# tried, and a scenario's setup must not end the run.
+say "pool: whole-disk vdev with a GPT (B9)"
 W=$(mkloop whole 512M -P)
-newpool "${P}w" "${W}p1" -o ashift=12 "$W"
-zfs create -V 32M -b 16K "${P}w/vol"; fill "${P}w/vol" 24M
-SHA[w]=$(oracle "${P}w/vol"); export_pool "${P}w"
-partprobe "$W" 2>/dev/null || true
-wait_dev "${W}p1"
+echo 'type=6A898CC3-1DD2-11B2-99A6-080020736631' | sfdisk --quiet --label gpt "$W" >/dev/null
+partprobe "$W" 2>/dev/null || partx -a "$W" 2>/dev/null || true
+HAVE_B9=0
+if wait_dev_soft "${W}p1"; then
+    HAVE_B9=1
+    newpool "${P}w" "${W}p1" -o ashift=12 "${W}p1"
+    zfs create -V 32M -b 16K "${P}w/vol"; fill "${P}w/vol" 24M
+    SHA[w]=$(oracle "${P}w/vol"); export_pool "${P}w"
+fi
 
 # ---- C10: a top-level vdev removed
 say "pool: top-level vdev removed (C10)"
@@ -478,7 +502,8 @@ else result B8 FAIL "scan exit $code; $(tail -1 "$WORK/out/b8-assert.err" 2>/dev
 
 # B9: the whole disk, and its partition
 run b9-scan -f json scan "$W"
-if [ "$code" = 0 ] && jsonq '
+if [ "$HAVE_B9" = 0 ]; then result B9 FAIL "the partition node ${W}p1 never appeared after sfdisk wrote the GPT"
+elif [ "$code" = 0 ] && jsonq '
 x=d["devices"][0]; t=x["partitions"]; assert t["scheme"]=="gpt", t
 assert any(p["zfs"] for p in t["partitions"]), t; assert x["vdev_base"]>0, x' < "$WORK/out/b9-scan.log" 2>"$WORK/out/b9-assert.err" \
     && dump_matches b9 "${P}w/vol" "${SHA[w]}" "$W" && dump_matches b9-part "${P}w/vol" "${SHA[w]}" "${W}p1"; then
@@ -486,15 +511,17 @@ assert any(p["zfs"] for p in t["partitions"]), t; assert x["vdev_base"]>0, x' < 
 else result B9 FAIL "scan exit $code; $(tail -1 "$WORK/out/b9-assert.err" 2>/dev/null)"; fi
 
 # C1, C2, C3: one dump per property value
+# What this ZFS does not have is said, not counted either way.
+here() { [ -z "$NOT_HERE" ] || printf '; not in this ZFS:%s' "$NOT_HERE"; }
 cfail=""
-for c in off lz4 zstd zstd-19 gzip-1 gzip-9 lzjb zle; do dump_matches "c1-$c" "${P}m/vm/c-$c" "${SHA[${P}m/vm/c-$c]}" "$M0" "$M1" || cfail="$cfail $c"; done
-if [ -z "$cfail" ]; then result C1 PASS "8 compressions"; else result C1 FAIL "$cfail"; fi
+for c in $C1_KEYS; do dump_matches "c1-$c" "${P}m/vm/c-$c" "${SHA[${P}m/vm/c-$c]}" "$M0" "$M1" || cfail="$cfail $c"; done
+if [ -z "$cfail" ]; then result C1 PASS "$(echo $C1_KEYS | wc -w) compressions$(here)"; else result C1 FAIL "$cfail"; fi
 cfail=""
-for k in fletcher2 fletcher4 sha256 sha512 skein edonr blake3; do dump_matches "c2-$k" "${P}m/k-$k" "${SHA[${P}m/k-$k]}" "$M0" "$M1" || cfail="$cfail $k"; done
-if [ -z "$cfail" ]; then result C2 PASS "7 checksums"; else result C2 FAIL "$cfail"; fi
+for k in $C2_KEYS; do dump_matches "c2-$k" "${P}m/k-$k" "${SHA[${P}m/k-$k]}" "$M0" "$M1" || cfail="$cfail $k"; done
+if [ -z "$cfail" ]; then result C2 PASS "$(echo $C2_KEYS | wc -w) checksums$(here)"; else result C2 FAIL "$cfail"; fi
 cfail=""
-for b in 4K 8K 16K 64K 128K 1M; do dump_matches "c3-$b" "${P}m/b-$b" "${SHA[${P}m/b-$b]}" "$M0" "$M1" || cfail="$cfail $b"; done
-if [ -z "$cfail" ]; then result C3 PASS "6 block sizes"; else result C3 FAIL "$cfail"; fi
+for b in $C3_KEYS; do dump_matches "c3-$b" "${P}m/b-$b" "${SHA[${P}m/b-$b]}" "$M0" "$M1" || cfail="$cfail $b"; done
+if [ -z "$cfail" ]; then result C3 PASS "$(echo $C3_KEYS | wc -w) block sizes$(here)"; else result C3 FAIL "$cfail"; fi
 
 # C4: sparse image
 if dump_matches c4 "${P}m/sparse" "${SHA[${P}m/sparse]}" "$M0" "$M1"; then
@@ -619,11 +646,11 @@ fi
 rm -rf "$WORK/out/d7"
 run d7 -f json dump -r "${P}m/vm" "$M0" "$M1" -o "$WORK/out/d7"
 d7fail=""
-for c in off lz4 zstd zstd-19 gzip-1 gzip-9 lzjb zle; do
+for c in $C1_KEYS; do
     f=$WORK/out/d7/${P}m_vm_c-$c.img
     [ -f "$f" ] && [ "$(sha_of "$f")" = "${SHA[${P}m/vm/c-$c]}" ] || d7fail="$d7fail $c"
 done
-if [ "$code" = 0 ] && [ -f "$WORK/out/d7/manifest.json" ] && [ -z "$d7fail" ]; then result D7 PASS "8 images + manifest, every hash matches"
+if [ "$code" = 0 ] && [ -f "$WORK/out/d7/manifest.json" ] && [ -z "$d7fail" ]; then result D7 PASS "$(echo $C1_KEYS | wc -w) images + manifest, every hash matches"
 else result D7 FAIL "exit $code; mismatched:$d7fail"; fi
 
 # D8: md5 and sha1 alongside
