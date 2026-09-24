@@ -87,18 +87,21 @@ jobs:
             # calls and on nothing under /lib or /usr/lib. `file` proves
             # it here, and the publish job proves it again for every file
             # of the release.
+            # The target is named so that the flag reaches only what is
+            # built for it: a proc-macro is a dylib for the host and
+            # cannot be linked static.
             export RUSTFLAGS="-C target-feature=+crt-static"
-            cargo build --release -p zvolrescue -p zvoltimeline -p zvolreport -p zvolcarve -p zvolfiles
+            cargo build --release --target x86_64-unknown-freebsd -p zvolrescue -p zvoltimeline -p zvolreport -p zvolcarve -p zvolfiles
             for b in zvolrescue zvoltimeline zvolreport zvolcarve zvolfiles; do
-              "./target/release/$b" --version
-              file "./target/release/$b"
-              file "./target/release/$b" | grep -Eq 'statically linked|static-pie linked'
+              "./target/x86_64-unknown-freebsd/release/$b" --version
+              file "./target/x86_64-unknown-freebsd/release/$b"
+              file "./target/x86_64-unknown-freebsd/release/$b" | grep -Eq 'statically linked|static-pie linked'
             done
       - name: Package
         run: |
           v=$(printf '%s' "$TAG" | sed 's/^[vV]\.*//')
           for b in zvolrescue zvoltimeline zvolreport zvolcarve zvolfiles; do
-            cp "target/release/$b" "$b-$v-amd64-freebsd"
+            cp "target/x86_64-unknown-freebsd/release/$b" "$b-$v-amd64-freebsd"
           done
       - uses: actions/upload-artifact@v4
         with:

@@ -1669,7 +1669,11 @@ jobs:
             # so does this job, so a crate that will not link that way
             # fails here, on the push, and not at release time — and
             # everything below runs the static binary on real devices.
-            RUSTFLAGS="-C target-feature=+crt-static" cargo build --release
+            # The target is named so that the flag reaches only what is
+            # built for it: a proc-macro is a dylib for the host and
+            # cannot be linked static.
+            RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target x86_64-unknown-freebsd
+            mkdir -p target/release && cp target/x86_64-unknown-freebsd/release/zvolrescue target/release/zvolrescue
             ./target/release/zvolrescue --version
             file ./target/release/zvolrescue
             file ./target/release/zvolrescue | grep -Eq 'statically linked|static-pie linked'
