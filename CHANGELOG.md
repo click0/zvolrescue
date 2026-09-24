@@ -43,6 +43,19 @@ tagged. `v0.7.1` is the release that carries those six.
   the next older verified TXG; readable at none, the run says at which
   TXG the dataset was named and why it does not read there. `--txg`
   still means that TXG and no other.
+* **The FreeBSD release binary is static, as the README always said
+  it was.** Up to v0.9.7 the `amd64-freebsd` files were linked against
+  FreeBSD 15's base `libc.so.7`, `libthr.so.3` and `libgcc_s.so.1` —
+  fine on any 15.x system and on mfsBSD 15, which carry them, but not
+  the "static binaries with no runtime dependencies" the README
+  promised, and `file` said so. The release workflow now builds the
+  FreeBSD binaries with `crt-static`, and both it and the publish step
+  refuse a file that `file` does not call statically linked, on every
+  platform. The FreeBSD 15 CI job builds the same way on every push
+  and runs that binary on its real devices, so a crate that will not
+  link statically is caught there, not at release time. A static
+  build still carries the system-call ABI of the branch it was built
+  on: on 14.x, build from source as before.
 
 ### Documented
 * **The first real-kernel runs of the matrix, and what they taught the

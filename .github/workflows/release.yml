@@ -82,12 +82,18 @@ jobs:
           usesh: true
           prepare: pkg install -y rust
           run: |
+            # Static, like the Linux binaries: FreeBSD's own libc linked
+            # in (crt-static), so the file depends on the kernel's system
+            # calls and on nothing under /lib or /usr/lib. `file` proves
+            # it here, and the publish job proves it again for every file
+            # of the release.
+            export RUSTFLAGS="-C target-feature=+crt-static"
             cargo build --release -p zvolrescue -p zvoltimeline -p zvolreport -p zvolcarve -p zvolfiles
-            ./target/release/zvolrescue --version
-            ./target/release/zvoltimeline --version
-            ./target/release/zvolreport --version
-            ./target/release/zvolcarve --version
-            ./target/release/zvolfiles --version
+            for b in zvolrescue zvoltimeline zvolreport zvolcarve zvolfiles; do
+              "./target/release/$b" --version
+              file "./target/release/$b"
+              file "./target/release/$b" | grep -Eq 'statically linked|static-pie linked'
+            done
       - name: Package
         run: |
           v=$(printf '%s' "$TAG" | sed 's/^[vV]\.*//')
@@ -116,6 +122,11 @@ jobs:
         run: |
           cd dist
           chmod +x zvol*
+          # No release carries a dynamically linked file, on any platform.
+          for b in zvol*; do
+            file "$b"
+            file "$b" | grep -Eq 'statically linked|static-pie linked' || { echo "$b is not statically linked"; exit 1; }
+          done
           ./zvolrescue-*-x86_64-linux-musl --version
           ./zvoltimeline-*-x86_64-linux-musl --version
           ./zvolreport-*-x86_64-linux-musl --version
@@ -222,7 +233,7 @@ jobs:
             echo "|---|---|---|"
             echo "| Linux x86_64 | \`x86_64-linux-musl\` | static; runs on any distribution, and on a rescue medium |"
             echo "| Linux aarch64 | \`aarch64-linux-musl\` | static |"
-            echo "| FreeBSD 15.x amd64 | \`amd64-freebsd\` | built on 15.x. FreeBSD changes its ABI between major branches, so on 14.x build from source: \`pkg install rust && cargo build --release\` |"
+            echo "| FreeBSD 15.x amd64 | \`amd64-freebsd\` | static (FreeBSD's own libc linked in); runs on any 15.x system and on mfsBSD 15. Built on 15.x, whose system-call ABI it uses, so on 14.x build from source: \`pkg install rust && cargo build --release\` |"
             echo
             echo "So the carver for Linux x86_64 is \`zvolcarve-$v-x86_64-linux-musl\`, and the FreeBSD main binary is \`zvolrescue-$v-amd64-freebsd\`."
             echo

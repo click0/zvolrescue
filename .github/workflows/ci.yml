@@ -1665,8 +1665,14 @@ jobs:
           prepare: pkg install -y rust
           run: |
             cargo test --all-targets
-            cargo build --release
+            # The release builds the FreeBSD binaries static (crt-static);
+            # so does this job, so a crate that will not link that way
+            # fails here, on the push, and not at release time — and
+            # everything below runs the static binary on real devices.
+            RUSTFLAGS="-C target-feature=+crt-static" cargo build --release
             ./target/release/zvolrescue --version
+            file ./target/release/zvolrescue
+            file ./target/release/zvolrescue | grep -Eq 'statically linked|static-pie linked'
             # SPEC F-71 against the real tools: gpart names a partition,
             # glabel names a provider, and the scan reads both names
             # back off the disk — with the GUID gpart itself reports.
