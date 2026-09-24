@@ -250,8 +250,11 @@ build from source: `pkg install rust && cargo build --release`). One
 exception: the `amd64-freebsd` files of v0.9.7 and earlier are linked
 against the base libraries of FreeBSD 15, which every 15.x system has —
 the release workflow makes them static from the next tag on and refuses
-a release with a dynamically linked file in it. Drop the binary on the
-rescue medium and run it; nothing to install. Verify with `sha256sum -c SHA256SUMS`,
+a release with a dynamically linked file in it. A static FreeBSD build
+of any commit or tag is one click away in the meantime: Actions →
+"FreeBSD static binaries" → Run workflow; the artifact holds the five
+programs, each checked with `file`, and their `SHA256SUMS`. Drop the
+binary on the rescue medium and run it; nothing to install. Verify with `sha256sum -c SHA256SUMS`,
 and `SHA256SUMS` itself against its Sigstore signature — the release notes
 carry the `cosign verify-blob` line for that tag; the certificate names
 this repository's release workflow and the tag, and there is no signing

@@ -1,0 +1,66 @@
+name: FreeBSD static binaries
+
+# On demand: the five programs built static on FreeBSD 15 from any
+# branch, tag or commit, each checked with `file`, and uploaded as one
+# artifact with their SHA256SUMS — a static FreeBSD binary without
+# cutting a release. The release workflow builds the same way; this
+# one is for a commit between releases, or for a tag whose release
+# still carries the dynamically linked file (v0.9.7 and earlier).
+#
+# Actions → "FreeBSD static binaries" → Run workflow. The artifact
+# `amd64-freebsd-static` holds `<program>-<version>+<commit>-amd64-freebsd`
+# for each program, and `SHA256SUMS`.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag or commit to build (empty: the branch this runs from)"
+        required: false
+        default: ""
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  freebsd:
+    name: FreeBSD 15 amd64, static
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+      - name: Which commit this is
+        run: git rev-parse --short HEAD > .build-commit && cat .build-commit
+      - uses: vmactions/freebsd-vm@v1
+        with:
+          release: "15"
+          usesh: true
+          prepare: pkg install -y rust
+          run: |
+            # crt-static links FreeBSD's own libc in; the target is named
+            # so that the flag reaches only what is built for it (a
+            # proc-macro is a host dylib and cannot be static).
+            export RUSTFLAGS="-C target-feature=+crt-static"
+            cargo build --release --target x86_64-unknown-freebsd -p zvolrescue -p zvoltimeline -p zvolreport -p zvolcarve -p zvolfiles
+            v=$(./target/x86_64-unknown-freebsd/release/zvolrescue --version | awk '{print $2}')
+            c=$(cat .build-commit)
+            mkdir -p dist
+            for b in zvolrescue zvoltimeline zvolreport zvolcarve zvolfiles; do
+              "./target/x86_64-unknown-freebsd/release/$b" --version
+              file "./target/x86_64-unknown-freebsd/release/$b"
+              file "./target/x86_64-unknown-freebsd/release/$b" | grep -Eq 'statically linked|static-pie linked'
+              cp "./target/x86_64-unknown-freebsd/release/$b" "dist/$b-$v+$c-amd64-freebsd"
+            done
+            cd dist && sha256sum zvol* > SHA256SUMS && cat SHA256SUMS
+      - name: Summary
+        run: |
+          echo "## FreeBSD 15 amd64, static, commit $(cat .build-commit)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          for f in dist/zvol*; do file "$f" | sed 's|^dist/||' >> "$GITHUB_STEP_SUMMARY"; done
+          cat dist/SHA256SUMS >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: amd64-freebsd-static
+          path: dist
+          if-no-files-found: error

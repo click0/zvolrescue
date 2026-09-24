@@ -55,7 +55,10 @@ tagged. `v0.7.1` is the release that carries those six.
   and runs that binary on its real devices, so a crate that will not
   link statically is caught there, not at release time. A static
   build still carries the system-call ABI of the branch it was built
-  on: on 14.x, build from source as before.
+  on: on 14.x, build from source as before. For a commit between
+  releases, or for a tag whose release still carries the dynamic file,
+  `.github/workflows/freebsd-static.yml` builds the five programs the
+  same way on demand and uploads them with their `SHA256SUMS`.
 
 ### Documented
 * **The first real-kernel runs of the matrix, and what they taught the
