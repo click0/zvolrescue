@@ -1816,6 +1816,10 @@ jobs:
       - uses: actions/checkout@v5
       - name: makepkg, pacman -U, man
         run: |
+          # The container image keeps manual pages out of every package
+          # it installs (NoExtract in pacman.conf); this job is about
+          # them, so that goes first.
+          sed -i '/^NoExtract/d' /etc/pacman.conf
           pacman -Syu --noconfirm --needed base-devel rust man-db
           useradd -m builder
           v=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
@@ -1827,7 +1831,7 @@ jobs:
           tar --exclude=./.git --exclude=./target --transform "s|^\.|zvolrescue-$v|" -czf "/home/builder/pkg/zvolrescue-$v.tar.gz" .
           chown -R builder /home/builder/pkg
           su builder -c "cd /home/builder/pkg && makepkg --noconfirm --skipchecksums"
-          pacman -U --noconfirm /home/builder/pkg/zvolrescue-*.pkg.tar.zst
+          pacman -U --noconfirm "$(ls /home/builder/pkg/zvolrescue-*.pkg.tar.zst | grep -v -- '-debug-')"
           for b in zvolrescue zvoltimeline zvolreport zvolcarve zvolfiles; do "$b" --version; done
           man -w zvolrescue zvoltimeline zvolreport zvolcarve zvolfiles
           pacman -R --noconfirm zvolrescue
