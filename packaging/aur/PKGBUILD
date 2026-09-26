@@ -1,0 +1,44 @@
+# Maintainer: Vladyslav V. Prodan <akapulko@gmail.com>
+#
+# The AUR package of zvolrescue: built from the tagged source with the
+# system's cargo, the five programs and their manual pages installed.
+# packaging/aur/update.sh in the source tree rewrites pkgver and the
+# checksum for a new tag and regenerates .SRCINFO.
+pkgname=zvolrescue
+pkgver=0.9.7
+pkgrel=1
+pkgdesc="Read-only extraction of zvols and files from ZFS pools that no longer import"
+arch=('x86_64' 'aarch64')
+url="https://github.com/click0/zvolrescue"
+license=('BSD-3-Clause')
+depends=('gcc-libs' 'glibc')
+makedepends=('cargo')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('99d8637e8dbb5a92ae73c6c25b1c6e3ef773b86df18a47cb5d09f4d1d8b96172')
+
+prepare() {
+    cd "$pkgname-$pkgver"
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "$pkgname-$pkgver"
+    export CARGO_TARGET_DIR=target
+    cargo build --frozen --release -p zvolrescue -p zvoltimeline -p zvolreport -p zvolcarve -p zvolfiles
+}
+
+check() {
+    cd "$pkgname-$pkgver"
+    cargo test --frozen --release --workspace
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+    local b
+    for b in zvolrescue zvoltimeline zvolreport zvolcarve zvolfiles; do
+        install -Dm755 "target/release/$b" "$pkgdir/usr/bin/$b"
+        install -Dm644 "man/$b.1" "$pkgdir/usr/share/man/man1/$b.1"
+    done
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}
