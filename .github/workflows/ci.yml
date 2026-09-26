@@ -1726,6 +1726,46 @@ jobs:
             grep -q "stopped here" /tmp/fx/nop.err
             gnop destroy "/dev/$md.nop"
             mdconfig -d -u "${md#md}"
+            # The static binary, the fixture and the hash of its volume,
+            # for the job below that runs them on 14.
+            mkdir -p static15
+            cp target/x86_64-unknown-freebsd/release/zvolrescue /tmp/fx/member0.img /tmp/fx/member1.img static15/
+            sha256 -q /tmp/fx/plain.img > static15/plain.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: freebsd15-static
+          path: static15
+          if-no-files-found: error
+
+  # E3's open question, answered on every push rather than assumed
+  # either way: a static build carries the system-call ABI of the
+  # branch it was built on, so does the binary the 15 job built run on
+  # 14? Best effort like the 14 job itself — the answer is recorded in
+  # REALWORLD-TESTS, and a change in it is worth noticing, not worth
+  # holding a push up for.
+  freebsd15-static-on-14:
+    name: FreeBSD 15 static binary on FreeBSD 14
+    runs-on: ubuntu-latest
+    needs: freebsd
+    continue-on-error: true
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: freebsd15-static
+          path: static15
+      - uses: vmactions/freebsd-vm@v1
+        with:
+          release: "14"
+          usesh: true
+          run: |
+            uname -r
+            cd static15
+            chmod +x zvolrescue
+            file zvolrescue
+            ./zvolrescue --version
+            ./zvolrescue scan member0.img member1.img
+            ./zvolrescue -q dump tank/vm/disk0 member0.img member1.img --txg 4816229 -o /tmp/on14.img
+            test "$(sha256 -q /tmp/on14.img)" = "$(cat plain.sha256)"
 
   # 14.x on a best-effort footing (N-06): built and tested so a break is
   # visible, allowed to fail so it does not hold anything up. stable/14
