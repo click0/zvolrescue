@@ -1836,7 +1836,7 @@ jobs:
           man -w zvolrescue zvoltimeline zvolreport zvolcarve zvolfiles
           pacman -R --noconfirm zvolrescue
           # .SRCINFO is what the PKGBUILD says, in makepkg's own words.
-          su builder -c "cd '$PWD/packaging/aur' && makepkg --printsrcinfo" | diff - packaging/aur/.SRCINFO
+          su builder -c "cd /home/builder/pkg && makepkg --printsrcinfo" | diff - packaging/aur/.SRCINFO
 
   # 14.x on a best-effort footing (N-06): built and tested so a break is
   # visible, allowed to fail so it does not hold anything up. stable/14
