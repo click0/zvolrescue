@@ -45,6 +45,11 @@ jobs:
         run: |
           sudo apt-get install -y -qq --no-install-recommends mandoc
           tests/man-check.sh ./target/release man
+      - name: The FreeBSD port's crate list is Cargo.lock's
+        run: |
+          packaging/freebsd/update-crates.sh
+          git diff --exit-code packaging/freebsd/sysutils/zvolrescue/Makefile.crates \
+            || { echo "::error::Makefile.crates is out of date: run packaging/freebsd/update-crates.sh"; exit 1; }
       - name: The .deb installs, and man zvolrescue is there (REALWORLD-TESTS E4)
         run: |
           v=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
@@ -1672,6 +1677,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - run: echo "$GITHUB_SHA" > .build-commit
       - uses: vmactions/freebsd-vm@v1
         with:
           # The newest 15.x the action ships, so a point release does not
@@ -1679,7 +1685,7 @@ jobs:
           # fails the job rather than quietly falling back to another.
           release: "15"
           usesh: true
-          prepare: pkg install -y rust
+          prepare: pkg install -y rust git
           run: |
             cargo test --all-targets
             # The release builds the FreeBSD binaries static (crt-static);
@@ -1748,6 +1754,21 @@ jobs:
             mkdir -p static15
             cp target/x86_64-unknown-freebsd/release/zvolrescue /tmp/fx/member0.img /tmp/fx/member1.img static15/
             sha256 -q /tmp/fx/plain.img > static15/plain.sha256
+            # The port (REALWORLD-TESTS E4): the ports framework from a
+            # sparse checkout, the port pointed at this very commit and
+            # its distinfo regenerated for it, staged, its plist checked,
+            # packaged, installed, every program and page found, removed.
+            git clone -q --depth 1 --filter=blob:none --sparse https://git.FreeBSD.org/ports.git /usr/ports
+            (cd /usr/ports && git sparse-checkout set Mk Templates Keywords Tools)
+            cp -R packaging/freebsd/sysutils/zvolrescue /tmp/port
+            cd /tmp/port
+            export GH_TAGNAME="$(cat "$GITHUB_WORKSPACE/.build-commit")" BATCH=yes
+            make makesum
+            make stage check-plist package
+            pkg add work/pkg/zvolrescue-*.pkg
+            for b in zvolrescue zvoltimeline zvolreport zvolcarve zvolfiles; do "$b" --version; done
+            man -w zvolrescue zvoltimeline zvolreport zvolcarve zvolfiles
+            pkg delete -y zvolrescue
       - uses: actions/upload-artifact@v4
         with:
           name: freebsd15-static
@@ -1783,6 +1804,33 @@ jobs:
             ./zvolrescue scan member0.img member1.img
             ./zvolrescue -q dump tank/vm/disk0 member0.img member1.img --txg 4816229 -o /tmp/on14.img
             test "$(sha256 -q /tmp/on14.img)" = "$(cat plain.sha256)"
+
+  # The AUR package, on Arch itself (REALWORLD-TESTS E4): the PKGBUILD
+  # built by makepkg from this commit's tree in place of the tag's
+  # tarball, installed with pacman, every program and page found.
+  aur:
+    name: AUR PKGBUILD (Arch container)
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: makepkg, pacman -U, man
+        run: |
+          pacman -Syu --noconfirm --needed base-devel rust man-db git
+          useradd -m builder
+          v=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          mkdir -p /home/builder/pkg
+          cp packaging/aur/PKGBUILD /home/builder/pkg/
+          git config --global --add safe.directory "$PWD"
+          git archive --format=tar.gz --prefix="zvolrescue-$v/" -o "/home/builder/pkg/zvolrescue-$v.tar.gz" HEAD
+          chown -R builder /home/builder/pkg
+          su builder -c "cd /home/builder/pkg && makepkg --noconfirm --skipchecksums"
+          pacman -U --noconfirm /home/builder/pkg/zvolrescue-*.pkg.tar.zst
+          for b in zvolrescue zvoltimeline zvolreport zvolcarve zvolfiles; do "$b" --version; done
+          man -w zvolrescue zvoltimeline zvolreport zvolcarve zvolfiles
+          pacman -R --noconfirm zvolrescue
+          # .SRCINFO is what the PKGBUILD says, in makepkg's own words.
+          su builder -c "cd '$PWD/packaging/aur' && makepkg --printsrcinfo" | diff - packaging/aur/.SRCINFO
 
   # 14.x on a best-effort footing (N-06): built and tested so a break is
   # visible, allowed to fail so it does not hold anything up. stable/14

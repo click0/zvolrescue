@@ -1,0 +1,11 @@
+zvolrescue reads the on-disk format of a ZFS pool by itself, without the
+kernel's ZFS and without importing the pool, and writes the raw image of a
+volume (zvol) out of it at any transaction group that still verifies: every
+block through its checksum, mirror copies and RAIDZ or dRAID parity to heal
+what one member cannot give, encrypted datasets with a key. It never writes
+to the members, and it logs every run as evidence a third party can check.
+
+With it: zvoltimeline (the pool's history from the transaction groups it
+still carries), zvolcarve (volumes no uberblock points at any more, found in
+raw vdev space), zvolfiles (files out of filesystem datasets) and zvolreport
+(the evidence logs of the others as one signed, checkable report).
