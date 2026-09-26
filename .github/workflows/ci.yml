@@ -41,6 +41,10 @@ jobs:
       - run: cargo test --all-targets
       - run: cargo build --release
       - run: ./target/release/zvolrescue --version
+      - name: The manual pages name every subcommand and option, and parse clean
+        run: |
+          sudo apt-get install -y -qq --no-install-recommends mandoc
+          tests/man-check.sh ./target/release man
       - name: The version and the CHANGELOG say the same thing
         run: |
           # The release workflow takes the tag's CHANGELOG section as

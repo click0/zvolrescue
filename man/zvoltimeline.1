@@ -1,0 +1,99 @@
+.\" zvoltimeline(1) — manual page, mdoc. Kept true to the program by
+.\" tests/man-check.sh.
+.Dd September 26, 2026
+.Dt ZVOLTIMELINE 1
+.Os zvolrescue 0.9.7
+.Sh NAME
+.Nm zvoltimeline
+.Nd the history of a ZFS pool from the transaction groups it still carries
+.Sh SYNOPSIS
+.Nm
+.Op Ar options
+.Op Ar dev ...
+.Sh DESCRIPTION
+.Nm
+reads every transaction group (TXG) that still verifies on the members
+of a pool, oldest to newest, and turns the differences between them
+into a history: when each dataset, volume and snapshot was created,
+renamed, destroyed or cloned, and what its properties were.
+It reads the members the way
+.Xr zvolrescue 1
+does, never writes to them, and can write an evidence log the same
+way.
+.Pp
+The pool members are given as devices, or as image files with
+.Fl -image .
+The
+.Sx POOL MEMBER OPTIONS
+and the global options are those of
+.Xr zvolrescue 1
+and are listed here in brief.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl -from Ar txg
+Oldest transaction group to read; default the oldest that verifies.
+.It Fl -to Ar txg
+Newest transaction group to read; default the newest that verifies.
+.It Fl -dataset Ar name | guid
+Only events about this object: a dataset name at any TXG, or a GUID.
+.It Fl -pending
+Also report how much space is held by things ZFS has finished with
+but has not freed.
+While a block is still accounted for there, it has not been
+reallocated.
+.It Fl o , Fl -output Ar file
+Write the report to
+.Ar file
+instead of standard output.
+.It Fl f , Fl -format Ar text | json
+Output format; text is the default.
+.It Fl v , Fl -verbose
+Increase verbosity; repeatable.
+.It Fl q , Fl -quiet
+Suppress non-essential output.
+.It Fl -evidence-log Ar file
+Append a JSON Lines evidence log to
+.Ar file .
+.It Fl -hash-inputs
+Also record the SHA-256 of every input in the evidence log.
+.It Fl -no-color
+Disable colour in text output.
+.It Fl -debug , Fl -debug-log Ar file
+Trace every read decision, to standard error or to
+.Ar file .
+.It Fl V , Fl -version
+Print the version.
+.El
+.Sh POOL MEMBER OPTIONS
+As in
+.Xr zvolrescue 1 :
+.Fl -image Ar file
+(an image file that is a member; repeatable),
+.Fl -hints Ar file
+(the layout by hand),
+.Fl -search-order
+(try every member order the layout leaves open),
+.Fl -pool-guid Ar guid
+(which pool when several are found),
+.Fl -assume-member Ar path Ns Op = Ns Ar guid
+(a member whose labels are gone),
+.Fl -ignore-unknown-features ,
+.Fl -map Ar member Ns = Ns Ar mapfile
+(the ddrescue mapfile an image was made with),
+.Fl -device-may-fail
+and
+.Fl -surface-scan-on-device .
+.Sh EXIT STATUS
+As in
+.Xr zvolrescue 1 :
+0 success, 1 usage, 2 evidence unreadable, 3 nothing readable, 5
+refused, 7 the medium refused a read.
+.Sh EXAMPLES
+Everything the ring of two mirror members still tells, as JSON:
+.Dl zvoltimeline -f json /dev/ada0p3 /dev/ada1p3
+.Pp
+What happened to one volume, with what its freed space still holds:
+.Dl zvoltimeline --dataset pool/vm/disk0 --pending /dev/ada0p3 /dev/ada1p3
+.Sh SEE ALSO
+.Xr zvolreport 1 ,
+.Xr zvolrescue 1

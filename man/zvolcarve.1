@@ -1,0 +1,240 @@
+.\" zvolcarve(1) — manual page, mdoc. Kept true to the program by
+.\" tests/man-check.sh.
+.Dd September 26, 2026
+.Dt ZVOLCARVE 1
+.Os zvolrescue 0.9.7
+.Sh NAME
+.Nm zvolcarve
+.Nd find and extract volumes that no uberblock of a ZFS pool points at any more
+.Sh SYNOPSIS
+.Nm
+.Op Ar global options
+.Cm scan
+.Fl o Ar dir
+.Op Ar options
+.Op Ar dev ...
+.Nm
+.Op Ar global options
+.Cm list
+.Ar dir
+.Nm
+.Op Ar global options
+.Cm dump
+.Ar dir candidate
+.Op Ar dev ...
+.Fl o Ar out.img
+.Op Ar options
+.Nm
+.Op Ar global options
+.Cm roots
+.Fl o Ar dir
+.Op Ar options
+.Op Ar dev ...
+.Nm
+.Op Ar global options
+.Cm zeropoint
+.Op Ar options
+.Op Ar dev ...
+.Sh DESCRIPTION
+When the transaction groups that named a volume have been overwritten,
+its blocks may still be on the members, addressed by nothing.
+.Nm
+scans the raw space of the members for the metadata of such volumes,
+ranks what it finds into candidates in a workspace directory, and
+extracts a candidate block by block, every block verified by its own
+checksum.
+.Cm roots
+does the same for the pool's object set when no uberblock survives,
+and
+.Cm zeropoint
+finds where a member's vdev begins from the pointers alone.
+Nothing is written to the members.
+.Pp
+The global options and the pool member options are those of
+.Xr zvolrescue 1 :
+.Fl f , Fl -format Ar text | json ,
+.Fl v , Fl -verbose ,
+.Fl q , Fl -quiet ,
+.Fl -evidence-log ,
+.Fl -hash-inputs ,
+.Fl -no-color ,
+.Fl -debug ,
+.Fl -debug-log ,
+and
+.Fl -image ,
+.Fl -hints ,
+.Fl -search-order ,
+.Fl -pool-guid ,
+.Fl -assume-member ,
+.Fl -ignore-unknown-features ,
+.Fl -map ,
+.Fl -device-may-fail ,
+.Fl -surface-scan-on-device .
+.Sh COMMANDS
+.Ss scan
+.Nm Cm scan
+.Fl o Ar dir
+.Op Ar options
+.Op Ar dev ...
+.Pp
+Scan the members and record what could be a volume.
+A profile of the volume being looked for narrows the search; without
+one every recognised dnode is a candidate.
+.Bl -tag -width Ds
+.It Fl o , Fl -output Ar dir
+The carve workspace, where candidates and the scan's state go.
+.It Fl -volblocksize Ar bytes
+Data block size of the volume being looked for.
+.It Fl -levels Ar n
+Tree depth of the volume being looked for.
+.It Fl -txg Ar from Ns .. Ns Ar to
+Birth transaction group window.
+.It Fl -size Ar min Ns .. Ns Ar max
+Estimated size range in bytes.
+.It Fl -dnode-type Ar type
+Object type to look for:
+.Ql zvol
+(the default),
+.Ql file ,
+a numeric dnode type, or
+.Ql any .
+.It Fl -profile Ar file
+Read the profile from a JSON file; command-line fields win.
+.It Fl -like Ar dataset
+Take the block size, levels and size from a dataset that still exists
+in the pool: in most incidents the lost volume was made like its
+neighbours.
+.It Fl -strict-profile
+Treat profile fields as hard filters, not as hints.
+.It Fl -range Ar start Ns - Ns Ar end
+Only this byte range of each member.
+.It Fl -resume
+Continue a scan that was interrupted; a SIGINT or SIGTERM ends a scan
+with its state written (exit status 6).
+.It Fl -full-assess
+Read every block a candidate claims when ranking it, rather than a
+sample.
+Slow, and rarely worth it before a
+.Cm dump .
+.It Fl -max-hits Ar n
+Stop after this many candidates; default 100000.
+.It Fl -sample Ar n
+Report what the first
+.Ar n
+hits look like instead of filtering, so a profile can be picked from
+the disk.
+.It Fl -compressed Ar list
+Compressions to try at each allocation-aligned offset:
+.Ql lz4,lzjb,gzip,zstd
+(the default), a subset, or
+.Ql none
+for the plaintext pass alone.
+Metadata is lz4 on any modern pool and lzjb on one made before the
+.Ql lz4_compress
+feature; each one costs a pass, and dropping the wrong one finds
+nothing.
+.El
+.Ss list
+.Nm Cm list
+.Ar dir
+.Pp
+Show the candidates a previous scan found, ranked, with the id each
+one is extracted by.
+.Ss dump
+.Nm Cm dump
+.Ar dir candidate
+.Op Ar dev ...
+.Fl o Ar out.img
+.Op Ar options
+.Pp
+Extract one candidate, verifying every block by its checksum.
+.Bl -tag -width Ds
+.It Fl o , Fl -output Ar out.img
+Write the image here.
+.It Fl -strict
+Stop at the first block that cannot be read.
+.It Fl -size Ar bytes
+Extract this many bytes instead of what the dnode implies.
+.It Fl -hash Ar list
+Also hash the image with
+.Ql md5
+and/or
+.Ql sha1 ,
+comma-separated; SHA-256 is always taken.
+.It Fl -resume
+Continue an interrupted extraction of the same candidate; the state is
+kept in
+.Pa out.img.resume.json
+while a run is in progress.
+.El
+.Ss roots
+.Nm Cm roots
+.Fl o Ar dir
+.Op Ar options
+.Op Ar dev ...
+.Pp
+Find the pool's object set when no uberblock survives: the members are
+scanned for object set headers, which are ranked into
+.Ar dir .
+.Bl -tag -width Ds
+.It Fl o , Fl -output Ar dir
+Carve workspace, where the ranked headers are written.
+.It Fl -range Ar start Ns - Ns Ar end
+Only this byte range of each member.
+.It Fl -compressed Ar list
+Compressions to try, as in
+.Cm scan .
+.It Fl -max-roots Ar n
+Keep at most this many headers after ranking; default 32.
+.El
+.Ss zeropoint
+.Nm Cm zeropoint
+.Op Ar options
+.Op Ar dev ...
+.Pp
+Where the vdev begins, from the pointers alone: the base at which the
+block pointers found on a member agree with the checksums of what they
+point at.
+.Bl -tag -width Ds
+.It Fl o , Fl -output Ar dir
+Also write
+.Pa zeropoint.json
+here.
+.It Fl -window Ar start Ns - Ns Ar end
+Consider only bases in this byte range; default the first 64 MiB,
+where a partition begins.
+.It Fl -compressed Ar list
+Compressions to try, as in
+.Cm scan .
+.It Fl -max-hits Ar n
+Collect probes from at most this many dnodes; default 4096.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa dir/state.json
+The state of a scan, for
+.Fl -resume .
+.It Pa out.img.resume.json
+The state of an interrupted
+.Cm dump .
+.El
+.Sh EXIT STATUS
+As in
+.Xr zvolrescue 1 :
+0 success, 1 usage, 2 evidence unreadable, 3 nothing found or the
+candidate unreadable, 4 a partial image, 5 refused, 6 interrupted with
+the state written, 7 the medium refused a read.
+.Sh EXAMPLES
+A volume made like its surviving neighbour, found and extracted from
+images of two mirror members:
+.Bd -literal -offset indent
+zvolcarve scan --like pool/vm/disk1 -o carve \e
+    --image ada0.img --image ada1.img
+zvolcarve list carve
+zvolcarve dump carve 3 --image ada0.img --image ada1.img -o disk0.img
+.Ed
+.Sh SEE ALSO
+.Xr zvolfiles 1 ,
+.Xr zvolreport 1 ,
+.Xr zvolrescue 1 ,
+.Xr zvoltimeline 1

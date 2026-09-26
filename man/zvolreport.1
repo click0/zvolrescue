@@ -1,0 +1,135 @@
+.\" zvolreport(1) — manual page, mdoc. Kept true to the program by
+.\" tests/man-check.sh.
+.Dd September 26, 2026
+.Dt ZVOLREPORT 1
+.Os zvolrescue 0.9.7
+.Sh NAME
+.Nm zvolreport
+.Nd one checkable report out of the evidence logs of the zvolrescue tools
+.Sh SYNOPSIS
+.Nm
+.Op Ar global options
+.Cm build
+.Fl o Ar report.json
+.Op Ar options
+.Ar log ...
+.Nm
+.Op Ar global options
+.Cm verify
+.Op Ar options
+.Ar report.json
+.Nm
+.Op Ar global options
+.Cm keygen
+.Fl o Ar key
+.Op Fl -public Ar key.pub
+.Sh DESCRIPTION
+.Nm
+consolidates the JSON Lines evidence logs that
+.Xr zvolrescue 1
+and its companions write into one report with a hash chain a third
+party can recompute: every input and output the logs name, with the
+hashes recorded at the time, and optionally an Ed25519 signature over
+the report.
+.Cm verify
+recomputes the hashes against the files as they are now and says what
+still matches.
+.Sh GLOBAL OPTIONS
+.Bl -tag -width Ds
+.It Fl f , Fl -format Ar text | json
+Output format; text is the default.
+.It Fl v , Fl -verbose
+Increase verbosity; repeatable.
+.It Fl q , Fl -quiet
+Suppress non-essential output.
+.It Fl -evidence-log Ar file
+Append a JSON Lines evidence log of this run to
+.Ar file .
+.It Fl -hash-inputs
+Also record the SHA-256 of every input in the evidence log.
+.It Fl -no-color
+Disable colour in text output.
+.It Fl -debug , Fl -debug-log Ar file
+Trace every decision, to standard error or to
+.Ar file .
+.It Fl V , Fl -version
+Print the version.
+.El
+.Sh COMMANDS
+.Ss build
+.Nm Cm build
+.Fl o Ar report.json
+.Op Ar options
+.Ar log ...
+.Pp
+Consolidate evidence logs into one report.
+.Bl -tag -width Ds
+.It Fl o , Fl -output Ar report.json
+Write the report here.
+.It Fl -md Ar report.md
+Also render the report as Markdown.
+.It Fl -case Ar id
+Case identifier, as it appears on the report.
+.It Fl -examiner Ar name
+Who is doing the examination.
+.It Fl -note Ar text
+A note to carry in the report; repeatable.
+.It Fl -sign Ar keyfile
+Sign the report with this Ed25519 private key (unencrypted PKCS#8,
+the form
+.Ql openssl genpkey -algorithm ed25519
+writes), leaving the raw 64-byte signature beside it.
+.It Fl -signature Ar report.json.sig
+Write the signature here instead of next to the report.
+.El
+.Ss verify
+.Nm Cm verify
+.Op Ar options
+.Ar report.json
+.Pp
+Recompute the hashes a report recorded and say what still matches.
+.Bl -tag -width Ds
+.It Fl -evidence-root Ar dir
+Look for the evidence under this directory instead of the path
+recorded; the disks are rarely mounted where they were.
+.It Fl -outputs-root Ar dir
+Look for the extracted files under this directory.
+.It Fl -key Ar keyfile
+Also check the report's signature against this Ed25519 public key
+(SubjectPublicKeyInfo, the form
+.Ql openssl pkey -pubout
+writes).
+.It Fl -signature Ar report.json.sig
+Read the signature here instead of next to the report.
+.El
+.Ss keygen
+.Nm Cm keygen
+.Fl o Ar key
+.Op Fl -public Ar key.pub
+.Pp
+Write a new Ed25519 key pair to sign reports with.
+.Bl -tag -width Ds
+.It Fl o , Fl -output Ar key
+Write the private key here, and the public key at
+.Ar key Ns .pub .
+.It Fl -public Ar key.pub
+Write the public key here instead.
+.El
+.Sh EXIT STATUS
+0 when the report was built, or when everything it names still
+verifies; 1 for a usage error; 2 when a log or a file the report names
+cannot be read; 3 when something no longer matches.
+.Sh EXAMPLES
+A signed report of one case, and its check on another machine:
+.Bd -literal -offset indent
+zvolreport keygen -o examiner.key
+zvolreport build --case RT-4471 --examiner "A. Examiner" \e
+    --sign examiner.key -o case.json --md case.md case42.jsonl
+zvolreport verify --key examiner.key.pub \e
+    --evidence-root /mnt/images --outputs-root /mnt/rescue case.json
+.Ed
+.Sh SEE ALSO
+.Xr zvolcarve 1 ,
+.Xr zvolfiles 1 ,
+.Xr zvolrescue 1 ,
+.Xr zvoltimeline 1

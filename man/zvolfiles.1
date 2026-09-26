@@ -1,0 +1,141 @@
+.\" zvolfiles(1) — manual page, mdoc. Kept true to the program by
+.\" tests/man-check.sh.
+.Dd September 26, 2026
+.Dt ZVOLFILES 1
+.Os zvolrescue 0.9.7
+.Sh NAME
+.Nm zvolfiles
+.Nd files out of ZFS filesystem datasets, without importing the pool
+.Sh SYNOPSIS
+.Nm
+.Op Ar global options
+.Cm list
+.Ar dataset
+.Op Ar dev ...
+.Op Ar options
+.Nm
+.Op Ar global options
+.Cm extract
+.Ar dataset
+.Op Ar dev ...
+.Fl o Ar dir
+.Op Ar options
+.Nm
+.Op Ar global options
+.Cm objects
+.Ar dataset
+.Op Ar dev ...
+.Fl o Ar dir
+.Op Ar options
+.Sh DESCRIPTION
+.Nm
+reads a filesystem dataset of a ZFS pool at any transaction group that
+still verifies and writes its files out: directories, symbolic links,
+ownership and times, each file's blocks verified by their checksums.
+When the POSIX metadata is too damaged for a tree,
+.Cm objects
+writes one file per object instead.
+Nothing is written to the members.
+.Pp
+The global options and the pool member options are those of
+.Xr zvolrescue 1 :
+.Fl f , Fl -format Ar text | json ,
+.Fl v , Fl -verbose ,
+.Fl q , Fl -quiet ,
+.Fl -evidence-log ,
+.Fl -hash-inputs ,
+.Fl -no-color ,
+.Fl -debug ,
+.Fl -debug-log ,
+and
+.Fl -image ,
+.Fl -hints ,
+.Fl -search-order ,
+.Fl -pool-guid ,
+.Fl -assume-member ,
+.Fl -ignore-unknown-features ,
+.Fl -map ,
+.Fl -device-may-fail ,
+.Fl -surface-scan-on-device .
+.Sh OPTIONS
+Taken by every command:
+.Bl -tag -width Ds
+.It Fl -txg Ar n
+Transaction group to read; the newest that verifies when absent.
+.It Fl -key Ar keyspec
+Dataset encryption key:
+.Ql raw: Ns Ar file ,
+.Ql hex: Ns Ar hex ,
+.Ql passphrase: Ns Ar file ,
+or
+.Ql prompt .
+.El
+.Sh COMMANDS
+.Ss list
+.Nm Cm list
+.Ar dataset
+.Op Ar dev ...
+.Op Ar options
+.Pp
+Show what is in the dataset.
+.Bl -tag -width Ds
+.It Fl -path Ar path
+Path inside the dataset; the root when absent.
+A flag rather than a trailing word: the member list is variable-length,
+so a bare path after it could not be told from another member.
+.It Fl R , Fl -recursive
+Descend into subdirectories.
+.El
+.Ss extract
+.Nm Cm extract
+.Ar dataset
+.Op Ar dev ...
+.Fl o Ar dir
+.Op Ar options
+.Pp
+Write the tree out as files.
+.Bl -tag -width Ds
+.It Fl o , Fl -output Ar dir
+Write the tree here.
+.It Fl -path Ar path
+Path inside the dataset, repeatable; everything when absent.
+.It Fl -strict
+Stop at the first block that cannot be read.
+.It Fl -preserve Ar list
+Metadata to restore: any of
+.Ql times ,
+.Ql mode ,
+comma-separated; default both.
+.El
+.Ss objects
+.Nm Cm objects
+.Ar dataset
+.Op Ar dev ...
+.Fl o Ar dir
+.Op Ar options
+.Pp
+One file per object, for when the POSIX metadata is gone.
+.Bl -tag -width Ds
+.It Fl o , Fl -output Ar dir
+Write the objects here.
+.It Fl -strict
+Stop at the first block that cannot be read.
+.El
+.Sh EXIT STATUS
+As in
+.Xr zvolrescue 1 :
+0 success, 1 usage (a missing key among it), 2 evidence unreadable, 3
+the dataset unreadable at the requested TXG, 4 not every file whole, 5
+refused, 6 interrupted by a signal, 7 the medium refused a read.
+.Sh EXAMPLES
+One directory of a home dataset, at the TXG before it was emptied:
+.Bd -literal -offset indent
+zvolfiles list pool/home /dev/ada0p3 /dev/ada1p3 -R --txg 4816229
+zvolfiles extract pool/home /dev/ada0p3 /dev/ada1p3 --txg 4816229 \e
+    --path alice/thesis -o /mnt/rescue/home
+.Ed
+.Sh SEE ALSO
+.Xr zvolcarve 1 ,
+.Xr zvolreport 1 ,
+.Xr zvolrescue 1 ,
+.Xr zvoltimeline 1

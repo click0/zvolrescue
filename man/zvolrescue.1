@@ -1,0 +1,349 @@
+.\" zvolrescue(1) — manual page, mdoc. Kept true to the program by
+.\" tests/man-check.sh, which reads --help and this file on every push.
+.Dd September 26, 2026
+.Dt ZVOLRESCUE 1
+.Os zvolrescue 0.9.7
+.Sh NAME
+.Nm zvolrescue
+.Nd read-only extraction of zvols from ZFS pools that no longer import
+.Sh SYNOPSIS
+.Nm
+.Op Ar global options
+.Cm scan
+.Op Ar options
+.Ar dev ...
+.Nm
+.Op Ar global options
+.Cm list
+.Op Ar options
+.Op Ar dev ...
+.Nm
+.Op Ar global options
+.Cm dump
+.Ar dataset
+.Op Ar dev ...
+.Fl o Ar out.img
+.Op Ar options
+.Sh DESCRIPTION
+.Nm
+reads the on-disk format of a ZFS pool by itself, without the kernel's
+ZFS and without importing the pool, and writes the raw image of a
+volume (a zvol) out of it, at any transaction group (TXG) that still
+verifies.
+It reads its inputs and never writes to them: labels, uberblocks and
+every block are read through their own checksums, mirror copies and
+RAIDZ or dRAID parity are used to heal what one member cannot give,
+and an output that would land on an input device is refused.
+.Pp
+The pool's members are given as devices, partitions or image files.
+Every command takes the same
+.Ar global options ,
+and
+.Cm list
+and
+.Cm dump
+take the same
+.Sx POOL MEMBER OPTIONS .
+A JSON Lines evidence log of every run, with the hash of every output,
+is written with
+.Fl -evidence-log ;
+.Xr zvolreport 1
+turns those logs into one checkable report.
+.Sh GLOBAL OPTIONS
+.Bl -tag -width Ds
+.It Fl f , Fl -format Ar text | json
+Output format: human-readable text (the default), or one JSON document
+on standard output.
+.It Fl v , Fl -verbose
+Increase verbosity; repeatable.
+.It Fl q , Fl -quiet
+Suppress non-essential output.
+.It Fl -evidence-log Ar file
+Append a JSON Lines evidence log to
+.Ar file :
+what was opened, what was read, what was written and its hash.
+.It Fl -hash-inputs
+Also record the SHA-256 of every input in the evidence log.
+Off by default: hashing a shelf of disk images means reading all of
+them through, which can take hours.
+Outputs are always hashed.
+.It Fl -no-color
+Disable colour in text output.
+.It Fl -debug
+Trace every read decision (labels, uberblocks, blocks, dnodes, ZAPs,
+the DSL walk) with hex dumps on failures, to standard error.
+.It Fl -debug-log Ar file
+Write the
+.Fl -debug
+trace to
+.Ar file
+instead of standard error; implies
+.Fl -debug .
+.El
+.Sh POOL MEMBER OPTIONS
+How the pool is put together from what was given.
+Taken by
+.Cm list
+and
+.Cm dump ;
+.Cm scan
+takes those of them it names.
+.Bl -tag -width Ds
+.It Fl -image Ar file
+An image file that is a member of the pool; repeatable.
+Devices are given as plain arguments.
+.It Fl -hints Ar file
+Describe the layout by hand when the labels cannot: a JSON file with
+the ashift, the top-level vdevs and their members in vdev order.
+It is used exactly as a label would be; every block read through it
+is still verified by its checksum.
+.It Fl -search-order
+Try every member order the layout leaves open and keep the one the
+checksums accept.
+Only for raidz and draid, where order is what a DVA addresses.
+.It Fl -pool-guid Ar guid
+Select a pool by GUID when several are found on the members.
+.It Fl -assume-member Ar path Ns Op = Ns Ar guid
+Treat a member whose labels are gone as a leaf the configuration says
+is missing:
+.Ar path
+when only one leaf is missing, or
+.Ar path Ns = Ns Ar guid
+to name it.
+Repeatable.
+Nothing is taken on trust: every block read through it is still
+verified by its checksum.
+.It Fl -ignore-unknown-features
+Read a pool whose active feature flags this build cannot account for.
+Without this the run refuses and names them.
+With it the pool is read as though the features were not there, which
+can be wrong in a way no checksum objects to: a reflowed raidz hands
+back the checksums of other blocks, and they agree.
+.It Fl -map Ar member Ns = Ns Ar mapfile
+The GNU ddrescue mapfile an image was made with; repeatable.
+Sectors the imager could not read are refused before they are read, so
+a block that crosses them is kept as far as the imager did read it and
+the rest is zeros with the reason, not a checksum failure with none.
+.It Fl -device-may-fail
+Go on after a device refuses a read.
+Without this the first refused read on a device stops the run with
+exit status 7, and the disk is for an imager.
+With it the refused range is skipped once, zeros, the reason logged,
+nothing read twice, and the run stops anyway after 8 incidents.
+For the operator who has weighed it and needs one small object off a
+disk that cannot be imaged.
+.It Fl -surface-scan-on-device
+Search the surface of a block device: for uberblock anchors when its
+labels are gone, for a root when no uberblock survives.
+Refused without this, because a surface scan is what a disk with
+defects survives least: image the disk first, and scan the image.
+.El
+.Sh COMMANDS
+.Ss scan
+.Nm Cm scan
+.Op Ar options
+.Ar dev ...
+.Pp
+What is on these devices or images: labels, uberblocks, the TXG
+window, which pool each member belongs to and where in it, what is
+missing, what is stale.
+.Fl v
+adds the uberblock ring of every label, corrupt slots included.
+.Bl -tag -width Ds
+.It Fl -zero-point
+Search for the vdev's zero point (where its label area begins) even
+when its labels are readable.
+The search runs by itself on a member whose four label configurations
+are all unusable.
+.It Fl -zero-point-whole
+Search the whole member for the zero point, not just its first and
+last 64 MiB.
+.It Fl -psize Ar bytes
+Physical size to assume for the vdev when testing the rear label pair;
+repeatable.
+The front pair needs no hypothesis.
+.It Fl -hints Ar file
+Describe the layout by hand: the JSON template that
+.Fl -emit-label
+turns into a label.
+.It Fl -emit-label Ar file
+Write the label the layout describes for one member to
+.Ar file :
+a 256 KiB image with the configuration nvlist sealed for its label
+position, to place on a
+.Em copy
+of the disk.
+The geometry goes to
+.Ar file Ns .json
+beside it.
+Nothing is ever written to the evidence.
+.It Fl -emit-for Ar top : Ns Ar leaf
+Which member of the layout the emitted label belongs to; default
+.Ql 0:0 .
+.It Fl -emit-label-index Ar n
+Which of the four label positions to seal the emitted label for;
+default 0.
+A label verifies only at the offset it was sealed for.
+.It Fl -map , Fl -device-may-fail , Fl -surface-scan-on-device
+As under
+.Sx POOL MEMBER OPTIONS .
+.El
+.Ss list
+.Nm Cm list
+.Op Ar options
+.Op Ar dev ...
+.Pp
+List the datasets, volumes and snapshots of the pool at one TXG, with
+type, GUID, creation TXG and time, referenced size, and for volumes
+their size and block size.
+.Bl -tag -width Ds
+.It Fl -txg Ar n
+Transaction group to read; default the newest that verifies.
+.It Fl -before Ar timestamp
+The newest TXG synced at or before this time, RFC 3339 or Unix
+seconds.
+.It Fl -diff Ar txg2
+Also show what was created or destroyed relative to this TXG, with the
+.Fl -txg
+that gets each destroyed dataset back.
+.It Fl r , Fl -recursive
+Also list snapshots.
+.It Fl p , Fl -properties
+Show the properties each dataset has set, user properties included.
+Only what was set on the dataset itself is on disk; anything else is
+inherited or a default.
+.El
+.Ss dump
+.Nm Cm dump
+.Ar dataset
+.Op Ar dev ...
+.Fl o Ar out.img
+.Op Ar options
+.Pp
+Extract a volume to a raw sparse image, verifying every block by its
+checksum, healing from another copy or from parity where one member
+fails, and hashing the image as it is written.
+The dataset comes first so that the variable-length list of members
+can follow it.
+Without
+.Fl -txg
+the TXG is the newest verified one that names the dataset and still
+reads its object set; one whose object set has been reused since a
+destroy is passed over for an older one, and the record says so.
+.Bl -tag -width Ds
+.It Fl o , Fl -output Ar out.img
+The output image; a directory with
+.Fl r .
+Refused if it resolves onto an input device.
+.It Fl -txg Ar n
+Transaction group to read.
+.It Fl -strict
+Abort on the first unreadable block instead of writing zeros for it.
+.It Fl -key Ar keyspec
+Encryption key of an encrypted dataset:
+.Ql raw: Ns Ar file ,
+.Ql hex: Ns Ar hex ,
+.Ql passphrase: Ns Ar file ,
+or
+.Ql prompt .
+.It Fl -resume
+Continue an interrupted extraction of the same dataset and TXG.
+A SIGINT or SIGTERM ends a run at the next block with its state
+written (exit status 6); the state is kept in
+.Pa out.img.resume.json
+while a run is in progress, and a second signal kills the run the
+usual way.
+.It Fl r , Fl -recursive
+Extract every volume under
+.Ar dataset
+into the directory
+.Ar out ,
+one image per volume plus
+.Pa manifest.json .
+.It Fl -hash Ar list
+Also hash the image with these, as it is written, for a toolchain
+that wants them:
+.Ql md5 ,
+.Ql sha1 ,
+comma-separated.
+SHA-256 is always taken.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa out.img.resume.json
+The state of an interrupted
+.Cm dump ,
+beside its output; removed when the image is whole.
+.It Pa manifest.json
+Under the output directory of
+.Cm dump Fl r :
+every image written, its dataset, TXG, size and hash.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width Ds -compact
+.It 0
+Success.
+.It 1
+Usage error, including a missing or wrong encryption key.
+.It 2
+Evidence unreadable: a member could not be opened or read.
+.It 3
+The pool is unrecoverable at the requested TXG, or the dataset is not
+readable at any TXG.
+.It 4
+The image is not the whole volume: blocks that could not be read were
+written as zeros and counted, or
+.Fl -strict
+aborted at the first one.
+.It 5
+Refused: the output would land on an input, or a device would have
+been surface-scanned without leave.
+.It 6
+Interrupted by a signal; the state is written and
+.Fl -resume
+continues.
+.It 7
+The medium refused a read: a device, not an image, returned an I/O
+error and the run stopped there.
+.El
+.Sh EXAMPLES
+What the two halves of a mirror hold:
+.Dl zvolrescue scan /dev/ada0p3 /dev/ada1p3
+.Pp
+The datasets at the newest TXG, and what was destroyed since TXG
+4816229:
+.Dl zvolrescue list -r --diff 4816229 /dev/ada0p3 /dev/ada1p3
+.Pp
+The destroyed volume back, from the TXG before the destroy, with an
+evidence log:
+.Bd -literal -offset indent
+zvolrescue --evidence-log case42.jsonl dump pool/vm/disk0 \e
+    /dev/ada0p3 /dev/ada1p3 --txg 4816229 -o /mnt/rescue/disk0.img
+.Ed
+.Pp
+The same from images made with ddrescue, with their mapfiles so that
+what the imager could not read is refused by name:
+.Bd -literal -offset indent
+zvolrescue dump pool/vm/disk0 --image ada0.img --image ada1.img \e
+    --map ada0.img=ada0.map --map ada1.img=ada1.map -o disk0.img
+.Ed
+.Sh SEE ALSO
+.Xr zvolcarve 1 ,
+.Xr zvolfiles 1 ,
+.Xr zvolreport 1 ,
+.Xr zvoltimeline 1 ,
+.Xr zdb 8 ,
+.Xr zpool 8
+.Pp
+The specification, the companion tools and the real-world test matrix
+are in the
+.Pa docs
+directory of the source and at
+.Lk https://github.com/click0/zvolrescue .
+.Sh CAVEATS
+.Nm
+recovers volumes, not pools: it never writes to a pool and cannot make
+one import again.
+What it reads is what the members hold; a block overwritten after a
+destroy is gone, and the image says so with the block zeroed and
+counted rather than with a guess.
