@@ -631,7 +631,7 @@ and runs the matrix.
 | **2 — Redundancy & integrity** | RAIDZ1/2/3 reconstruction, dRAID, all checksums, gang/embedded blocks, `--strict`, `--resume`, bulk `-r` | F-24…F-26, F-31, F-32, F-05, F-06 | UC-2 passes: zvols recovered from a raidz2 fixture with one member missing and another corrupted. |
 | **3 — Forensics** | Encrypted datasets with key (main binary); first companion tools: `zvoltimeline`, `zvolcarve`, `zvolreport` | F-27; ◇ F-15, F-41, F-42, F-51, F-52 | UC-3 passes: full report with hash chain; carved zvol recovered after uberblocks were rolled past it. |
 | **4 — Filesystems** | Companion tool `zvolfiles`: object dump of fs datasets, then ZPL file-level recovery | ◇ F-29, F-30, F-43 | Files from a destroyed filesystem dataset recovered with correct names, sizes and hashes. |
-| **Later** | TUI, `zfs send` stream output, plugins for guest-fs carving, packaging in FreeBSD ports; a separate imaging tool for failing media, outside this repository — map-driven, in `ddrescue`'s map format so this tool reads it unchanged, with read strategies by zone and surface and rules for when to stop (§3.2, N-10) | — | — |
+| **Later** | TUI, `zfs send` stream output, plugins for guest-fs carving, submission of the port to the FreeBSD ports tree and of the PKGBUILD to the AUR; a separate imaging tool for failing media, outside this repository — map-driven, in `ddrescue`'s map format so this tool reads it unchanged, with read strategies by zone and surface and rules for when to stop (§3.2, N-10) | — | — |
 
 Version numbering: phases 0–4 shipped as `0.N.x`, and the tag that
 closed the functional rows was `v0.8.5`. What remains is measured in
@@ -656,8 +656,11 @@ exit 6, as §7 had promised since 0.1 (F-32, COMPANIONS §1.2); and the
 first real-kernel environment of the matrix — Debian with `zfs-dkms` and
 loop devices — is a script whose every oracle comes from OpenZFS alone.
 `1.0.0` is the full release, and waits for what no CI can supply: three real-world incidents with
-documented outcomes ([REALWORLD-TESTS.md](REALWORLD-TESTS.md)),
-packaging (ports, `.deb`, AUR, a manual page); the open questions of §12
+documented outcomes ([REALWORLD-TESTS.md](REALWORLD-TESTS.md)). The
+packaging it also waited for — a FreeBSD port, a `.deb`, an AUR
+PKGBUILD, a manual page for every program — is built and installed in
+CI on every push (E4), with the submission of the port to the ports tree
+and of the PKGBUILD to the AUR still to do; the open questions of §12
 are settled (D-8 to D-11).
 
 ## 11. Risks and mitigations

@@ -254,7 +254,15 @@ a release with a dynamically linked file in it. A static FreeBSD build
 of any commit or tag is one click away in the meantime: Actions →
 "FreeBSD static binaries" → Run workflow; the artifact holds the five
 programs, each checked with `file`, and their `SHA256SUMS`. Drop the
-binary on the rescue medium and run it; nothing to install. Verify with `sha256sum -c SHA256SUMS`,
+binary on the rescue medium and run it; nothing to install. Or install a package:
+on Debian and Ubuntu, `sudo apt install ./zvolrescue_<version>_amd64.deb`
+(or `_arm64.deb`) from the same release; on FreeBSD, the port under
+`packaging/freebsd/sysutils/zvolrescue` builds and installs with
+`make install` (not yet in the ports tree); on Arch and CachyOS,
+`packaging/aur` holds the PKGBUILD (not yet on the AUR): `makepkg -si`
+in a copy of it. Each puts the five programs and their manual pages in
+place, and `man zvolrescue` is the reference for every option; CI
+builds and installs all three on every push. Verify with `sha256sum -c SHA256SUMS`,
 and `SHA256SUMS` itself against its Sigstore signature — the release notes
 carry the `cosign verify-blob` line for that tag; the certificate names
 this repository's release workflow and the tag, and there is no signing

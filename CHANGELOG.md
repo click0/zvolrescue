@@ -15,6 +15,26 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ## Unreleased
 
+### Added
+* **Manual pages, and packages that install them: a FreeBSD port, a
+  `.deb`, an AUR PKGBUILD (REALWORLD-TESTS E4).** `man/zvolrescue.1`,
+  `zvoltimeline.1`, `zvolreport.1`, `zvolcarve.1` and `zvolfiles.1` in
+  mdoc, each kept true to its program by `tests/man-check.sh`, which
+  reads `--help` of every subcommand and refuses a page missing an
+  option, carrying another version, or failing `mandoc`. Under
+  `packaging/`: `deb/build.sh` makes `zvolrescue_<version>_<arch>.deb`
+  of the five static binaries and the pages with `dpkg-deb` alone, and
+  every release now ships one for amd64 and arm64, covered by
+  `SHA256SUMS`; `freebsd/sysutils/zvolrescue` is a port (`USES=cargo`,
+  its crate list generated from `Cargo.lock`, its `distinfo` written by
+  a script that hashes the tarball and every crate the way `make
+  makesum` does); `aur/` holds the PKGBUILD and `.SRCINFO`, with a
+  script that points them at a new tag. CI builds and installs all
+  three on every push — the port on FreeBSD 15 through the ports
+  framework, the `.deb` with `dpkg`, the PKGBUILD with `makepkg` in an
+  Arch container — and each install runs every program and finds every
+  page. Submission to the ports tree and to the AUR is still to do.
+
 ### Fixed
 * **A member detached while it was out of the machine is set aside,
   not listed beside the survivor.** `zpool detach` erases the labels
@@ -88,6 +108,12 @@ tagged. `v0.7.1` is the release that carries those six.
   prints now names where the module came from (`zfs-dkms` or the
   in-tree module) and the module's version where it differs from
   userland's.
+* **The FreeBSD static binary built on 15 runs on 14 (REALWORLD-TESTS
+  E3).** A CI job takes the `crt-static` binary the FreeBSD 15 job
+  built, with the mirror fixture and the hash of the volume it read,
+  and runs version, scan and dump on FreeBSD 14.5-RELEASE: all pass,
+  the hash matches. The matrix row says so, with the caveat that this
+  is a full 14 VM and not mfsBSD itself.
 
 ## v0.9.7 — 2026-09-23
 
