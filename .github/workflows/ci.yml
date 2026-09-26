@@ -1824,7 +1824,7 @@ jobs:
           # The tarball the PKGBUILD would fetch for the tag, made from
           # this tree instead (the checkout in a container has no .git
           # to archive from); makepkg takes a source file that is there.
-          tar --exclude=./.git --exclude=./target --transform "s|^\./|zvolrescue-$v/|" -czf "/home/builder/pkg/zvolrescue-$v.tar.gz" .
+          tar --exclude=./.git --exclude=./target --transform "s|^\.|zvolrescue-$v|" -czf "/home/builder/pkg/zvolrescue-$v.tar.gz" .
           chown -R builder /home/builder/pkg
           su builder -c "cd /home/builder/pkg && makepkg --noconfirm --skipchecksums"
           pacman -U --noconfirm /home/builder/pkg/zvolrescue-*.pkg.tar.zst
