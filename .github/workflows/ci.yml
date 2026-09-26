@@ -1816,13 +1816,15 @@ jobs:
       - uses: actions/checkout@v5
       - name: makepkg, pacman -U, man
         run: |
-          pacman -Syu --noconfirm --needed base-devel rust man-db git
+          pacman -Syu --noconfirm --needed base-devel rust man-db
           useradd -m builder
           v=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
           mkdir -p /home/builder/pkg
           cp packaging/aur/PKGBUILD /home/builder/pkg/
-          git config --global --add safe.directory "$PWD"
-          git archive --format=tar.gz --prefix="zvolrescue-$v/" -o "/home/builder/pkg/zvolrescue-$v.tar.gz" HEAD
+          # The tarball the PKGBUILD would fetch for the tag, made from
+          # this tree instead (the checkout in a container has no .git
+          # to archive from); makepkg takes a source file that is there.
+          tar --exclude=./.git --exclude=./target --transform "s|^\./|zvolrescue-$v/|" -czf "/home/builder/pkg/zvolrescue-$v.tar.gz" .
           chown -R builder /home/builder/pkg
           su builder -c "cd /home/builder/pkg && makepkg --noconfirm --skipchecksums"
           pacman -U --noconfirm /home/builder/pkg/zvolrescue-*.pkg.tar.zst
