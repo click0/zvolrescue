@@ -1,0 +1,21 @@
+Package: zvolrescue
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: Vladyslav V. Prodan <akapulko@gmail.com>
+Installed-Size: @SIZE@
+Section: admin
+Priority: optional
+Homepage: https://github.com/click0/zvolrescue
+Description: read-only extraction of zvols and files from ZFS pools that no longer import
+ zvolrescue reads the on-disk format of a ZFS pool by itself, without
+ the kernel's ZFS and without importing the pool, and writes the raw
+ image of a volume out of it at any transaction group that still
+ verifies: every block through its checksum, mirror copies and RAIDZ or
+ dRAID parity to heal what one member cannot give, encrypted datasets
+ with a key. It never writes to the members.
+ .
+ With it: zvoltimeline (the pool's history from the transaction groups
+ it still carries), zvolcarve (volumes no uberblock points at any more,
+ found in raw vdev space), zvolfiles (files out of filesystem datasets)
+ and zvolreport (the evidence logs of the others as one signed,
+ checkable report). The binaries are static and depend on nothing.

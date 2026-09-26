@@ -135,6 +135,18 @@ jobs:
           ./zvolreport-*-x86_64-linux-musl --version
           ./zvolcarve-*-x86_64-linux-musl --version
           ./zvolfiles-*-x86_64-linux-musl --version
+          # A .deb for each Linux machine, of the same static binaries
+          # and the manual pages: `apt install ./zvolrescue_*.deb`.
+          v=$(printf '%s' "$TAG" | sed 's/^[vV]\.*//')
+          for pair in x86_64-linux-musl:amd64 aarch64-linux-musl:arm64; do
+            plat=${pair%%:*}; arch=${pair##*:}
+            mkdir -p "/tmp/bin-$arch"
+            for b in zvolrescue zvoltimeline zvolreport zvolcarve zvolfiles; do
+              cp "$b-$v-$plat" "/tmp/bin-$arch/$b"
+            done
+            ../packaging/deb/build.sh "$v" "$arch" "/tmp/bin-$arch" ../man .
+          done
+          dpkg-deb -I "zvolrescue_${v}_amd64.deb"
           sha256sum zvol* > SHA256SUMS
           cat SHA256SUMS
       # N-07: signed release files. Nobody holds a signing key: the
@@ -214,7 +226,8 @@ jobs:
             exit 1
           fi
           ntools=$(printf '%s\n' "$listed" | wc -l | tr -d ' ')
-          nbins=$(ls dist | grep -c '^zvol')
+          nbins=$(ls dist | grep -c "^zvol[a-z]*-$v-")
+          ndebs=$(ls dist | grep -c '^zvolrescue_.*\.deb$')
           {
             echo "**zvolrescue $tag** — read-only extraction of zvols from ZFS pools that no longer import: labels, uberblocks, mirror/RAIDZ/dRAID reconstruction, every checksum and compression, encrypted datasets with a key."
             echo
@@ -240,7 +253,9 @@ jobs:
             echo
             echo "So the carver for Linux x86_64 is \`zvolcarve-$v-x86_64-linux-musl\`, and the FreeBSD main binary is \`zvolrescue-$v-amd64-freebsd\`."
             echo
-            echo "\`SHA256SUMS\` covers all $nbins of them, and \`SHA256SUMS.sigstore.json\` is its signature — made by this release workflow at this tag, keylessly, through Sigstore:"
+            echo "On Debian and Ubuntu, \`zvolrescue_${v}_amd64.deb\` and \`zvolrescue_${v}_arm64.deb\` install the same five static binaries with their manual pages: \`sudo apt install ./zvolrescue_${v}_amd64.deb\`, then \`man zvolrescue\`."
+            echo
+            echo "\`SHA256SUMS\` covers all $nbins binaries and the $ndebs packages, and \`SHA256SUMS.sigstore.json\` is its signature — made by this release workflow at this tag, keylessly, through Sigstore:"
             echo
             echo '```sh'
             echo "sha256sum -c SHA256SUMS   # or, on FreeBSD: sha256 -c SHA256SUMS"

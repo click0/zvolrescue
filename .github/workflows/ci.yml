@@ -45,6 +45,19 @@ jobs:
         run: |
           sudo apt-get install -y -qq --no-install-recommends mandoc
           tests/man-check.sh ./target/release man
+      - name: The .deb installs, and man zvolrescue is there (REALWORLD-TESTS E4)
+        run: |
+          v=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          packaging/deb/build.sh "$v+git${GITHUB_SHA::7}" amd64 ./target/release man /tmp/deb
+          dpkg-deb -I /tmp/deb/*.deb
+          sudo dpkg -i /tmp/deb/*.deb
+          test "$(command -v zvolrescue)" = /usr/bin/zvolrescue
+          zvolrescue --version
+          zvolcarve --version && zvolfiles --version && zvolreport --version && zvoltimeline --version
+          man -w zvolrescue zvoltimeline zvolreport zvolcarve zvolfiles
+          man zvolrescue | head -5
+          sudo dpkg -r zvolrescue
+          test ! -e /usr/bin/zvolrescue
       - name: The version and the CHANGELOG say the same thing
         run: |
           # The release workflow takes the tag's CHANGELOG section as
