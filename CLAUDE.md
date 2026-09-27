@@ -63,7 +63,10 @@ cargo build --release && cargo build --release -p zfs-read --examples
    (англійською: що це, таблиця артефактів, секція CHANGELOG, застереження
    для pre-release) формує сам workflow — після завершення пайплайна
    перевірити сторінку релізу і, якщо треба, доправити текст через API.
-   Процедура — `docs/RELEASING.md`.
+   Версія живе ще в `man/*.1` (`.Os`), `packaging/aur/PKGBUILD` (+
+   `.SRCINFO`) і в `DISTVERSION` порту; `distinfo` порту і `sha256sums`
+   PKGBUILD хешують tarball тега, тож їх після релізу дописує сам
+   workflow окремим комітом у `main`. Процедура — `docs/RELEASING.md`.
 5. Кожен новий факт про on-disk формат, знайдений на реальних даних, —
    рядок у `docs/REALWORLD-TESTS.md` (+ `.uk.md`) і, якщо змінює
    архітектурне рішення, — у журнал рішень `docs/SPEC.md` §13.

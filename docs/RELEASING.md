@@ -18,7 +18,17 @@ moment of tagging, and everything below follows from that:
 1. Update `version` in the workspace `Cargo.toml` and add a section
    `## vX.Y.Z — date` to `CHANGELOG.md` (and `CHANGELOG.uk.md`). Fold
    whatever `## Unreleased` holds into it: after the tag it is released,
-   whether or not the section said so.
+   whether or not the section said so. The version is also in the
+   manual pages (`.Os zvolrescue X.Y.Z` in `man/*.1`; `tests/man-check.sh`
+   refuses a page at another version), in `pkgver` of
+   `packaging/aur/PKGBUILD` (then `packaging/aur/srcinfo.sh >
+   packaging/aur/.SRCINFO`) and in `DISTVERSION` of
+   `packaging/freebsd/sysutils/zvolrescue/Makefile`; `SPEC.md`'s header
+   and §10 and the README status line say which version the documents
+   describe. Leave the PKGBUILD's `sha256sums` at `SKIP` and the port's
+   `distinfo` as it is: both hash the tag's tarball, which does not exist
+   yet, and the release workflow writes them after the tag and pushes
+   that one commit to `main` (step 7).
 2. Make sure CI is green on `main`, and that nothing has been pushed
    since the run that went green.
 3. Tag. From the web: **Releases → Draft a new release → Choose a tag →**
@@ -101,6 +111,16 @@ moment of tagging, and everything below follows from that:
    it does not match the binaries the build actually produced — a new
    companion tool means a new line there, not a release that ships a
    binary its own notes never mention.
+
+   After the release is published, one more job hashes the tag's
+   tarball and every crate for the port's `distinfo`
+   (`packaging/freebsd/distinfo.sh`) and the PKGBUILD's `sha256sums`
+   (`packaging/aur/update.sh`), and pushes the result to `main` as a
+   commit of its own — only while `main` is still at the released
+   version, so a re-cut of an old tag never rewrites the packaging of a
+   newer `main`. Until that commit lands, the port and the PKGBUILD in
+   `main` name the new version with the old checksums; CI does not
+   depend on either (it regenerates them for the commit under test).
 
 Version numbers follow SemVer. The first cut was `v0.1.0-alpha.1`; from
 then on every release is a plain minor bump — `v0.2.0`, `v0.3.0`, … — with

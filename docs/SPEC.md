@@ -1,6 +1,6 @@
 # zvolrescue — Technical Specification (ТЗ)
 
-**Status:** living document, revised 2026-09-23 (tool at v0.9.7) · **Owner:** Vladyslav V. Prodan
+**Status:** living document, revised 2026-09-27 (tool at v0.9.8) · **Owner:** Vladyslav V. Prodan
 
 **Ukrainian version:** [SPEC.uk.md](SPEC.uk.md) · **Companion tools:** [COMPANIONS.md](COMPANIONS.md)
 
@@ -655,6 +655,11 @@ extractor at the next block, chunk or entry with the state written and
 exit 6, as §7 had promised since 0.1 (F-32, COMPANIONS §1.2); and the
 first real-kernel environment of the matrix — Debian with `zfs-dkms` and
 loop devices — is a script whose every oracle comes from OpenZFS alone.
+`v0.9.8` is the packaged release: that script passes on Ubuntu's
+in-tree module and on Debian's `zfs-dkms`, the two defects it found are
+fixed, the FreeBSD binary is static and runs on 14 as well as 15, and
+every program has a manual page and a port, a `.deb` and a PKGBUILD
+that CI builds and installs on every push.
 `1.0.0` is the full release, and waits for what no CI can supply: three real-world incidents with
 documented outcomes ([REALWORLD-TESTS.md](REALWORLD-TESTS.md)). The
 packaging it also waited for — a FreeBSD port, a `.deb`, an AUR

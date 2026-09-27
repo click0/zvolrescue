@@ -340,3 +340,31 @@ jobs:
           gh release edit "$tag" --draft=false
           gh release view "$tag" --json name,isDraft,isPrerelease,assets \
             --jq '"published \(.name) (draft=\(.isDraft) prerelease=\(.isPrerelease)) with \(.assets | length) file(s): " + (.assets | map(.name) | join(", "))'
+
+  # The port's distinfo and the PKGBUILD's checksum hash the tag's own
+  # tarball, so they cannot be written before the tag exists; the
+  # release commit carries the new version and a `SKIP`, and this job
+  # fills both in once the release is out and pushes that one commit to
+  # main. Only when main is still at the released version: a re-cut of
+  # an old tag must not rewrite the packaging of a newer main.
+  packaging-follows-the-tag:
+    name: The port's distinfo and the PKGBUILD's checksum, for the tag
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+      - name: Hash the tag's tarball and every crate; commit what changed
+        run: |
+          v=$(printf '%s' "$TAG" | sed 's/^[vV]\.*//')
+          at=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          if [ "$at" != "$v" ]; then echo "main is at $at, not $v: leaving its packaging alone"; exit 0; fi
+          packaging/freebsd/distinfo.sh "$v"
+          packaging/aur/update.sh "$v"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packaging
+          if git diff --cached --quiet; then echo "nothing to commit"; exit 0; fi
+          git commit -m "packaging: the port's distinfo and the PKGBUILD's checksum for v$v"
+          git push origin HEAD:main

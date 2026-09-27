@@ -13,7 +13,20 @@ development milestone that names what changed when — the sections below
 are their record — and ships inside the next version that does get
 tagged. `v0.7.1` is the release that carries those six.
 
-## Unreleased
+## v0.9.8 — 2026-09-27
+
+**The packaged release.**
+The tool has now been run on real kernels: the matrix's script passes
+every applicable scenario on Ubuntu 24.04's in-tree OpenZFS and on
+Debian 12's `zfs-dkms`, on pools the kernel made, every oracle from
+OpenZFS — and those runs found what fixtures had not: a member
+detached while it was out of the machine listed beside the survivor,
+and `dump` stopping at a TXG whose object set a later write had
+reused instead of taking an older one. Both are fixed below. The
+FreeBSD release binary is static now, like the Linux ones, and the
+one built on 15 runs on 14. And the packaging `1.0.0` was waiting for
+is here: manual pages for every program, a FreeBSD port, a `.deb` and
+an AUR PKGBUILD, each built and installed in CI on every push.
 
 ### Added
 * **Manual pages, and packages that install them: a FreeBSD port, a
