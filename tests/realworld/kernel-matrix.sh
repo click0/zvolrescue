@@ -663,6 +663,7 @@ if [ -z "$cfail" ]; then result C3 PASS "$(words $C3_KEYS) block sizes$(here "$N
 
 # C4: sparse image
 if dump_matches c4 "${P}m/sparse" "${SHA[${P}m/sparse]}" "$M0" "$M1"; then
+    sync   # a ZFS-backed work directory counts the blocks only once they are written
     used=$(du -k "$WORK/out/c4.img" | awk '{print $1 * 1024}')
     if [ "$used" -lt $((200 * 1048576)) ]; then result C4 PASS "1 GiB image uses $used bytes on disk"; else result C4 FAIL "image not sparse: $used bytes"; fi
 else result C4 FAIL "see out/c4-*"; fi
@@ -854,7 +855,9 @@ elif os.environ["HAVE_TRACE"] == "1":
     # was opened on, and count the preads on it while it is.
     opened = re.compile(r'\bopen(?:at)?\((?:AT_FDCWD,)?"([^"]+)"[^)]*\)\s+=\s+(\d+)')
     closed = re.compile(r'\bclose\((\d+)\)')
-    pread = re.compile(r'\bpread\((\d+),0x[0-9a-f]+,(\d+),(0x[0-9a-f]+|\d+)\)\s+=')
+    # The buffer is printed as the bytes read ("\0\0..."...), commas and
+    # all; the size and offset are the last two arguments.
+    pread = re.compile(r'\bpread\((\d+),.*,(\d+),(0x[0-9a-f]+|\d+)\)\s+=')
     fds, reads = {}, []
     for line in open(os.environ["TRACE"]):
         m = opened.search(line)
