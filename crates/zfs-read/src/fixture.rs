@@ -376,6 +376,11 @@ pub struct Alloc {
     /// sample builder has put it: where a fixture that wants that block
     /// gone finds it.
     pub last_zvol_objset: Option<[u8; blkptr::SIZE]>,
+    /// The pointer to the block of the sample volume's dnodes (the data
+    /// object and its properties), beneath that object set: the block a
+    /// fixture that wants the object set to read but the volume not to
+    /// overwrites.
+    pub last_zvol_dnodes: Option<[u8; blkptr::SIZE]>,
     /// Build the sample volume deduplicated (SPEC F-28): its data
     /// pointers carry the dedup bit and a dedup-capable checksum
     /// (sha256), and its properties ZAP says `dedup=sha256,verify`.
@@ -508,6 +513,7 @@ impl Alloc {
             data: None,
             dense: None,
             last_zvol_objset: None,
+            last_zvol_dnodes: None,
             fill: 1,
             dedup: false,
         }
@@ -1133,6 +1139,7 @@ pub fn build_sample_mos_variant(
     .build();
     let os_zvol = a.put_objset(m, &objset(&zvol_meta, 3), zvol_objects, 100);
     a.last_zvol_objset = Some(os_zvol);
+    a.last_zvol_dnodes = Some(zvol_dnode_blk);
 
     let mut dnodes = vec![0u8; 16384];
     let mut put = |obj: u64, bytes: Vec<u8>| {
@@ -1443,14 +1450,32 @@ fn destroyed_zvol_members_with(
     (members, newest, previous)
 }
 
+/// What [`objset_reused_members`] built: the member images, the TXGs
+/// that matter and where the blocks a reuse would overwrite are.
+pub struct Reused {
+    /// The member images.
+    pub members: Vec<Vec<u8>>,
+    /// The TXG at which the volume is destroyed.
+    pub newest: u64,
+    /// The TXG before it, which still names the volume over blocks the
+    /// caller is to overwrite.
+    pub reused: u64,
+    /// The TXG before that, which holds the volume whole.
+    pub whole: u64,
+    /// DVA offset of the volume's object set block at `reused` (the same
+    /// in every member).
+    pub objset: u64,
+    /// DVA offset of the block of the volume's dnodes beneath it.
+    pub dnodes: u64,
+}
+
 /// A mirror on which `tank/vm/disk0` was destroyed at the newest TXG,
-/// the TXG before it still names the volume but the block its object
-/// set was in is for the caller to overwrite, and the TXGs before that
-/// hold it whole — what a `zfs destroy` followed by more writes leaves
-/// in the uberblock ring once the freed block is reused. Returns the
-/// member images, the TXGs `(destroyed_at, reused_at, last_whole)` and
-/// the DVA offset of that object set block (the same in every member).
-pub fn objset_reused_members(pool: &mut Pool, size: u64) -> (Vec<Vec<u8>>, u64, u64, u64, u64) {
+/// the TXG before it still names the volume but the blocks its object
+/// set and its dnodes were in are for the caller to overwrite, and the
+/// TXGs before that hold it whole — what a `zfs destroy` followed by
+/// more writes leaves in the uberblock ring once the freed blocks are
+/// reused.
+pub fn objset_reused_members(pool: &mut Pool, size: u64) -> Reused {
     let txgs: Vec<u64> = pool.uberblocks.iter().map(|(t, _)| *t).collect();
     assert!(txgs.len() >= 3, "need at least three uberblocks");
     let newest = txgs[txgs.len() - 1];
@@ -1464,15 +1489,27 @@ pub fn objset_reused_members(pool: &mut Pool, size: u64) -> (Vec<Vec<u8>>, u64, 
     let objset = alloc
         .last_zvol_objset
         .expect("the sample builder records the volume's object set");
+    let dnodes = alloc
+        .last_zvol_dnodes
+        .expect("the sample builder records the volume's dnodes");
     let without = build_sample_mos_variant(&mut members, &mut alloc, false);
     pool.rootbp = Some(with);
     pool.rootbp_by_txg = vec![(newest, without), (reused, with_again)];
     for (i, img) in members.iter_mut().enumerate() {
         pool.write_labels(i, img);
     }
-    let w1 = u64::from_le_bytes(objset[8..16].try_into().expect("8 bytes"));
-    let offset = blkptr::Dva::from_words(0, w1).offset;
-    (members, newest, reused, whole, offset)
+    let offset = |bp: [u8; blkptr::SIZE]| {
+        let w1 = u64::from_le_bytes(bp[8..16].try_into().expect("8 bytes"));
+        blkptr::Dva::from_words(0, w1).offset
+    };
+    Reused {
+        members,
+        newest,
+        reused,
+        whole,
+        objset: offset(objset),
+        dnodes: offset(dnodes),
+    }
 }
 
 /// [`destroyed_zvol_members`] with `tank/vm/disk0` deduplicated (SPEC

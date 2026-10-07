@@ -13,6 +13,26 @@ development milestone that names what changed when — the sections below
 are their record — and ships inside the next version that does get
 tagged. `v0.7.1` is the release that carries those six.
 
+## Unreleased
+
+### Fixed
+
+* **`dump` passes over a TXG at which a destroyed volume's dnodes are
+  gone, not only its object set.** v0.9.8 made the search pass over a
+  TXG whose object set block no longer reads, but checked that block
+  alone. The blocks a destroy frees are reused in no particular order,
+  and on Debian 12's OpenZFS 2.1.11 and FreeBSD 15's 2.4.2 the block of
+  the volume's dnodes went first: the object set block still read, the
+  search stopped there, and the run then failed opening the volume
+  with `every copy failed its checksum` (exit 3) while an older TXG
+  held it whole. Found by the matrix's D2 on both kernels; reproduced
+  with a fixture. The search now checks what `dump` opens before the
+  first data block — the object set and, for a volume, its data object
+  and size — and passes over a TXG where any of it does not read. The
+  messages say `unreadable` and `does not read there` without naming
+  the object set, since that is no longer the only thing that can be
+  gone.
+
 ## v0.9.8 — 2026-09-27
 
 **The packaged release.**

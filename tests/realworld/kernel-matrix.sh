@@ -738,9 +738,9 @@ else result C12 SKIP "raidz_expansion not available in this ZFS (needs OpenZFS 2
 
 # D2: destroyed, then 500 MiB written elsewhere over several TXGs. Four
 # honest answers: whole from an older TXG; named at no TXG left in the
-# ring; named at one whose object set the writes reused, readable at
-# none (exit 3 either way); or an older MOS intact but data blocks
-# reused, zeroed and counted (exit 4).
+# ring; named at one whose object set or volume dnodes the writes
+# reused, readable at none (exit 3 either way); or an older MOS intact
+# but data blocks reused, zeroed and counted (exit 4).
 rm -f "$WORK/out/d2.img"
 run d2 -f json dump "${P}m/doomed2" "$M0" "$M1" -o "$WORK/out/d2.img"
 got=$(jsonq 'print(d["volumes"][0]["sha256"])' < "$WORK/out/d2.log" 2>/dev/null)
@@ -748,7 +748,7 @@ zeroed=$(jsonq 'v=d["volumes"][0]; print(v["blocks_zeroed"], "of", v["blocks_tot
 unreadable=$(jsonq 'print(" ".join(str(u["txg"]) for u in d.get("unreadable_at", [])))' < "$WORK/out/d2.log" 2>/dev/null)
 if [ "$code" = 0 ] && [ "$got" = "${SHA[${P}m/doomed2]}" ]; then result D2 PASS "recovered whole from an older TXG"
 elif [ "$code" = 3 ] && grep -q "not found at any of" "$WORK/out/d2.log.err"; then result D2 PASS "a clean 'not found at any of N verified TXGs' (exit 3)"
-elif [ "$code" = 3 ] && [ -n "$unreadable" ] && grep -q "object set does not read there" "$WORK/out/d2.log.err"; then result D2 PASS "named at txg $unreadable, object set reused by the later writes, readable at no older TXG: a clean exit 3 naming it"
+elif [ "$code" = 3 ] && [ -n "$unreadable" ] && grep -q "does not read there" "$WORK/out/d2.log.err"; then result D2 PASS "named at txg $unreadable, its blocks reused by the later writes, readable at no older TXG: a clean exit 3 naming it"
 elif [ "$code" = 4 ] && [ -n "$zeroed" ]; then result D2 PASS "the MOS of an older TXG survived but the data was reused: partial image, $zeroed blocks zeroed and counted (exit 4)"
 else result D2 FAIL "exit $code, hash $got"; fi
 

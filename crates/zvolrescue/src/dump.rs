@@ -92,10 +92,11 @@ struct DumpOut {
     encryption: Option<String>,
 }
 
-/// A TXG that names the dataset but at which its object set does not
-/// read: a destroyed dataset's blocks are free to reuse from the next
-/// txg on, and the ring may still name it at one whose object set is
-/// gone while an older one's reads. Passed over for that older one.
+/// A TXG that names the dataset but at which it does not read — its
+/// object set, or for a volume the dnodes beneath it: a destroyed
+/// dataset's blocks are free to reuse from the next txg on, and the ring
+/// may still name it at one where they are gone while an older one's
+/// read. Passed over for that older one.
 #[derive(Debug, Serialize)]
 struct UnreadableAt {
     txg: u64,
@@ -107,8 +108,7 @@ struct UnreadableAt {
 struct Searched {
     /// TXGs walked, newest first.
     txgs: Vec<u64>,
-    /// Those among them that name the dataset but cannot read its
-    /// object set.
+    /// Those among them that name the dataset but cannot read it.
     unreadable: Vec<UnreadableAt>,
 }
 
@@ -119,8 +119,8 @@ struct RunOut {
     members: Vec<PathBuf>,
     /// TXGs that were walked before the dataset was found (newest first).
     txgs_searched: Vec<u64>,
-    /// TXGs among them that name the dataset but cannot read its
-    /// object set (newest first), passed over for an older one.
+    /// TXGs among them that name the dataset but cannot read it (newest
+    /// first), passed over for an older one.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     unreadable_at: Vec<UnreadableAt>,
     recursive: bool,
@@ -135,23 +135,42 @@ struct RunOut {
     peak_rss_kib: Option<u64>,
 }
 
-/// Whether the dataset's object set block is still on disk: read and
-/// verified, or verified ciphertext waiting for a key — either way the
-/// dataset can be opened once the run gets that far.
-fn objset_reads(reader: &PoolReader<'_>, ds: &Dataset) -> Result<(), ReadError> {
+/// Whether the dataset is still on disk as far as `dump_one` opens it
+/// before the first data block: its object set block and, for a volume,
+/// the dnodes beneath it (the data object, and the properties that give
+/// its size). Read and verified, or verified ciphertext waiting for a
+/// key — either way the dataset can be opened once the run gets that
+/// far. Checking the object set block alone is not enough: the blocks
+/// a destroy frees are reused in no particular order, and the dnode
+/// block can be gone while the object set block above it still reads.
+fn dataset_reads(reader: &PoolReader<'_>, ds: &Dataset) -> Result<(), ReadError> {
     match reader.read_block(&ds.phys.bp, false) {
-        Ok(_) | Err(ReadError::Encrypted) => Ok(()),
-        Err(e) => Err(e),
+        Ok(_) | Err(ReadError::Encrypted) => {}
+        Err(e) => return Err(e),
     }
+    if ds.kind != Some(zfs_ondisk::dmu::ObjsetType::Zvol) {
+        return Ok(());
+    }
+    match open_volume(reader, ds) {
+        Ok(_) | Err(ReadError::Encrypted) => {}
+        Err(e) => return Err(e),
+    }
+    if ds.volsize.is_none() && ds.encryption.is_none() {
+        return Err(ReadError::Io(format!(
+            "volume size unknown ({})",
+            ds.warnings.join("; ")
+        )));
+    }
+    Ok(())
 }
 
-/// The newest verified TXG that names `name` and whose object set still
+/// The newest verified TXG that names `name` and at which it still
 /// reads — or the one `sel` asks for, if it does. A TXG that names the
-/// dataset but has lost its object set is passed over, said on stderr
-/// and recorded in `unreadable`, and an older one is tried: after a
-/// `zfs destroy` the pool goes on writing, and the freed object set
-/// block is among the first to be reused while older uberblocks still
-/// lead to it whole.
+/// dataset but has lost its object set or its volume's dnodes is passed
+/// over, said on stderr and recorded in `unreadable`, and an older one
+/// is tried: after a `zfs destroy` the pool goes on writing, and the
+/// freed blocks are among the first to be reused while older uberblocks
+/// still lead to them whole.
 fn find_dataset<'c>(
     reader: &PoolReader<'_>,
     candidates: &'c [Candidate],
@@ -184,7 +203,7 @@ fn find_dataset<'c>(
         match open_mos(reader, &c.ub).and_then(|mos| walk(&mos, pool_name)) {
             Ok(tree) => {
                 let Some(ds) = tree.get(name) else { continue };
-                match objset_reads(reader, ds) {
+                match dataset_reads(reader, ds) {
                     Ok(()) => return Ok((c, tree)),
                     Err(e) => {
                         // A device that refused a read has stopped the
@@ -192,7 +211,7 @@ fn find_dataset<'c>(
                         let stopped = matches!(e, ReadError::Medium { .. });
                         if !quiet {
                             eprintln!(
-                                "zvolrescue: {name}: txg {}: object set unreadable ({e}){}",
+                                "zvolrescue: {name}: txg {}: unreadable ({e}){}",
                                 c.ub.txg,
                                 if stopped { "" } else { "; trying an older TXG" }
                             );
@@ -212,7 +231,7 @@ fn find_dataset<'c>(
     }
     if let Some(u) = searched.unreadable.first() {
         eprintln!(
-            "zvolrescue: dataset {name:?} is named at txg {} but its object set does not read there ({}); readable at none of {} verified TXG(s)",
+            "zvolrescue: dataset {name:?} is named at txg {} but does not read there ({}); readable at none of {} verified TXG(s)",
             u.txg,
             u.error,
             searched.txgs.len()

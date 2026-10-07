@@ -416,8 +416,9 @@ fn list_diff_names_what_the_newest_txg_no_longer_has() {
 fn a_txg_whose_object_set_was_reused_is_passed_over_for_an_older_one() {
     let dir = scratch("objset-reused");
     let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1), (200, 2), (300, 3)]);
-    let (mut members, newest, reused, whole, objset) = objset_reused_members(&mut pool, SIZE);
-    assert_eq!((newest, reused, whole), (300, 200, 100));
+    let r = objset_reused_members(&mut pool, SIZE);
+    assert_eq!((r.newest, r.reused, r.whole), (300, 200, 100));
+    let (mut members, objset) = (r.members, r.objset);
     // The reference: the volume at the txg about to lose its object
     // set, while that still reads.
     let paths = write_members(&dir, &members);
@@ -469,7 +470,7 @@ fn a_txg_whose_object_set_was_reused_is_passed_over_for_an_older_one() {
     assert_eq!(v["volumes"][0]["txg"], 100);
     assert_eq!(v["volumes"][0]["sha256"], reference);
     assert!(
-        err.contains("txg 200: object set unreadable") && err.contains("trying an older TXG"),
+        err.contains("txg 200: unreadable") && err.contains("trying an older TXG"),
         "{err}"
     );
 
@@ -490,7 +491,7 @@ fn a_txg_whose_object_set_was_reused_is_passed_over_for_an_older_one() {
     ]);
     assert_eq!(code, 3, "{out}");
     assert!(
-        err.contains("is named at txg 200 but its object set does not read there"),
+        err.contains("is named at txg 200 but does not read there"),
         "{err}"
     );
     assert_eq!(json(&out)["unreadable_at"][0]["txg"], 200);
@@ -498,6 +499,88 @@ fn a_txg_whose_object_set_was_reused_is_passed_over_for_an_older_one() {
         !dir.join("exact.img").exists(),
         "nothing written on a refusal"
     );
+}
+
+/// The blocks a destroy frees are reused in no particular order: the
+/// block of a volume's dnodes can be gone while its object set block
+/// still reads (Debian 12's and FreeBSD 15's kernels did exactly that in
+/// `tests/realworld/kernel-matrix.sh`'s D2). Such a TXG is passed over
+/// as one whose object set is gone is, not chosen and then failed on.
+#[test]
+fn a_txg_whose_volume_dnodes_were_reused_is_passed_over_for_an_older_one() {
+    let dir = scratch("dnodes-reused");
+    let mut pool = Pool::mirror("tank", 0x4243, 12).txgs(&[(100, 1), (200, 2), (300, 3)]);
+    let r = objset_reused_members(&mut pool, SIZE);
+    let mut members = r.members;
+    let paths = write_members(&dir, &members);
+    let (code, out, _) = run(&[
+        "-q",
+        "-f",
+        "json",
+        "dump",
+        "tank/vm/disk0",
+        &paths[0],
+        &paths[1],
+        "--txg",
+        "200",
+        "-o",
+        &dir.join("ref.img").to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "{out}");
+    let reference = json(&out)["volumes"][0]["sha256"].clone();
+
+    // Both copies of the dnode block reused; the object set block above
+    // it untouched.
+    assert_ne!(r.dnodes, r.objset);
+    let at = (LABEL_START_SIZE + r.dnodes) as usize;
+    for m in members.iter_mut() {
+        for b in &mut m[at..at + 512] {
+            *b ^= 0x5a;
+        }
+    }
+    let paths = write_members(&dir, &members);
+    let (code, out, err) = run(&[
+        "-f",
+        "json",
+        "dump",
+        "tank/vm/disk0",
+        &paths[0],
+        &paths[1],
+        "-o",
+        &dir.join("older.img").to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    let v = json(&out);
+    assert_eq!(v["txgs_searched"], serde_json::json!([300, 200, 100]));
+    assert_eq!(v["unreadable_at"][0]["txg"], 200, "{v}");
+    assert!(
+        v["unreadable_at"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("checksum"),
+        "{v}"
+    );
+    assert_eq!(v["volumes"][0]["txg"], 100);
+    assert_eq!(v["volumes"][0]["sha256"], reference);
+
+    // Asked for that txg by name: refused before anything is written.
+    let (code, _, err) = run(&[
+        "-q",
+        "dump",
+        "tank/vm/disk0",
+        &paths[0],
+        &paths[1],
+        "--txg",
+        "200",
+        "-o",
+        &dir.join("exact.img").to_string_lossy(),
+    ]);
+    assert_eq!(code, 3);
+    assert!(
+        err.contains("is named at txg 200 but does not read there"),
+        "{err}"
+    );
+    assert!(!dir.join("exact.img").exists());
 }
 
 /// `--resume` believes a state file only as far as the output backs it
