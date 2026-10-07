@@ -184,12 +184,13 @@ jobs:
           mem: 8192
           usesh: true
           prepare: pkg install -y rust bash python3
+          # `run` is executed under `sh -e`: without `set +e` a failing
+          # scenario ends the step before the record is copied back.
           run: |
+            set +e
             freebsd-version -ku
             cargo build --release -p zvolrescue -p zvolreport
-            bash tests/realworld/kernel-matrix.sh /var/tmp/rw ./target/release/zvolrescue > run.log 2>&1
-            echo $? > exit.txt
-            cat run.log
+            { bash tests/realworld/kernel-matrix.sh /var/tmp/rw ./target/release/zvolrescue; echo $? > exit.txt; } 2>&1 | tee run.log
             mkdir -p record/out
             cp run.log exit.txt record/
             for f in env.txt results.txt row.md evidence.jsonl report.md; do cp "/var/tmp/rw/$f" record/ 2>/dev/null || true; done
