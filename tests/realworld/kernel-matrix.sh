@@ -663,9 +663,24 @@ if [ -z "$cfail" ]; then result C3 PASS "$(words $C3_KEYS) block sizes$(here "$N
 
 # C4: sparse image
 if dump_matches c4 "${P}m/sparse" "${SHA[${P}m/sparse]}" "$M0" "$M1"; then
-    sync   # a ZFS-backed work directory counts the blocks only once they are written
-    used=$(du -k "$WORK/out/c4.img" | awk '{print $1 * 1024}')
-    if [ "$used" -lt $((200 * 1048576)) ]; then result C4 PASS "1 GiB image uses $used bytes on disk"; else result C4 FAIL "image not sparse: $used bytes"; fi
+    # The bytes in the image's data extents, by SEEK_DATA/SEEK_HOLE: du
+    # on a ZFS-backed work directory counts blocks only once a TXG has
+    # written them (1024 bytes for this image on FreeBSD 15, before and
+    # after a sync), and ZFS answers SEEK_HOLE exactly.
+    used=$(python3 - "$WORK/out/c4.img" <<'PY'
+import os, sys
+fd = os.open(sys.argv[1], os.O_RDONLY); end = os.fstat(fd).st_size; at = data = 0
+try:
+    while at < end:
+        try: at = os.lseek(fd, at, os.SEEK_DATA)
+        except OSError: break
+        hole = os.lseek(fd, at, os.SEEK_HOLE); data += hole - at; at = hole
+except (AttributeError, OSError):
+    data = os.fstat(fd).st_blocks * 512
+print(data)
+PY
+)
+    if [ -n "$used" ] && [ "$used" -lt $((200 * 1048576)) ]; then result C4 PASS "1 GiB image holds $used bytes of data extents"; else result C4 FAIL "image not sparse: ${used:-?} bytes of data extents"; fi
 else result C4 FAIL "see out/c4-*"; fi
 
 # C5, C6, C7, C8
