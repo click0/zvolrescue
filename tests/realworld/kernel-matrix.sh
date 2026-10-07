@@ -1,22 +1,24 @@
-#!/bin/bash
-# The real-world matrix on Debian with zfs-dkms and loop devices
-# (docs/REALWORLD-TESTS.md, "Running on Debian with zfs-dkms and loop
-# devices").
+#!/usr/bin/env bash
+# The real-world matrix on a real kernel ZFS, with file-backed devices
+# (docs/REALWORLD-TESTS.md, "Running the matrix on a kernel ZFS").
 #
 # The cheapest environment with a real kernel ZFS: pools the kernel
-# itself made, on loop devices, which are block devices as far as the
-# tool is concerned (SPEC N-10: a device, not an image). Every oracle
-# comes from OpenZFS — `sha256sum /dev/zvol/...` before export, `zdb -d`,
-# `zdb -lu` and `zfs get` — never from zvolrescue.
+# itself made, on loop devices (Linux) or md devices (FreeBSD), which
+# are devices as far as the tool is concerned (SPEC N-10: a device, not
+# an image). Every oracle comes from OpenZFS — the zvol as the kernel
+# reads it before export, `zdb -d`, `zdb -lu` and `zfs get` — never from
+# zvolrescue.
 #
-#   apt install zfsutils-linux zfs-dkms dmsetup strace python3
-#   modprobe zfs
-#   sudo bash tests/realworld/debian-loop.sh /var/tmp/rw [./target/release/zvolrescue]
+#   Debian/Ubuntu: apt install zfsutils-linux zfs-dkms dmsetup strace python3
+#   FreeBSD:       pkg install bash python3        (ZFS, gpart, gnop, gconcat
+#                                                   and truss are in base)
+#   sudo bash tests/realworld/kernel-matrix.sh /var/tmp/rw [./target/release/zvolrescue]
 #
 # Runs as root in a scratch directory (sparse member files and the
-# images the tool writes: about 6 GiB of disk), creates only pools whose names begin with `zrw`, refuses to
-# start if any such pool exists, and tears down its own loop and
-# device-mapper devices on exit. Nothing it does touches another pool.
+# images the tool writes: about 6 GiB of disk), creates only pools whose
+# names begin with `zrw`, refuses to start if any such pool exists, and
+# tears down its own devices on exit. Nothing it does touches another
+# pool.
 #
 # Output: WORKDIR/results.txt (one line per scenario), WORKDIR/env.txt,
 # WORKDIR/evidence.jsonl (every run of the tool), WORKDIR/row.md (the
@@ -26,8 +28,8 @@
 # What it covers: A1 A2 A3 B1 B2 B3 B4 B5 B6 B7 B8 B9 C1 C2 C3 C4 C5 C6
 # C7 C8 C9 C10 C11 C12 D1 D2 D3 D4 D5 D6 D7 D8 F7 G5. C12 needs OpenZFS
 # 2.3 (`raidz_expansion`) and is skipped on 2.2 with a note; B7 is
-# skipped when this zpool does not build dRAID. What a loop device
-# cannot give — E1, E2 (a disk's read rate), F1–F6 and F8–F10 (sector
+# skipped when this zpool does not build dRAID. What a file-backed
+# device cannot give — E1, E2 (a disk's read rate), F1–F6 and F8–F10 (sector
 # sizes, controllers, bridges) — is not attempted and stays ☐.
 set -u
 
@@ -44,62 +46,148 @@ EV=$WORK/evidence.jsonl
 : > "$EV"
 
 say() { printf '\n== %s\n' "$*"; }
-die() { printf 'debian-loop: %s\n' "$*" >&2; exit 1; }
+die() { printf 'kernel-matrix: %s\n' "$*" >&2; exit 1; }
+
+# ---------------------------------------------------------------- platform
+# Everything that differs between Linux and FreeBSD, and nothing else.
+# The scenarios below speak only through these.
+OS=$(uname -s)
+case $OS in
+Linux)
+    DEVKIND="loop devices"
+    NEED="zpool zfs zdb losetup sfdisk dmsetup sha256sum sha1sum md5sum python3 openssl blockdev runuser"
+    TRACER=strace
+    load_zfs() { [ -e /dev/zfs ] || modprobe zfs 2>/dev/null; [ -e /dev/zfs ]; }
+    module_from() { if dkms status 2>/dev/null | grep -q '^zfs'; then echo zfs-dkms; else echo "in-tree module"; fi; }
+    attach_file() { losetup --find --show "${@:2}" "$1"; }     # attach_file FILE [losetup options]
+    detach_dev() { losetup -d "$1" 2>/dev/null; }
+    devsize() { blockdev --getsize64 "$1"; }
+    fsize() { stat -c %s "$1"; }
+    as_nobody() { runuser -u nobody -- "$@"; }
+    DIGESTS="sha256sum sha1sum md5sum"
+    # make_gpt DEV: a GPT with one partition of the type ZFS uses, the
+    # partition's device on stdout (when it appears).
+    make_gpt() {
+        echo 'type=6A898CC3-1DD2-11B2-99A6-080020736631' | sfdisk --quiet --label gpt "$1" >/dev/null
+        partprobe "$1" 2>/dev/null || partx -a "$1" 2>/dev/null || true
+        echo "${1}p1"
+    }
+    GPT_TOOL=sfdisk
+    # bad_dev_create MEMBER FILE SECTOR: MEMBER with 8 sectors from SECTOR
+    # refusing every read (EIO); the device in $BAD_DEV.
+    bad_dev_create() {
+        size=$(( $(devsize "$1") / 512 ))
+        printf '0 %s linear %s 0\n%s 8 error\n%s %s linear %s %s\n' "$3" "$1" "$3" "$(( $3 + 8 ))" "$(( size - $3 - 8 ))" "$1" "$(( $3 + 8 ))" | dmsetup create zr-bad || return 1
+        BAD_DEV=/dev/mapper/zr-bad
+    }
+    bad_dev_remove() { dmsetup info zr-bad >/dev/null 2>&1 && dmsetup remove zr-bad; }
+    trace() { out=$1; shift; strace -f -y -e trace=pread64 -o "$out" "$@"; }
+    ;;
+FreeBSD)
+    DEVKIND="md devices"
+    NEED="zpool zfs zdb mdconfig gpart gnop gconcat diskinfo sha256 sha1 md5 python3 openssl truss chroot"
+    TRACER=truss
+    load_zfs() { [ -e /dev/zfs ] || kldload zfs 2>/dev/null; [ -e /dev/zfs ]; }
+    module_from() { echo "base system"; }
+    attach_file() { md=$(mdconfig -a -t vnode -f "$1") || return 1; echo "/dev/$md"; }
+    detach_dev() { mdconfig -d -u "${1#/dev/}" 2>/dev/null; }
+    devsize() { diskinfo "$1" | awk '{print $3}'; }
+    fsize() { stat -f %z "$1"; }
+    as_nobody() { chroot -u nobody / "$@"; }
+    DIGESTS="sha256 -q|sha1 -q|md5 -q"
+    make_gpt() {
+        gpart create -s gpt "${1#/dev/}" >/dev/null && gpart add -a 1m -t freebsd-zfs "${1#/dev/}" >/dev/null
+        echo "${1}p1"
+    }
+    GPT_TOOL=gpart
+    # Three md devices over the member's file, a gnop window over each
+    # (the middle one failing every read), and gconcat joining them back
+    # into one device the size of the member.
+    BAD_MDS=""
+    bad_dev_create() {
+        size=$(devsize "$1"); at=$(( $3 * 512 ))
+        for _ in 1 2 3; do m=$(mdconfig -a -t vnode -f "$2") || return 1; BAD_MDS="$BAD_MDS $m"; done
+        set -- $BAD_MDS
+        gnop create -o 0 -s "$at" "$1" || return 1
+        gnop create -e 5 -r 100 -o "$at" -s 4096 "$2" || return 1
+        gnop create -o $(( at + 4096 )) -s $(( size - at - 4096 )) "$3" || return 1
+        gconcat create zrbad "$1.nop" "$2.nop" "$3.nop" || return 1
+        BAD_DEV=/dev/concat/zrbad
+    }
+    bad_dev_remove() {
+        [ -e /dev/concat/zrbad ] && gconcat destroy zrbad
+        for m in $BAD_MDS; do [ -e "/dev/$m.nop" ] && gnop destroy "$m.nop"; mdconfig -d -u "$m"; done
+        BAD_MDS=""
+    }
+    trace() { out=$1; shift; truss -f -o "$out" "$@"; }
+    ;;
+*) die "$OS: this script knows Linux and FreeBSD" ;;
+esac
+os_pretty() { if [ -r /etc/os-release ]; then (. /etc/os-release && echo "$PRETTY_NAME"); else uname -sr; fi; }
+nbytes() { # 24M → 25165824
+    case $1 in *K) echo $(( ${1%K} * 1024 )) ;; *M) echo $(( ${1%M} * 1048576 )) ;; *G) echo $(( ${1%G} * 1073741824 )) ;; *) echo "$1" ;; esac
+}
+sha_stdin() { openssl dgst -sha256 -r | cut -d' ' -f1; }
+words() { echo $#; }
+lines() { wc -l < "$1" | tr -d ' '; }
 
 # ---------------------------------------------------------------- checks
-[ "$(id -u)" = 0 ] || die "run as root (zpool, losetup and dmsetup need it)"
+[ "$(id -u)" = 0 ] || die "run as root (zpool and the device tools need it)"
 [ -x "$ZR" ] || die "$ZR is not executable (build with cargo build --release)"
-for c in zpool zfs zdb losetup sfdisk dmsetup sha256sum sha1sum md5sum python3 openssl blockdev; do
+for c in $NEED; do
     command -v "$c" >/dev/null || die "$c not found"
 done
-[ -e /dev/zfs ] || modprobe zfs 2>/dev/null || die "the zfs kernel module is not loaded (apt install zfs-dkms; modprobe zfs)"
-[ -e /dev/zfs ] || die "/dev/zfs missing after modprobe"
+load_zfs || die "the zfs kernel module is not loaded and would not load"
 if zpool list -H -o name 2>/dev/null | grep -q "^$P"; then
     die "a pool named $P* is already imported; this script only ever creates and destroys those, so export or destroy it first"
 fi
-HAVE_STRACE=1; command -v strace >/dev/null || HAVE_STRACE=0
+HAVE_TRACE=1; command -v "$TRACER" >/dev/null || HAVE_TRACE=0
 
 {
     echo "date: $(date -u +%Y-%m-%d)"
-    echo "os: $(. /etc/os-release && echo "$PRETTY_NAME")"
+    echo "os: $(os_pretty)"
     echo "kernel: $(uname -r)"
     echo "zfs: $(zfs version 2>/dev/null | tr '\n' ' ')"
     echo "tool: $("$ZR" --version)"
-    echo "strace: $HAVE_STRACE"
+    echo "tracer: $TRACER $HAVE_TRACE"
 } | tee "$WORK/env.txt"
-ZFS_VER=$(zfs version 2>/dev/null | sed -n 's/^zfs-\([0-9][0-9.]*\).*/\1/p' | head -1)
+ZFS_VER=$(zfs version 2>/dev/null | sed -n 's/^zfs-\([0-9][0-9.]*\).*/\1/p' | head -n 1)
 # The module's version where it differs from userland's (Ubuntu ships a
 # newer in-tree module than its tools), and where the module came from.
-KMOD_VER=$(zfs version 2>/dev/null | sed -n 's/^zfs-kmod-\([0-9][0-9.]*\).*/\1/p' | head -1)
+KMOD_VER=$(zfs version 2>/dev/null | sed -n 's/^zfs-kmod-\([0-9][0-9.]*\).*/\1/p' | head -n 1)
 [ -z "$KMOD_VER" ] || [ "$KMOD_VER" = "$ZFS_VER" ] || ZFS_VER="$ZFS_VER (kmod $KMOD_VER)"
-MODULE_FROM="in-tree module"; dkms status 2>/dev/null | grep -q '^zfs' && MODULE_FROM="zfs-dkms"
+MODULE_FROM=$(module_from)
 TOOL_VER=$("$ZR" --version | awk '{print $2}')
 
 # ---------------------------------------------------------------- teardown
-LOOPS=""
+# Every device mkloop made, one per line. A file and not a variable:
+# mkloop runs in a command substitution, and a variable set there is
+# gone when it returns.
+DEVLIST=$WORK/devices.list
+: > "$DEVLIST"
 POOLS=""
 cleanup() {
     set +e
     for p in $POOLS; do
         zpool list -H -o name "$p" >/dev/null 2>&1 && zpool export "$p" >/dev/null 2>&1
     done
-    dmsetup info zr-bad >/dev/null 2>&1 && dmsetup remove zr-bad
-    for l in $LOOPS; do losetup -d "$l" 2>/dev/null; done
+    bad_dev_remove
+    while read -r l; do detach_dev "$l"; done < "$DEVLIST"
 }
 trap cleanup EXIT
 
 # ---------------------------------------------------------------- helpers
-# Loop device over a sparse file. Prints the device.
-mkloop() { # mkloop NAME SIZE [losetup options]
+# A device over a sparse file. Prints the device.
+mkloop() { # mkloop NAME SIZE [losetup options, Linux only]
     truncate -s "$2" "$WORK/img/$1.img"
-    dev=$(losetup --find --show "${@:3}" "$WORK/img/$1.img") || die "losetup failed for $1"
-    LOOPS="$LOOPS $dev"
+    dev=$(attach_file "$WORK/img/$1.img" "${@:3}") || die "could not attach $1"
+    echo "$dev" >> "$DEVLIST"
     echo "$dev"
 }
 # Deterministic bytes: AES-CTR keystream keyed by SEED and a label.
 stream() { # stream LABEL BYTES
     key=$(printf '%s:%s' "$SEED" "$1" | openssl dgst -sha256 | awk '{print $NF}')
-    head -c "$2" /dev/zero | openssl enc -aes-256-ctr -K "$key" -iv 00000000000000000000000000000000 2>/dev/null
+    head -c "$(nbytes "$2")" /dev/zero | openssl enc -aes-256-ctr -K "$key" -iv 00000000000000000000000000000000 2>/dev/null
 }
 zdev() { echo "/dev/zvol/$1"; }
 wait_dev() {
@@ -119,7 +207,7 @@ fill() { # fill POOL/VOL BYTES [SEEK_MIB]  — deterministic content
 }
 oracle() { # oracle POOL/VOL → sha256 of the whole volume as the kernel reads it
     wait_dev "$(zdev "$1")"
-    sha256sum "$(zdev "$1")" | awk '{print $1}'
+    dd if="$(zdev "$1")" bs=1M status=none | sha_stdin
 }
 declare -A DEVS   # pool → its devices, for the import check at the end
 newpool() { # newpool NAME "DEVICES" [-o|-O prop=value]... VDEV-SPEC... — records it for teardown
@@ -129,12 +217,16 @@ newpool() { # newpool NAME "DEVICES" [-o|-O prop=value]... VDEV-SPEC... — reco
     zpool create -f "${opts[@]}" "$name" "$@" || die "zpool create $name failed"
 }
 import_args() { for d in ${DEVS[$1]}; do printf -- '-d %s ' "$d"; done; }
-export_pool() { zpool sync "$1"; zpool export "$1" || die "zpool export $1 failed"; sync; }
+export_pool() { # a zvol just tasted by the OS can hold the pool busy for a moment
+    zpool sync "$1"
+    zpool export "$1" 2>/dev/null || { sleep 2; zpool export "$1"; } || die "zpool export $1 failed"
+    sync
+}
 run() { # run LOG ARGS... — the tool with the evidence log; exit code in $code
     log=$WORK/out/$1.log; shift
     "$ZR" --evidence-log "$EV" "$@" >"$log" 2>"$log.err"; code=$?
 }
-sha_of() { sha256sum "$1" | awk '{print $1}'; }
+sha_of() { sha_stdin < "$1"; }
 jsonq() { python3 -c "import json,sys; d=json.load(sys.stdin); $1"; }
 
 PASSED=""; FAILED=""; SKIPPED=""
@@ -201,7 +293,7 @@ for l in sys.stdin:
     return 1
 }
 # Hash of the first and last 4 MiB of a device (A1, G5).
-edges() { { dd if="$1" bs=1M count=4 status=none; dd if="$1" bs=1M skip=$(( $(blockdev --getsize64 "$1") / 1048576 - 4 )) status=none; } | sha256sum | awk '{print $1}'; }
+edges() { { dd if="$1" bs=1M count=4 status=none; dd if="$1" bs=1M skip=$(( $(devsize "$1") / 1048576 - 4 )) status=none; } | sha_stdin; }
 
 # ================================================================ pools
 # Every pool is built, filled, its oracles taken, and exported before the
@@ -232,7 +324,7 @@ for c in off lz4 zstd zstd-19 gzip-1 gzip-9 lzjb zle; do
         C1_KEYS="$C1_KEYS $c"
         wait_dev "$(zdev "${P}m/vm/c-$c")"
         # compressible and incompressible halves
-        { stream "c-$c" 6M; head -c 6M /dev/zero; stream "c-$c-2" 4M; } | dd of="$(zdev "${P}m/vm/c-$c")" bs=1M conv=notrunc,fsync status=none
+        { stream "c-$c" 6M; head -c "$(nbytes 6M)" /dev/zero; stream "c-$c-2" 4M; } | dd of="$(zdev "${P}m/vm/c-$c")" bs=1M conv=notrunc,fsync status=none
     else NOT_HERE_C1="${NOT_HERE_C1:-} compression=$c"; fi
 done
 # C2 checksums
@@ -289,9 +381,9 @@ SHA["${P}m/snapped@two"]=$(oracle "${P}m/snapped@two")
 # volsize is answered from the zvol's own object, not the property ZAP,
 # though `zfs get` calls it local; volblocksize the other way round.
 zfs get -H -s local -o name,property,value all "${P}m/bigdnode" "${P}m/bigdnode/vol" | awk -F'\t' '$2 != "volsize"' | sort > "$WORK/out/c11-zfs.txt"
-zfs list -H -o name -r "${P}m" | wc -l > "$WORK/out/c9-count.txt"
+zfs list -H -o name -r "${P}m" | wc -l | tr -d ' ' > "$WORK/out/c9-count.txt"
 # The TXG before the destroys, from the kernel's own uberblock.
-TXG_BEFORE=$(zdb -u "${P}m" 2>/dev/null | sed -n 's/^[[:space:]]*txg = //p' | head -1)
+TXG_BEFORE=$(zdb -u "${P}m" 2>/dev/null | sed -n 's/^[[:space:]]*txg = //p' | head -n 1)
 [ -n "$TXG_BEFORE" ] || die "zdb -u ${P}m gave no txg"
 zfs destroy "${P}m/doomed1"
 export_pool "${P}m"
@@ -311,8 +403,8 @@ if [ "$code" = 0 ] && jsonq 'names=[x["name"] for x in d["diff"]["destroyed_sinc
         result D1 PASS "--diff $TXG_BEFORE shows it destroyed; dump --txg $TXG_BEFORE matches"
     elif [ "$code" = 4 ] && lost=$(partial_matches "$WORK/out/d1.img" "$WORK/doomed1.raw" "$WORK/out/d1-dump.log" 2>"$WORK/out/d1-partial.err"); then
         result D1 PASS "--diff $TXG_BEFORE shows it destroyed; dump --txg $TXG_BEFORE is partial: $lost to the export's own TXGs, zeroed and counted, the rest the kernel's bytes (exit 4)"
-    else result D1 FAIL "dump exit $code; $(tail -1 "$WORK/out/d1-partial.err" 2>/dev/null)"; fi
-else result D1 FAIL "list exit $code; $(tail -1 "$WORK/out/d1-assert.err" 2>/dev/null)"; fi
+    else result D1 FAIL "dump exit $code; $(tail -n 1 "$WORK/out/d1-partial.err" 2>/dev/null)"; fi
+else result D1 FAIL "list exit $code; $(tail -n 1 "$WORK/out/d1-assert.err" 2>/dev/null)"; fi
 
 # D2: destroy, then keep writing elsewhere before exporting
 # shellcheck disable=SC2046
@@ -385,18 +477,17 @@ fill "${P}a/vol" 8M 16
 SHA[a]=$(oracle "${P}a/vol"); export_pool "${P}a"
 
 # ---- B9: a whole disk with a GPT, the pool in its ZFS partition. The
-# GPT is written by sfdisk with the partition type ZFS itself uses —
-# `zpool create` on the bare loop device labels it the same way, but
-# the partition node it then expects did not appear on either kernel
-# tried, and a scenario's setup must not end the run.
+# GPT is written by the system's own tool with the partition type ZFS
+# uses there — on Linux `zpool create` on the bare loop device labels it
+# the same way, but the partition node it then expects did not appear
+# on either kernel tried, and a scenario's setup must not end the run.
 say "pool: whole-disk vdev with a GPT (B9)"
 W=$(mkloop whole 512M -P)
-echo 'type=6A898CC3-1DD2-11B2-99A6-080020736631' | sfdisk --quiet --label gpt "$W" >/dev/null
-partprobe "$W" 2>/dev/null || partx -a "$W" 2>/dev/null || true
+WP=$(make_gpt "$W")
 HAVE_B9=0
-if wait_dev_soft "${W}p1"; then
+if wait_dev_soft "$WP"; then
     HAVE_B9=1
-    newpool "${P}w" "${W}p1" -o ashift=12 "${W}p1"
+    newpool "${P}w" "$WP" -o ashift=12 "$WP"
     zfs create -V 32M -b 16K "${P}w/vol"; fill "${P}w/vol" 24M
     SHA[w]=$(oracle "${P}w/vol"); export_pool "${P}w"
 fi
@@ -454,8 +545,8 @@ for l in sys.stdin:
     m = re.match(r"\s*txg = (\d+)", l)
     if m and slot is not None and int(m.group(1)) > best[0]: best=(int(m.group(1)), slot)
 print(best[1] if best[1] is not None else "")')
-D5_TXG=$(zdb -lu "$D5" 2>/dev/null | sed -n 's/^[[:space:]]*txg = //p' | sort -n | tail -1)
-D5_SIZE=$(blockdev --getsize64 "$D5")
+D5_TXG=$(zdb -lu "$D5" 2>/dev/null | sed -n 's/^[[:space:]]*txg = //p' | sort -n | tail -n 1)
+D5_SIZE=$(devsize "$D5")
 if [ -n "$D5_SLOT" ]; then
     for base in 0 262144 $(( (D5_SIZE / 262144) * 262144 - 524288 )) $(( (D5_SIZE / 262144) * 262144 - 262144 )); do
         dd if=/dev/zero of="$D5" bs=4096 count=1 seek=$(( (base + 131072) / 4096 + D5_SLOT )) conv=notrunc,fsync status=none
@@ -464,7 +555,7 @@ fi
 sync
 
 # Every device the tool will read: hashes of both ends, before (A1, G5).
-ALL_DEVS=$LOOPS
+ALL_DEVS=$(cat "$DEVLIST")
 declare -A EDGE
 for d in $ALL_DEVS; do EDGE[$d]=$(edges "$d"); done
 
@@ -492,7 +583,7 @@ for z in z1:1 z2:2 z3:3; do
     n=${z#*:}; z=${z%:*}
     eval "devs=\$RZ${z#z}"
     # shellcheck disable=SC2086
-    keep=$(echo $devs | tr ' ' '\n' | head -n -"$n" | tr '\n' ' ')
+    keep=$(echo $devs | tr ' ' '\n' | awk -v n="$n" '{a[NR]=$0} END {for (i = 1; i <= NR - n; i++) print a[i]}' | tr '\n' ' ')
     # shellcheck disable=SC2086
     datasets_match "b3-$z" "${P}$z" $keep && dump_matches "b3-$z" "${P}$z/vol" "${SHA[$z]}" $keep || b3fail="$b3fail $z"
 done
@@ -516,7 +607,7 @@ EDGE[$1]=$(edges "$1")
 rm -f "$WORK/out/b4.img"
 "$ZR" --evidence-log "$EV" -f json dump "${P}z2/vol" "$@" -o "$WORK/out/b4.img" --debug-log "$WORK/out/b4-debug.log" > "$WORK/out/b4-dump.log" 2>"$WORK/out/b4-dump.err"; code=$?
 got=$(jsonq 'print(d["volumes"][0]["sha256"])' < "$WORK/out/b4-dump.log" 2>/dev/null)
-rebuilt=$(grep -c "rebuilt\|reconstruct" "$WORK/out/b4-debug.log" 2>/dev/null)
+rebuilt=$(grep -Ec "rebuilt|reconstruct" "$WORK/out/b4-debug.log" 2>/dev/null)
 if [ "$code" = 0 ] && [ "$got" = "${SHA[z2]}" ] && [ "${rebuilt:-0}" -gt 0 ]; then
     result B4 PASS "healed; $rebuilt reconstruction notes in the trace"
 else
@@ -545,34 +636,34 @@ p=d["pools"][0]; assert p["stale"] and p["stale"][0]["device"]=="'"$AOLD"'", p["
 assert [m["present"] for t in p["tops"] for m in t["members"]] == ["'"$A1"'"], p["tops"]' < "$WORK/out/b8-scan.log" 2>"$WORK/out/b8-assert.err" \
     && dump_matches b8 "${P}a/vol" "${SHA[a]}" "$AOLD" "$A1"; then
     result B8 PASS "the older copy is stale; dump from both matches the pool after the detach"
-else result B8 FAIL "scan exit $code; $(tail -1 "$WORK/out/b8-assert.err" 2>/dev/null)"; fi
+else result B8 FAIL "scan exit $code; $(tail -n 1 "$WORK/out/b8-assert.err" 2>/dev/null)"; fi
 
 # B9: the whole disk, and its partition
 run b9-scan -f json scan "$W"
-if [ "$HAVE_B9" = 0 ]; then result B9 FAIL "the partition node ${W}p1 never appeared after sfdisk wrote the GPT"
+if [ "$HAVE_B9" = 0 ]; then result B9 FAIL "the partition node $WP never appeared after $GPT_TOOL wrote the GPT"
 elif [ "$code" = 0 ] && jsonq '
 x=d["devices"][0]; t=x["partitions"]; assert t["scheme"]=="gpt", t
 assert any(p["zfs"] for p in t["partitions"]), t; assert x["vdev_base"]>0, x' < "$WORK/out/b9-scan.log" 2>"$WORK/out/b9-assert.err" \
-    && dump_matches b9 "${P}w/vol" "${SHA[w]}" "$W" && dump_matches b9-part "${P}w/vol" "${SHA[w]}" "${W}p1"; then
+    && dump_matches b9 "${P}w/vol" "${SHA[w]}" "$W" && dump_matches b9-part "${P}w/vol" "${SHA[w]}" "$WP"; then
     result B9 PASS "GPT found on the whole disk; dump from the disk and from p1 match"
-else result B9 FAIL "scan exit $code; $(tail -1 "$WORK/out/b9-assert.err" 2>/dev/null)"; fi
+else result B9 FAIL "scan exit $code; $(tail -n 1 "$WORK/out/b9-assert.err" 2>/dev/null)"; fi
 
 # C1, C2, C3: one dump per property value
 # What this ZFS does not have is said, not counted either way.
 here() { [ -z "$1" ] || printf '; not in this ZFS:%s' "$1"; }
 cfail=""
 for c in $C1_KEYS; do dump_matches "c1-$c" "${P}m/vm/c-$c" "${SHA[${P}m/vm/c-$c]}" "$M0" "$M1" || cfail="$cfail $c"; done
-if [ -z "$cfail" ]; then result C1 PASS "$(echo $C1_KEYS | wc -w) compressions$(here "$NOT_HERE_C1")"; else result C1 FAIL "$cfail"; fi
+if [ -z "$cfail" ]; then result C1 PASS "$(words $C1_KEYS) compressions$(here "$NOT_HERE_C1")"; else result C1 FAIL "$cfail"; fi
 cfail=""
 for k in $C2_KEYS; do dump_matches "c2-$k" "${P}m/k-$k" "${SHA[${P}m/k-$k]}" "$M0" "$M1" || cfail="$cfail $k"; done
-if [ -z "$cfail" ]; then result C2 PASS "$(echo $C2_KEYS | wc -w) checksums$(here "$NOT_HERE_C2")"; else result C2 FAIL "$cfail"; fi
+if [ -z "$cfail" ]; then result C2 PASS "$(words $C2_KEYS) checksums$(here "$NOT_HERE_C2")"; else result C2 FAIL "$cfail"; fi
 cfail=""
 for b in $C3_KEYS; do dump_matches "c3-$b" "${P}m/b-$b" "${SHA[${P}m/b-$b]}" "$M0" "$M1" || cfail="$cfail $b"; done
-if [ -z "$cfail" ]; then result C3 PASS "$(echo $C3_KEYS | wc -w) block sizes$(here "$NOT_HERE_C3")"; else result C3 FAIL "$cfail"; fi
+if [ -z "$cfail" ]; then result C3 PASS "$(words $C3_KEYS) block sizes$(here "$NOT_HERE_C3")"; else result C3 FAIL "$cfail"; fi
 
 # C4: sparse image
 if dump_matches c4 "${P}m/sparse" "${SHA[${P}m/sparse]}" "$M0" "$M1"; then
-    used=$(du -B1 "$WORK/out/c4.img" | awk '{print $1}')
+    used=$(du -k "$WORK/out/c4.img" | awk '{print $1 * 1024}')
     if [ "$used" -lt $((200 * 1048576)) ]; then result C4 PASS "1 GiB image uses $used bytes on disk"; else result C4 FAIL "image not sparse: $used bytes"; fi
 else result C4 FAIL "see out/c4-*"; fi
 
@@ -592,8 +683,8 @@ else result C7 FAIL "with key: $got (wanted ${SHA[${P}m/secret/vol]}); without: 
 if dump_matches c8 "${P}m/bigdnode/vol" "${SHA[${P}m/bigdnode/vol]}" "$M0" "$M1"; then result C8 PASS "dnodesize=auto parent"; else result C8 FAIL "see out/c8-*"; fi
 
 # C9: every dataset, and at least the count the kernel gave
-if datasets_match c9 "${P}m" "$M0" "$M1" && [ "$(wc -l < "$WORK/out/c9-zr.txt")" -ge "$(cat "$WORK/out/c9-count.txt")" ]; then
-    result C9 PASS "$(wc -l < "$WORK/out/c9-zr.txt") datasets match zdb -d"
+if datasets_match c9 "${P}m" "$M0" "$M1" && [ "$(lines "$WORK/out/c9-zr.txt")" -ge "$(cat "$WORK/out/c9-count.txt")" ]; then
+    result C9 PASS "$(lines "$WORK/out/c9-zr.txt") datasets match zdb -d"
 else result C9 FAIL "see out/c9-*"; fi
 
 # C10: the removed vdev
@@ -601,7 +692,7 @@ run c10-scan -f json scan "$R0" "$R1"
 if [ "$code" = 0 ] && jsonq 'p=d["pools"][0]; assert p["readable"] and p["removed_tops"]==[1] and p["missing_tops"]==[], p' < "$WORK/out/c10-scan.log" 2>"$WORK/out/c10-assert.err" \
     && dump_matches c10 "${P}r/vol" "${SHA[r]}" "$R0" "$R1" && datasets_match c10 "${P}r" "$R0" "$R1"; then
     result C10 PASS "vdev 1 removed, blocks read through the mapping"
-else result C10 FAIL "scan exit $code; $(tail -1 "$WORK/out/c10-assert.err" 2>/dev/null)"; fi
+else result C10 FAIL "scan exit $code; $(tail -n 1 "$WORK/out/c10-assert.err" 2>/dev/null)"; fi
 
 # C11: exactly the local properties. `volblocksize` is in the volume's
 # property ZAP (set once at creation) but `zfs get` shows its source as
@@ -612,9 +703,11 @@ for x in d["datasets"]:
     if x["name"] in ("'"${P}m/bigdnode"'", "'"${P}m/bigdnode/vol"'"):
         for p in x.get("properties") or []:
             if p["name"] != "volblocksize": print(x["name"], p["name"], p["value"])' < "$WORK/out/c11.log" 2>/dev/null | sort > "$WORK/out/c11-zr.txt"
-if [ "$code" = 0 ] && diff <(awk '{print $1, $2}' "$WORK/out/c11-zfs.txt") <(awk '{print $1, $2}' "$WORK/out/c11-zr.txt") > "$WORK/out/c11-diff.txt" \
+awk '{print $1, $2}' "$WORK/out/c11-zfs.txt" > "$WORK/out/c11-zfs-keys.txt"
+awk '{print $1, $2}' "$WORK/out/c11-zr.txt" > "$WORK/out/c11-zr-keys.txt"
+if [ "$code" = 0 ] && diff "$WORK/out/c11-zfs-keys.txt" "$WORK/out/c11-zr-keys.txt" > "$WORK/out/c11-diff.txt" \
     && grep -q "org.example:ticket RW-2" "$WORK/out/c11-zr.txt"; then
-    result C11 PASS "$(wc -l < "$WORK/out/c11-zr.txt") local properties, the same set as zfs get -s local"
+    result C11 PASS "$(lines "$WORK/out/c11-zr.txt") local properties, the same set as zfs get -s local"
 else result C11 FAIL "see out/c11-diff.txt"; fi
 
 # C12: the expanded raidz is refused by name
@@ -647,7 +740,7 @@ else result D2 FAIL "exit $code, hash $got"; fi
 run d3-scan -f json scan "$D3"
 if [ "$code" = 0 ] && jsonq 'assert d["devices"][0]["config"]["state"]=="DESTROYED", d["devices"][0]["config"]' < "$WORK/out/d3-scan.log" 2>"$WORK/out/d3-assert.err" \
     && dump_matches d3 "${P}k/vol" "${SHA[k]}" "$D3"; then result D3 PASS "state DESTROYED; dump matches"
-else result D3 FAIL "scan exit $code; $(tail -1 "$WORK/out/d3-assert.err" 2>/dev/null)"; fi
+else result D3 FAIL "scan exit $code; $(tail -n 1 "$WORK/out/d3-assert.err" 2>/dev/null)"; fi
 
 # D4: L0 and L1 zeroed (whether the kernel still imports it is checked
 # after A1, since an import writes)
@@ -675,7 +768,7 @@ set -m
 pid=$!
 set +m
 for _ in $(seq 1 6000); do
-    sz=$(stat -c %s "$WORK/out/d6.img" 2>/dev/null || echo 0)
+    sz=$(fsize "$WORK/out/d6.img" 2>/dev/null || echo 0)
     [ "$sz" -ge $((128 * 1048576)) ] && break
     kill -0 $pid 2>/dev/null || break
     sleep 0.005
@@ -703,23 +796,27 @@ for c in $C1_KEYS; do
     f=$WORK/out/d7/${P}m_vm_c-$c.img
     [ -f "$f" ] && [ "$(sha_of "$f")" = "${SHA[${P}m/vm/c-$c]}" ] || d7fail="$d7fail $c"
 done
-if [ "$code" = 0 ] && [ -f "$WORK/out/d7/manifest.json" ] && [ -z "$d7fail" ]; then result D7 PASS "$(echo $C1_KEYS | wc -w) images + manifest, every hash matches"
+if [ "$code" = 0 ] && [ -f "$WORK/out/d7/manifest.json" ] && [ -z "$d7fail" ]; then result D7 PASS "$(words $C1_KEYS) images + manifest, every hash matches"
 else result D7 FAIL "exit $code; mismatched:$d7fail"; fi
 
 # D8: md5 and sha1 alongside
 rm -f "$WORK/out/d8.img"
 run d8 -f json dump "${P}m/k-sha256" "$M0" "$M1" -o "$WORK/out/d8.img" --hash md5,sha1
-if [ "$code" = 0 ] && jsonq '
-v=d["volumes"][0]; import subprocess
-def h(t): return subprocess.run([t, "'"$WORK/out/d8.img"'"], capture_output=True, text=True).stdout.split()[0]
-assert v["sha256"]==h("sha256sum") and v["sha1"]==h("sha1sum") and v["md5"]==h("md5sum"), v' < "$WORK/out/d8.log" 2>"$WORK/out/d8-assert.err"; then
-    result D8 PASS "sha256, sha1 and md5 equal the coreutils digests"
-else result D8 FAIL "exit $code; $(tail -1 "$WORK/out/d8-assert.err" 2>/dev/null)"; fi
+if [ "$code" = 0 ] && DIGESTS="$DIGESTS" jsonq '
+v=d["volumes"][0]; import os, subprocess
+sep = "|" if "|" in os.environ["DIGESTS"] else " "
+tools = [t.split() for t in os.environ["DIGESTS"].split(sep)]
+def h(t): return subprocess.run(t + ["'"$WORK/out/d8.img"'"], capture_output=True, text=True).stdout.split()[0]
+assert [v["sha256"], v["sha1"], v["md5"]] == [h(t) for t in tools], v' < "$WORK/out/d8.log" 2>"$WORK/out/d8-assert.err"; then
+    result D8 PASS "sha256, sha1 and md5 equal the system's own digests"
+else result D8 FAIL "exit $code; $(tail -n 1 "$WORK/out/d8-assert.err" 2>/dev/null)"; fi
 
-# F7: dm-error under one member of the mirror, over the first data block
-# of f7 (its DVA from zdb; a mirror child's byte offset is the DVA offset
-# plus the 4 MiB the labels take).
-say "F7: dm-error under $M0"
+# F7: 8 sectors under one member of the mirror refusing every read, over
+# the first data block of f7 (its DVA from zdb; a mirror child's byte
+# offset is the DVA offset plus the 4 MiB the labels take): dm-error on
+# Linux, a failing gnop between two clean ones joined by gconcat on
+# FreeBSD.
+say "F7: a range under $M0 that refuses every read"
 f7_dva=$(zdb -e -p "$WORK/img" -dddddd "${P}m/f7" 1 2>/dev/null | python3 -c '
 import re,sys
 for l in sys.stdin:
@@ -728,20 +825,19 @@ for l in sys.stdin:
         print(int(m.group(2), 16)); break')
 if [ -n "$f7_dva" ]; then
     bad=$(( (f7_dva + 4194304) / 512 ))
-    size=$(blockdev --getsz "$M0")
-    printf '0 %s linear %s 0\n%s 8 error\n%s %s linear %s %s\n' "$bad" "$M0" "$bad" "$((bad+8))" "$((size-bad-8))" "$M0" "$((bad+8))" | dmsetup create zr-bad
-    dev=/dev/mapper/zr-bad; real=$(readlink -f "$dev")
+    bad_dev_create "$M0" "$WORK/img/mirror0.img" "$bad" || die "could not build the failing device for F7"
+    dev=$BAD_DEV; real=$(readlink -f "$dev")
     run f7-stop dump "${P}m/f7" "$dev" "$M1" -o "$WORK/out/f7-stop.img"; stop=$code
-    if [ "$HAVE_STRACE" = 1 ]; then
-        strace -f -y -e trace=pread64 -o "$WORK/out/f7-trace.txt" "$ZR" --evidence-log "$EV" -f json dump "${P}m/f7" "$dev" "$M1" -o "$WORK/out/f7-heal.img" --device-may-fail > "$WORK/out/f7-heal.log" 2>"$WORK/out/f7-heal.err"; heal=$?
+    if [ "$HAVE_TRACE" = 1 ]; then
+        trace "$WORK/out/f7-trace.txt" "$ZR" --evidence-log "$EV" -f json dump "${P}m/f7" "$dev" "$M1" -o "$WORK/out/f7-heal.img" --device-may-fail > "$WORK/out/f7-heal.log" 2>"$WORK/out/f7-heal.err"; heal=$?
     else
         run f7-heal -f json dump "${P}m/f7" "$dev" "$M1" -o "$WORK/out/f7-heal.img" --device-may-fail; heal=$code
     fi
-    dmsetup remove zr-bad
+    bad_dev_remove
     f7ok=1
     { [ "$stop" = 7 ] && grep -q "MEDIUM INCIDENT: $dev refused .* (LBA $bad, " "$WORK/out/f7-stop.log.err"; } || f7ok=0
     { [ "$heal" = 0 ] && [ "$(sha_of "$WORK/out/f7-heal.img")" = "${SHA[${P}m/f7]}" ]; } || f7ok=0
-    REAL="$real" DEV="$dev" EV="$EV" TRACE="$WORK/out/f7-trace.txt" BAD="$bad" HAVE_STRACE="$HAVE_STRACE" python3 - > "$WORK/out/f7-check.txt" 2>&1 <<'EOF' || f7ok=0
+    REAL="$real" DEV="$dev" EV="$EV" TRACE="$WORK/out/f7-trace.txt" BAD="$bad" HAVE_TRACE="$HAVE_TRACE" TRACER="$TRACER" python3 - > "$WORK/out/f7-check.txt" 2>&1 <<'EOF' || f7ok=0
 import json, os, re
 recs = [json.loads(l) for l in open(os.environ["EV"]) if l.strip()]
 stop, heal = recs[-2], recs[-1]
@@ -749,17 +845,37 @@ si, hi = stop.get("incidents", []), heal.get("incidents", [])
 assert stop["status"] == 7 and len(si) == 1 and si[0]["stopped"], (stop["status"], si)
 assert si[0]["lba"] == int(os.environ["BAD"]), si[0]
 assert heal["status"] == 0 and len(hi) == 1 and not hi[0]["stopped"], (heal["status"], hi)
-if os.environ["HAVE_STRACE"] == "1":
-    pat = re.compile(r'pread64\(\d+<(?:' + re.escape(os.environ["DEV"]) + '|' + re.escape(os.environ["REAL"]) + r')>, .*, (\d+), (\d+)\) = ')
+names = {os.environ["DEV"], os.environ["REAL"]}
+if os.environ["HAVE_TRACE"] == "1" and os.environ["TRACER"] == "strace":
+    pat = re.compile(r'pread64\(\d+<(?:' + "|".join(map(re.escape, names)) + r')>, .*, (\d+), (\d+)\) = ')
     reads = sorted((int(m.group(2)), int(m.group(1))) for m in map(pat.search, open(os.environ["TRACE"])) if m)
+elif os.environ["HAVE_TRACE"] == "1":
+    # truss names no path at a read: follow which descriptor the device
+    # was opened on, and count the preads on it while it is.
+    opened = re.compile(r'\bopen(?:at)?\((?:AT_FDCWD,)?"([^"]+)"[^)]*\)\s+=\s+(\d+)')
+    closed = re.compile(r'\bclose\((\d+)\)')
+    pread = re.compile(r'\bpread\((\d+),0x[0-9a-f]+,(\d+),(0x[0-9a-f]+|\d+)\)\s+=')
+    fds, reads = {}, []
+    for line in open(os.environ["TRACE"]):
+        m = opened.search(line)
+        if m:
+            fds[int(m.group(2))] = m.group(1); continue
+        m = closed.search(line)
+        if m:
+            fds.pop(int(m.group(1)), None); continue
+        m = pread.search(line)
+        if m and fds.get(int(m.group(1))) in names:
+            reads.append((int(m.group(3), 0), int(m.group(2))))
+    reads.sort()
+if os.environ["HAVE_TRACE"] == "1":
     assert reads, "no read of the device seen in the trace"
     twice = [(a, b) for a, b in zip(reads, reads[1:]) if b[0] < a[0] + a[1]]
     assert not twice, f"an address on the device was read twice: {twice}"
     print(f"{len(reads)} reads of the device, none overlapping")
 print("ok")
 EOF
-    if [ "$f7ok" = 1 ]; then result F7 PASS "stop exit 7 at LBA $bad; --device-may-fail heals from $M1; $(grep -v '^ok$' "$WORK/out/f7-check.txt" | tail -1)"
-    else result F7 FAIL "stop exit $stop, heal exit $heal; $(tail -1 "$WORK/out/f7-check.txt")"; fi
+    if [ "$f7ok" = 1 ]; then result F7 PASS "stop exit 7 at LBA $bad; --device-may-fail heals from $M1; $(grep -v '^ok$' "$WORK/out/f7-check.txt" | tail -n 1)"
+    else result F7 FAIL "stop exit $stop, heal exit $heal; $(tail -n 1 "$WORK/out/f7-check.txt")"; fi
 else result F7 FAIL "could not find the volume's first L0 block with zdb"; fi
 
 # A3: an unprivileged user with read access to the devices (a copy of the
@@ -767,13 +883,13 @@ else result F7 FAIL "could not find the volume's first L0 block with zdb"; fi
 if ! id nobody >/dev/null 2>&1; then result A3 SKIP "no user nobody"
 else
     cp "$ZR" "$WORK/zvolrescue-for-nobody"; chmod 755 "$WORK/zvolrescue-for-nobody"; chmod o+rx "$WORK"
-    if ! runuser -u nobody -- test -x "$WORK/zvolrescue-for-nobody"; then
+    if ! as_nobody test -x "$WORK/zvolrescue-for-nobody"; then
         result A3 SKIP "$WORK is not reachable by nobody (a parent directory is not world-traversable); use a directory under /var/tmp"
     else
         chmod o+r "$M0" "$M1"
-        if (cd / && runuser -u nobody -- "$WORK/zvolrescue-for-nobody" -q -f json list -r "$M0" "$M1") > "$WORK/out/a3.log" 2>"$WORK/out/a3.err"; then
+        if (cd / && as_nobody "$WORK/zvolrescue-for-nobody" -q -f json list -r "$M0" "$M1") > "$WORK/out/a3.log" 2>"$WORK/out/a3.err"; then
             result A3 PASS "list as nobody, with read access to the two devices and nothing else"
-        else result A3 FAIL "exit $?: $(tail -1 "$WORK/out/a3.err")"; fi
+        else result A3 FAIL "exit $?: $(tail -n 1 "$WORK/out/a3.err")"; fi
         chmod o-r "$M0" "$M1"
     fi
 fi
@@ -793,24 +909,24 @@ else result A1 FAIL "changed:$changed; do not import:$imports"; fi
 if [ -z "$changed" ]; then result G5 PASS "inputs unchanged"; else result G5 FAIL "changed:$changed"; fi
 if zpool import -d "$D4" -N "${P}4" >/dev/null 2>&1; then zpool export "${P}4"; d4import="zpool import still works (L2/L3)"; else d4import="zpool import fails"; fi
 if [ "$d4" = PASS ]; then result D4 PASS "L2/L3 used; dump matches; $d4import"
-else result D4 FAIL "scan or dump; $(tail -1 "$WORK/out/d4-assert.err" 2>/dev/null); $d4import"; fi
+else result D4 FAIL "scan or dump; $(tail -n 1 "$WORK/out/d4-assert.err" 2>/dev/null); $d4import"; fi
 
 # The case file, checked back (D8's second half; COMPANIONS R-01…R-07)
 if [ -x "$REPORT" ]; then
     if "$REPORT" build "$EV" -o "$WORK/report.md" >/dev/null 2>"$WORK/out/report.err" && "$REPORT" verify "$WORK/report.md" >"$WORK/out/verify.txt" 2>&1; then
-        result R PASS "zvolreport build + verify over $(wc -l < "$EV") records"
-    else result R FAIL "$(tail -1 "$WORK/out/verify.txt" "$WORK/out/report.err" 2>/dev/null | tail -1)"; fi
+        result R PASS "zvolreport build + verify over $(lines "$EV") records"
+    else result R FAIL "$(tail -n 1 "$WORK/out/verify.txt" "$WORK/out/report.err" 2>/dev/null | tail -n 1)"; fi
 fi
 
 # ================================================================ the row
 say "summary"
-os=$(. /etc/os-release && echo "$PRETTY_NAME")
+os=$(os_pretty)
 mark="☑"; [ -z "$FAILED" ] || mark="✗"
-note="tests/realworld/debian-loop.sh, kernel $(uname -r)"
+note="tests/realworld/kernel-matrix.sh, kernel $(uname -r)"
 [ -z "$FAILED" ] || note="$note; failed:$FAILED"
 [ -z "$SKIPPED" ] || note="$note; skipped:$SKIPPED"
 # shellcheck disable=SC2086
-printf '| %s | %s (%s, loop devices) | %s | `%s` | %s | %s | %s |\n' "$(date -u +%Y-%m-%d)" "$os" "$MODULE_FROM" "$ZFS_VER" "$TOOL_VER" "$(echo $PASSED)" "$mark" "$note" | tee "$WORK/row.md"
+printf '| %s | %s (%s, %s) | %s | `%s` | %s | %s | %s |\n' "$(date -u +%Y-%m-%d)" "$os" "$MODULE_FROM" "$DEVKIND" "$ZFS_VER" "$TOOL_VER" "$(echo $PASSED)" "$mark" "$note" | tee "$WORK/row.md"
 echo "passed:$PASSED"
 echo "failed:$FAILED"
 echo "skipped:$SKIPPED"

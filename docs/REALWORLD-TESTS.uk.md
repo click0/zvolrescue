@@ -137,8 +137,8 @@ N-10: у записі `kind: device`, перше відмовлене читан
 диска), F1–F6 і F8–F10 (розміри секторів, контролери, мости) лишаються
 ☐, доки їх не прожене машина з накопичувачами.
 
-`tests/realworld/debian-loop.sh` робить увесь прогін: будує пули, бере
-кожен оракул з OpenZFS (`sha256sum /dev/zvol/...` перед експортом,
+`tests/realworld/kernel-matrix.sh` робить увесь прогін: будує пули, бере
+кожен оракул з OpenZFS (zvol так, як його читає ядро, перед експортом,
 `zdb -d`, `zdb -lu`, `zfs get -s local`), експортує їх, запускає
 інструмент на loop-пристроях і друкує рядок для таблиці результатів.
 
@@ -149,8 +149,26 @@ N-10: у записі `kind: device`, перше відмовлене читан
 apt install linux-headers-$(uname -r) zfsutils-linux zfs-dkms dmsetup strace python3 openssl
 modprobe zfs
 cargo build --release
-sudo bash tests/realworld/debian-loop.sh /var/tmp/rw ./target/release/zvolrescue
+sudo bash tests/realworld/kernel-matrix.sh /var/tmp/rw ./target/release/zvolrescue
 ```
+
+Той самий скрипт працює на FreeBSD 14 і 15 з OpenZFS базової системи,
+з md-пристроями замість loop: GPT для B9 пише `gpart` (розділ
+`freebsd-zfs`), діапазон, що відмовляє, для F7 — це `gnop`, який
+відхиляє кожне читання, між двома справними, зібраний назад в один
+пристрій через `gconcat`; перевірку «кожна адреса читається один раз»
+веде `truss` замість `strace`, а A3 запускає інструмент від `nobody`
+через `chroot -u`:
+
+```
+pkg install rust bash python3
+cargo build --release
+bash tests/realworld/kernel-matrix.sh /var/tmp/rw ./target/release/zvolrescue
+```
+
+`.github/workflows/realworld.yml` на вимогу запускає його в усіх
+чотирьох середовищах: на власному ядрі runner'а Ubuntu, у VM Debian 12
+із `zfs-dkms` і у VM FreeBSD 15 та 14.
 
 `zfs-dkms` збирає модуль під запущене ядро, тож заголовки мають йому
 відповідати (спершу перезавантажитись у те ядро, для якого вони); з

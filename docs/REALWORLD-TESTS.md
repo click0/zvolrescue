@@ -136,8 +136,8 @@ every byte OpenZFS wrote. What it cannot give is a disk: E1/E2 (a read
 rate relative to a disk), F1–F6 and F8–F10 (sector sizes, controllers,
 bridges) stay ☐ until a machine with drives runs them.
 
-`tests/realworld/debian-loop.sh` does the whole run: builds the pools,
-takes every oracle from OpenZFS (`sha256sum /dev/zvol/...` before export,
+`tests/realworld/kernel-matrix.sh` does the whole run: builds the pools,
+takes every oracle from OpenZFS (the zvol as the kernel reads it before export,
 `zdb -d`, `zdb -lu`, `zfs get -s local`), exports them, runs the tool
 against the loop devices, and prints the row for the Results table.
 
@@ -148,8 +148,25 @@ of RAM and 8 GiB of free disk is enough):
 apt install linux-headers-$(uname -r) zfsutils-linux zfs-dkms dmsetup strace python3 openssl
 modprobe zfs
 cargo build --release
-sudo bash tests/realworld/debian-loop.sh /var/tmp/rw ./target/release/zvolrescue
+sudo bash tests/realworld/kernel-matrix.sh /var/tmp/rw ./target/release/zvolrescue
 ```
+
+The same script runs on FreeBSD 14 and 15 against the OpenZFS of the
+base system, with md devices for loop devices: `gpart` writes B9's GPT
+(a `freebsd-zfs` partition), F7's failing range is a `gnop` that refuses
+every read between two clean ones, joined back into one device by
+`gconcat`, `truss` takes the place of `strace` for the read-once check,
+and A3 runs the tool as `nobody` through `chroot -u`:
+
+```
+pkg install rust bash python3
+cargo build --release
+bash tests/realworld/kernel-matrix.sh /var/tmp/rw ./target/release/zvolrescue
+```
+
+`.github/workflows/realworld.yml` runs it on demand in all four
+environments: the Ubuntu runner's own kernel, a Debian 12 VM with
+`zfs-dkms`, and FreeBSD 15 and 14 VMs.
 
 `zfs-dkms` builds the module for the running kernel, so the headers have
 to match it (reboot into the kernel the headers are for, first); with

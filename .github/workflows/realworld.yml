@@ -1,8 +1,8 @@
 name: Real-world (kernel ZFS)
 
 # The real-world matrix on a kernel ZFS (docs/REALWORLD-TESTS.md), on
-# demand: pools the kernel itself makes on loop devices, every oracle
-# from OpenZFS, the tool reading the devices as devices. Two
+# demand: pools the kernel itself makes on file-backed devices, every
+# oracle from OpenZFS, the tool reading the devices as devices. The
 # environments from the matrix's table:
 #
 #  * Ubuntu LTS: the runner's own kernel and its in-tree OpenZFS module —
@@ -11,7 +11,10 @@ name: Real-world (kernel ZFS)
 #  * Debian 12 with zfs-dkms: a real Debian VM under QEMU/KVM on the
 #    runner, the module built by dkms against Debian's kernel, the
 #    static musl binaries copied in — the environment the script was
-#    written for.
+#    written for;
+#  * FreeBSD 15 and 14: the project's first-class and best-effort
+#    targets (SPEC N-06), each a VM with the OpenZFS of its own base
+#    system, the pools on md devices, the tool built in the VM.
 #
 # Each job uploads the run's record (results, the row for the matrix,
 # the evidence log, every log of a failed scenario) whether it passed
@@ -42,7 +45,7 @@ jobs:
         id: run
         run: |
           set +e
-          sudo bash tests/realworld/debian-loop.sh /var/tmp/rw ./target/release/zvolrescue 2>&1 | tee /var/tmp/run.log
+          sudo bash tests/realworld/kernel-matrix.sh /var/tmp/rw ./target/release/zvolrescue 2>&1 | tee /var/tmp/run.log
           code=${PIPESTATUS[0]}
           echo "exit=$code" >> "$GITHUB_OUTPUT"
           echo "## Ubuntu LTS (runner kernel)" >> "$GITHUB_STEP_SUMMARY"
@@ -79,7 +82,7 @@ jobs:
         run: |
           cargo build --release --target x86_64-unknown-linux-musl -p zvolrescue -p zvolreport
           mkdir -p guest
-          cp target/x86_64-unknown-linux-musl/release/zvolrescue target/x86_64-unknown-linux-musl/release/zvolreport tests/realworld/debian-loop.sh guest/
+          cp target/x86_64-unknown-linux-musl/release/zvolrescue target/x86_64-unknown-linux-musl/release/zvolreport tests/realworld/kernel-matrix.sh guest/
       - name: QEMU with KVM
         run: |
           sudo apt-get update -qq
@@ -136,9 +139,9 @@ jobs:
         run: |
           cd vm
           SSH="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i key -p 2222"
-          scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i key -P 2222 ../guest/zvolrescue ../guest/zvolreport ../guest/debian-loop.sh debian@127.0.0.1:/var/tmp/
+          scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i key -P 2222 ../guest/zvolrescue ../guest/zvolreport ../guest/kernel-matrix.sh debian@127.0.0.1:/var/tmp/
           set +e
-          $SSH debian@127.0.0.1 'chmod +x /var/tmp/zvolrescue /var/tmp/zvolreport && sudo bash /var/tmp/debian-loop.sh /var/tmp/rw /var/tmp/zvolrescue' 2>&1 | tee run.log
+          $SSH debian@127.0.0.1 'chmod +x /var/tmp/zvolrescue /var/tmp/zvolreport && sudo bash /var/tmp/kernel-matrix.sh /var/tmp/rw /var/tmp/zvolrescue' 2>&1 | tee run.log
           code=${PIPESTATUS[0]}
           echo "exit=$code" >> "$GITHUB_OUTPUT"
           # The record, without the images.
@@ -162,3 +165,48 @@ jobs:
         with:
           name: realworld-debian-12
           path: vm/record
+
+  freebsd:
+    name: FreeBSD ${{ matrix.release }}, OpenZFS from base (md devices)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        release: ["15", "14"]
+    steps:
+      - uses: actions/checkout@v5
+      # The VM runs the script and always succeeds; the script's own exit
+      # status comes back in the record and decides the job below, after
+      # the record is uploaded.
+      - uses: vmactions/freebsd-vm@v1
+        with:
+          release: ${{ matrix.release }}
+          mem: 8192
+          usesh: true
+          prepare: pkg install -y rust bash python3
+          run: |
+            freebsd-version -ku
+            cargo build --release -p zvolrescue -p zvolreport
+            bash tests/realworld/kernel-matrix.sh /var/tmp/rw ./target/release/zvolrescue > run.log 2>&1
+            echo $? > exit.txt
+            cat run.log
+            mkdir -p record/out
+            cp run.log exit.txt record/
+            for f in env.txt results.txt row.md evidence.jsonl report.md; do cp "/var/tmp/rw/$f" record/ 2>/dev/null || true; done
+            find /var/tmp/rw/out -maxdepth 1 -type f \( -name '*.log' -o -name '*.err' -o -name '*.txt' -o -name '*.json' \) -exec cp {} record/out/ \; 2>/dev/null || true
+            true
+      - name: The row, and the verdict
+        if: always()
+        run: |
+          echo "## FreeBSD ${{ matrix.release }} (OpenZFS from base, md devices)" >> "$GITHUB_STEP_SUMMARY"
+          cat record/env.txt >> "$GITHUB_STEP_SUMMARY" 2>/dev/null
+          echo >> "$GITHUB_STEP_SUMMARY"
+          cat record/row.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null
+          echo >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"; cat record/results.txt >> "$GITHUB_STEP_SUMMARY" 2>/dev/null; echo '```' >> "$GITHUB_STEP_SUMMARY"
+          test "$(cat record/exit.txt 2>/dev/null)" = 0
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: realworld-freebsd-${{ matrix.release }}
+          path: record
