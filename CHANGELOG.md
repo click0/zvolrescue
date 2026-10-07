@@ -15,6 +15,20 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ## Unreleased
 
+### Added
+
+* **The real-kernel matrix runs on FreeBSD 15 and 14.** The script
+  (`tests/realworld/kernel-matrix.sh`, renamed from `debian-loop.sh`)
+  now runs on FreeBSD with the base system's OpenZFS and md devices for
+  loop devices: B9's GPT from `gpart`, F7's failing range a `gnop` that
+  refuses every read between two clean ones joined by `gconcat`, the
+  read-once check from `truss`, A3 as `nobody` through `chroot -u`.
+  `realworld.yml` runs it in FreeBSD 15.1 and 14.5 VMs beside Ubuntu
+  and Debian 12, on demand. All four pass (REALWORLD-TESTS, Results);
+  on FreeBSD 15.1 (OpenZFS 2.4.2) every one of the 35 scenarios
+  applies, C12 included: `list` refuses a kernel-expanded raidz with
+  exit 3 naming `raidz_expansion`.
+
 ### Fixed
 
 * **`dump` passes over a TXG at which a destroyed volume's dnodes are
@@ -32,6 +46,15 @@ tagged. `v0.7.1` is the release that carries those six.
   messages say `unreadable` and `does not read there` without naming
   the object set, since that is no longer the only thing that can be
   gone.
+* **A1 and G5 of the real-kernel matrix compared nothing.** The
+  script recorded its loop devices inside a command substitution, so
+  the list the before/after edge hashes walk was empty and both passed
+  without comparing a byte — in the 2026-09-23 rows too. The list is a
+  file now, and the 2026-10-07 runs compare every device's ends.
+* **C4 measured nothing on a ZFS-backed work directory.** `du` counts
+  a file's blocks only once a TXG has written them (1024 bytes for a
+  1 GiB image with 64 MiB of data on FreeBSD 15); C4 now sums the
+  image's data extents with `SEEK_DATA`/`SEEK_HOLE`.
 
 ## v0.9.8 — 2026-09-27
 
