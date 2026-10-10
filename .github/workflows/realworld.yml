@@ -5,13 +5,15 @@ name: Real-world (kernel ZFS)
 # oracle from OpenZFS, the tool reading the devices as devices. The
 # environments from the matrix's table:
 #
-#  * Ubuntu LTS: the runner's own kernel and its in-tree OpenZFS module —
-#    the cheap check that the script and the tool hold up on a real
-#    kernel at all;
-#  * Debian 12 with zfs-dkms: a real Debian VM under QEMU/KVM on the
-#    runner, the module built by dkms against Debian's kernel, the
-#    static musl binaries copied in — the environment the script was
-#    written for;
+#  * Ubuntu LTS, the current one and the one before (26.04 and 24.04):
+#    the runner's own kernel and its in-tree OpenZFS module — the cheap
+#    check that the script and the tool hold up on a real kernel at all;
+#  * Debian with zfs-dkms, stable and oldstable (13 and 12): a real
+#    Debian VM under QEMU/KVM on the runner, the module built by dkms
+#    against Debian's kernel, the static musl binaries copied in — the
+#    environment the script was written for, and in 12's OpenZFS 2.1
+#    the oldest ZFS on the matrix, the one that found both of D2's
+#    defects;
 #  * FreeBSD 15 and 14: the project's first-class and best-effort
 #    targets (SPEC N-06), each a VM with the OpenZFS of its own base
 #    system, the pools on md devices, the tool built in the VM.
@@ -28,8 +30,12 @@ env:
 
 jobs:
   ubuntu-kernel:
-    name: Ubuntu LTS, in-tree OpenZFS (runner kernel)
-    runs-on: ubuntu-24.04
+    name: Ubuntu LTS, in-tree OpenZFS (${{ matrix.runner }} runner kernel)
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ["ubuntu-26.04", "ubuntu-24.04"]
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -48,7 +54,7 @@ jobs:
           sudo bash tests/realworld/kernel-matrix.sh /var/tmp/rw ./target/release/zvolrescue 2>&1 | tee /var/tmp/run.log
           code=${PIPESTATUS[0]}
           echo "exit=$code" >> "$GITHUB_OUTPUT"
-          echo "## Ubuntu LTS (runner kernel)" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Ubuntu LTS (${{ matrix.runner }} runner kernel)" >> "$GITHUB_STEP_SUMMARY"
           cat /var/tmp/rw/env.txt >> "$GITHUB_STEP_SUMMARY" 2>/dev/null
           echo >> "$GITHUB_STEP_SUMMARY"
           cat /var/tmp/rw/row.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null
@@ -67,12 +73,20 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: realworld-ubuntu-lts
+          name: realworld-${{ matrix.runner }}
           path: /var/tmp/record
 
   debian-vm:
-    name: Debian 12, zfs-dkms (QEMU/KVM)
+    name: Debian ${{ matrix.release }}, zfs-dkms (QEMU/KVM)
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - release: "13"
+            codename: trixie
+          - release: "12"
+            codename: bookworm
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -91,10 +105,12 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
           ls -l /dev/kvm
-      - name: A Debian 12 cloud image, and a seed that lets us in
+      - name: A Debian ${{ matrix.release }} cloud image, and a seed that lets us in
         run: |
           mkdir -p vm && cd vm
-          curl -sSL -o disk.qcow2 https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2
+          base=https://cloud.debian.org/images/cloud/${{ matrix.codename }}/latest
+          curl -sSL -o disk.qcow2 "$base/debian-${{ matrix.release }}-genericcloud-amd64.qcow2"
+          curl -sSL "$base/SHA512SUMS" | grep ' debian-${{ matrix.release }}-genericcloud-amd64.qcow2$' | sed 's/ .*//; s/$/  disk.qcow2/' | sha512sum -c -
           qemu-img resize disk.qcow2 24G
           ssh-keygen -q -N '' -t ed25519 -f key
           printf 'instance-id: rw-1\nlocal-hostname: rw\n' > meta-data
@@ -127,7 +143,7 @@ jobs:
           ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i key -p 2222 debian@127.0.0.1 'bash -s' <<'EOF'
           set -e
           export DEBIAN_FRONTEND=noninteractive
-          sudo sed -i 's/^Components: main$/Components: main contrib non-free-firmware/' /etc/apt/sources.list.d/debian.sources
+          sudo sed -i 's/^Components:.*/Components: main contrib non-free-firmware/' /etc/apt/sources.list.d/debian.sources
           sudo apt-get update -qq
           sudo -E apt-get install -y -qq --no-install-recommends "linux-headers-$(uname -r)" dkms zfs-dkms zfsutils-linux dmsetup strace python3 openssl
           sudo modprobe zfs
@@ -148,7 +164,7 @@ jobs:
           $SSH debian@127.0.0.1 'cd /var/tmp/rw && sudo tar czf /var/tmp/record.tgz env.txt results.txt row.md evidence.jsonl report.md $(cd out && ls | grep -E "\.(log|err|txt|json)$" | sed "s|^|out/|") 2>/dev/null; sudo chmod 644 /var/tmp/record.tgz'
           scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i key -P 2222 debian@127.0.0.1:/var/tmp/record.tgz .
           mkdir -p record && tar xzf record.tgz -C record && cp run.log serial.log record/
-          echo "## Debian 12 (zfs-dkms, QEMU/KVM)" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Debian ${{ matrix.release }} (zfs-dkms, QEMU/KVM)" >> "$GITHUB_STEP_SUMMARY"
           cat record/env.txt >> "$GITHUB_STEP_SUMMARY" 2>/dev/null
           echo >> "$GITHUB_STEP_SUMMARY"
           cat record/row.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null
@@ -163,7 +179,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: realworld-debian-12
+          name: realworld-debian-${{ matrix.release }}
           path: vm/record
 
   freebsd:
