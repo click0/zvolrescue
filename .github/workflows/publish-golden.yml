@@ -156,7 +156,11 @@ jobs:
           } > "reports/$TAG/README.md"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # The oracle whole, its keys included: the repository ignores
+          # `*.key` for anything else, and the keys of an image's test
+          # datasets protect nothing.
           git add -A
+          git add -f "oracle/$POOL"
           git status --short | head -20
           git commit -q -F - <<EOF
           $TAG: the kernel-built golden image — oracle, IMAGE.md, the matrix report
