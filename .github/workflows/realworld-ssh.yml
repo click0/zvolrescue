@@ -267,6 +267,9 @@ jobs:
       - name: The record, whatever the verdict was
         if: always()
         run: |
+          # Nothing to fetch when the way in was never built.
+          test -x ~/bin/gate || { echo "the machine was never reached; nothing to bring back"; exit 0; }
+          test -n "${{ steps.probe.outputs.os }}" || { echo "the probe did not answer; nothing to bring back"; exit 0; }
           mkdir -p record
           cp run.log record/ 2>/dev/null || true
           if gate record > record.tgz 2>record.err; then
@@ -276,11 +279,11 @@ jobs:
           fi
           {
             echo "## ${{ steps.probe.outputs.host }}: ${{ steps.probe.outputs.os }} ${{ steps.probe.outputs.kernel }} on ${{ steps.probe.outputs.arch }}, ${{ steps.probe.outputs.zfs }} (environment \`${{ inputs.target }}\`, ${{ inputs.script }})"
-            cat record/env.txt 2>/dev/null
+            cat record/env.txt 2>/dev/null || true
             echo
-            cat record/row.md 2>/dev/null
+            cat record/row.md 2>/dev/null || true
             echo
-            echo '```'; cat record/results.txt 2>/dev/null; echo '```'
+            echo '```'; cat record/results.txt 2>/dev/null || true; echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           if [ "${{ inputs.keep }}" = true ]; then
             echo "the run's directory stays on the machine (keep)"
