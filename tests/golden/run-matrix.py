@@ -224,10 +224,26 @@ class Oracle:
                 f = line.split()
                 if len(f) == 2 and f[1].endswith("@export"):
                     self.volumes[f[1][: -len("@export")]] = f[0]
+        # Keys: the raw key (every ztest dataset; `secret-raw` of the
+        # kernel-built image) and, where the image has one, the passphrase
+        # of the others. Which one a volume takes comes from the oracle's
+        # `zfs list` capture, by its keyformat; `self.key` stays the raw
+        # one for the walker.
         self.key = None
         rk = os.path.join(d, "keys", "raw.key")
         if os.path.exists(rk):
             self.key = "raw:" + rk
+        self.passphrase = None
+        pw = os.path.join(d, "keys", "passphrase.txt")
+        if os.path.exists(pw):
+            self.passphrase = "passphrase:" + pw
+        self.keyformat = {}
+        zl = os.path.join(d, "zfs-list.txt")
+        if os.path.exists(zl):
+            for line in open(zl):
+                f = line.rstrip("\n").split("\t")
+                if len(f) >= 12:
+                    self.keyformat[f[0]] = f[11]
         self.zdb = ""
         zd = os.path.join(d, "zdb-dddd.txt")
         if os.path.exists(zd):
@@ -235,6 +251,18 @@ class Oracle:
 
     def path(self, role):
         return os.path.join(self.image, self.layout["members"][role]["file"])
+
+    def key_for(self, dataset):
+        """The `--key` spec that unlocks `dataset`, None for a plain one.
+        Without a `zfs list` capture every dataset is taken as raw-keyed,
+        which is what a ztest image is."""
+        default = "none" if self.keyformat else ("raw" if self.key else "none")
+        kf = self.keyformat.get(dataset, default)
+        if kf == "passphrase":
+            return self.passphrase
+        if kf in ("raw", "hex"):
+            return self.key
+        return None
 
     @property
     def min_length(self):
@@ -507,8 +535,9 @@ def judge_dump(args, oracle, manifest, members, work, assume=()):
         cmd = [args.tool, "-q", "-f", "json", "--debug-log", log, "dump", vol, *members, "-o", out]
         for path in assume:
             cmd += ["--assume-member", path]
-        if oracle.key:
-            cmd += ["--key", oracle.key]
+        key = oracle.key_for(vol)
+        if key:
+            cmd += ["--key", key]
         proc = subprocess.run(cmd, capture_output=True, text=True)
         trace = open(log, errors="replace").read() if os.path.exists(log) else ""
         redundancy |= bool(REDUNDANCY.search(trace))

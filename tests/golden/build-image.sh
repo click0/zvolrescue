@@ -21,6 +21,7 @@
 # captured from whatever this run produced).
 set -eu
 
+HERE=$(cd "$(dirname "$0")" && pwd)
 OUT=${1:?output directory}
 TAG=${2:-image-v1}
 POOL=golden
@@ -37,6 +38,7 @@ die() { printf 'build-image: %s\n' "$*" >&2; exit 1; }
 command -v zpool >/dev/null || die "zpool not found"
 command -v zdb >/dev/null || die "zdb not found"
 command -v zstd >/dev/null || die "zstd not found"
+command -v python3 >/dev/null || die "python3 not found (zdb-layout.py writes the layout)"
 if command -v sha256sum >/dev/null; then SHA="sha256sum"; else SHA="sha256 -r"; fi
 sha() { $SHA "$1" | awk '{print $1}'; }
 
@@ -210,27 +212,12 @@ if [ -n "$newest" ]; then
     done
 fi
 
-# layout.json: the machine-readable form of the topology
-{
-    echo "{"
-    echo "  \"pool\": \"$POOL\", \"ashift\": 12, \"member_size\": \"$MEMBER_SIZE\", \"image_tag\": \"$TAG\","
-    echo "  \"tops\": ["
-    echo "    {\"kind\": \"mirror\", \"members\": [\"mirror-0a\", \"mirror-0b\"]},"
-    echo "    {\"kind\": \"raidz2\", \"nparity\": 2, \"members\": [\"raidz2-0\", \"raidz2-1\", \"raidz2-2\", \"raidz2-3\"]},"
-    echo "    {\"kind\": \"draid1\", \"nparity\": 1, \"ndata\": 2, \"nspares\": 1, \"members\": [\"draid1-0\", \"draid1-1\", \"draid1-2\", \"draid1-3\"]}"
-    echo "  ],"
-    echo "  \"member_guids\": {"
-    first=1
-    for m in $ALL; do
-        g=$(awk '/^\s*guid:/{print $2; exit}' "$OUT/oracle/labels/$m.txt")
-        [ $first = 1 ] || echo ","
-        first=0
-        printf '    "%s": "%s"' "$m" "$g"
-    done
-    echo
-    echo "  }"
-    echo "}"
-} > "$OUT/oracle/layout.json"
+# layout.json: the topology as zdb reports it, in the shape the damage
+# matrix reads (zdb-layout.py, shared with the ztest image): every member
+# a role `t<top>-<kind>-<i>`, every top-level vdev with its groups, and
+# `volumes` set, so runs against this image are judged by volume hashes.
+python3 "$HERE/zdb-layout.py" --pool "$POOL" --tag "$TAG" --source kernel --volumes \
+    < "$OUT/oracle/zdb-C.txt" > "$OUT/oracle/layout.json"
 
 # ---------------------------------------------------------------- release
 say "release files"

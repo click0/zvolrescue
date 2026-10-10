@@ -20,7 +20,11 @@ name: Real-world (kernel ZFS)
 #  * mfsBSD: the rescue medium itself — FreeBSD booted from an ISO into
 #    RAM under QEMU/KVM on the runner, a pool its kernel makes on two
 #    raw disks, and the static binary built on FreeBSD 15 copied in
-#    over ssh (REALWORLD-TESTS E3).
+#    over ssh (REALWORLD-TESTS E3);
+#  * the golden image (SPEC §9.1, REALWORLD-TESTS G1–G3): built by
+#    tests/golden/build-image.sh on the runner's kernel ZFS, the whole
+#    damage matrix run over it, image and oracle uploaded for
+#    publication in zvolrescue-testdata.
 #
 # Each job uploads the run's record (results, the row for the matrix,
 # the evidence log, every log of a failed scenario) whether it passed
@@ -30,7 +34,7 @@ on:
   workflow_dispatch:
     inputs:
       only:
-        description: "Which environments to run, any of: ubuntu debian freebsd mfsbsd (empty: all)"
+        description: "Which environments to run, any of: ubuntu debian freebsd mfsbsd golden (empty: all); golden-held-out runs the held-out manifests too"
         required: false
         default: ""
 
@@ -332,3 +336,96 @@ jobs:
         with:
           name: realworld-mfsbsd-14.2
           path: vm/record
+
+  # The golden image (SPEC §9.1): one pool with mirror, raidz2 and dRAID
+  # tops, every checksum and compression, encrypted datasets, snapshots,
+  # a clone, a rename, a destroy, hundreds of TXGs, built by the runner's
+  # own kernel ZFS and recorded against OpenZFS alone — then the whole
+  # damage matrix over it, every expectation enforced, since this
+  # layout is known. The image and its oracle are uploaded as an
+  # artifact for publication in zvolrescue-testdata (a release there,
+  # `image-v1`), which this workflow cannot do itself.
+  golden:
+    name: Golden image (G1) on the runner kernel, and the damage matrix over it (G2, G3)
+    if: ${{ !github.event.inputs.only || contains(github.event.inputs.only, 'golden') }}
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          repository: click0/zvolrescue-testdata
+          path: testdata
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release -p zvolrescue && cargo build --release -p zfs-read --examples
+      - name: Kernel ZFS on the runner
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends zfsutils-linux zstd attr python3 openssl
+          sudo modprobe zfs || { sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)" && sudo modprobe zfs; }
+          zfs version
+          uname -r
+      - name: G1, the image, and its oracle from zdb
+        run: |
+          sudo sh tests/golden/build-image.sh /var/tmp/golden image-v1 2>&1 | tee /var/tmp/golden-build.log
+          test "${PIPESTATUS[0]}" = 0
+          sudo chown -R "$USER" /var/tmp/golden
+          du -sh /var/tmp/golden/release /var/tmp/golden/oracle
+          cat /var/tmp/golden/release/SHA256SUMS
+          python3 -c 'import json; l = json.load(open("/var/tmp/golden/oracle/layout.json")); print(l["pool"], l["volumes"], [(t["index"], t["kind"], len(t["members"])) for t in l["tops"]])'
+          wc -l /var/tmp/golden/oracle/volumes.sha256
+      - name: G2, G3, the damage matrix over it
+        id: matrix
+        run: |
+          held=""
+          case "${{ github.event.inputs.only }}" in *held-out*) held=--held-out ;; esac
+          set +e
+          python3 tests/golden/run-matrix.py \
+            --image /var/tmp/golden/members --oracle /var/tmp/golden/oracle \
+            --manifests testdata/manifests --out /var/tmp/golden/report --label image-v1 \
+            --tmp /var/tmp $held 2>&1 | tee /var/tmp/golden-matrix.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "run-matrix.py exit $rc"
+          # Against this image every expectation holds: the layout is the
+          # one the manifests were written for, so a run that lands
+          # outside its expected category is a finding, not noise.
+          python3 - <<'EOF' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json, collections
+          rs = json.load(open("/var/tmp/golden/report/report-image-v1.json"))
+          print("## Golden image: the damage matrix (G2, G3)")
+          print()
+          print("| Manifest | Expected | Actual | Verdict |")
+          print("|---|---|---|---|")
+          for r in rs:
+              print(f"| `{r['id']}` | {r['expected']} | {r['actual']} | {r['verdict']} |")
+          c = collections.Counter(r["verdict"] for r in rs)
+          print()
+          print(f"{len(rs)} manifests: " + ", ".join(f"{k} {v}" for k, v in sorted(c.items())))
+          bad = [r for r in rs if r["verdict"] not in ("pass", "n/a")]
+          for r in bad:
+              print(f"- **{r['id']}**: expected {r['expected']}, got {r['actual']}")
+              for n in r.get("notes", []):
+                  print(f"  - {n}")
+              for k, v in (r.get("outcomes") or {}).items():
+                  if v != "ok":
+                      print(f"  - {k}: {v}")
+          wrote = [r["id"] for r in rs if r.get("inputs_unchanged") is False]
+          assert not wrote, f"a run modified its own evidence: {wrote}"
+          assert not bad, f"{len(bad)} run(s) outside their expected category"
+          EOF
+          test "$rc" = 0 || { echo "::error::run-matrix.py exited $rc"; exit 1; }
+      - name: The image and its oracle, for zvolrescue-testdata
+        if: always()
+        run: |
+          mkdir -p /var/tmp/golden/publish
+          cp -r /var/tmp/golden/release /var/tmp/golden/oracle /var/tmp/golden/IMAGE.md /var/tmp/golden/publish/ 2>/dev/null || true
+          cp /var/tmp/golden-build.log /var/tmp/golden/publish/ 2>/dev/null || true
+          cp -r /var/tmp/golden/report /var/tmp/golden/publish/ 2>/dev/null || true
+          cp /var/tmp/golden-matrix.log /var/tmp/golden/publish/report/ 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: golden-image-v1
+          path: /var/tmp/golden/publish
+          retention-days: 14
+          if-no-files-found: warn
