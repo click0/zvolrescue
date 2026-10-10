@@ -186,7 +186,7 @@ tunable metaslab_force_ganging 16777216 metaslab.force_ganging
 say "oracle"
 record_volume_hashes export
 zpool status -v "$POOL" > "$OUT/oracle/zpool-status.txt"
-zfs list -t all -o name,type,guid,creation,used,refer,volsize,volblocksize,checksum,compression,encryption,keyformat -H "$POOL" > "$OUT/oracle/zfs-list.txt"
+zfs list -r -t all -o name,type,guid,creation,used,refer,volsize,volblocksize,checksum,compression,encryption,keyformat -H "$POOL" > "$OUT/oracle/zfs-list.txt"
 zfs get -r -H -o name,property,value all "$POOL" > "$OUT/oracle/zfs-get-all.txt"
 zdb -d "$POOL" > "$OUT/oracle/datasets.txt"
 zdb -dddd "$POOL" > "$OUT/oracle/zdb-dddd.txt" 2>&1 || true

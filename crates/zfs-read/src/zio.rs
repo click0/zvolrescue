@@ -1269,10 +1269,15 @@ impl<'a> PoolReader<'a> {
         }
     }
 
-    /// How many bytes the gang header behind `bp` is: 512 on every pool
-    /// before `dynamic_gang_header`, and with that feature active the
-    /// smallest of its copies' allocations (`zio_gang_tree_assemble`:
+    /// How many bytes the gang header behind `bp` may be: 512 on every
+    /// pool before `dynamic_gang_header`, and with that feature active
+    /// the smallest of its copies' allocations (`zio_gang_tree_assemble`:
     /// the header was written once, at the size every DVA could hold).
+    /// "May be": a pool keeps the 512-byte headers it wrote before the
+    /// feature went active — it goes active on the first gang write that
+    /// needed more than three children — so the reader tries the old
+    /// size when the full one does not verify, as `zio_checksum_error`
+    /// does.
     fn gang_header_size(&self, bp: &BlkPtr) -> usize {
         if !self.dynamic_gang {
             return blkptr::GANG_HEADER_SIZE;
@@ -1294,32 +1299,47 @@ impl<'a> PoolReader<'a> {
             return Err(ReadError::Gang("nesting deeper than 8".into()));
         }
         let header_size = self.gang_header_size(bp);
+        // Verifier: DVA[0] and the physical birth. A gang header of an
+        // encrypted dataset carries the folded checksum.
+        let verify = |buf: &[u8]| {
+            if bp.uses_crypt() && bp.object_type != ot::OBJSET {
+                zfs_ondisk::checksum::verify_gang_header_crypt(
+                    buf,
+                    u64::from(bp.dva[0].vdev),
+                    bp.dva[0].offset,
+                    bp.physical_birth_or_logical(),
+                )
+            } else {
+                zfs_ondisk::checksum::verify_gang_header(
+                    buf,
+                    u64::from(bp.dva[0].vdev),
+                    bp.dva[0].offset,
+                    bp.physical_birth_or_logical(),
+                )
+            }
+        };
         let mut header = None;
         let mut last = ReadError::NoMember;
         for (device, candidate) in self.candidates_on(dva.vdev, dva.offset, header_size, 0) {
             match candidate {
-                Ok(buf) => {
-                    // Verifier: DVA[0] and the physical birth. A gang
-                    // header of an encrypted dataset carries the folded
-                    // checksum.
-                    let status = if bp.uses_crypt() && bp.object_type != ot::OBJSET {
-                        zfs_ondisk::checksum::verify_gang_header_crypt(
-                            &buf,
-                            u64::from(bp.dva[0].vdev),
-                            bp.dva[0].offset,
-                            bp.physical_birth_or_logical(),
-                        )
-                    } else {
-                        zfs_ondisk::checksum::verify_gang_header(
-                            &buf,
-                            u64::from(bp.dva[0].vdev),
-                            bp.dva[0].offset,
-                            bp.physical_birth_or_logical(),
-                        )
-                    };
+                Ok(mut buf) => {
+                    let mut status = verify(&buf);
+                    let mut size = header_size;
+                    if status != zfs_ondisk::checksum::ChecksumStatus::Ok
+                        && header_size > blkptr::GANG_HEADER_SIZE
+                    {
+                        // Written before the feature went active: a
+                        // 512-byte header at the start of the allocation.
+                        let old = verify(&buf[..blkptr::GANG_HEADER_SIZE]);
+                        if old == zfs_ondisk::checksum::ChecksumStatus::Ok {
+                            buf.truncate(blkptr::GANG_HEADER_SIZE);
+                            status = old;
+                            size = blkptr::GANG_HEADER_SIZE;
+                        }
+                    }
                     trace!(
                         "gang",
-                        "header @ vdev {} off {:#x} device {device:?} (depth {depth}): {header_size} bytes, checksum {}",
+                        "header @ vdev {} off {:#x} device {device:?} (depth {depth}): {size} bytes, checksum {}",
                         dva.vdev,
                         dva.offset,
                         status.as_str()
@@ -2082,6 +2102,29 @@ mod tests {
             assert!(a.features_for_read.iter().any(|f| f == DGH));
             let block = reader(&s, &a).read_block(&bp, false).unwrap();
             assert_eq!(block.data, wide_payload());
+            assert_eq!(block.verify, Verify::Ok);
+        }
+
+        /// A pool keeps the 512-byte headers it wrote before the feature
+        /// went active (the first golden image had hundreds of them, and
+        /// not one 4 KiB header): with the feature claimed, a header that
+        /// does not verify at the vdev's allocation is tried at the old
+        /// size, as OpenZFS tries it.
+        #[test]
+        fn an_old_header_on_a_pool_with_the_feature_active_still_reads() {
+            let pool = Pool::mirror("tank", 0x9e9e, 12)
+                .txgs(&[(100, 1)])
+                .with_feature(DGH);
+            let mut members = vec![pool.member_image(0, SIZE), pool.member_image(1, SIZE)];
+            let mut a = Alloc::new(0x30_0000);
+            let bp = a.put_gang(&mut members, &payload(), &[4096, 4096, 4096], ot::ZVOL, 100);
+            let bp = BlkPtr::parse(&bp, Endian::Little).unwrap();
+            let s: Vec<MemSource> = members.into_iter().map(MemSource::new).collect();
+            let scans: Vec<_> = s.iter().map(|m| scan_device(m).ok()).collect();
+            let a = assemble(&scans).into_iter().next().unwrap();
+            assert!(a.features_for_read.iter().any(|f| f == DGH));
+            let block = reader(&s, &a).read_block(&bp, false).unwrap();
+            assert_eq!(block.data, payload());
             assert_eq!(block.verify, Verify::Ok);
         }
 

@@ -772,14 +772,15 @@ if [ "$HAVE_DGH" = 1 ]; then
     if [ "$DGH_STATE" != active ]; then
         result C13 SKIP "ganging was forced, but dynamic_gang_header stayed '$DGH_STATE' on this ZFS"
     else
-        run c13-scan scan "$G0" "$G1"; s=$code
+        run c13-scan -f json scan "$G0" "$G1"; s=$code
+        jsonq 'import sys; sys.exit(0 if any("dynamic_gang_header" in f for v in d["devices"] for f in ((v.get("config") or {}).get("features_for_read") or [])) else 1)' < "$WORK/out/c13-scan.log" 2>/dev/null && named=1 || named=0
         rm -f "$WORK/out/c13t.img"
         "$ZR" -q --debug-log "$WORK/out/c13.trace" dump "${P}g/vol" "$G0" "$G1" -o "$WORK/out/c13t.img" >/dev/null 2>&1
         headers=$(grep -c '4096 bytes, checksum ok' "$WORK/out/c13.trace" 2>/dev/null); headers=${headers:-0}
-        if [ "$s" = 0 ] && grep -q 'dynamic_gang_header' "$WORK/out/c13-scan.log" && [ "$headers" -gt 0 ] \
+        if [ "$s" = 0 ] && [ "$named" = 1 ] && [ "$headers" -gt 0 ] \
             && dump_matches c13 "${P}g/vol" "${SHA[g]}" "$G0" "$G1"; then
             result C13 PASS "dynamic_gang_header active; $headers gang headers of 4096 bytes read; dump matches the kernel"
-        else result C13 FAIL "scan $s, $headers 4 KiB gang headers in the trace, dump $(test -f "$WORK/out/c13.img" && echo written || echo missing)"; fi
+        else result C13 FAIL "scan $s (names the feature: $named), $headers 4 KiB gang headers in the trace, dump $(test -f "$WORK/out/c13.img" && echo written || echo missing)"; fi
     fi
 else result C13 SKIP "dynamic_gang_header not in this ZFS (needs OpenZFS 2.4)"; fi
 

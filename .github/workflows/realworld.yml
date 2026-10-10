@@ -384,7 +384,7 @@ jobs:
           rc=0
           while read -r sha name; do
             vol=${name%@export}
-            case $(awk -F'\t' -v v="$vol" '$1 == v { print $12 }' oracle/zfs-list.txt) in
+            case $(awk -F'\t' -v v="$vol" '$1 == v && $2 == "keyformat" { print $3 }' oracle/zfs-get-all.txt) in
               raw) key="--key raw:$PWD/oracle/keys/raw.key" ;;
               passphrase) key="--key passphrase:$PWD/oracle/keys/passphrase.txt" ;;
               *) key="" ;;

@@ -237,13 +237,22 @@ class Oracle:
         pw = os.path.join(d, "keys", "passphrase.txt")
         if os.path.exists(pw):
             self.passphrase = "passphrase:" + pw
+        # `zfs get -r all` names every dataset's keyformat; the `zfs list`
+        # capture is the fallback (the first image's was written without
+        # `-r` and named the pool alone).
         self.keyformat = {}
+        zg = os.path.join(d, "zfs-get-all.txt")
+        if os.path.exists(zg):
+            for line in open(zg):
+                f = line.rstrip("\n").split("\t")
+                if len(f) >= 3 and f[1] == "keyformat":
+                    self.keyformat[f[0]] = f[2]
         zl = os.path.join(d, "zfs-list.txt")
         if os.path.exists(zl):
             for line in open(zl):
                 f = line.rstrip("\n").split("\t")
                 if len(f) >= 12:
-                    self.keyformat[f[0]] = f[11]
+                    self.keyformat.setdefault(f[0], f[11])
         self.zdb = ""
         zd = os.path.join(d, "zdb-dddd.txt")
         if os.path.exists(zd):
