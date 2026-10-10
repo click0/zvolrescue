@@ -2,7 +2,7 @@
 """Run the damage matrix (SPEC §9.1) against a golden image.
 
     run-matrix.py --image DIR --oracle DIR --manifests DIR [--tool ...] [--walker ...]
-                  [--out DIR] [--only ID ...] [--held-out] [--keep]
+                  [--older DIR] [--out DIR] [--only ID ...] [--held-out] [--keep]
 
 For every manifest: copy the members it damages, apply the damage, hash
 every input, run the tool, compare what came out with the oracle, classify
@@ -204,8 +204,13 @@ def sparse_copy(src, dst):
 
 
 class Oracle:
-    def __init__(self, d, image):
+    def __init__(self, d, image, older=None):
         self.dir, self.image = d, image
+        # The same members at an earlier point of the pool's life, for
+        # the `older-self` pattern: the builder writes them beside the
+        # members as `<image>-round6`, and the release carries them as
+        # the `round6-*` files.
+        self.older = older or image.rstrip("/") + "-round6"
         self.layout = json.load(open(os.path.join(d, "layout.json")))
         self.pool = self.layout["pool"]
         self.has_volumes = bool(self.layout.get("volumes"))
@@ -260,6 +265,23 @@ class Oracle:
 
     def path(self, role):
         return os.path.join(self.image, self.layout["members"][role]["file"])
+
+    def older_path(self, role, source):
+        """The earlier copy of a member that `older-self:<source>` names.
+
+        `source` is `<image tag>-round6`: the tag ties the manifest to the
+        image whose history it means, so a copy from another image's life
+        is never written over this one's members by mistake."""
+        tag = self.layout.get("image_tag") or ""
+        want = f"{tag}-round6"
+        if source != want:
+            raise Unresolved(f"older-self source {source!r} is not of this image ({want!r})")
+        p = os.path.join(self.older, self.layout["members"][role]["file"])
+        if not os.path.exists(p):
+            raise Unresolved(f"this image has no older-self material: {p} not found")
+        if os.path.getsize(p) != os.path.getsize(self.path(role)):
+            raise Unresolved(f"older-self copy {p} is not the member's size")
+        return p
 
     def key_for(self, dataset):
         """The `--key` spec that unlocks `dataset`, None for a plain one.
@@ -447,6 +469,10 @@ def apply_damage(oracle, manifest, work, rng):
             missing.add(role)
             continue
         src = paths[role]
+        if pat.startswith("older-self:"):
+            # Resolved here, before any member is copied, so that a
+            # manifest this image cannot serve is n/a and not half-done.
+            oracle.older_path(role, pat.split(":", 1)[1])
         for off, length in ranges_for(d.get("range", "0.."), src, os.path.getsize(src),
                                       reference=oracle.min_length):
             plans.setdefault(role, []).append((off, length, pat))
@@ -483,7 +509,20 @@ def apply_damage(oracle, manifest, work, rng):
                 elif pat == "truncate":
                     f.truncate(off)
                 elif pat.startswith("older-self:"):
-                    raise Unresolved("this image has no older-self material")
+                    # The range as it was at that earlier point, written
+                    # over the current bytes: every block in it verifies,
+                    # and none of it is current.
+                    older = oracle.older_path(role, pat.split(":", 1)[1])
+                    with open(older, "rb") as o:
+                        o.seek(off)
+                        f.seek(off)
+                        left = length
+                        while left:
+                            chunk = o.read(min(left, 1 << 20))
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            left -= len(chunk)
                 else:
                     raise ValueError(f"unknown pattern {pat}")
     ordered = [paths[r] for r in oracle.roles if r not in missing]
@@ -825,8 +864,10 @@ def main():
     ap.add_argument("--only", nargs="*", default=[])
     ap.add_argument("--held-out", action="store_true")
     ap.add_argument("--keep", action="store_true")
+    ap.add_argument("--older", default=None,
+                    help="the members at an earlier point of the pool's life, for older-self (default: <image>-round6)")
     args = ap.parse_args()
-    oracle = Oracle(args.oracle, args.image)
+    oracle = Oracle(args.oracle, args.image, args.older)
     os.makedirs(args.out, exist_ok=True)
     label = args.label or os.path.basename(args.oracle.rstrip("/"))
     results = []

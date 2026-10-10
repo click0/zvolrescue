@@ -24,7 +24,12 @@ name: Real-world (kernel ZFS)
 #  * the golden image (SPEC §9.1, REALWORLD-TESTS G1–G3): built by
 #    tests/golden/build-image.sh on the runner's kernel ZFS, the whole
 #    damage matrix run over it, image and oracle uploaded for
-#    publication in zvolrescue-testdata.
+#    publication in zvolrescue-testdata (publish-golden.yml);
+#  * the published golden image: the release of zvolrescue-testdata that
+#    tests/golden/image-v1.SHA256SUMS pins, the matrix over it with the
+#    oracle from that repository — what SPEC §9.1 calls the CI job that
+#    fetches the image; also weekly, since an image that does not change
+#    makes a changed verdict the tool's.
 #
 # Each job uploads the run's record (results, the row for the matrix,
 # the evidence log, every log of a failed scenario) whether it passed
@@ -34,9 +39,13 @@ on:
   workflow_dispatch:
     inputs:
       only:
-        description: "Which environments to run, any of: ubuntu debian freebsd mfsbsd golden (empty: all); golden-held-out runs the held-out manifests too"
+        description: "Which environments to run, any of: ubuntu debian freebsd mfsbsd golden published (empty: all); held-out in the value runs the held-out manifests too (golden-held-out, published-held-out)"
         required: false
         default: ""
+  schedule:
+    # The published image, every Monday: the image is pinned, so a
+    # verdict that changes is the tool that changed.
+    - cron: "17 4 * * 1"
 
 env:
   CARGO_TERM_COLOR: always
@@ -44,7 +53,7 @@ env:
 jobs:
   ubuntu-kernel:
     name: Ubuntu LTS, in-tree OpenZFS (${{ matrix.runner }} runner kernel)
-    if: ${{ !github.event.inputs.only || contains(github.event.inputs.only, 'ubuntu') }}
+    if: ${{ github.event_name != 'schedule' && (!github.event.inputs.only || contains(github.event.inputs.only, 'ubuntu')) }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -92,7 +101,7 @@ jobs:
 
   debian-vm:
     name: Debian ${{ matrix.release }}, zfs-dkms (QEMU/KVM)
-    if: ${{ !github.event.inputs.only || contains(github.event.inputs.only, 'debian') }}
+    if: ${{ github.event_name != 'schedule' && (!github.event.inputs.only || contains(github.event.inputs.only, 'debian')) }}
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -199,7 +208,7 @@ jobs:
 
   freebsd:
     name: FreeBSD ${{ matrix.release }}, OpenZFS from base (md devices)
-    if: ${{ !github.event.inputs.only || contains(github.event.inputs.only, 'freebsd') }}
+    if: ${{ github.event_name != 'schedule' && (!github.event.inputs.only || contains(github.event.inputs.only, 'freebsd')) }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -253,7 +262,7 @@ jobs:
   # image mfsBSD publishes; there is no 15 yet.
   mfsbsd:
     name: mfsBSD 14.2 (FreeBSD in RAM, QEMU/KVM), the FreeBSD 15 static binary
-    if: ${{ !github.event.inputs.only || contains(github.event.inputs.only, 'mfsbsd') }}
+    if: ${{ github.event_name != 'schedule' && (!github.event.inputs.only || contains(github.event.inputs.only, 'mfsbsd')) }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
@@ -347,7 +356,7 @@ jobs:
   # `image-v1`), which this workflow cannot do itself.
   golden:
     name: Golden image (G1) on the runner kernel, and the damage matrix over it (G2, G3)
-    if: ${{ !github.event.inputs.only || contains(github.event.inputs.only, 'golden') }}
+    if: ${{ github.event_name != 'schedule' && (!github.event.inputs.only || contains(github.event.inputs.only, 'golden')) }}
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v5
@@ -418,34 +427,8 @@ jobs:
           # Against this image every expectation holds: the layout is the
           # one the manifests were written for, so a run that lands
           # outside its expected category is a finding, not noise.
-          python3 - <<'EOF' | tee -a "$GITHUB_STEP_SUMMARY"
-          import json, collections
-          rs = json.load(open("/var/tmp/golden/report/report-image-v1.json"))
-          # The report is also what the publication carries.
-          print("## Golden image: the damage matrix (G2, G3)")
-          print()
-          print("| Manifest | Expected | Actual | Verdict |")
-          print("|---|---|---|---|")
-          for r in rs:
-              print(f"| `{r['id']}` | {r['expected']} | {r['actual']} | {r['verdict']} |")
-          c = collections.Counter(r["verdict"] for r in rs)
-          print()
-          print(f"{len(rs)} manifests: " + ", ".join(f"{k} {v}" for k, v in sorted(c.items())))
-          bad = [r for r in rs if r["verdict"] not in ("pass", "n/a")]
-          for r in bad:
-              print(f"- **{r['id']}**: expected {r['expected']}, got {r['actual']}")
-              for n in r.get("notes", []):
-                  print(f"  - {n}")
-              for k, v in (r.get("outcomes") or {}).items():
-                  if k == "refused_detail":
-                      for vol, why in v.items():
-                          print(f"  - {vol}: {why}")
-                  elif v != "ok":
-                      print(f"  - {k}: {v}")
-          wrote = [r["id"] for r in rs if r.get("inputs_unchanged") is False]
-          assert not wrote, f"a run modified its own evidence: {wrote}"
-          assert not bad, f"{len(bad)} run(s) outside their expected category"
-          EOF
+          python3 tests/golden/summarize-report.py /var/tmp/golden/report/report-image-v1.json \
+            "Golden image: the damage matrix (G2, G3)" | tee -a "$GITHUB_STEP_SUMMARY"
           test "$rc" = 0 || { echo "::error::run-matrix.py exited $rc"; exit 1; }
       - name: The image and its oracle, for zvolrescue-testdata
         if: always()
@@ -462,3 +445,103 @@ jobs:
           path: /var/tmp/golden/publish
           retention-days: 14
           if-no-files-found: warn
+
+
+  # The golden image as published (SPEC §9.1): the release of
+  # zvolrescue-testdata that tests/golden/image-v1.SHA256SUMS pins,
+  # fetched and checked against those sums, the oracle and the manifests
+  # from that repository's checkout, the whole damage matrix over it with
+  # every expectation enforced — the held-out manifests too when asked.
+  # Runs weekly as well: the image never changes, so a verdict that
+  # changes is the tool's doing.
+  golden-published:
+    name: The published golden image (image-v1), the damage matrix over it (G2–G4)
+    if: ${{ github.event_name == 'schedule' || !github.event.inputs.only || contains(github.event.inputs.only, 'published') }}
+    runs-on: ubuntu-24.04
+    env:
+      TAG: image-v1
+      TESTDATA: click0/zvolrescue-testdata
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          repository: click0/zvolrescue-testdata
+          path: testdata
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release -p zvolrescue && cargo build --release -p zfs-read --examples
+      - name: The release files, kept between runs
+        uses: actions/cache@v4
+        with:
+          path: /var/tmp/image/dl
+          key: golden-${{ env.TAG }}-${{ hashFiles('tests/golden/image-v1.SHA256SUMS') }}
+      - name: The release files, checked against the pinned sums, and the members out of them
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends zstd
+          pin="$GITHUB_WORKSPACE/tests/golden/$TAG.SHA256SUMS"
+          # The pin and the oracle's own record of the release agree.
+          cmp "$pin" "testdata/oracle/golden/SHA256SUMS-release.txt"
+          sudo mkdir -p /var/tmp/image/dl && sudo chown -R "$USER" /var/tmp/image
+          cd /var/tmp/image/dl
+          while read -r sum name; do
+            [ -s "$name" ] || curl -sSL --retry 3 -o "$name" "https://github.com/$TESTDATA/releases/download/$TAG/$name"
+          done < "$pin"
+          sha256sum -c "$pin"
+          mkdir -p ../members ../members-round6
+          for f in *.img.zst; do
+            name=${f%.zst}
+            case $f in
+              round6-*) zstd -d -q -f --sparse "$f" -o "../members-round6/${name#round6-}" ;;
+              *)        zstd -d -q -f --sparse "$f" -o "../members/$name" ;;
+            esac
+          done
+          (cd ../members && sha256sum -c "$GITHUB_WORKSPACE/testdata/oracle/golden/members.sha256")
+          ls -l ../members ../members-round6 | head -30
+          du -sh ../members ../members-round6
+          df -h /var/tmp | tail -n 1
+      - name: The undamaged image first, every volume
+        run: |
+          cd /var/tmp/image
+          members=$(ls members/*.img)
+          rc=0
+          while read -r sha name; do
+            vol=${name%@export}
+            case $(awk -F'\t' -v v="$vol" '$1 == v && $2 == "keyformat" { print $3 }' "$GITHUB_WORKSPACE/testdata/oracle/golden/zfs-get-all.txt") in
+              raw) key="--key raw:$GITHUB_WORKSPACE/testdata/oracle/golden/keys/raw.key" ;;
+              passphrase) key="--key passphrase:$GITHUB_WORKSPACE/testdata/oracle/golden/keys/passphrase.txt" ;;
+              *) key="" ;;
+            esac
+            set +e
+            "$GITHUB_WORKSPACE/target/release/zvolrescue" -q dump "$vol" $members $key -o /var/tmp/baseline.img 2>/var/tmp/baseline.err; code=$?
+            set -e
+            got=$(sha256sum /var/tmp/baseline.img 2>/dev/null | cut -d' ' -f1)
+            if [ "$code" = 0 ] && [ "$got" = "$sha" ]; then echo "ok        $vol"
+            else echo "FAIL ($code) $vol: $(tail -n 3 /var/tmp/baseline.err | tr '\n' ' ')"; rc=1; fi
+            rm -f /var/tmp/baseline.img
+          done < <(grep '@export$' "$GITHUB_WORKSPACE/testdata/oracle/golden/volumes.sha256")
+          test "$rc" = 0
+      - name: The damage matrix over it (G2, G3; G4 with held-out)
+        run: |
+          set -o pipefail
+          held=""
+          case "${{ github.event.inputs.only }}" in *held-out*) held=--held-out ;; esac
+          set +e
+          python3 tests/golden/run-matrix.py \
+            --image /var/tmp/image/members --oracle testdata/oracle/golden \
+            --manifests testdata/manifests --out /var/tmp/image/report --label "$TAG" \
+            --tmp /var/tmp $held 2>&1 | tee /var/tmp/image/matrix.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "run-matrix.py exit $rc"
+          python3 tests/golden/summarize-report.py "/var/tmp/image/report/report-$TAG.json" \
+            "The published golden image $TAG: the damage matrix (G2, G3${held:+, G4})" | tee -a "$GITHUB_STEP_SUMMARY"
+          test "$rc" = 0 || { echo "::error::run-matrix.py exited $rc"; exit 1; }
+      - name: The report
+        if: always()
+        run: |
+          mkdir -p /var/tmp/image/report
+          cp /var/tmp/image/matrix.log /var/tmp/image/report/ 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: golden-published-${{ env.TAG }}-report
+          path: /var/tmp/image/report
