@@ -53,6 +53,26 @@ tagged. `v0.7.1` is the release that carries those six.
   14.2 rescue image. The README and the release notes said "mfsBSD 15
   included" of that binary; no mfsBSD 15 exists, and they now say what
   was checked, and that 14.x stays build-from-source (SPEC N-06a).
+* **Gang headers the size of a sector: `com.klarasystems:dynamic_gang_header`
+  (OpenZFS 2.4) is read.** The feature lets a gang header fill the
+  smallest allocation its top-level vdev makes — 4 KiB on an `ashift=12`
+  mirror or raidz, a data row on a dRAID — instead of one 512-byte
+  sector, and it goes active on the first gang write that needed more
+  than three children; a fragmented pool on 2.4 (Ubuntu 26.04, FreeBSD
+  15.1) carries it. v0.9.8 did not know it and refused such a pool
+  whole, every `dump` exit 3 — which is how the first golden image,
+  built with ganging forced, came out: 33 of 41 damage runs "refused".
+  The reader sizes the header as `zio_gang_tree_assemble` does, the
+  least of the copies' minimum allocations, parses as many child
+  pointers as fit before the checksum tail, and — since a pool keeps the
+  512-byte headers it wrote before the feature went active, and the
+  golden image had hundreds of those and not one larger — tries the
+  old size when the vdev's does not verify, as `zio_checksum_error`
+  does. Fixtures write both kinds; four tests read them on a mirror and
+  a degraded raidz2 and see the same bytes refused cleanly when the
+  labels do not claim the feature. The feature joins the implemented
+  list. `kernel-matrix.sh` C13 fills a mirror with ganging forced on a
+  2.4 kernel, sees the feature go active and the dump match.
 
 ### Fixed
 

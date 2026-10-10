@@ -279,6 +279,20 @@ class Oracle:
             self._min_length = min(os.path.getsize(self.path(r)) for r in self.roles)
         return self._min_length
 
+    @property
+    def widest_top(self):
+        """The top-level vdev with the most members, lowest id first: where
+        a manifest's bare `leaf = N` lands. On an image of one top-level
+        vdev that is the only choice; on the golden image — a mirror, a
+        raidz2 and a dRAID side by side — it keeps "leaves 0 and 1" of a
+        manifest two members of one group, as the manifest means them,
+        rather than the mirror's two halves and the raidz's third disk.
+        `top = N` or `kind = …` in the manifest overrides it."""
+        counts = {}
+        for info in self.layout["members"].values():
+            counts[info["top"]] = counts.get(info["top"], 0) + 1
+        return min(counts, key=lambda t: (-counts[t], t))
+
     def resolve(self, spec):
         """A member reference: a role name, or {kind=…, leaf=N, top=N}."""
         if isinstance(spec, str):
@@ -292,6 +306,8 @@ class Oracle:
             raise Unresolved(f"no member {spec!r}")
         kind, leaf = spec.get("kind"), spec.get("leaf", 0)
         top = spec.get("top")
+        if top is None and not kind:
+            top = self.widest_top
         for role, info in self.layout["members"].items():
             if kind and info["group_kind"] != kind:
                 continue
@@ -300,6 +316,22 @@ class Oracle:
             if info["index"] == leaf:
                 return role
         raise Unresolved(f"no member matching {spec}")
+
+    def damaged_kinds(self, manifest):
+        """The group kinds of the members a manifest damages — what its
+        expectation is judged by. A target it cannot place, or a manifest
+        that names no member, falls back to every kind in the image."""
+        kinds = set()
+        for d in manifest.get("damage", []):
+            try:
+                if "member" in d:
+                    kinds.add(self.layout["members"][self.resolve(d["member"])]["group_kind"])
+                elif "target" in d:
+                    for role, _, _ in self.resolve_target(d["target"]):
+                        kinds.add(self.layout["members"][role]["group_kind"])
+            except Unresolved:
+                pass
+        return kinds or {m["group_kind"] for m in self.layout["members"].values()}
 
     def a_dataset(self):
         """A dataset of this pool to aim at, chosen from the capture
@@ -534,6 +566,12 @@ def refusal(returncode, stderr):
     return None
 
 
+# The tool's answer when some blocks of a volume could not be read from
+# any copy: an image with those written as zeros, each one counted and
+# listed, exit 4 (SPEC F-33). Neither a clean refusal nor a recovery.
+INCOMPLETE = "incomplete (blocks written as zeros)"
+
+
 def judge_dump(args, oracle, manifest, members, work, assume=()):
     want = manifest["expect"].get("volumes", "all")
     volumes = list(oracle.volumes) if want == "all" else list(want)
@@ -564,7 +602,7 @@ def judge_dump(args, oracle, manifest, members, work, assume=()):
             # The tool says the image is not the whole volume. That is
             # neither a clean refusal nor an answer, so it is named
             # rather than folded into either.
-            outcomes[vol] = "incomplete (blocks written as zeros)"
+            outcomes[vol] = INCOMPLETE
         else:
             outcomes[vol] = f"exit {proc.returncode}: {proc.stderr.strip()[:160]}"
     return outcomes, redundancy
@@ -681,9 +719,11 @@ def run_case(args, oracle, manifest, rng):
     mid = manifest["id"]
     work = tempfile.mkdtemp(prefix=f"golden-{mid}-", dir=args.tmp)
     # Expectations may differ by geometry: losing one copy of a block is
-    # transparent on a mirror and needs parity on a raidz.
+    # transparent on a mirror and needs parity on a raidz. The geometry is
+    # that of the members the manifest damages — on an image with several
+    # top-level vdevs, the kinds of the others say nothing about it.
     expect = manifest["expect"]
-    kinds = {m["group_kind"] for m in oracle.layout["members"].values()}
+    kinds = oracle.damaged_kinds(manifest)
     expected = expect["outcome"]
     for kind, alt in expect.get("by_group_kind", {}).items():
         if kind in kinds:
@@ -697,6 +737,13 @@ def run_case(args, oracle, manifest, rng):
     # on where the damage landed, and neither is a property worth pinning.
     if "recovered" in accepted:
         accepted = [a for a in accepted if a != "recovered"] + ["bit-exact", "reconstructed"]
+    # Where the redundancy is gone and a refusal is the honest answer, an
+    # image with the lost blocks written as zeros, counted and announced
+    # (exit 4) is honest too: it presents nothing as good that is not,
+    # and keeps what still reads. Where recovery is expected it stays a
+    # failure.
+    if "refused" in accepted:
+        accepted = accepted + ["partial"]
     expected = " | ".join(dict.fromkeys(accepted))
     result = {"id": mid, "description": manifest.get("description", ""),
               "expected": expected, "notes": []}
@@ -746,6 +793,8 @@ def run_case(args, oracle, manifest, rng):
             actual = "reconstructed" if redundancy else "bit-exact"
         elif values <= good | {"refused"}:
             actual = "refused"
+        elif values <= good | {"refused", INCOMPLETE}:
+            actual = "partial"
         else:
             actual = "defect"
         after = {p: sha256_file(p) for p in members}
