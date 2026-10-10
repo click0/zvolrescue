@@ -28,6 +28,7 @@ import random
 import re
 import shutil
 import subprocess
+import struct
 import sys
 import tempfile
 import tomllib
@@ -376,9 +377,17 @@ class Oracle:
             raise Unresolved("no dataset with a block pointer in this capture")
         return best[0]
 
-    def resolve_target(self, target):
+    def resolve_target(self, target, notes=None):
         """(role, offset, length) for the chosen DVA copies of a structure,
-        located from the oracle's zdb capture."""
+        located from the oracle's zdb capture.
+
+        A copy on a mirror or raidz top is placed by arithmetic; a copy on
+        a dRAID top is found by content — the block's bytes, read from a
+        copy that arithmetic places (and checked against the block
+        pointer's checksum where that is fletcher4 or sha256), searched
+        for on the dRAID's children. What that places is the block's data
+        columns; its parity columns hold bytes nothing here can predict,
+        and stay. `notes`, when given, is told what was placed how."""
         obj, copy = target["object"], target.get("copy", "all")
         if obj == "mos:objset":
             m = re.search(r"^Dataset mos .*?rootbp (.*)$", self.zdb, re.M)
@@ -401,28 +410,190 @@ class Oracle:
         dvas = re.findall(r"DVA\[(\d)\]=<(\d+):([0-9a-f]+):([0-9a-f]+)>", raw)
         if not dvas:
             raise Unresolved(f"target {obj} not found in the zdb capture")
-        if copy != "all":
-            dvas = [d for d in dvas if int(d[0]) == int(copy)]
+        every = [(int(n), int(v), int(o, 16), int(a, 16)) for n, v, o, a in dvas]
+        chosen = [d for d in every if copy == "all" or d[0] == int(copy)]
+        if not chosen:
+            raise Unresolved(f"target {obj}: no copy {copy}")
         out = []
-        for _, vdev, off, sz in dvas:
-            out.extend(self.dva_to_physical(int(vdev), int(off, 16), int(sz, 16)))
+        for n, vdev, off, asize in chosen:
+            if self.top_kind(vdev).startswith("draid"):
+                data = self.block_bytes(obj, every, raw)
+                placed = self.locate_on_draid(vdev, asize, data)
+                out.extend(placed)
+                if notes is not None:
+                    notes.append(f"{obj} copy {n} on draid: {len(placed)} column(s) found by content on "
+                                 + ", ".join(f"{r} @ {o}" for r, o, _ in placed)
+                                 + " (parity columns are placed only where they equal a data column)")
+            else:
+                out.extend(self.dva_to_physical(vdev, off, asize))
         if not out:
             raise Unresolved(f"target {obj}: DVA on a vdev this harness cannot map")
         return out
 
-    def dva_to_physical(self, vdev, offset, asize):
+    def top(self, vdev):
         tops = [t for t in self.layout["tops"] if t["index"] == vdev]
         if not tops:
-            return []
+            raise Unresolved(f"DVA names top-level vdev {vdev}, which the layout does not have")
         top = tops[0]
         if len(top["groups"]) != 1:
-            # `roles` below is every member of the top, while the column
+            # `roles` is every member of the top, while the column
             # arithmetic is one group wide. With two groups the two
             # disagree and the answer is quietly wrong — which is worse
             # than no answer, so there is no answer.
             raise Unresolved(
                 f"top-level vdev {vdev} has {len(top['groups'])} groups; "
                 "this harness maps a DVA only inside a single-group top")
+        return top
+
+    def top_kind(self, vdev):
+        return self.top(vdev)["groups"][0]["kind"]
+
+    def block_bytes(self, obj, dvas, raw):
+        """The logical bytes of a block, read from the intact image at a
+        copy that arithmetic places — a mirror's member, or a raidz's data
+        columns put back together — and checked against the pointer's
+        checksum when it is one this harness can compute."""
+        m = re.search(r"size=([0-9a-f]+)L/([0-9a-f]+)P", raw)
+        if not m:
+            raise Unresolved(f"target {obj}: the block pointer names no size")
+        psize = int(m.group(2), 16)
+        unit = 1 << self.layout.get("ashift", 12)
+        data = None
+        for _, vdev, off, asize in dvas:
+            kind = self.top_kind(vdev)
+            if kind == "mirror":
+                role = self.top(vdev)["members"][0]
+                with open(self.path(role), "rb") as f:
+                    f.seek(LABEL_START + off)
+                    data = f.read(psize)
+                break
+            if kind.startswith("raidz"):
+                cols = self.raidz_columns(vdev, off, psize)
+                parts = []
+                for role, poff, length, parity in cols:
+                    if parity or not length:
+                        continue
+                    with open(self.path(role), "rb") as f:
+                        f.seek(poff)
+                        parts.append(f.read(length))
+                data = b"".join(parts)[:psize]
+                break
+        if data is None or len(data) != psize:
+            raise Unresolved(f"target {obj}: every copy is on a dRAID top, and nothing places one by arithmetic")
+        self.check_cksum(obj, data, raw)
+        return data
+
+    def check_cksum(self, obj, data, raw):
+        """fletcher4 and sha256 are checked against the pointer's `cksum=`;
+        the others are left to the uniqueness of the content search."""
+        m = re.search(r"cksum=([0-9a-f]+):([0-9a-f]+):([0-9a-f]+):([0-9a-f]+)", raw)
+        if not m:
+            return
+        want = tuple(int(w, 16) for w in m.groups())
+        if " fletcher4 " in raw:
+            a = b = c = d = 0
+            mask = (1 << 64) - 1
+            for (w,) in struct.iter_unpack("<I", data):
+                a = (a + w) & mask
+                b = (b + a) & mask
+                c = (c + b) & mask
+                d = (d + c) & mask
+            got = (a, b, c, d)
+        elif " sha256 " in raw:
+            got = struct.unpack(">4Q", hashlib.sha256(data).digest())
+        else:
+            return
+        if got != want:
+            raise Unresolved(f"target {obj}: the bytes read for it do not match the block pointer's checksum")
+
+    def raidz_columns(self, vdev, offset, psize):
+        """The columns of one block on a raidz top, with their exact sizes:
+        (role, physical offset, bytes, is_parity), parity first, then the
+        data columns in the order the block's bytes fill them — the map
+        raidz_map_alloc makes."""
+        top = self.top(vdev)
+        group = top["groups"][0]
+        ashift = self.layout.get("ashift", 12)
+        unit = 1 << ashift
+        dcols, nparity, roles = group["count"], group["nparity"], top["members"]
+        s = -(-psize // unit)
+        b = offset >> ashift
+        f = b % dcols
+        o = (b // dcols) << ashift
+        q, r = divmod(s, dcols - nparity)
+        bc = nparity + r
+        out = []
+        for c in range(dcols):
+            col = (f + c) % dcols
+            coff = o + (unit if f + c >= dcols else 0)
+            size = (q + (1 if c < bc else 0)) * unit
+            out.append((roles[col], LABEL_START + coff, size, c < nparity))
+        return out
+
+    def locate_on_draid(self, vdev, asize, data):
+        """Where a block's data columns lie on a dRAID top, found by
+        searching its children for the bytes themselves: (role, offset,
+        length) per column, each found exactly once at an ashift-aligned
+        offset — anything else is no answer."""
+        top = self.top(vdev)
+        group = top["groups"][0]
+        unit = 1 << self.layout.get("ashift", 12)
+        width = group["ndata"] + group["nparity"]
+        if asize % width or (asize // width) % unit:
+            raise Unresolved(f"a dRAID allocation of {asize} bytes is not {width} columns of whole sectors")
+        colsize = asize // width
+        placed = []
+        for i in range(-(-len(data) // colsize)):
+            chunk = data[i * colsize:(i + 1) * colsize]
+            if not chunk.strip(b"\0"):
+                raise Unresolved("a data column of the target is all zeros, which is found everywhere")
+            hits = []
+            for role in top["members"]:
+                hits.extend((role, pos) for pos in self.find_aligned(self.path(role), chunk, unit))
+            if not hits:
+                raise Unresolved(f"the target's column {i} was not found on the dRAID children")
+            # One row of a dRAID group lies at one offset on every child
+            # it uses, so the column may be met more than once and still
+            # be this block's: a parity column equals a data column when
+            # the row's other data columns are padding (one data sector,
+            # ndata 2, single parity: P = D xor 0). Several hits at one
+            # offset on distinct children are that row, and all of them
+            # are the copy; a hit at another offset is some other block
+            # with the same bytes, and then there is no answer.
+            if len({pos for _, pos in hits}) != 1 or len({r for r, _ in hits}) != len(hits) or len(hits) > width:
+                raise Unresolved(f"the target's column {i} was found {len(hits)} times on the dRAID children at "
+                                 f"{len({pos for _, pos in hits})} offset(s); one row at one offset is the only answer")
+            placed.extend((role, pos, colsize) for role, pos in hits)
+        return placed
+
+    @staticmethod
+    def find_aligned(path, needle, unit, window=8 << 20):
+        """Every offset in the file, a multiple of `unit` from LABEL_START,
+        at which `needle` begins."""
+        out = []
+        n = len(needle)
+        with open(path, "rb") as f:
+            f.seek(LABEL_START)
+            base = LABEL_START
+            carry = b""
+            while True:
+                buf = f.read(window)
+                if not buf:
+                    break
+                hay = carry + buf
+                start = base - len(carry)
+                i = hay.find(needle)
+                while i != -1:
+                    pos = start + i
+                    if (pos - LABEL_START) % unit == 0:
+                        out.append(pos)
+                    i = hay.find(needle, i + 1)
+                base += len(buf)
+                carry = hay[-(n - 1):] if n > 1 else b""
+        return out
+
+    def dva_to_physical(self, vdev, offset, asize):
+        top = self.top(vdev)
         group = top["groups"][0]
         kind, ashift = group["kind"], self.layout.get("ashift", 12)
         roles = top["members"]
@@ -445,12 +616,10 @@ class Oracle:
         # derived from the pool, so which child holds which column is not
         # arithmetic the way raidz is. Reimplementing that here, in the
         # thing that is supposed to be the oracle, is how a harness comes
-        # to be confidently wrong; until it can be checked against
-        # something, a dRAID pool skips the cases that aim at a structure.
+        # to be confidently wrong; a copy on dRAID is found by content
+        # instead (`locate_on_draid`), which `resolve_target` does.
         raise Unresolved(
-            f"top-level vdev {vdev} is {kind}: this harness does not map a DVA "
-            "through the dRAID permutation, so structure-targeted damage is "
-            "not placed on it")
+            f"top-level vdev {vdev} is {kind}: a DVA on it is placed by content, not arithmetic")
 
 
 def apply_damage(oracle, manifest, work, rng):
@@ -461,7 +630,7 @@ def apply_damage(oracle, manifest, work, rng):
     for d in manifest.get("damage", []):
         pat = d["pattern"]
         if "target" in d:
-            for role, off, length in oracle.resolve_target(d["target"]):
+            for role, off, length in oracle.resolve_target(d["target"], notes):
                 plans.setdefault(role, []).append((off, length, pat))
             continue
         role = oracle.resolve(d["member"])

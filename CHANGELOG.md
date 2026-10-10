@@ -54,6 +54,20 @@ tagged. `v0.7.1` is the release that carries those six.
   Five manifests in `zvolrescue-testdata` use it: one mirror half
   stale, both halves, two raidz2 columns, one dRAID child, one stale
   beside one missing.
+* **Structure-targeted damage lands on a dRAID top too.** Five of the
+  six n/a of every matrix run so far were the MOS and object-set
+  copies that live on the image's dRAID top-level vdev: the harness
+  maps a block pointer to members by arithmetic on mirrors and raidz,
+  and dRAID places columns through a permutation it refused to
+  reimplement. It finds them by content now — the block's bytes, read
+  from a copy on a mirror or put back together from a raidz's data
+  columns and checked against the pointer's fletcher4 or sha256, are
+  searched for on the dRAID's children; a column is placed only where
+  it is found at one row offset, on distinct children, and a parity
+  column that equals a data column (one data sector in a row, the rest
+  padding) is placed with it. Checked locally against the kernel-built
+  image: the five manifests pass, among them every copy of the MOS
+  destroyed and the pool read from an older uberblock.
 
 ## v0.9.9 — 2026-10-10
 
