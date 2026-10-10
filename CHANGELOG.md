@@ -13,6 +13,22 @@ development milestone that names what changed when — the sections below
 are their record — and ships inside the next version that does get
 tagged. `v0.7.1` is the release that carries those six.
 
+## Unreleased
+
+### Added
+
+* **The golden image is published from the run that built it.**
+  `publish-golden.yml` takes the number of a `realworld.yml` run, downloads
+  its `golden-<tag>` artifact where it already is, checks the sums and
+  that no run of the matrix fell outside its expected category, and
+  publishes the image in `zvolrescue-testdata`: the members into the
+  release `<tag>` (created as a draft, filled, checked, published — or
+  filled if the tag was made from the web first), the oracle into
+  `oracle/<pool>/`, `IMAGE.md` and the matrix report into
+  `reports/<tag>/`, in one commit. Nobody carries the 2.5 GB artifact
+  through a browser. One secret, `TESTDATA_TOKEN`, a fine-grained token
+  for that repository with contents read and write.
+
 ## v0.9.9 — 2026-10-10
 
 **The golden image release.**

@@ -1,0 +1,172 @@
+name: Publish the golden image
+
+# The golden image a `golden` job of realworld.yml built and judged — the
+# artifact of one of its runs — published where SPEC §9.1 says it lives:
+# a release of zvolrescue-testdata holding the members, and a commit
+# there holding the oracle, IMAGE.md and the matrix report. The artifact
+# is 2.5 GB; this runs where it already is, so that no browser has to
+# carry it. Refuses an image whose matrix had a run outside its expected
+# category: what gets published is what passed.
+#
+# One secret, TESTDATA_TOKEN, in this repository's Actions secrets: a
+# fine-grained personal access token (Settings → Developer settings →
+# Personal access tokens → Fine-grained) for click0/zvolrescue-testdata
+# alone, with repository permission Contents: read and write. GITHUB_TOKEN
+# cannot write to another repository, which is the whole reason for it.
+# The testdata release may exist already (its tag made from the web with
+# nothing attached) or not: it is created as a draft, filled, checked and
+# published. A release that is already published and frozen by release
+# immutability refuses uploads; the job then says what to do.
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "The realworld.yml run whose golden job built the image (the number in its URL)"
+        required: true
+      tag:
+        description: "The image's tag in zvolrescue-testdata: its release and its reports/<tag> directory; the artifact is golden-<tag>"
+        required: true
+        default: image-v1
+      pool:
+        description: "The pool's name, which is the oracle's directory there (oracle/<pool>)"
+        required: true
+        default: golden
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  publish:
+    name: ${{ inputs.tag }} from run ${{ inputs.run_id }}, into zvolrescue-testdata
+    runs-on: ubuntu-24.04
+    env:
+      TAG: ${{ inputs.tag }}
+      POOL: ${{ inputs.pool }}
+      RUN_ID: ${{ inputs.run_id }}
+      TESTDATA: ${{ github.repository }}-testdata
+    steps:
+      - name: The secret, before anything is downloaded
+        env:
+          TESTDATA_TOKEN: ${{ secrets.TESTDATA_TOKEN }}
+        run: |
+          test -n "$TESTDATA_TOKEN" || { echo "::error::no TESTDATA_TOKEN in this repository's Actions secrets: a fine-grained token for $TESTDATA with Contents read and write (the header of this workflow says how)"; exit 1; }
+          GH_TOKEN=$TESTDATA_TOKEN gh api "repos/$TESTDATA" -q .full_name || { echo "::error::TESTDATA_TOKEN cannot read $TESTDATA"; exit 1; }
+
+      - name: The artifact, from the run that built and judged the image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run view "$RUN_ID" -R "$GITHUB_REPOSITORY" --json headSha,conclusion,createdAt,url > run.json
+          cat run.json
+          gh run download "$RUN_ID" -R "$GITHUB_REPOSITORY" -n "golden-$TAG" -D art
+          ls art art/release art/oracle art/report
+          test -s art/release/SHA256SUMS
+          test -s art/IMAGE.md
+          test -s "art/oracle/layout.json"
+          (cd art/release && sha256sum -c SHA256SUMS)
+          du -sh art/release
+
+      - name: "The matrix that judged it: nothing outside its expected category"
+        run: |
+          python3 - <<'EOF'
+          import json, os, collections, sys
+          tag = os.environ["TAG"]
+          rs = json.load(open(f"art/report/report-{tag}.json"))
+          c = collections.Counter(r["verdict"] for r in rs)
+          bad = [r["id"] for r in rs if r["verdict"] not in ("pass", "n/a")]
+          wrote = [r["id"] for r in rs if r.get("inputs_unchanged") is False]
+          line = f"{len(rs)} manifests: " + ", ".join(f"{k} {v}" for k, v in sorted(c.items()))
+          print(line)
+          open("counts.txt", "w").write(line + "\n")
+          if bad or wrote:
+              print(f"::error::not publishing: runs outside their category {bad}, runs that changed their inputs {wrote}")
+              sys.exit(1)
+          EOF
+
+      - name: The members, into the release of zvolrescue-testdata
+        env:
+          GH_TOKEN: ${{ secrets.TESTDATA_TOKEN }}
+        run: |
+          sha=$(jq -r .headSha run.json); url=$(jq -r .url run.json); when=$(jq -r .createdAt run.json)
+          built=$(sed -n '3p' art/IMAGE.md)
+          {
+            echo "The golden image \`$TAG\` of zvolrescue's [SPEC §9.1](https://github.com/$GITHUB_REPOSITORY/blob/main/docs/SPEC.md): one pool with mirror, RAIDZ2 and dRAID1 top-level vdevs, volumes over every checksum and compression, snapshots, a clone, a rename, a destroy, encrypted datasets, gang blocks, hundreds of TXGs."
+            echo
+            echo "$built"
+            echo
+            echo "Built and judged by [run $RUN_ID]($url) of \`realworld.yml\` ($when, zvolrescue \`${sha:0:7}\`): $(cat counts.txt), no run outside its expected category. The oracle is \`oracle/$POOL/\` in this repository, the description \`IMAGE.md\`, the report \`reports/$TAG/\`."
+            echo
+            echo "The \`round6-*\` files are a consistent copy of every member taken after round 6 of the fill, for the manifests' older-self pattern. \`SHA256SUMS\` covers every file here; \`oracle/$POOL/members.sha256\` has the sums of the uncompressed members."
+            echo
+            echo '```'; cat art/release/SHA256SUMS; echo '```'
+          } > notes.md
+          if gh release view "$TAG" -R "$TESTDATA" --json isDraft -q .isDraft > draft.txt 2>/dev/null; then
+            echo "release $TAG exists (draft: $(cat draft.txt))"
+          else
+            gh release create "$TAG" -R "$TESTDATA" --draft --title "$TAG" --notes-file notes.md
+            echo true > draft.txt
+          fi
+          if ! gh release upload "$TAG" -R "$TESTDATA" art/release/*.zst art/release/SHA256SUMS --clobber; then
+            echo "::error::the upload to release $TAG of $TESTDATA was refused. A published release is frozen when release immutability is on there: delete that release (Releases → $TAG → Delete; the tag may stay) and run this workflow again — it then creates the release as a draft, fills it, checks it and publishes it."
+            exit 1
+          fi
+          want=$(ls art/release/*.zst art/release/SHA256SUMS | wc -l)
+          have=$(gh release view "$TAG" -R "$TESTDATA" --json assets -q '.assets | length')
+          echo "assets: $have of $want"
+          test "$have" -ge "$want"
+          gh release edit "$TAG" -R "$TESTDATA" --title "$TAG" --notes-file notes.md || echo "the release's notes stayed as they were"
+          if [ "$(cat draft.txt)" = true ]; then gh release edit "$TAG" -R "$TESTDATA" --draft=false; fi
+          echo "release: https://github.com/$TESTDATA/releases/tag/$TAG" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: The oracle, the description and the report, into its git
+        env:
+          TESTDATA_TOKEN: ${{ secrets.TESTDATA_TOKEN }}
+        run: |
+          sha=$(jq -r .headSha run.json); url=$(jq -r .url run.json); when=$(jq -r .createdAt run.json)
+          git clone -q --depth 1 "https://x-access-token:${TESTDATA_TOKEN}@github.com/$TESTDATA" td
+          cd td
+          # The image this publishes is the current one, so IMAGE.md at the
+          # root is its; the one that was there keeps its place under the
+          # reports of the image it describes.
+          if [ -f IMAGE.md ] && ! grep -q "($TAG)" IMAGE.md; then
+            old=$(sed -n '1s/^# .*(\(.*\))$/\1/p' IMAGE.md)
+            if [ -n "$old" ]; then mkdir -p "reports/$old"; git mv -f IMAGE.md "reports/$old/IMAGE.md"; fi
+          fi
+          rm -rf "oracle/$POOL" "reports/$TAG"
+          mkdir -p "oracle/$POOL" "reports/$TAG"
+          cp -r ../art/oracle/. "oracle/$POOL/"
+          cp ../art/release/SHA256SUMS "oracle/$POOL/SHA256SUMS-release.txt"
+          cp ../art/IMAGE.md IMAGE.md
+          cp ../art/report/* "reports/$TAG/"
+          cp ../art/golden-build.log "reports/$TAG/" 2>/dev/null || true
+          {
+            echo "# Damage matrix run: $TAG"
+            echo
+            echo "The damage matrix against the kernel-built golden image \`$TAG\` (see [IMAGE.md](../../IMAGE.md)), judged against the oracle in \`oracle/$POOL/\`: every volume of every damaged copy against the kernel's hash, every expectation enforced."
+            echo
+            echo "Run [$RUN_ID]($url) of \`realworld.yml\` in zvolrescue, $when, zvolrescue \`${sha:0:7}\`: **$(cat ../counts.txt)**, no run outside its expected category, inputs unchanged."
+            echo
+            echo "| File | What |"
+            echo "|---|---|"
+            echo "| \`report-$TAG.md\`, \`report-$TAG.json\` | the verdict of every manifest, with the outcome per volume |"
+            echo "| \`golden-matrix.log\` | the matrix's own log |"
+            echo "| \`golden-build.log\` | the image builder's log |"
+          } > "reports/$TAG/README.md"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git status --short | head -20
+          git commit -q -F - <<EOF
+          $TAG: the kernel-built golden image — oracle, IMAGE.md, the matrix report
+
+          From run $RUN_ID of realworld.yml in $GITHUB_REPOSITORY ($sha): the
+          image built on the runner's kernel ZFS, published as the release
+          $TAG here, and what goes with it in git — the oracle under
+          oracle/$POOL, IMAGE.md, and the report of the damage matrix that
+          judged it under reports/$TAG ($(cat ../counts.txt)).
+          EOF
+          git push -q origin HEAD:main
+          echo "commit: $(git rev-parse HEAD) on $TESTDATA main" | tee -a "$GITHUB_STEP_SUMMARY"
+          cat ../counts.txt >> "$GITHUB_STEP_SUMMARY"
