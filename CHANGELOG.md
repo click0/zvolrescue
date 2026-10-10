@@ -28,6 +28,32 @@ tagged. `v0.7.1` is the release that carries those six.
   `reports/<tag>/`, in one commit. Nobody carries the 2.5 GB artifact
   through a browser. One secret, `TESTDATA_TOKEN`, a fine-grained token
   for that repository with contents read and write.
+* **The matrix runs against the published image, pinned.** The
+  `golden-published` job of `realworld.yml` is the CI job SPEC §9.1
+  asks for: it fetches the `image-v1` release of `zvolrescue-testdata`,
+  checks every file against the sums this repository pins in
+  `tests/golden/image-v1.SHA256SUMS` (and against the oracle's own
+  record of the release), decompresses the members and their round-6
+  copies, reads every volume intact to the kernel's hash, and runs the
+  whole matrix with the oracle and manifests from that repository's
+  checkout, every expectation enforced — the held-out manifests too
+  with `published-held-out` (G4). The release files are kept in the
+  Actions cache between runs. It also runs every Monday on its own:
+  the image never changes, so a verdict that changes is the tool's
+  doing. The verdicts, counts, every n/a's reason and every
+  out-of-category run's detail come from one script now,
+  `tests/golden/summarize-report.py`, which both golden jobs share.
+* **The `older-self` damage pattern.** SPEC §9.1's "member replaced by
+  an older copy of itself" was documented in the manifests and never
+  placed: no image had a member captured at two points of its life.
+  `image-v1`'s release carries every member as it was after round 6 of
+  the fill, and `run-matrix.py` now writes that copy over the range
+  the manifest names (`older-self:image-v1-round6`; the copies beside
+  the members as `<image>-round6`, or `--older DIR`), refusing a source
+  of another image and reporting n/a where the copies are not there.
+  Five manifests in `zvolrescue-testdata` use it: one mirror half
+  stale, both halves, two raidz2 columns, one dRAID child, one stale
+  beside one missing.
 
 ## v0.9.9 — 2026-10-10
 
