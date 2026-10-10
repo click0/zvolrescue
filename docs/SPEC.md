@@ -1,6 +1,6 @@
 # zvolrescue — Technical Specification (ТЗ)
 
-**Status:** living document, revised 2026-09-27 (tool at v0.9.8) · **Owner:** Vladyslav V. Prodan
+**Status:** living document, revised 2026-10-10 (tool at v0.9.9) · **Owner:** Vladyslav V. Prodan
 
 **Ukrainian version:** [SPEC.uk.md](SPEC.uk.md) · **Companion tools:** [COMPANIONS.md](COMPANIONS.md)
 
@@ -659,7 +659,13 @@ loop devices — is a script whose every oracle comes from OpenZFS alone.
 in-tree module and on Debian's `zfs-dkms`, the two defects it found are
 fixed, the FreeBSD binary is static and runs on 14 as well as 15, and
 every program has a manual page and a port, a `.deb` and a PKGBUILD
-that CI builds and installs on every push.
+that CI builds and installs on every push. `v0.9.9` is the golden
+image release: the damage matrix of §9.1 runs in CI over an image a
+real kernel built, every expectation enforced, the tool reads OpenZFS
+2.4's dynamic gang headers that image found it did not know, and the
+real-kernel matrix spans Ubuntu 26.04 and 24.04, Debian 13 and 12,
+FreeBSD 15.1 and 14.5, the mfsBSD 14.2 rescue image, and any machine
+of your own over ssh.
 `1.0.0` is the full release, and waits for what no CI can supply: three real-world incidents with
 documented outcomes ([REALWORLD-TESTS.md](REALWORLD-TESTS.md)). The
 packaging it also waited for — a FreeBSD port, a `.deb`, an AUR

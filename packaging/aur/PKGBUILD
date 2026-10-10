@@ -5,7 +5,7 @@
 # packaging/aur/update.sh in the source tree rewrites pkgver and the
 # checksum for a new tag and regenerates .SRCINFO.
 pkgname=zvolrescue
-pkgver=0.9.8
+pkgver=0.9.9
 pkgrel=1
 pkgdesc="Read-only extraction of zvols and files from ZFS pools that no longer import"
 arch=('x86_64' 'aarch64')

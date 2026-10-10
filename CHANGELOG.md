@@ -13,7 +13,19 @@ development milestone that names what changed when — the sections below
 are their record — and ships inside the next version that does get
 tagged. `v0.7.1` is the release that carries those six.
 
-## Unreleased
+## v0.9.9 — 2026-10-10
+
+**The golden image release.**
+The damage matrix of SPEC §9.1 runs in CI over an image a real kernel
+built — mirror, raidz2 and dRAID top-level vdevs, every checksum and
+compression, encryption, hundreds of TXGs — with every expectation
+enforced: 41 manifests, 35 pass, 6 not applicable, no defects. That
+image's first build found a pool feature the tool did not know,
+OpenZFS 2.4's `dynamic_gang_header`, which it reads now. The
+real-kernel matrix spans Ubuntu 26.04 and 24.04, Debian 13 and 12,
+FreeBSD 15.1 and 14.5 and the mfsBSD 14.2 rescue image, and runs on a
+machine of your own over ssh; `dump` passes over a TXG at which any of
+what it opens is gone, not only the object set.
 
 ### Added
 
