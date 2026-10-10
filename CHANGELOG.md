@@ -73,6 +73,41 @@ tagged. `v0.7.1` is the release that carries those six.
   labels do not claim the feature. The feature joins the implemented
   list. `kernel-matrix.sh` C13 fills a mirror with ganging forced on a
   2.4 kernel, sees the feature go active and the dump match.
+* **The golden image is built in CI, and the whole damage matrix runs
+  over it (G1–G3).** The `golden` job of `realworld.yml` builds the
+  image of SPEC §9.1 with `tests/golden/build-image.sh` on the
+  `ubuntu-26.04` runner's OpenZFS 2.4.1 — one pool with mirror, raidz2
+  and dRAID1 top-level vdevs, 12 volumes over every checksum and
+  compression, a clone, raw-key and passphrase encryption, snapshots, a
+  rename, a destroy, 5015 TXGs — reads every volume of it intact to
+  the kernel's hash, then runs the 41 manifests of
+  `zvolrescue-testdata` over it with every expectation enforced: a run
+  outside its expected category fails the job, where the ztest images
+  could only be counted. 35 pass, 6 n/a (structure-targeted damage is
+  not placed on a dRAID top, whose permutation the harness does not
+  map; one case asks for a third leaf of a two-way mirror), 0 defects,
+  inputs unchanged (REALWORLD-TESTS, Results). The members (zstd, with
+  `SHA256SUMS`), the oracle, `IMAGE.md` and the report are uploaded as
+  the artifact `golden-image-v1`, for publication as `image-v1` in
+  `zvolrescue-testdata`. Its first build is how `dynamic_gang_header`
+  (above) was found.
+* **The matrix on a machine of your own, over ssh.**
+  `realworld-ssh.yml` runs `kernel-matrix.sh` — or `mfsbsd.sh`, on a
+  rescue system — on a machine the runners cannot stand in for: a
+  distribution with no image here, an OpenZFS built from git, a box
+  with disks. It builds the static binaries for what the machine turns
+  out to be (Linux x86_64 or aarch64, FreeBSD amd64), copies them and
+  the script over, has the script run there as root and brings the
+  record back, as the VM jobs do. The machine is described by one
+  GitHub Environment's secrets alone — host, user, a key or a password,
+  the pinned host key, and an `ssh_config` for a bastion (`ProxyJump`
+  through a server or an OpenWrt router), with a Tailscale tailnet or
+  a self-hosted runner as the way into a network nothing else reaches.
+  On the machine the key runs `tests/realworld/ssh-gate.sh` as a forced
+  command: five requests (probe, put, run, record, clean) and no shell,
+  root for the run through one sudoers line that allows the gate
+  alone. REALWORLD-TESTS, "Running the matrix on your own machine over
+  ssh".
 
 ### Fixed
 
@@ -100,6 +135,24 @@ tagged. `v0.7.1` is the release that carries those six.
   a file's blocks only once a TXG has written them (1024 bytes for a
   1 GiB image with 64 MiB of data on FreeBSD 15); C4 now sums the
   image's data extents with `SEEK_DATA`/`SEEK_HOLE`.
+* **The golden matrix could not fail its job, and judged a multi-top
+  image by the wrong geometry.** Harness defects found by the first
+  kernel-built image, none of them in the tool. The job stayed green
+  with 33 of 41 runs outside their category — the matrix's exit code
+  was lost to `tee`; the job now asserts that no run landed outside
+  its expected category and none changed its inputs. A manifest's
+  expectation on an image with several top-level vdevs came from the
+  manifest's own geometry list rather than from the geometry of the
+  members it damaged (`by_group_kind` is read for the kinds the damage
+  touches; a bare leaf index resolves on the widest top). A refusal
+  was accepted where the honest answer is a partial image — exit 4
+  with the lost blocks zeroed and counted — which is a category of its
+  own now, `partial`, accepted wherever `refused` is. The encrypted
+  volumes' key formats come from `zfs get`: the `zfs list` the builder
+  captured was not recursive, so every encrypted volume had run
+  without its key. The builder writes its layout with `zdb-layout.py`
+  in the schema the matrix reads, and a refused run's record says per
+  volume why (`refused_detail`).
 
 ## v0.9.8 — 2026-09-27
 

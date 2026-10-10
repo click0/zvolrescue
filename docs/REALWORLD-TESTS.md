@@ -117,13 +117,13 @@ the evidence log) / refused cleanly (exit 3) / tool defect.
 | ID | Scenario | Expected |
 |---|---|---|
 | G0 | Interim image without a kernel: `tests/golden/build-ztest-image.sh` (ztest + zdb) — three pools (mirror, raidz2, draid1), real metadata, no zvols; runs judged by walking every object against `zdb -d` | image + oracle in `zvolrescue-testdata`; the matrix runs with no defects |
-| G1 | Build the golden image with `tests/golden/build-image.sh` in a real-kernel VM: one pool with mirror + RAIDZ2 + dRAID1 top-level vdevs, zvols of several block sizes, snapshots, clones, renamed/destroyed volume and snapshot, encrypted datasets (raw key, passphrase), every checksum/compression, gang blocks, large dnodes, hundreds of TXGs; record the oracle | image + oracle published in `zvolrescue-testdata` with SHA-256 |
+| G1 | Build the golden image with `tests/golden/build-image.sh` on a real kernel: one pool with mirror + RAIDZ2 + dRAID1 top-level vdevs, zvols of several block sizes, snapshots, clones, renamed/destroyed volume and snapshot, encrypted datasets (raw key, passphrase), every checksum/compression, gang blocks, large dnodes, hundreds of TXGs; record the oracle | image + oracle built by the `golden` job of `realworld.yml` on the `ubuntu-26.04` runner's OpenZFS 2.4.1, uploaded as the artifact `golden-image-v1`, published in `zvolrescue-testdata` with SHA-256. *Built and published as `image-v1` (Results, 2026-10-10)* |
 | G2 | Single damage classes (labels, partition, metadata, data, missing member, older-self member) on each geometry | every run in an expected category; no tool defects |
 | G3 | Pairs and triples of classes across members and geometries | as G2; the expected category derived from ZFS redundancy for the combination |
 | G4 | Held-out combinations run only before a release | as G2 |
 | G5 | Read-only invariant on every run | input copies' hashes unchanged |
 
-How to run: build the image once with `tests/golden/build-image.sh OUT` in a real-kernel VM, publish `OUT/release` and `OUT/oracle` in `zvolrescue-testdata`, then `tests/golden/run-matrix.py --image OUT/members --oracle OUT/oracle --manifests <testdata>/manifests --tool ./target/release/zvolrescue` (add `--held-out` before a release). The report lands in `golden-report/report.md`.
+How to run: **Actions → Real-world (kernel ZFS) → Run workflow** with `only: golden` (`golden-held-out` for G4) builds the image on the runner's kernel, reads every volume of it intact to the kernel's hash, runs the whole matrix over it with every expectation enforced — a run outside its expected category fails the job — and uploads `release/` (the members, zstd, with `SHA256SUMS`), `oracle/`, `IMAGE.md` and `report/` as the artifact `golden-image-v1` for publication in `zvolrescue-testdata`. By hand: `tests/golden/build-image.sh OUT image-v1` as root on a real kernel, then `tests/golden/run-matrix.py --image OUT/members --oracle OUT/oracle --manifests <testdata>/manifests --out REPORT --label image-v1` (add `--held-out` before a release); the report lands in `REPORT/report-image-v1.md` and `.json`.
 
 ## Running on Debian with zfs-dkms and loop devices
 
@@ -172,7 +172,9 @@ VMs with `zfs-dkms`, and FreeBSD 15 and 14 VMs. Its `mfsbsd` job is the
 one environment this script does not run in: mfsBSD has no bash or
 python, so `tests/realworld/mfsbsd.sh` — `/bin/sh` and the base system —
 answers E3 there, with a pool the rescue kernel makes on two raw disks
-and the static binary built on FreeBSD 15 copied in over ssh.
+and the static binary built on FreeBSD 15 copied in over ssh. A
+machine of your own — a kernel the runners cannot supply, a box with
+disks — runs the same script through `realworld-ssh.yml`, below.
 
 `zfs-dkms` builds the module for the running kernel, so the headers have
 to match it (reboot into the kernel the headers are for, first); with
@@ -228,6 +230,121 @@ every run in `WORKDIR/out/`, and the evidence log of the whole session in
 `WORKDIR/evidence.jsonl`. A failure is a tool defect until shown
 otherwise: file it with the `out/*.log` and `out/*.err` of that scenario.
 
+## Running the matrix on your own machine over ssh
+
+The environments above are the ones GitHub's runners can stand in for.
+A kernel ZFS they cannot — a distribution the workflow has no image of,
+an OpenZFS built from git (CachyOS in the table), a box with disks for
+E1/E2 and F1–F10 — runs the same script on a machine of your own, over
+ssh: `.github/workflows/realworld-ssh.yml`. The runner builds the
+static binaries for what the machine turns out to be (Linux x86_64 or
+aarch64 with musl; FreeBSD amd64, built on FreeBSD 15 as the release
+is), copies them and the script over, has the script run there as
+root, and brings the record back into the job's summary and an
+artifact, exactly as `realworld.yml` does with its own VMs. Nothing
+about the machine is in the repository: it is all in one GitHub
+Environment (Settings → Environments), named by the workflow's `target`
+input, whose secrets are
+
+| Secret | What | |
+|---|---|---|
+| `SSH_HOST` | the machine: a name or an address | required |
+| `SSH_USER` | the user to log in as | required |
+| `SSH_PORT` | its sshd port | 22 |
+| `SSH_KEY` | an OpenSSH private key for that user (`ssh-keygen -t ed25519 -N '' -f ci`: the secret is `ci`, the machine gets `ci.pub`) | one of |
+| `SSH_PASSWORD` | or the user's password: a rescue system booted with a known root password, a throwaway VM | the two |
+| `SSH_KNOWN_HOSTS` | the machine's host key as `ssh-keyscan -p PORT HOST` prints it, and the bastion's when there is one; empty, the first key seen is taken and the summary warns | recommended |
+| `SSH_CONFIG` | more `ssh_config` for the way in: a `ProxyJump`, the bastion's own `Host` block, `HostKeyAlgorithms` for an old sshd | optional |
+| `SSH_JUMP_KEY` | a private key for the bastion when it is not `SSH_KEY`; the config names it `~/.ssh/id_jump` | optional |
+| `TS_OAUTH_CLIENT_ID`, `TS_OAUTH_SECRET` | a Tailscale OAuth client with the tag `tag:ci`: the runner joins the tailnet first, and `SSH_HOST` is the machine's name on it | optional |
+
+and whose protection rules (required reviewers) decide who may start a
+run against it. Start one from **Actions → Real-world (kernel ZFS) over
+ssh → Run workflow** with the environment's name as `target`; `script`
+is `matrix` (`kernel-matrix.sh`) or, for a rescue system, `mfsbsd`
+(`mfsbsd.sh` on the two raw disks named in `disks`, whose contents it
+destroys). One run per environment at a time. The row for the table
+below comes back in the summary and, as `row.md`, in the artifact
+`realworld-ssh-<target>-<script>`, with the results, the evidence log
+and the logs of every scenario beside it.
+
+What the machine needs, besides ssh: for `matrix`, a kernel ZFS with
+its userland (`zpool`, `zfs`, `zdb`), `bash`, `python3` and `openssl`
+— on Linux also `losetup`, `sfdisk`, `dmsetup` and `strace`
+(`util-linux`, `dmsetup`, `strace`), on FreeBSD `pkg install bash
+python3`, the rest is in base; for `mfsbsd`, `/bin/sh` and the base
+system. The workflow's probe says what is missing before anything is
+built.
+
+**The gate.** The key the workflow holds is best installed behind
+`tests/realworld/ssh-gate.sh` as a forced command, so that whoever
+holds it can ask for what the workflow needs and nothing else — it is
+not a shell:
+
+```
+install -m 755 tests/realworld/ssh-gate.sh /usr/local/sbin/zvolrescue-gate
+echo 'command="/usr/local/sbin/zvolrescue-gate",restrict ssh-ed25519 AAAA… zvolrescue-ci' >> ~ci/.ssh/authorized_keys
+echo 'ci ALL=(root) NOPASSWD: /usr/local/sbin/zvolrescue-gate' > /etc/sudoers.d/zvolrescue-gate
+```
+
+The gate answers five requests — `probe` (what the machine is), `put`
+(one of the four files the workflow ships, into
+`/var/tmp/zvolrescue-ci/in`), `run matrix` or `run mfsbsd D0 D1`,
+`record` (the run's record without its images) and `clean` — and
+refuses everything else. The last three need root, which is what the
+sudoers line is for: the gate re-runs itself under `sudo` for them, and
+the line allows the gate and nothing else (on FreeBSD, `pkg install
+sudo` first; or put the key in root's own `authorized_keys` and leave
+the line out). What then runs as root is the repository's own script,
+so a run is exactly as trusted as the repository that sent it: lend a
+machine you can lose — a VM, a spare box — never one with a pool you
+care about. The script refuses to start while a `zrw*` pool is
+imported, creates only such pools and tears its devices down on exit;
+it writes about 6 GiB under `/var/tmp`. Where there is no gate — a
+login with a password, a throwaway VM whose user has `sudo` — the
+workflow copies the gate over first and runs it as `~/zvolrescue-gate`,
+with the same requests.
+
+**The way in.** Three kinds of access, and what each needs:
+
+* *A key.* `SSH_KEY`, its public half behind the gate as above, and
+  `SSH_KNOWN_HOSTS` from `ssh-keyscan`. The machine's sshd needs
+  nothing it does not have.
+* *A password.* `SSH_PASSWORD` instead of `SSH_KEY`; the runner
+  installs `sshpass`, and the gate travels with the run. This is what
+  a rescue system offers: mfsBSD answers as `root` with its published
+  password, and `script: mfsbsd` with its two disks in `disks` is E3 on
+  the real thing. A password reaches the machine itself only; a
+  bastion on the way takes a key.
+* *A bastion.* The machine is behind a host the Internet can reach — a
+  server, or the router itself when it runs OpenWrt — and ssh jumps
+  through it. `SSH_CONFIG` holds the jump and the bastion's block,
+  `SSH_KNOWN_HOSTS` both host keys, and the bastion gets the public
+  half of `SSH_JUMP_KEY` (or of `SSH_KEY`) with no command to run,
+  since a jump is a TCP forward, not a login:
+
+  ```
+  ProxyJump jump
+  Host jump
+    HostName router.example.net
+    Port 22
+    User root
+  ```
+
+  On OpenWrt the sshd is dropbear: the key goes into
+  `/etc/dropbear/authorized_keys` (System → Administration → SSH-Keys
+  in LuCI) as `no-pty,command="/bin/false" ssh-ed25519 …` — no shell,
+  while the forward a jump needs stays allowed — and `ssh-keyscan -p 22
+  router.example.net` gives its host key. Dropbear has taken `ed25519`
+  keys since 2016; for a build that does not, `ssh-keygen -t rsa -b
+  4096` and `HostKeyAlgorithms +ssh-rsa` in the config. A machine that
+  nothing outside its network can reach has two more ways in: a
+  Tailscale tailnet (the `TS_` secrets; the runner joins as `tag:ci`,
+  and the tailnet's ACL lets that tag reach the machine's port 22), or
+  a self-hosted runner inside the network, named by the `runner` input
+  — the runner is then the bastion, and `SSH_HOST` is the machine's
+  address on the LAN.
+
 ## Results
 
 Append one row per run.
@@ -260,3 +377,4 @@ Append one row per run.
 | 2026-10-10 | Ubuntu 26.04.1 LTS (GitHub Actions `ubuntu-26.04` runner, in-tree OpenZFS module, loop devices) | 2.4.1 | `0.9.8`+ (`6050981`) | A1 A2 A3, B1–B9, C1–C12, D1–D8, F7, G5, R | ☑ | `kernel-matrix.sh`, the Ubuntu job of `realworld.yml` on its new runner; kernel 7.0.0-1012-azure. The current LTS — the matrix had run only on 24.04 (OpenZFS 2.2.2) until now: all **35** scenarios apply and pass, C12 on a raidz1 this kernel expanded, the first Linux kernel on the matrix with `raidz_expansion`. F7: exit 7 at LBA 4857552, healed with `--device-may-fail`, 1426 reads of the failing device, none overlapping. The 24.04 runner ran beside it and passed again (34, C12 skipped). |
 | 2026-10-10 | Debian 13 (trixie), zfs-dkms against Debian's kernel, loop devices; QEMU/KVM guest on a GitHub Actions runner | 2.3.9 | `0.9.8`+ (`6050981`) | A1 A2 A3, B1–B9, C1–C12, D1–D8, F7, G5, R | ☑ | `kernel-matrix.sh`, the Debian job of `realworld.yml`, a matrix of 13 and 12 now; kernel 6.12.111+deb13-cloud-amd64, the cloud image checked against Debian's `SHA512SUMS`. Debian stable — the matrix had run only on 12 (OpenZFS 2.1.11) until now: all 35 pass, C12 included, C2 with `blake3` again. F7: exit 7 at LBA 4849224, 1422 reads, none overlapping. D2 came back whole from an older TXG. The 12 guest ran beside it and passed again (34, C12 skipped, C2 without `blake3`). |
 | 2026-10-10 | mfsBSD 14.2-RELEASE (FreeBSD 14.2 booted from its ISO into RAM; QEMU/KVM guest on a GitHub Actions runner, two raw virtio disks) | 2.2.6 | `0.9.8`+ (`57591e4`), the static binary built on FreeBSD 15.1 | E3, A1, G5, R | ☑ | `tests/realworld/mfsbsd.sh`, the `mfsbsd` job of `realworld.yml`: the first run on the rescue medium itself, the first row of the environments table. mfsBSD answered on ssh 25 s after boot; its kernel made a mirror on the two disks and a 128 MiB volume with 96 MiB of data; the 15.1-built static binary (`file`: statically linked, for FreeBSD 15.1) ran `--version`, `scan` (pool EXPORTED, READABLE from both disks), `list -r` (the volume) and `dump`, whose image hashed to the kernel's `eab4d933…cfa08d`, the tool's own `sha256:` line agreeing. Both disks' ends unchanged and the pool importable after the run; `zvolreport` built and verified the case file over the 3 records. The whole job, the FreeBSD 15 build included, takes 3 minutes. |
+| 2026-10-10 | Ubuntu 26.04.1 LTS (GitHub Actions `ubuntu-26.04` runner, in-tree OpenZFS module): the golden image built by its kernel, and the damage matrix over it | 2.4.1 | `0.9.8`+ (`beac928`) | G1, G2, G3, G5 | ☑ | The `golden` job of `realworld.yml`: `tests/golden/build-image.sh` and `run-matrix.py`, the first golden image a kernel built (SPEC §9.1) — one pool with mirror-2, raidz2-4 and draid1 top-level vdevs at `ashift` 12, 12 volumes (block sizes, every checksum and compression, a clone, raw-key and passphrase encryption), snapshots, a rename and a destroy, 5015 TXGs, built in 9 minutes; every volume of the intact image read to the kernel's hash first (the encrypted ones with the oracle's keys). Then **41 manifests: 35 pass, 6 n/a, 0 defects**, inputs unchanged — the first matrix where every expectation is enforced. The 6 n/a: five structure-targeted cases (MOS and object-set copies) have a copy on the dRAID top, which the harness does not map through the permutation, and one asks for a third leaf of the two-way mirror. The image's first build was refused whole by v0.9.8: built with ganging forced, the pool had `dynamic_gang_header` active (C13) — 33 of 41 runs "refused" — and, once that was read, 7 more from the 512-byte headers written before the feature went active, read now too. The harness had its own defects, fixed on the way: the job stayed green over those 33 (no `pipefail`; a run outside its category now fails the job), a manifest on a multi-top image was judged by the member it damaged rather than that member's geometry, "refused" was accepted where the honest answer is a partial image (exit 4), and the encrypted volumes' key formats came from a `zfs list` that was not recursive. The artifact `golden-image-v1` — `release/*.zst` with `SHA256SUMS`, `oracle/`, `IMAGE.md`, `report/` — is what `zvolrescue-testdata` publishes as `image-v1`. |

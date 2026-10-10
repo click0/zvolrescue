@@ -1,0 +1,295 @@
+name: Real-world (kernel ZFS) over ssh
+
+# The real-world matrix (docs/REALWORLD-TESTS.md) on a machine of your
+# own, reached over ssh: a kernel ZFS that GitHub's runners cannot stand
+# in for — a distribution the workflow has no image of, an OpenZFS
+# built from git, a box with disks. The runner builds the static
+# binaries for what the machine turns out to be, copies them and the
+# matrix script over, has the script run there as root, and brings the
+# record back, exactly as realworld.yml does with its own VMs. How the
+# machine is reached, and as whom, is the business of one GitHub
+# Environment (Settings → Environments), named by the `target` input,
+# whose secrets are:
+#
+#   SSH_HOST          the machine: a name or an address            required
+#   SSH_USER          the user to log in as                        required
+#   SSH_PORT          its sshd port                                default 22
+#   SSH_KEY           an OpenSSH private key for that user, whose
+#                     public half is on the machine behind the gate
+#                     (tests/realworld/ssh-gate.sh says how)
+#   SSH_PASSWORD      or the user's password: a rescue system booted
+#                     with a known root password, a throwaway VM; the
+#                     gate is then copied over first              one of the two
+#   SSH_KNOWN_HOSTS   the machine's host key, as `ssh-keyscan -p PORT
+#                     HOST` prints it, and the bastion's when there
+#                     is one. Empty: the first key seen is taken and
+#                     the summary says so                          recommended
+#   SSH_CONFIG        more ssh_config for the way in: `ProxyJump` through
+#                     a bastion (a router running OpenWrt's dropbear
+#                     does), the `Host` block of that bastion,
+#                     `HostKeyAlgorithms` for an old sshd            optional
+#   SSH_JUMP_KEY      a private key for the bastion when it is not
+#                     SSH_KEY; the config names it as ~/.ssh/id_jump   optional
+#   TS_OAUTH_CLIENT_ID, TS_OAUTH_SECRET
+#                     a Tailscale OAuth client (tag:ci): the runner
+#                     joins the tailnet first, and SSH_HOST is the
+#                     machine's name on it                         optional
+#
+# A password reaches the machine itself only; a bastion on the way
+# takes a key. The run writes about 6 GiB under /var/tmp on the machine
+# and makes pools, loop or md devices and a device-mapper target as
+# root: lend a machine you can lose. A machine the Internet cannot
+# reach at all is reached from a self-hosted runner inside its network:
+# the `runner` input is that runner's label.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "The GitHub Environment whose secrets say how to reach the machine (SSH_HOST, SSH_USER, SSH_KEY or SSH_PASSWORD, SSH_KNOWN_HOSTS; SSH_PORT, SSH_CONFIG, SSH_JUMP_KEY optional)"
+        required: true
+        default: "realworld-ssh"
+      script:
+        description: "matrix: tests/realworld/kernel-matrix.sh (needs bash, python3, openssl and the ZFS userland on the machine); mfsbsd: tests/realworld/mfsbsd.sh (/bin/sh and the base system; E3 on a rescue system)"
+        type: choice
+        options: [matrix, mfsbsd]
+        default: matrix
+      disks:
+        description: "mfsbsd only: the two raw disks its kernel makes the pool on, e.g. /dev/vtbd0 /dev/vtbd1 — their contents are destroyed"
+        required: false
+        default: ""
+      runner:
+        description: "Where this workflow runs: a GitHub runner, or the label of a self-hosted one that can reach the machine"
+        required: false
+        default: "ubuntu-24.04"
+      keep:
+        description: "Leave the run's directory on the machine (images included) instead of removing it at the end"
+        type: boolean
+        default: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+# One run per machine at a time: the script refuses to start while a
+# zrw* pool is imported, and two runs would be that for each other.
+concurrency:
+  group: realworld-ssh-${{ inputs.target }}
+
+jobs:
+  over-ssh:
+    name: The matrix over ssh (${{ inputs.target }}, ${{ inputs.script }})
+    runs-on: ${{ inputs.runner }}
+    environment: ${{ inputs.target }}
+    timeout-minutes: 240
+    env:
+      TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: The tailnet, when the machine lives on one
+        if: ${{ env.TS_OAUTH_CLIENT_ID != '' }}
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+
+      - name: The way in, from the environment's secrets
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+          SSH_CONFIG: ${{ secrets.SSH_CONFIG }}
+          SSH_JUMP_KEY: ${{ secrets.SSH_JUMP_KEY }}
+        run: |
+          where="Settings → Environments → ${{ inputs.target }} → Environment secrets"
+          test -n "$SSH_HOST" || { echo "::error::the environment '${{ inputs.target }}' has no SSH_HOST ($where)"; exit 1; }
+          test -n "$SSH_USER" || { echo "::error::the environment '${{ inputs.target }}' has no SSH_USER ($where)"; exit 1; }
+          test -n "$SSH_KEY" || test -n "$SSH_PASSWORD" || { echo "::error::the environment '${{ inputs.target }}' has neither SSH_KEY nor SSH_PASSWORD ($where)"; exit 1; }
+          mkdir -p ~/.ssh ~/bin && chmod 700 ~/.ssh
+          {
+            echo "Host target"
+            echo "  HostName $SSH_HOST"
+            echo "  Port ${SSH_PORT:-22}"
+            echo "  User $SSH_USER"
+            if [ -n "$SSH_KEY" ]; then
+              printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ci && chmod 600 ~/.ssh/id_ci
+              echo "  PubkeyAuthentication yes"
+            else
+              echo "  PubkeyAuthentication no"
+              echo "  PreferredAuthentications password,keyboard-interactive"
+            fi
+            # Whatever the environment adds comes next: lines before its
+            # first `Host` still belong to `target` (a ProxyJump, a
+            # HostKeyAlgorithms), and its own `Host` blocks describe the
+            # bastion. The defaults for every hop close the file.
+            [ -n "$SSH_CONFIG" ] && printf '%s\n' "$SSH_CONFIG"
+            echo "Host *"
+            if [ -n "$SSH_KNOWN_HOSTS" ]; then
+              printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts && chmod 600 ~/.ssh/known_hosts
+              echo "  StrictHostKeyChecking yes"
+            else
+              echo "  StrictHostKeyChecking accept-new"
+            fi
+            echo "  UserKnownHostsFile ~/.ssh/known_hosts"
+            echo "  IdentitiesOnly yes"
+            [ -n "$SSH_KEY" ] && echo "  IdentityFile ~/.ssh/id_ci"
+            if [ -n "$SSH_JUMP_KEY" ]; then
+              printf '%s\n' "$SSH_JUMP_KEY" > ~/.ssh/id_jump && chmod 600 ~/.ssh/id_jump
+              echo "  IdentityFile ~/.ssh/id_jump"
+            fi
+            echo "  ServerAliveInterval 30"
+            echo "  ServerAliveCountMax 20"
+            echo "  ConnectTimeout 30"
+            echo "  LogLevel ERROR"
+          } > ~/.ssh/config
+          chmod 600 ~/.ssh/config
+          if [ -n "$SSH_KNOWN_HOSTS" ]; then echo "host keys: pinned from SSH_KNOWN_HOSTS"
+          else echo "::warning::SSH_KNOWN_HOSTS is empty: the host key the machine (and any bastion) presents now is the one trusted — pin it with ssh-keyscan for the next run"; fi
+          if [ -n "$SSH_KEY" ]; then echo "login: $SSH_USER with SSH_KEY"; else echo "login: $SSH_USER with SSH_PASSWORD"; fi
+          [ -n "$SSH_CONFIG" ] && echo "ssh_config: $(printf '%s\n' "$SSH_CONFIG" | grep -ci '^ *proxyjump') ProxyJump line(s), $(printf '%s\n' "$SSH_CONFIG" | grep -ci '^ *host ') Host block(s)"
+          if [ -n "$SSH_PASSWORD" ]; then
+            command -v sshpass >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends sshpass; }
+            printf '%s\n' "$SSH_PASSWORD" > ~/.ssh/pass && chmod 600 ~/.ssh/pass
+            printf '#!/bin/sh\nexec sshpass -f "$HOME/.ssh/pass" ssh target "$@"\n' > ~/bin/tssh
+          else
+            printf '#!/bin/sh\nexec ssh -o BatchMode=yes target "$@"\n' > ~/bin/tssh
+          fi
+          # gate VERB [ARGS]: one request to the machine, stdin and stdout
+          # passed through; GATE is the prefix the probe below settles.
+          printf '#!/bin/sh\nexec "$HOME/bin/tssh" "${GATE:+$GATE }$*"\n' > ~/bin/gate
+          chmod 755 ~/bin/tssh ~/bin/gate
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: What the machine is
+        id: probe
+        run: |
+          # Behind a forced command the key runs the gate and `probe`
+          # answers; a plain login answers "not found", and then the gate
+          # travels with the run.
+          set +e
+          out=$(gate probe 2>&1); code=$?
+          set -e
+          case $out in
+            *"zvolrescue-gate 1"*) echo "the key runs the gate (forced command)" ;;
+            *)
+              echo "no gate behind this login (exit $code: $(printf '%s' "$out" | tail -n 1)); shipping it"
+              tssh 'cat > ~/zvolrescue-gate && chmod 755 ~/zvolrescue-gate' < tests/realworld/ssh-gate.sh
+              echo "GATE=~/zvolrescue-gate" >> "$GITHUB_ENV"
+              export GATE="~/zvolrescue-gate"
+              out=$(gate probe 2>&1) || { echo "::error::the gate does not run on the machine: $out"; exit 1; }
+              ;;
+          esac
+          printf '%s\n' "$out"
+          field() { printf '%s\n' "$out" | awk -v k="$1" '$1 == k { $1 = ""; sub(/^ /, ""); print; exit }'; }
+          os=$(field os); arch=$(field arch); root=$(field root)
+          test -n "$os" || { echo "::error::the probe said nothing about the machine"; exit 1; }
+          case $root in
+            yes|sudo) ;;
+            *) echo "::error::the gate cannot become root on the machine: install it for root, or add the sudoers line its header shows"; exit 1 ;;
+          esac
+          case "${{ inputs.script }}" in
+            matrix)
+              for t in bash python3 openssl; do
+                test "$(field $t)" = yes || { echo "::error::the machine has no $t, which kernel-matrix.sh needs (a rescue system takes the mfsbsd script)"; exit 1; }
+              done ;;
+            mfsbsd)
+              test -n "${{ inputs.disks }}" || { echo "::error::the mfsbsd script needs the 'disks' input: two raw disks whose contents it may destroy"; exit 1; } ;;
+          esac
+          case "$os/$arch" in
+            Linux/x86_64)  rust=x86_64-unknown-linux-musl; flags="" ;;
+            Linux/aarch64) rust=aarch64-unknown-linux-musl; flags="-C linker=rust-lld -C link-self-contained=yes" ;;
+            FreeBSD/amd64) rust=x86_64-unknown-freebsd; flags="-C target-feature=+crt-static" ;;
+            *) echo "::error::no static build here for $os on $arch (Linux x86_64/aarch64 and FreeBSD amd64 are)"; exit 1 ;;
+          esac
+          {
+            echo "os=$os"; echo "arch=$arch"; echo "rust_target=$rust"; echo "rustflags=$flags"
+            echo "kernel=$(field kernel)"; echo "zfs=$(field zfs)"; echo "host=$(field host)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: The static binaries for a Linux machine
+        if: ${{ steps.probe.outputs.os == 'Linux' }}
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ steps.probe.outputs.rust_target }}
+      - name: Built here, static, for its architecture
+        if: ${{ steps.probe.outputs.os == 'Linux' }}
+        env:
+          RUSTFLAGS: ${{ steps.probe.outputs.rustflags }}
+        run: |
+          cargo build --release --target "${{ steps.probe.outputs.rust_target }}" -p zvolrescue -p zvolreport
+          mkdir -p guest
+          cp "target/${{ steps.probe.outputs.rust_target }}/release/zvolrescue" "target/${{ steps.probe.outputs.rust_target }}/release/zvolreport" guest/
+          file guest/zvolrescue
+
+      - name: The static binaries for a FreeBSD machine, built on FreeBSD 15
+        if: ${{ steps.probe.outputs.os == 'FreeBSD' }}
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "15"
+          usesh: true
+          prepare: pkg install -y rust
+          run: |
+            export RUSTFLAGS="${{ steps.probe.outputs.rustflags }}"
+            cargo build --release --target x86_64-unknown-freebsd -p zvolrescue -p zvolreport
+            mkdir -p guest
+            for b in zvolrescue zvolreport; do
+              file "target/x86_64-unknown-freebsd/release/$b"
+              file "target/x86_64-unknown-freebsd/release/$b" | grep -Eq 'statically linked|static-pie linked'
+              cp "target/x86_64-unknown-freebsd/release/$b" guest/
+            done
+
+      - name: The binaries and the script, over
+        run: |
+          gate put zvolrescue < guest/zvolrescue
+          gate put zvolreport < guest/zvolreport
+          case "${{ inputs.script }}" in
+            matrix) gate put kernel-matrix.sh < tests/realworld/kernel-matrix.sh ;;
+            mfsbsd) gate put mfsbsd.sh < tests/realworld/mfsbsd.sh ;;
+          esac
+
+      - name: The run, on the machine
+        id: run
+        run: |
+          set +e
+          case "${{ inputs.script }}" in
+            matrix) gate run matrix 2>&1 | tee run.log ;;
+            mfsbsd) gate run mfsbsd ${{ inputs.disks }} 2>&1 | tee run.log ;;
+          esac
+          code=${PIPESTATUS[0]}
+          echo "exit=$code" >> "$GITHUB_OUTPUT"
+          echo "the script exited $code"
+          exit "$code"
+
+      - name: The record, whatever the verdict was
+        if: always()
+        run: |
+          mkdir -p record
+          cp run.log record/ 2>/dev/null || true
+          if gate record > record.tgz 2>record.err; then
+            tar xzf record.tgz -C record
+          else
+            echo "no record came back: $(cat record.err)"
+          fi
+          {
+            echo "## ${{ steps.probe.outputs.host }}: ${{ steps.probe.outputs.os }} ${{ steps.probe.outputs.kernel }} on ${{ steps.probe.outputs.arch }}, ${{ steps.probe.outputs.zfs }} (environment \`${{ inputs.target }}\`, ${{ inputs.script }})"
+            cat record/env.txt 2>/dev/null
+            echo
+            cat record/row.md 2>/dev/null
+            echo
+            echo '```'; cat record/results.txt 2>/dev/null; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ inputs.keep }}" = true ]; then
+            echo "the run's directory stays on the machine (keep)"
+          else
+            gate clean || true
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: realworld-ssh-${{ inputs.target }}-${{ inputs.script }}
+          path: record
