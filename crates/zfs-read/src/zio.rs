@@ -186,6 +186,14 @@ pub struct PoolReader<'a> {
     /// its uberblocks (SPEC F-61) goes here.
     bases: Vec<u64>,
     tops: BTreeMap<u32, Node>,
+    /// `ashift` of each top-level vdev, by id: what a gang header's size
+    /// follows once the pool has `dynamic_gang_header` active.
+    top_ashift: BTreeMap<u32, u32>,
+    /// `com.klarasystems:dynamic_gang_header` is active (OpenZFS 2.4):
+    /// a gang header fills the smallest allocation its top-level vdev
+    /// makes instead of one 512-byte sector, and holds as many child
+    /// pointers as fit. Without it, every header is 512 bytes.
+    dynamic_gang: bool,
     /// How many leaf reads each device has served. Used when deciding
     /// whether a member really contributed to what was read (F-62).
     reads: RefCell<Vec<u64>>,
@@ -379,16 +387,28 @@ impl<'a> PoolReader<'a> {
     /// Build a reader for `pool` over `devices`, indexed exactly like the
     /// scans that produced the assembly (`None` for unreadable devices).
     pub fn new(pool: &PoolAssembly, devices: Vec<Option<&'a dyn BlockSource>>) -> Self {
+        let mut top_ashift = BTreeMap::new();
         let tops = pool
             .tops
             .iter()
             .map(|t| {
                 let ashift = t.ashift.and_then(|a| u32::try_from(a).ok()).unwrap_or(9);
+                top_ashift.insert(t.id as u32, ashift);
                 let node = Node::from_tree(&t.tree, &t.members, ashift);
                 trace!("zio", "top-level vdev {}: {}", t.id, node.describe());
                 (t.id as u32, node)
             })
             .collect();
+        let dynamic_gang = pool
+            .features_for_read
+            .iter()
+            .any(|f| f == "com.klarasystems:dynamic_gang_header");
+        if dynamic_gang {
+            trace!(
+                "zio",
+                "dynamic_gang_header is active: gang headers are sized by their vdev"
+            );
+        }
         let bases = vec![0u64; devices.len()];
         let reads = RefCell::new(vec![0u64; devices.len()]);
         PoolReader {
@@ -399,6 +419,8 @@ impl<'a> PoolReader<'a> {
             cache: RefCell::new(ReadCache::default()),
             mismatches: Cell::new(0),
             tops,
+            top_ashift,
+            dynamic_gang,
             salt: Cell::new(None),
             keys: RefCell::new(None),
             removed: RefCell::new(BTreeMap::new()),
@@ -1236,19 +1258,45 @@ impl<'a> PoolReader<'a> {
         Err(last)
     }
 
-    /// Read the raw bytes behind a gang pointer: the 512-byte header at
-    /// the DVA (verified against the pointer's identity and birth, trying
-    /// every copy), then each child pointer in order, concatenated;
-    /// children may be gang blocks themselves.
+    /// The smallest allocation top-level vdev `vdev` makes
+    /// (`vdev_get_min_alloc`): one sector of its `ashift`, or a full data
+    /// row of a dRAID — the size of a dynamic gang header there.
+    fn min_alloc(&self, vdev: u32) -> u64 {
+        let ashift = self.top_ashift.get(&vdev).copied().unwrap_or(9);
+        match self.tops.get(&vdev) {
+            Some(Node::Draid { cfg, .. }) => cfg.ndata << ashift,
+            _ => 1u64 << ashift,
+        }
+    }
+
+    /// How many bytes the gang header behind `bp` is: 512 on every pool
+    /// before `dynamic_gang_header`, and with that feature active the
+    /// smallest of its copies' allocations (`zio_gang_tree_assemble`:
+    /// the header was written once, at the size every DVA could hold).
+    fn gang_header_size(&self, bp: &BlkPtr) -> usize {
+        if !self.dynamic_gang {
+            return blkptr::GANG_HEADER_SIZE;
+        }
+        bp.dvas()
+            .map(|d| self.min_alloc(d.vdev))
+            .min()
+            .map(|n| usize::try_from(n).unwrap_or(blkptr::GANG_HEADER_SIZE))
+            .unwrap_or(blkptr::GANG_HEADER_SIZE)
+            .max(blkptr::GANG_HEADER_SIZE)
+    }
+
+    /// Read the raw bytes behind a gang pointer: the header at the DVA
+    /// (verified against the pointer's identity and birth, trying every
+    /// copy), then each child pointer in order, concatenated; children
+    /// may be gang blocks themselves.
     fn read_gang(&self, dva: &Dva, bp: &BlkPtr, depth: usize) -> Result<Vec<u8>, ReadError> {
         if depth > 8 {
             return Err(ReadError::Gang("nesting deeper than 8".into()));
         }
+        let header_size = self.gang_header_size(bp);
         let mut header = None;
         let mut last = ReadError::NoMember;
-        for (device, candidate) in
-            self.candidates_on(dva.vdev, dva.offset, blkptr::GANG_HEADER_SIZE, 0)
-        {
+        for (device, candidate) in self.candidates_on(dva.vdev, dva.offset, header_size, 0) {
             match candidate {
                 Ok(buf) => {
                     // Verifier: DVA[0] and the physical birth. A gang
@@ -1271,7 +1319,7 @@ impl<'a> PoolReader<'a> {
                     };
                     trace!(
                         "gang",
-                        "header @ vdev {} off {:#x} device {device:?} (depth {depth}): checksum {}",
+                        "header @ vdev {} off {:#x} device {device:?} (depth {depth}): {header_size} bytes, checksum {}",
                         dva.vdev,
                         dva.offset,
                         status.as_str()
@@ -1988,6 +2036,106 @@ mod tests {
                 reader(&s, &a).read_block(&bp, false).unwrap_err(),
                 ReadError::AllCopiesBad
             );
+        }
+
+        const DGH: &str = "com.klarasystems:dynamic_gang_header";
+
+        /// Five pieces behind one header: more than the three a 512-byte
+        /// header holds, so only a dynamic header can carry them.
+        fn wide_payload() -> Vec<u8> {
+            (0..20480u32).map(|i| (i % 251) as u8).collect()
+        }
+
+        /// A mirror whose labels say `dynamic_gang_header` is active, or
+        /// not, over the same bytes: a 4 KiB gang header with five
+        /// children, as OpenZFS 2.4 writes it on an `ashift=12` mirror.
+        fn build_dynamic(active: bool) -> (Vec<MemSource>, PoolAssembly, BlkPtr) {
+            let mut pool = Pool::mirror("tank", 0x9c9c, 12).txgs(&[(100, 1)]);
+            if active {
+                pool = pool.with_feature(DGH);
+            }
+            let mut members = vec![pool.member_image(0, SIZE), pool.member_image(1, SIZE)];
+            let mut a = Alloc::new(0x30_0000);
+            let bp = a.put_gang_sized(
+                &mut members,
+                &wide_payload(),
+                &[4096; 5],
+                ot::ZVOL,
+                100,
+                4096,
+            );
+            let bp = BlkPtr::parse(&bp, Endian::Little).unwrap();
+            let sources: Vec<MemSource> = members.into_iter().map(MemSource::new).collect();
+            let scans: Vec<_> = sources.iter().map(|s| scan_device(s).ok()).collect();
+            let assembly = assemble(&scans).into_iter().next().unwrap();
+            (sources, assembly, bp)
+        }
+
+        /// With `dynamic_gang_header` active the header is read at the
+        /// vdev's smallest allocation — 4 KiB here — and every pointer
+        /// in it is followed (SPEC F-26, F-70).
+        #[test]
+        fn dynamic_gang_header_on_a_mirror_reads_every_pointer_it_holds() {
+            let (s, a, bp) = build_dynamic(true);
+            assert!(bp.dva[0].gang);
+            assert_eq!(bp.dva[0].asize, 4096);
+            assert!(a.features_for_read.iter().any(|f| f == DGH));
+            let block = reader(&s, &a).read_block(&bp, false).unwrap();
+            assert_eq!(block.data, wide_payload());
+            assert_eq!(block.verify, Verify::Ok);
+        }
+
+        /// The same bytes under a pool that does not claim the feature
+        /// are read as a 512-byte header, whose checksum tail is not
+        /// where the old format puts it: a clean gang error, never
+        /// three children passed off as the block.
+        #[test]
+        fn the_same_header_without_the_feature_is_a_clean_gang_error() {
+            let (s, a, bp) = build_dynamic(false);
+            assert!(!a.features_for_read.iter().any(|f| f == DGH));
+            assert!(matches!(
+                reader(&s, &a).read_block(&bp, false).unwrap_err(),
+                ReadError::Gang(_)
+            ));
+        }
+
+        /// On a 4-wide raidz2 at `ashift=12` the smallest allocation is
+        /// one 4 KiB sector too, and the header reads through parity with
+        /// a member absent like any other block.
+        #[test]
+        fn dynamic_gang_header_on_a_raidz2_reads_whole_and_degraded() {
+            let pool = Pool::raidz("tank", 0x9d9d, 12, 4, 2)
+                .txgs(&[(100, 1)])
+                .with_feature(DGH);
+            let mut members: Vec<Vec<u8>> = (0..4).map(|i| pool.member_image(i, SIZE)).collect();
+            let mut a = Alloc::with_layout(
+                0x30_0000,
+                Layout::Raidz {
+                    ashift: 12,
+                    nparity: 2,
+                },
+            );
+            let bp = a.put_gang_sized(
+                &mut members,
+                &wide_payload(),
+                &[4096; 5],
+                ot::ZVOL,
+                100,
+                4096,
+            );
+            let bp = BlkPtr::parse(&bp, Endian::Little).unwrap();
+            let s: Vec<MemSource> = members.into_iter().map(MemSource::new).collect();
+            for present in [
+                [true; 4],
+                [false, true, true, true],
+                [true, true, false, true],
+            ] {
+                let (a, devs) = degraded(&s, &present);
+                let block = PoolReader::new(&a, devs)
+                    .read_block(&bp, false)
+                    .unwrap_or_else(|e| panic!("dynamic gang read with {present:?}: {e}"));
+                assert_eq!(block.data, wide_payload(), "{present:?}");
+            }
         }
 
         /// The same gang block on a 4-wide raidz2: header and children

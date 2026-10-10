@@ -828,8 +828,25 @@ impl Alloc {
         otype: u8,
         txg: u64,
     ) -> [u8; blkptr::SIZE] {
+        self.put_gang_sized(members, data, pieces, otype, txg, blkptr::GANG_HEADER_SIZE)
+    }
+
+    /// [`put_gang`](Self::put_gang) with a header of `header_size`
+    /// bytes: what a pool with `com.klarasystems:dynamic_gang_header`
+    /// active writes — the vdev's smallest allocation, holding as many
+    /// child pointers as fit — instead of the old 512-byte sector.
+    pub fn put_gang_sized(
+        &mut self,
+        members: &mut [Vec<u8>],
+        data: &[u8],
+        pieces: &[usize],
+        otype: u8,
+        txg: u64,
+        header_size: usize,
+    ) -> [u8; blkptr::SIZE] {
         assert!(
-            pieces.len() <= blkptr::GANG_NBLKPTRS && pieces.iter().sum::<usize>() == data.len()
+            pieces.len() <= blkptr::gang_nblkptrs(header_size)
+                && pieces.iter().sum::<usize>() == data.len()
         );
         let mut children = Vec::new();
         let mut at = 0usize;
@@ -838,7 +855,7 @@ impl Alloc {
             at += n;
         }
         let offset = self.next;
-        let mut header = vec![0u8; blkptr::GANG_HEADER_SIZE];
+        let mut header = vec![0u8; header_size];
         for (i, c) in children.iter().enumerate() {
             header[i * blkptr::SIZE..(i + 1) * blkptr::SIZE].copy_from_slice(c);
         }
@@ -848,16 +865,16 @@ impl Alloc {
                 for m in members.iter_mut() {
                     write_at_dva(m, offset, &header);
                 }
-                blkptr::GANG_HEADER_SIZE as u64
+                header_size as u64
             }
             Layout::Raidz { ashift, nparity } => {
                 let unit = 1usize << ashift;
                 let mut row = header.clone();
-                row.resize(unit, 0);
+                row.resize(header_size.max(unit).div_ceil(unit) * unit, 0);
                 let members = self.mine(members);
                 let m = zfs_ondisk::raidz::map(
                     offset,
-                    unit as u64,
+                    row.len() as u64,
                     ashift,
                     members.len() as u64,
                     nparity,

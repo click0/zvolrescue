@@ -408,14 +408,28 @@ impl BlkPtr {
     }
 }
 
-/// Size of a gang block header (`SPA_GANGBLOCKSIZE`).
+/// Size of a gang block header as every pool wrote it before
+/// `com.klarasystems:dynamic_gang_header` (`SPA_OLD_GANGBLOCKSIZE`): one
+/// 512-byte sector, whatever the vdev's `ashift`.
 pub const GANG_HEADER_SIZE: usize = 512;
-/// Block pointers in a gang header (`SPA_GBH_NBLKPTRS`).
+/// Block pointers in a 512-byte gang header (`SPA_GBH_NBLKPTRS`).
 pub const GANG_NBLKPTRS: usize = 3;
 
-/// Parse the child pointers of a gang block header (`zio_gbh_phys_t`):
-/// three block pointers, filler, and an embedded checksum tail that the
-/// caller verifies with `checksum::verify_gang_header`.
+/// Block pointers a gang header of `size` bytes holds (`gbh_nblkptrs`):
+/// the header is pointers from the start and an embedded checksum tail
+/// at the end, with whatever is left between them unused. 3 for the old
+/// 512-byte header; 31 for the 4 KiB one a dynamic header takes on an
+/// `ashift=12` mirror or raidz.
+pub fn gang_nblkptrs(size: usize) -> usize {
+    size.saturating_sub(crate::checksum::ECK_SIZE) / SIZE
+}
+
+/// Parse the child pointers of a gang block header (`zio_gbh_phys_t`)
+/// of `buf.len()` bytes: [`gang_nblkptrs`] block pointers, then filler,
+/// then the embedded checksum tail the caller verifies with
+/// `checksum::verify_gang_header`. A pool without the dynamic header
+/// feature always wrote 512 bytes; with it active, the header is the
+/// top-level vdev's smallest allocation, and the caller knows which.
 pub fn parse_gang_header(buf: &[u8], endian: Endian) -> Result<Vec<BlkPtr>, ParseError> {
     if buf.len() < GANG_HEADER_SIZE {
         return Err(ParseError::Truncated {
@@ -423,7 +437,7 @@ pub fn parse_gang_header(buf: &[u8], endian: Endian) -> Result<Vec<BlkPtr>, Pars
             got: buf.len(),
         });
     }
-    (0..GANG_NBLKPTRS)
+    (0..gang_nblkptrs(buf.len()))
         .map(|i| BlkPtr::parse(&buf[i * SIZE..(i + 1) * SIZE], endian))
         .collect()
 }
@@ -661,6 +675,39 @@ mod tests {
         assert!(bp.uses_crypt() && !bp.is_encrypted());
         assert_eq!(bp.fill, 5);
         assert!(bp.crypt_params().is_none());
+    }
+
+    /// A gang header holds as many pointers as fit before its checksum
+    /// tail: 3 in the 512 bytes every pool wrote before
+    /// `dynamic_gang_header`, 31 in the 4 KiB one an `ashift=12` vdev
+    /// writes with it, 63 in a dRAID's 8 KiB.
+    #[test]
+    fn gang_header_pointer_count_follows_its_size() {
+        assert_eq!(gang_nblkptrs(GANG_HEADER_SIZE), GANG_NBLKPTRS);
+        assert_eq!(gang_nblkptrs(4096), 31);
+        assert_eq!(gang_nblkptrs(8192), 63);
+        let child = encode::Builder::new()
+            .dva(0, 0, 0x1000, 0x1000, false)
+            .sizes(4096, 4096)
+            .props(2, 7, 23, 0)
+            .births(10, 10, 1)
+            .bytes(Endian::Little);
+        let mut header = vec![0u8; 4096];
+        for i in 0..31 {
+            header[i * SIZE..(i + 1) * SIZE].copy_from_slice(&child);
+        }
+        let parsed = parse_gang_header(&header, Endian::Little).unwrap();
+        assert_eq!(parsed.len(), 31);
+        assert!(parsed.iter().all(|p| p.dva[0].offset == 0x1000));
+        // The old header, from the same bytes: three pointers, and the
+        // fourth 128-byte slot is filler, never read as a pointer.
+        assert_eq!(
+            parse_gang_header(&header[..GANG_HEADER_SIZE], Endian::Little)
+                .unwrap()
+                .len(),
+            3
+        );
+        assert!(parse_gang_header(&header[..256], Endian::Little).is_err());
     }
 
     #[test]

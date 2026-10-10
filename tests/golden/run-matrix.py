@@ -545,6 +545,12 @@ def judge_dump(args, oracle, manifest, members, work, assume=()):
             outcomes[vol] = "ok" if sha256_file(out) == oracle.volumes[vol] else "hash mismatch"
         elif refusal(proc.returncode, proc.stderr):
             outcomes[vol] = "refused"
+            # The reason, in the tool's words: a refusal where recovery
+            # was expected is only diagnosable from it, and the debug
+            # log is gone with the work directory.
+            why = proc.stderr.strip().splitlines()
+            outcomes.setdefault("refused_detail", {})[vol] = (
+                f"exit {proc.returncode}: " + (why[-1][:200] if why else ""))
         elif proc.returncode == 4:
             # The tool says the image is not the whole volume. That is
             # neither a clean refusal nor an answer, so it is named

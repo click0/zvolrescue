@@ -26,9 +26,10 @@
 # when every attempted scenario passed, 1 otherwise.
 #
 # What it covers: A1 A2 A3 B1 B2 B3 B4 B5 B6 B7 B8 B9 C1 C2 C3 C4 C5 C6
-# C7 C8 C9 C10 C11 C12 D1 D2 D3 D4 D5 D6 D7 D8 F7 G5. C12 needs OpenZFS
-# 2.3 (`raidz_expansion`) and is skipped on 2.2 with a note; B7 is
-# skipped when this zpool does not build dRAID. What a file-backed
+# C7 C8 C9 C10 C11 C12 C13 D1 D2 D3 D4 D5 D6 D7 D8 F7 G5. C12 needs
+# OpenZFS 2.3 (`raidz_expansion`) and C13 OpenZFS 2.4
+# (`dynamic_gang_header`); each is skipped with a note where its feature
+# does not exist. B7 is skipped when this zpool does not build dRAID. What a file-backed
 # device cannot give — E1, E2 (a disk's read rate), F1–F6 and F8–F10 (sector
 # sizes, controllers, bridges) — is not attempted and stays ☐.
 set -u
@@ -57,6 +58,11 @@ Linux)
     DEVKIND="loop devices"
     NEED="zpool zfs zdb losetup sfdisk dmsetup sha256sum sha1sum md5sum python3 openssl blockdev runuser"
     TRACER=strace
+    # Ganging forced for C13: every allocation above SIZE bytes is ganged,
+    # PCT percent of the time (OpenZFS 2.2 added the percentage; older
+    # modules gang every one and have no knob to say otherwise).
+    gang_force() { echo "$1" > /sys/module/zfs/parameters/metaslab_force_ganging; echo "$2" > /sys/module/zfs/parameters/metaslab_force_ganging_pct 2>/dev/null || true; }
+    gang_default() { cat /sys/module/zfs/parameters/metaslab_force_ganging; cat /sys/module/zfs/parameters/metaslab_force_ganging_pct 2>/dev/null || echo 3; }
     load_zfs() { [ -e /dev/zfs ] || modprobe zfs 2>/dev/null; [ -e /dev/zfs ]; }
     module_from() { if dkms status 2>/dev/null | grep -q '^zfs'; then echo zfs-dkms; else echo "in-tree module"; fi; }
     attach_file() { losetup --find --show "${@:2}" "$1"; }     # attach_file FILE [losetup options]
@@ -87,6 +93,8 @@ FreeBSD)
     DEVKIND="md devices"
     NEED="zpool zfs zdb mdconfig gpart gnop gconcat diskinfo sha256 sha1 md5 python3 openssl truss chroot"
     TRACER=truss
+    gang_force() { sysctl "vfs.zfs.metaslab.force_ganging=$1" >/dev/null; sysctl "vfs.zfs.metaslab.force_ganging_pct=$2" >/dev/null 2>&1 || true; }
+    gang_default() { sysctl -n vfs.zfs.metaslab.force_ganging; sysctl -n vfs.zfs.metaslab.force_ganging_pct 2>/dev/null || echo 3; }
     load_zfs() { [ -e /dev/zfs ] || kldload zfs 2>/dev/null; [ -e /dev/zfs ]; }
     module_from() { echo "base system"; }
     attach_file() { md=$(mdconfig -a -t vnode -f "$1") || return 1; echo "/dev/$md"; }
@@ -518,6 +526,29 @@ else
 fi
 SHA[e]=$(oracle "${P}e/vol"); export_pool "${P}e"
 
+# ---- C13: gang headers the size of a sector (OpenZFS 2.4)
+# `dynamic_gang_header` lets a gang header fill the vdev's smallest
+# allocation — 4 KiB on this mirror — instead of one 512-byte sector,
+# and becomes active the first time such a header is written. Ganging is
+# forced for every allocation over 16 KiB while the volume is filled, so
+# the pool has hundreds of them; the tunables go back afterwards.
+say "pool: ganging forced, dynamic gang headers (C13)"
+if zpool upgrade -v 2>/dev/null | grep -q '^dynamic_gang_header'; then
+    HAVE_DGH=1
+    G0=$(mkloop gang0 512M); G1=$(mkloop gang1 512M)
+    newpool "${P}g" "$G0 $G1" -o ashift=12 -O compression=off mirror "$G0" "$G1"
+    GANG_WAS=$(gang_default)
+    gang_force 16384 100
+    zfs create -V 64M -b 128K "${P}g/vol"; fill "${P}g/vol" 48M
+    zpool sync "${P}g"
+    # shellcheck disable=SC2086
+    gang_force $GANG_WAS
+    DGH_STATE=$(zpool get -H -o value feature@dynamic_gang_header "${P}g")
+    SHA[g]=$(oracle "${P}g/vol"); export_pool "${P}g"
+else
+    HAVE_DGH=0
+fi
+
 # ---- D3: a destroyed pool; D4, D5: labels and uberblocks damaged after export
 say "pools: destroyed (D3), labels zeroed (D4), newest uberblock zeroed (D5)"
 D3=$(mkloop destroyed 512M)
@@ -735,6 +766,22 @@ if [ "$HAVE_EXPAND" = 1 ]; then
         result C12 PASS "list exit 3 naming raidz_expansion; scan exit 0; --ignore-unknown-features reads"
     else result C12 FAIL "list $l, scan $s, ignore $g"; fi
 else result C12 SKIP "raidz_expansion not available in this ZFS (needs OpenZFS 2.3)"; fi
+
+# C13: a pool whose gang headers are the vdev's smallest allocation
+if [ "$HAVE_DGH" = 1 ]; then
+    if [ "$DGH_STATE" != active ]; then
+        result C13 SKIP "ganging was forced, but dynamic_gang_header stayed '$DGH_STATE' on this ZFS"
+    else
+        run c13-scan scan "$G0" "$G1"; s=$code
+        rm -f "$WORK/out/c13t.img"
+        "$ZR" -q --debug-log "$WORK/out/c13.trace" dump "${P}g/vol" "$G0" "$G1" -o "$WORK/out/c13t.img" >/dev/null 2>&1
+        headers=$(grep -c '4096 bytes, checksum ok' "$WORK/out/c13.trace" 2>/dev/null); headers=${headers:-0}
+        if [ "$s" = 0 ] && grep -q 'dynamic_gang_header' "$WORK/out/c13-scan.log" && [ "$headers" -gt 0 ] \
+            && dump_matches c13 "${P}g/vol" "${SHA[g]}" "$G0" "$G1"; then
+            result C13 PASS "dynamic_gang_header active; $headers gang headers of 4096 bytes read; dump matches the kernel"
+        else result C13 FAIL "scan $s, $headers 4 KiB gang headers in the trace, dump $(test -f "$WORK/out/c13.img" && echo written || echo missing)"; fi
+    fi
+else result C13 SKIP "dynamic_gang_header not in this ZFS (needs OpenZFS 2.4)"; fi
 
 # D2: destroyed, then 500 MiB written elsewhere over several TXGs. Four
 # honest answers: whole from an older TXG; named at no TXG left in the

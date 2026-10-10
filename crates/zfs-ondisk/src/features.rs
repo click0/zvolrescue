@@ -66,6 +66,11 @@ const KNOWN: &[(&str, &str)] = &[
         "com.delphix:device_removal",
         "indirect.rs: the mapping a removed vdev leaves behind",
     ),
+    (
+        "com.klarasystems:dynamic_gang_header",
+        "zio.rs: a gang header the size of the vdev's smallest allocation; \
+         read on a pool OpenZFS 2.4 built with ganging forced (REALWORLD-TESTS G1, C13)",
+    ),
 ];
 
 /// Features this build knows it cannot honour, and what happens without

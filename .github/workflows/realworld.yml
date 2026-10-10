@@ -373,9 +373,38 @@ jobs:
           cat /var/tmp/golden/release/SHA256SUMS
           python3 -c 'import json; l = json.load(open("/var/tmp/golden/oracle/layout.json")); print(l["pool"], l["volumes"], [(t["index"], t["kind"], len(t["members"])) for t in l["tops"]])'
           wc -l /var/tmp/golden/oracle/volumes.sha256
+      - name: The undamaged image first, every volume, the tool's own words on stderr
+        run: |
+          # What the matrix cannot say: when every manifest comes back
+          # "refused", whether the tool reads this pool at all. Every
+          # volume of the intact image, with the key the oracle holds for
+          # it, and the exit code and stderr of each.
+          cd /var/tmp/golden
+          members=$(ls members/*.img)
+          rc=0
+          while read -r sha name; do
+            vol=${name%@export}
+            case $(awk -F'\t' -v v="$vol" '$1 == v { print $12 }' oracle/zfs-list.txt) in
+              raw) key="--key raw:$PWD/oracle/keys/raw.key" ;;
+              passphrase) key="--key passphrase:$PWD/oracle/keys/passphrase.txt" ;;
+              *) key="" ;;
+            esac
+            set +e
+            "$GITHUB_WORKSPACE/target/release/zvolrescue" -q dump "$vol" $members $key -o /var/tmp/baseline.img 2>/var/tmp/baseline.err; code=$?
+            set -e
+            got=$(sha256sum /var/tmp/baseline.img 2>/dev/null | cut -d' ' -f1)
+            if [ "$code" = 0 ] && [ "$got" = "$sha" ]; then echo "ok        $vol"
+            else echo "FAIL ($code) $vol: $(tail -n 3 /var/tmp/baseline.err | tr '\n' ' ')"; rc=1; fi
+            rm -f /var/tmp/baseline.img
+          done < <(grep '@export$' oracle/volumes.sha256)
+          # The scan and list of the intact image, for the record.
+          "$GITHUB_WORKSPACE/target/release/zvolrescue" scan $members | tail -n 20 || true
+          "$GITHUB_WORKSPACE/target/release/zvolrescue" list -r $members 2>&1 | tail -n 30 || true
+          test "$rc" = 0
       - name: G2, G3, the damage matrix over it
         id: matrix
         run: |
+          set -o pipefail
           held=""
           case "${{ github.event.inputs.only }}" in *held-out*) held=--held-out ;; esac
           set +e
@@ -392,6 +421,7 @@ jobs:
           python3 - <<'EOF' | tee -a "$GITHUB_STEP_SUMMARY"
           import json, collections
           rs = json.load(open("/var/tmp/golden/report/report-image-v1.json"))
+          # The report is also what the publication carries.
           print("## Golden image: the damage matrix (G2, G3)")
           print()
           print("| Manifest | Expected | Actual | Verdict |")
@@ -407,7 +437,10 @@ jobs:
               for n in r.get("notes", []):
                   print(f"  - {n}")
               for k, v in (r.get("outcomes") or {}).items():
-                  if v != "ok":
+                  if k == "refused_detail":
+                      for vol, why in v.items():
+                          print(f"  - {vol}: {why}")
+                  elif v != "ok":
                       print(f"  - {k}: {v}")
           wrote = [r["id"] for r in rs if r.get("inputs_unchanged") is False]
           assert not wrote, f"a run modified its own evidence: {wrote}"
