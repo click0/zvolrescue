@@ -28,6 +28,31 @@ tagged. `v0.7.1` is the release that carries those six.
   on FreeBSD 15.1 (OpenZFS 2.4.2) every one of the 35 scenarios
   applies, C12 included: `list` refuses a kernel-expanded raidz with
   exit 3 naming `raidz_expansion`.
+* **Ubuntu 26.04 and Debian 13 on the matrix, beside 24.04 and 12.**
+  The Linux jobs of `realworld.yml` ran only on the releases they were
+  written on in September; they are matrices now — the `ubuntu-26.04`
+  and `ubuntu-24.04` runners' own kernels, and Debian 13 and 12 VMs,
+  the cloud image checked against Debian's `SHA512SUMS`. On Ubuntu
+  26.04 (OpenZFS 2.4.1, kernel 7.0) and Debian 13 (zfs-dkms 2.3.9,
+  kernel 6.12) all 35 scenarios apply and pass, C12 included — the
+  first Linux kernels on the matrix with `raidz_expansion`. The old
+  releases stay: 12's 2.1 is the oldest ZFS on the matrix and found
+  both of D2's defects. The workflow takes an `only` input naming
+  which environments to run.
+* **E3 on the rescue medium itself: mfsBSD.** `tests/realworld/mfsbsd.sh`
+  runs on mfsBSD — FreeBSD booted from an ISO into RAM, `/bin/sh` and
+  the base system alone — where its kernel makes a mirror pool on two
+  raw disks and fills a volume, and the static `zvolrescue` built on
+  FreeBSD 15, copied in over ssh, scans both disks, lists the volume
+  and dumps it to the kernel's hash; the disks are checked unchanged
+  and the pool importable afterwards, and `zvolreport` runs over the
+  evidence. The `mfsbsd` job of `realworld.yml` boots
+  `mfsbsd-14.2-RELEASE-amd64.iso`, checked against its published
+  SHA2-256, under QEMU/KVM for it. The first run passed
+  (REALWORLD-TESTS, Results): the 15.1-built static binary runs on the
+  14.2 rescue image. The README and the release notes said "mfsBSD 15
+  included" of that binary; no mfsBSD 15 exists, and they now say what
+  was checked, and that 14.x stays build-from-source (SPEC N-06a).
 
 ### Fixed
 
