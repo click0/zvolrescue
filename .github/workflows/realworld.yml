@@ -16,7 +16,11 @@ name: Real-world (kernel ZFS)
 #    defects;
 #  * FreeBSD 15 and 14: the project's first-class and best-effort
 #    targets (SPEC N-06), each a VM with the OpenZFS of its own base
-#    system, the pools on md devices, the tool built in the VM.
+#    system, the pools on md devices, the tool built in the VM;
+#  * mfsBSD: the rescue medium itself — FreeBSD booted from an ISO into
+#    RAM under QEMU/KVM on the runner, a pool its kernel makes on two
+#    raw disks, and the static binary built on FreeBSD 15 copied in
+#    over ssh (REALWORLD-TESTS E3).
 #
 # Each job uploads the run's record (results, the row for the matrix,
 # the evidence log, every log of a failed scenario) whether it passed
@@ -24,6 +28,11 @@ name: Real-world (kernel ZFS)
 
 on:
   workflow_dispatch:
+    inputs:
+      only:
+        description: "Which environments to run, any of: ubuntu debian freebsd mfsbsd (empty: all)"
+        required: false
+        default: ""
 
 env:
   CARGO_TERM_COLOR: always
@@ -31,6 +40,7 @@ env:
 jobs:
   ubuntu-kernel:
     name: Ubuntu LTS, in-tree OpenZFS (${{ matrix.runner }} runner kernel)
+    if: ${{ !github.event.inputs.only || contains(github.event.inputs.only, 'ubuntu') }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -78,6 +88,7 @@ jobs:
 
   debian-vm:
     name: Debian ${{ matrix.release }}, zfs-dkms (QEMU/KVM)
+    if: ${{ !github.event.inputs.only || contains(github.event.inputs.only, 'debian') }}
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -184,6 +195,7 @@ jobs:
 
   freebsd:
     name: FreeBSD ${{ matrix.release }}, OpenZFS from base (md devices)
+    if: ${{ !github.event.inputs.only || contains(github.event.inputs.only, 'freebsd') }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -227,3 +239,96 @@ jobs:
         with:
           name: realworld-freebsd-${{ matrix.release }}
           path: record
+
+  # E3 on the rescue medium itself: mfsBSD — FreeBSD booted from an ISO
+  # into RAM, the way a machine with no system left to install anything
+  # on gets one — under QEMU/KVM on the runner, two raw virtio disks for
+  # the pool its kernel makes, and the static zvolrescue built on
+  # FreeBSD 15 copied in over ssh as root with the image's published
+  # password, which is how a rescue system is reached. 14.2 is the newest
+  # image mfsBSD publishes; there is no 15 yet.
+  mfsbsd:
+    name: mfsBSD 14.2 (FreeBSD in RAM, QEMU/KVM), the FreeBSD 15 static binary
+    if: ${{ !github.event.inputs.only || contains(github.event.inputs.only, 'mfsbsd') }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: The static binaries, built on FreeBSD 15
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "15"
+          usesh: true
+          prepare: pkg install -y rust
+          run: |
+            export RUSTFLAGS="-C target-feature=+crt-static"
+            cargo build --release --target x86_64-unknown-freebsd -p zvolrescue -p zvolreport
+            mkdir -p guest
+            for b in zvolrescue zvolreport; do
+              file "target/x86_64-unknown-freebsd/release/$b"
+              file "target/x86_64-unknown-freebsd/release/$b" | grep -Eq 'statically linked|static-pie linked'
+              cp "target/x86_64-unknown-freebsd/release/$b" guest/
+            done
+            freebsd-version -ku | tee guest/built-on.txt
+      - name: QEMU with KVM, and a way to give ssh a password
+        run: |
+          # The build VM has done its work; the runner's memory is for
+          # the rescue system now.
+          pkill -f qemu-system-x86_64 || true
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends qemu-system-x86 qemu-utils openssh-client sshpass
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+      - name: mfsBSD, checked against its published sums, booted with two blank disks
+        run: |
+          mkdir -p vm && cd vm
+          base=https://mfsbsd.vx.sk/files/iso/14/amd64
+          iso=mfsbsd-14.2-RELEASE-amd64.iso
+          curl -sSL -o mfsbsd.iso "$base/$iso"
+          curl -sSL "$base/$iso.sums.txt" | sed -n 's/^SHA2-256(.*)= *\([0-9a-f]*\).*/\1  mfsbsd.iso/p' | sha256sum -c -
+          qemu-img create -f raw disk0.img 512M
+          qemu-img create -f raw disk1.img 512M
+          qemu-system-x86_64 -enable-kvm -cpu host -m 3072 -smp 2 \
+            -cdrom mfsbsd.iso -boot d \
+            -drive file=disk0.img,if=virtio,format=raw \
+            -drive file=disk1.img,if=virtio,format=raw \
+            -netdev user,id=n0,hostfwd=tcp:127.0.0.1:2223-:22 -device virtio-net-pci,netdev=n0 \
+            -display none -serial file:serial.log -daemonize -pidfile qemu.pid
+          SSH="sshpass -p mfsroot ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o PreferredAuthentications=password,keyboard-interactive -o PubkeyAuthentication=no -o ConnectTimeout=3 -p 2223 root@127.0.0.1"
+          for i in $(seq 1 60); do
+            if $SSH -q true 2>/dev/null; then echo "ssh up after $((i*5)) s"; break; fi
+            sleep 5
+          done
+          $SSH 'uname -a; df -h /; kenv -q mfsbsd.autodhcp; ls /dev/vtbd*; zfs version'
+      - name: E3 in the guest
+        id: run
+        run: |
+          cd vm
+          SSH="sshpass -p mfsroot ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o PreferredAuthentications=password,keyboard-interactive -o PubkeyAuthentication=no -p 2223 root@127.0.0.1"
+          for f in zvolrescue zvolreport; do $SSH "cat > /tmp/$f && chmod +x /tmp/$f" < "../guest/$f"; done
+          $SSH 'cat > /tmp/mfsbsd.sh' < ../tests/realworld/mfsbsd.sh
+          set +e
+          $SSH 'sh /tmp/mfsbsd.sh /mnt/rw /tmp/zvolrescue /dev/vtbd0 /dev/vtbd1' 2>&1 | tee run.log
+          code=${PIPESTATUS[0]}
+          echo "exit=$code" >> "$GITHUB_OUTPUT"
+          # The record, without the image.
+          $SSH 'cd /mnt/rw && tar czf - env.txt results.txt row.md evidence.jsonl report.md out 2>/dev/null' > record.tgz
+          mkdir -p record && tar xzf record.tgz -C record 2>/dev/null; cp run.log serial.log ../guest/built-on.txt record/
+          echo "## mfsBSD 14.2 (FreeBSD in RAM, QEMU/KVM), the binary built on FreeBSD $(cat ../guest/built-on.txt | head -n 1)" >> "$GITHUB_STEP_SUMMARY"
+          cat record/env.txt >> "$GITHUB_STEP_SUMMARY" 2>/dev/null
+          echo >> "$GITHUB_STEP_SUMMARY"
+          cat record/row.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null
+          echo >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"; cat record/results.txt >> "$GITHUB_STEP_SUMMARY" 2>/dev/null; echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit "$code"
+      - name: The guest's console, when nothing else came back
+        if: always()
+        run: |
+          mkdir -p vm/record && cp vm/serial.log vm/record/ 2>/dev/null || true
+          test -f vm/run.log && cp vm/run.log vm/record/ || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: realworld-mfsbsd-14.2
+          path: vm/record
