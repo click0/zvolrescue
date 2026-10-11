@@ -190,6 +190,9 @@ zfs list -r -t all -o name,type,guid,creation,used,refer,volsize,volblocksize,ch
 zfs get -r -H -o name,property,value all "$POOL" > "$OUT/oracle/zfs-get-all.txt"
 zdb -d "$POOL" > "$OUT/oracle/datasets.txt"
 zdb -dddd "$POOL" > "$OUT/oracle/zdb-dddd.txt" 2>&1 || true
+# Every object's block pointers, level by level: what lets a manifest aim
+# at a dnode block, an indirect block or one data block of a named object.
+zdb -dddddd "$POOL" > "$OUT/oracle/zdb-dddddd.txt" 2>&1 || true
 zdb -C "$POOL" > "$OUT/oracle/zdb-C.txt"
 zdb -u "$POOL" > "$OUT/oracle/zdb-u.txt" 2>&1 || true
 zpool get -H -o property,value all "$POOL" > "$OUT/oracle/zpool-get-all.txt"

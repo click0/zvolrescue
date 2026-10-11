@@ -1,0 +1,109 @@
+name: Capture the oracle again
+
+# zdb over the published members of a golden image, offline (`zdb -e -p`),
+# on a userland whose OpenZFS is at least the image's — the ubuntu-26.04
+# runner's 2.4.1 for image-v1 — to add to the oracle what its builder did
+# not keep: `zdb -dddddd`, every object's block pointers level by level,
+# which is what lets a manifest aim at a dnode block, an indirect block or
+# one data block of a named object. The capture is OpenZFS's own reading
+# of the bytes the release holds, checked against the pinned sums first;
+# the tool under test is not involved.
+#
+# The file goes into oracle/<pool>/ of zvolrescue-testdata when
+# TESTDATA_TOKEN (see publish-golden.yml) is there; without it, onto the
+# branch oracle-capture/<tag> of this repository, to be moved by hand.
+# Either way it is uploaded as an artifact.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The image's tag in zvolrescue-testdata (its release; tests/golden/<tag>.SHA256SUMS pins it)"
+        required: true
+        default: image-v1
+      pool:
+        description: "The pool's name, which is the oracle's directory there (oracle/<pool>)"
+        required: true
+        default: golden
+
+permissions:
+  contents: write
+
+jobs:
+  capture:
+    name: zdb -dddddd over ${{ inputs.tag }}
+    runs-on: ubuntu-26.04
+    env:
+      TAG: ${{ inputs.tag }}
+      POOL: ${{ inputs.pool }}
+      TESTDATA: ${{ github.repository }}-testdata
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          repository: click0/zvolrescue-testdata
+          path: testdata
+      - name: OpenZFS userland, zstd
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends zfsutils-linux zstd
+          zdb --version 2>/dev/null || zfs version
+      - name: The release files, kept between runs
+        uses: actions/cache@v4
+        with:
+          path: /var/tmp/image/dl
+          key: golden-${{ inputs.tag }}-${{ hashFiles(format('tests/golden/{0}.SHA256SUMS', inputs.tag)) }}
+      - name: The members, checked against the pinned sums
+        run: |
+          cmp "tests/golden/$TAG.SHA256SUMS" "testdata/oracle/$POOL/SHA256SUMS-release.txt"
+          sudo mkdir -p /var/tmp/image && sudo chown -R "$USER" /var/tmp/image
+          sh tests/golden/fetch-image.sh "$TAG" "tests/golden/$TAG.SHA256SUMS" /var/tmp/image "testdata/oracle/$POOL/members.sha256"
+      - name: zdb, offline, over the members
+        run: |
+          mkdir -p capture
+          # -e: an exported pool; -p: where its members are; the pool by name.
+          sudo zdb -e -p /var/tmp/image/members -dddddd "$POOL" > capture/zdb-dddddd.txt 2> capture/zdb-dddddd.err || {
+            echo "::error::zdb -dddddd exited $?"; tail -n 20 capture/zdb-dddddd.err; exit 1; }
+          wc -l capture/zdb-dddddd.txt capture/zdb-dddddd.err
+          grep -c '^Dataset ' capture/zdb-dddddd.txt
+          grep -c 'Indirect blocks:' capture/zdb-dddddd.txt
+          grep -m 3 -n 'DVA\[0\]' capture/zdb-dddddd.txt | cut -c1-200
+          # What the capture is of: the pool's own record, so that nobody
+          # mistakes it for another image's.
+          sudo zdb -e -p /var/tmp/image/members -C "$POOL" > capture/zdb-C.txt 2>/dev/null || true
+          grep -E 'pool_guid|txg' capture/zdb-C.txt | head -n 4
+          cmp <(grep -E '^\s*pool_guid' capture/zdb-C.txt) <(grep -E '^\s*pool_guid' "testdata/oracle/$POOL/zdb-C.txt")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oracle-capture-${{ inputs.tag }}
+          path: capture
+      - name: Into the oracle
+        env:
+          TESTDATA_TOKEN: ${{ secrets.TESTDATA_TOKEN }}
+        run: |
+          if [ -n "$TESTDATA_TOKEN" ]; then
+            git clone -q --depth 1 "https://x-access-token:${TESTDATA_TOKEN}@github.com/$TESTDATA" td
+            cp capture/zdb-dddddd.txt "td/oracle/$POOL/zdb-dddddd.txt"
+            cd td
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -A
+            git commit -q -F - <<MSG
+          oracle: zdb -dddddd of $TAG, captured offline over the release's members
+
+          Every object's block pointers, level by level, from OpenZFS's own zdb
+          over the published members (checked against the pinned sums first):
+          what the builder of $TAG did not keep, and what lets a manifest aim at
+          a dnode block, an indirect block or one data block of a named object.
+          MSG
+            git push -q origin HEAD:main
+            echo "committed to $TESTDATA main: $(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git checkout -q -b "oracle-capture/$TAG"
+            mkdir -p "oracle-capture/$POOL" && cp capture/zdb-dddddd.txt "oracle-capture/$POOL/"
+            git add oracle-capture && git commit -q -m "oracle capture of $TAG (zdb -dddddd), to be moved to zvolrescue-testdata"
+            git push -q -f origin "oracle-capture/$TAG"
+            echo "no TESTDATA_TOKEN: pushed to branch oracle-capture/$TAG of $GITHUB_REPOSITORY" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi

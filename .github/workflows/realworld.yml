@@ -477,26 +477,10 @@ jobs:
       - name: The release files, checked against the pinned sums, and the members out of them
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends zstd
-          pin="$GITHUB_WORKSPACE/tests/golden/$TAG.SHA256SUMS"
           # The pin and the oracle's own record of the release agree.
-          cmp "$pin" "testdata/oracle/golden/SHA256SUMS-release.txt"
-          sudo mkdir -p /var/tmp/image/dl && sudo chown -R "$USER" /var/tmp/image
-          cd /var/tmp/image/dl
-          while read -r sum name; do
-            [ -s "$name" ] || curl -sSL --retry 3 -o "$name" "https://github.com/$TESTDATA/releases/download/$TAG/$name"
-          done < "$pin"
-          sha256sum -c "$pin"
-          mkdir -p ../members ../members-round6
-          for f in *.img.zst; do
-            name=${f%.zst}
-            case $f in
-              round6-*) zstd -d -q -f --sparse "$f" -o "../members-round6/${name#round6-}" ;;
-              *)        zstd -d -q -f --sparse "$f" -o "../members/$name" ;;
-            esac
-          done
-          (cd ../members && sha256sum -c "$GITHUB_WORKSPACE/testdata/oracle/golden/members.sha256")
-          ls -l ../members ../members-round6 | head -30
-          du -sh ../members ../members-round6
+          cmp "tests/golden/$TAG.SHA256SUMS" "testdata/oracle/golden/SHA256SUMS-release.txt"
+          sudo mkdir -p /var/tmp/image && sudo chown -R "$USER" /var/tmp/image
+          sh tests/golden/fetch-image.sh "$TAG" "tests/golden/$TAG.SHA256SUMS" /var/tmp/image testdata/oracle/golden/members.sha256
           df -h /var/tmp | tail -n 1
       - name: The undamaged image first, every volume
         run: |
