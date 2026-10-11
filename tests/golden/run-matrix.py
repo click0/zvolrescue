@@ -477,10 +477,18 @@ class Oracle:
         if not out:
             raise Unresolved(f"target {obj}: DVA on a vdev this harness cannot map")
         if pieces == "one":
-            # One piece of the first copy: a mirror's half, one raidz
+            # One piece of the first copy: a mirror's half, one raidz data
             # column, one dRAID column — the loss every geometry here
-            # survives once.
-            out = out[:1]
+            # survives once. A data column rather than a parity column on
+            # raidz, so that the loss is one the reader has to notice.
+            n, vdev, off, asize = chosen[0]
+            if self.top_kind(vdev).startswith("raidz"):
+                m = re.search(r"size=([0-9a-f]+)L/([0-9a-f]+)P", raw)
+                psize = int(m.group(2), 16) if m else asize
+                data_cols = [(r, o, l) for r, o, l, parity in self.raidz_columns(vdev, off, psize) if not parity and l]
+                out = data_cols[:1] or out[:1]
+            else:
+                out = out[:1]
         elif pieces != "all":
             raise ValueError(f"target {obj}: pieces is 'all' or 'one', not {pieces!r}")
         return out
