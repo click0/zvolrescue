@@ -366,23 +366,58 @@ class Oracle:
             self._deep = open(path).read() if os.path.exists(path) else None
         if self._deep is None:
             raise Unresolved("the oracle has no zdb -dddddd capture, which is what places a block of an object")
-        head = re.search(rf"^Dataset {re.escape(dataset)} \[", self._deep, re.M)
-        if not head:
+        # A dataset may appear more than once: the pool-wide capture shows
+        # an encrypted dataset without its objects, and a capture made
+        # with its key, appended, shows them. The first section with
+        # objects is the one.
+        heads = list(re.finditer(rf"^Dataset {re.escape(dataset)} \[", self._deep, re.M))
+        if not heads:
             raise Unresolved(f"dataset {dataset} is not in the zdb -dddddd capture")
-        end = re.search(r"^Dataset ", self._deep[head.end():], re.M)
-        section = self._deep[head.start():head.end() + (end.start() if end else len(self._deep))]
-        objs = list(re.finditer(rf"^\s+{obj}\s+\d+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+(.*)$", section, re.M))
+        objs, section = None, None
+        for head in heads:
+            end = re.search(r"^Dataset ", self._deep[head.end():], re.M)
+            section = self._deep[head.start():head.end() + (end.start() if end else len(self._deep))]
+            objs = list(re.finditer(rf"^\s+{obj}\s+\d+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+(.*)$", section, re.M))
+            if objs:
+                break
         if not objs:
-            raise Unresolved(f"object {obj} of {dataset} is not in the zdb -dddddd capture")
+            raise Unresolved(f"object {obj} of {dataset} is not in the zdb -dddddd capture (an encrypted dataset captured without its key?)")
         start = objs[0].end()
         nxt = re.search(r"^\s+Object\s+lvl", section[start:], re.M)
         body = section[start:start + (nxt.start() if nxt else len(section))]
+        # zdb -dddddd writes a pointer compactly — `vdev:offset:asize` per
+        # copy, a G on a gang block, `<lsize>L/<psize>P`, `cksum=` — where
+        # the -dddd root pointers are spelled out. The compact form is
+        # rewritten into the spelled-out one here, so that everything
+        # downstream reads one shape; the checksum's name, which the
+        # compact form drops, comes from the dataset's `checksum` property.
+        algo = self.checksum_of(dataset)
         levels = {}
-        for m in re.finditer(r"^\s*([0-9a-f]+)\s+L(\d)\s+(DVA\[0\]=<.*)$", body, re.M):
-            levels.setdefault(int(m.group(2)), []).append((int(m.group(1), 16), m.group(3)))
+        for m in re.finditer(
+                r"^\s*([0-9a-f]+)\s+L(\d)\s+((?:\d+:[0-9a-f]+:[0-9a-f]+G?\s+)+)([0-9a-f]+)L/([0-9a-f]+)P\s+F=\d+\s+B=\d+/\d+\s+cksum=([0-9a-f:]+)",
+                body, re.M):
+            off, level, dvas, lsize, psize, cksum = m.groups()
+            gang = "G" in dvas
+            raw = " ".join(f"DVA[{i}]=<{d.rstrip('G')}>" for i, d in enumerate(dvas.split()))
+            raw += f" [L{level}] {algo} size={lsize}L/{psize}P cksum={cksum}" + (" gang" if gang else "")
+            levels.setdefault(int(level), []).append((int(off, 16), raw))
         if not levels:
             raise Unresolved(f"object {obj} of {dataset} has no block pointers in the capture (a hole, or an embedded block)")
         return levels, objs[0].group(1)
+
+    def checksum_of(self, dataset):
+        """The dataset's `checksum` property from `zfs get -r all`, as the
+        algorithm's name; `on` is fletcher4. Unknown: an empty string, and
+        the pointer's checksum is then not checked."""
+        zg = os.path.join(self.dir, "zfs-get-all.txt")
+        if dataset == "mos":
+            return "fletcher4"
+        if os.path.exists(zg):
+            for line in open(zg):
+                f = line.rstrip("\n").split("\t")
+                if len(f) >= 3 and f[0] == dataset and f[1] == "checksum":
+                    return "fletcher4" if f[2] in ("on", "fletcher4") else f[2]
+        return ""
 
     def dataset_type(self, name):
         m = re.search(rf"^Dataset {re.escape(name)} \[(\w+)\]", self.zdb, re.M)
@@ -441,11 +476,17 @@ class Oracle:
                 # the data and its L1 blocks the indirect blocks.
                 if what == "dnode-block":
                     num, level = 0, 0
+                    levels, _ = self.blocks_of(name, num)
                 else:
                     if self.dataset_type(name) != "ZVOL":
                         raise Unresolved(f"target {obj}: {name} is not a volume, so `data` names no object of it")
-                    num, level = 1, (0 if what == "data" else 1)
-                levels, _ = self.blocks_of(name, num)
+                    num = 1
+                    levels, _ = self.blocks_of(name, num)
+                    # `indirect` means the topmost level unless `level` says
+                    # which: the lower indirect blocks of a volume filled
+                    # with ganging forced are mostly gang blocks, which
+                    # cannot be aimed at (below).
+                    level = 0 if what == "data" else int(target.get("level", max(levels)))
                 if level not in levels:
                     raise Unresolved(f"target {obj}: object {num} of {name} has no L{level} blocks")
                 raw = self.pick_block(obj, levels[level], target.get("block", 0))
@@ -499,17 +540,24 @@ class Oracle:
         `on:draid1`), so that a manifest can ask for a block the harness
         can place — a block with one copy, on a dRAID, has nothing to find
         it by — without naming an index that is this image's alone."""
+        # A gang block's pointer names its gang header and an allocated
+        # size that is the whole tree's; the header's own size is not in
+        # the capture, so damage cannot be aimed at it without taking
+        # other blocks with it. Such a pointer is not placed.
         if isinstance(which, int):
             if which >= len(blocks):
                 raise Unresolved(f"target {obj}: block {which} asked for, {len(blocks)} in the capture")
-            return blocks[which][1]
+            raw = blocks[which][1]
+            if raw.endswith(" gang"):
+                raise Unresolved(f"target {obj}: block {which} is a gang block, which this harness does not aim at")
+            return raw
         if isinstance(which, str) and which.startswith("on:"):
             kind = which[3:]
             for _, raw in blocks:
                 m = re.search(r"DVA\[0\]=<(\d+):", raw)
-                if m and self.top_kind(int(m.group(1))) == kind:
+                if m and self.top_kind(int(m.group(1))) == kind and not raw.endswith(" gang"):
                     return raw
-            raise Unresolved(f"target {obj}: no block of it has its first copy on a {kind} top")
+            raise Unresolved(f"target {obj}: no block of it that is not a gang block has its first copy on a {kind} top")
         raise ValueError(f"target {obj}: block is an index or on:<kind>, not {which!r}")
 
     def top(self, vdev):
