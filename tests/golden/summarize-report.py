@@ -28,6 +28,13 @@ print(f"{len(rs)} manifests: " + ", ".join(f"{k} {v}" for k, v in sorted(c.items
 for r in rs:
     if r["verdict"] == "n/a":
         print(f"- `{r['id']}` n/a: {'; '.join(r.get('notes') or [])}")
+    elif r["verdict"] == "pass" and r["actual"] in ("refused", "partial"):
+        # A refusal among passes says which volume, and in whose words:
+        # "refused" is the category of one volume refused beside eleven
+        # read whole as much as of twelve refused.
+        detail = (r.get("outcomes") or {}).get("refused_detail") or {}
+        if detail:
+            print(f"- `{r['id']}` {r['actual']}: " + "; ".join(f"{vol}: {why}" for vol, why in detail.items()))
 bad = [r for r in rs if r["verdict"] not in ("pass", "n/a")]
 for r in bad:
     print(f"- **{r['id']}**: expected {r['expected']}, got {r['actual']}")
