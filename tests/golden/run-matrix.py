@@ -457,9 +457,10 @@ class Oracle:
         and stay. `notes`, when given, is told what was placed how."""
         obj, copy = target["object"], target.get("copy", "all")
         pieces = target.get("pieces", "all")
+        raws = None
         if obj == "mos:objset":
             m = re.search(r"^Dataset mos .*?rootbp (.*)$", self.zdb, re.M)
-            raw = m.group(1) if m else ""
+            raws = [m.group(1) if m else ""]
         else:
             ds, what = obj.rsplit(":", 1)
             if ds == "any":
@@ -468,7 +469,17 @@ class Oracle:
                 name = ds if ds.startswith(self.pool) else f"{self.pool}/{ds}"
             if what == "objset":
                 m = re.search(rf"^Dataset {re.escape(name)} .*?rootbp (.*)$", self.zdb, re.M)
-                raw = m.group(1) if m else ""
+                raws = [m.group(1) if m else ""]
+            elif what == "crypto-key":
+                # The dataset's DSL crypto key: the MOS object its DSL
+                # directory names as com.datto:crypto_key_obj, a ZAP whose
+                # leaf holds the wrapped keys. Every block of it unless
+                # `block` says one.
+                key_obj = self.crypto_key_obj(name)
+                levels, _ = self.blocks_of("mos", key_obj)
+                if 0 not in levels:
+                    raise Unresolved(f"target {obj}: crypto key object {key_obj} has no L0 blocks in the capture")
+                raws = self.pick_blocks(obj, levels[0], target.get("block", "all"))
             elif what in ("dnode-block", "data", "indirect"):
                 # Below the object set, from the -dddddd capture: the
                 # dataset's dnode array is object 0 (its L0 blocks are the
@@ -489,13 +500,23 @@ class Oracle:
                     level = 0 if what == "data" else int(target.get("level", max(levels)))
                 if level not in levels:
                     raise Unresolved(f"target {obj}: object {num} of {name} has no L{level} blocks")
-                raw = self.pick_block(obj, levels[level], target.get("block", 0))
+                raws = self.pick_blocks(obj, levels[level], target.get("block", 0))
             else:
                 # `crypto-key` is a documented shape this harness cannot
                 # locate yet. Saying so is the point: resolving it to
                 # something else would make a manifest claim to damage
                 # what it never touched.
-                raise Unresolved(f"target {obj}: {what} is not located from this capture (objset, dnode-block, data, indirect are)")
+                raise Unresolved(f"target {obj}: {what} is not located from this capture (objset, dnode-block, data, indirect, crypto-key are)")
+        if pieces not in ("all", "one"):
+            raise ValueError(f"target {obj}: pieces is 'all' or 'one', not {pieces!r}")
+        out = []
+        for raw in raws:
+            out.extend(self.place_pointer(obj, raw, copy, pieces, notes))
+        return out
+
+    def place_pointer(self, obj, raw, copy, pieces, notes):
+        """(role, offset, length) for the chosen copies of one block pointer
+        (spelled out as -dddd prints it)."""
         dvas = re.findall(r"DVA\[(\d)\]=<(\d+):([0-9a-f]+):([0-9a-f]+)>", raw)
         if not dvas:
             raise Unresolved(f"target {obj} not found in the zdb capture")
@@ -530,9 +551,52 @@ class Oracle:
                 out = data_cols[:1] or out[:1]
             else:
                 out = out[:1]
-        elif pieces != "all":
-            raise ValueError(f"target {obj}: pieces is 'all' or 'one', not {pieces!r}")
         return out
+
+    def crypto_key_obj(self, name):
+        """The MOS object number of a dataset's DSL crypto key, by way of
+        the capture: the dataset's ID is its DSL dataset object, whose
+        dir_obj is its DSL directory, whose ZAP names
+        com.datto:crypto_key_obj."""
+        m = re.search(rf"^Dataset {re.escape(name)} \[\w+\], ID (\d+),", self.zdb, re.M)
+        if not m:
+            raise Unresolved(f"dataset {name} is not in the zdb capture")
+        ds_obj = int(m.group(1))
+        mos = self.mos_object(ds_obj)
+        d = re.search(r"^\s+dir_obj = (\d+)", mos, re.M)
+        if not d:
+            raise Unresolved(f"DSL dataset object {ds_obj} of {name} names no dir_obj")
+        dir_dump = self.mos_object(int(d.group(1)))
+        k = re.search(r"^\s+com\.datto:crypto_key_obj = (\d+)", dir_dump, re.M)
+        if not k:
+            raise Unresolved(f"{name} is not encrypted: its DSL directory names no crypto_key_obj")
+        return int(k.group(1))
+
+    def mos_object(self, num):
+        """One object's dump from the MOS section of the -dddddd capture."""
+        if not hasattr(self, "_deep"):
+            path = os.path.join(self.dir, "zdb-dddddd.txt")
+            self._deep = open(path).read() if os.path.exists(path) else None
+        if self._deep is None:
+            raise Unresolved("the oracle has no zdb -dddddd capture")
+        head = re.search(r"^Dataset mos \[", self._deep, re.M)
+        end = re.search(r"^Dataset ", self._deep[head.end():], re.M)
+        section = self._deep[head.start():head.end() + (end.start() if end else len(self._deep))]
+        m = re.search(rf"^\s+{num}\s+\d+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+.*$", section, re.M)
+        if not m:
+            raise Unresolved(f"MOS object {num} is not in the zdb -dddddd capture")
+        nxt = re.search(r"^\s+Object\s+lvl", section[m.end():], re.M)
+        return section[m.start():m.end() + (nxt.start() if nxt else len(section))]
+
+    def pick_blocks(self, obj, blocks, which):
+        """`pick_block`, or every block of the level that is not a gang
+        block when `which` is "all"."""
+        if which == "all":
+            out = [raw for _, raw in blocks if not raw.endswith(" gang")]
+            if not out:
+                raise Unresolved(f"target {obj}: every block of it is a gang block")
+            return out
+        return [self.pick_block(obj, blocks, which)]
 
     def pick_block(self, obj, blocks, which):
         """One block pointer of a level: by index, or the first whose first

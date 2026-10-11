@@ -84,10 +84,16 @@ tagged. `v0.7.1` is the release that carries those six.
   geometry survives once. Eight manifests in `zvolrescue-testdata` use
   them: a data block's one piece and every piece, an encrypted volume's
   block, a dnode block and an indirect block by one copy and by every
-  copy, and a dnode block beside a missing member. The one shape still
-  not located is `crypto-key`. `tests/golden/fetch-image.sh` is the one
-  place the published image is fetched, pinned and decompressed; the
-  matrix job and the capture use it.
+  copy, and a dnode block beside a missing member.
+  `<dataset>:crypto-key` is located too — the MOS object the dataset's
+  DSL directory names as `com.datto:crypto_key_obj`, the ZAP holding
+  its wrapped keys, every block of it (`block = "all"`) — and two
+  manifests destroy `secret-raw/disk`'s by one copy and by every copy,
+  so every shape the manifests' format names is placed now; a volume's
+  property ZAP on `image-v1` is embedded in its dnode's block pointer,
+  so the dnode-block cases are its. `tests/golden/fetch-image.sh` is
+  the one place the published image is fetched, pinned and
+  decompressed; the matrix job and the capture use it.
 
 ## v0.9.9 — 2026-10-10
 
