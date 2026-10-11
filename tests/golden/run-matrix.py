@@ -356,6 +356,38 @@ class Oracle:
                 pass
         return kinds or {m["group_kind"] for m in self.layout["members"].values()}
 
+    def blocks_of(self, dataset, obj):
+        """The block pointers of one object of one dataset from the oracle's
+        `zdb -dddddd` capture: {level: [(logical offset, raw pointer text)]}
+        in the order zdb printed them. `dataset` is the full name
+        (`golden/vm/disk-8k`) or `mos`; `obj` the object number."""
+        if not hasattr(self, "_deep"):
+            path = os.path.join(self.dir, "zdb-dddddd.txt")
+            self._deep = open(path).read() if os.path.exists(path) else None
+        if self._deep is None:
+            raise Unresolved("the oracle has no zdb -dddddd capture, which is what places a block of an object")
+        head = re.search(rf"^Dataset {re.escape(dataset)} \[", self._deep, re.M)
+        if not head:
+            raise Unresolved(f"dataset {dataset} is not in the zdb -dddddd capture")
+        end = re.search(r"^Dataset ", self._deep[head.end():], re.M)
+        section = self._deep[head.start():head.end() + (end.start() if end else len(self._deep))]
+        objs = list(re.finditer(rf"^\s+{obj}\s+\d+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+(.*)$", section, re.M))
+        if not objs:
+            raise Unresolved(f"object {obj} of {dataset} is not in the zdb -dddddd capture")
+        start = objs[0].end()
+        nxt = re.search(r"^\s+Object\s+lvl", section[start:], re.M)
+        body = section[start:start + (nxt.start() if nxt else len(section))]
+        levels = {}
+        for m in re.finditer(r"^\s*([0-9a-f]+)\s+L(\d)\s+(DVA\[0\]=<.*)$", body, re.M):
+            levels.setdefault(int(m.group(2)), []).append((int(m.group(1), 16), m.group(3)))
+        if not levels:
+            raise Unresolved(f"object {obj} of {dataset} has no block pointers in the capture (a hole, or an embedded block)")
+        return levels, objs[0].group(1)
+
+    def dataset_type(self, name):
+        m = re.search(rf"^Dataset {re.escape(name)} \[(\w+)\]", self.zdb, re.M)
+        return m.group(1) if m else None
+
     def a_dataset(self):
         """A dataset of this pool to aim at, chosen from the capture
         rather than named in the manifest.
@@ -389,24 +421,40 @@ class Oracle:
         columns; its parity columns hold bytes nothing here can predict,
         and stay. `notes`, when given, is told what was placed how."""
         obj, copy = target["object"], target.get("copy", "all")
+        pieces = target.get("pieces", "all")
         if obj == "mos:objset":
             m = re.search(r"^Dataset mos .*?rootbp (.*)$", self.zdb, re.M)
             raw = m.group(1) if m else ""
         else:
             ds, what = obj.rsplit(":", 1)
-            if what != "objset":
-                # `dnode-block` and `crypto-key` are documented shapes that
-                # this harness cannot locate yet. Saying so is the point:
-                # resolving them to the objset's own block pointer, which
-                # is what the first version of this did, made a manifest
-                # claim to damage something it never touched.
-                raise Unresolved(f"target {obj}: only objset is located from this capture")
             if ds == "any":
                 name = self.a_dataset()
             else:
                 name = ds if ds.startswith(self.pool) else f"{self.pool}/{ds}"
-            m = re.search(rf"^Dataset {re.escape(name)} .*?rootbp (.*)$", self.zdb, re.M)
-            raw = m.group(1) if m else ""
+            if what == "objset":
+                m = re.search(rf"^Dataset {re.escape(name)} .*?rootbp (.*)$", self.zdb, re.M)
+                raw = m.group(1) if m else ""
+            elif what in ("dnode-block", "data", "indirect"):
+                # Below the object set, from the -dddddd capture: the
+                # dataset's dnode array is object 0 (its L0 blocks are the
+                # dnode blocks); a volume's data is object 1, its L0 blocks
+                # the data and its L1 blocks the indirect blocks.
+                if what == "dnode-block":
+                    num, level = 0, 0
+                else:
+                    if self.dataset_type(name) != "ZVOL":
+                        raise Unresolved(f"target {obj}: {name} is not a volume, so `data` names no object of it")
+                    num, level = 1, (0 if what == "data" else 1)
+                levels, _ = self.blocks_of(name, num)
+                if level not in levels:
+                    raise Unresolved(f"target {obj}: object {num} of {name} has no L{level} blocks")
+                raw = self.pick_block(obj, levels[level], target.get("block", 0))
+            else:
+                # `crypto-key` is a documented shape this harness cannot
+                # locate yet. Saying so is the point: resolving it to
+                # something else would make a manifest claim to damage
+                # what it never touched.
+                raise Unresolved(f"target {obj}: {what} is not located from this capture (objset, dnode-block, data, indirect are)")
         dvas = re.findall(r"DVA\[(\d)\]=<(\d+):([0-9a-f]+):([0-9a-f]+)>", raw)
         if not dvas:
             raise Unresolved(f"target {obj} not found in the zdb capture")
@@ -428,7 +476,33 @@ class Oracle:
                 out.extend(self.dva_to_physical(vdev, off, asize))
         if not out:
             raise Unresolved(f"target {obj}: DVA on a vdev this harness cannot map")
+        if pieces == "one":
+            # One piece of the first copy: a mirror's half, one raidz
+            # column, one dRAID column — the loss every geometry here
+            # survives once.
+            out = out[:1]
+        elif pieces != "all":
+            raise ValueError(f"target {obj}: pieces is 'all' or 'one', not {pieces!r}")
         return out
+
+    def pick_block(self, obj, blocks, which):
+        """One block pointer of a level: by index, or the first whose first
+        copy lies on a top-level vdev of a kind (`on:mirror`, `on:raidz2`,
+        `on:draid1`), so that a manifest can ask for a block the harness
+        can place — a block with one copy, on a dRAID, has nothing to find
+        it by — without naming an index that is this image's alone."""
+        if isinstance(which, int):
+            if which >= len(blocks):
+                raise Unresolved(f"target {obj}: block {which} asked for, {len(blocks)} in the capture")
+            return blocks[which][1]
+        if isinstance(which, str) and which.startswith("on:"):
+            kind = which[3:]
+            for _, raw in blocks:
+                m = re.search(r"DVA\[0\]=<(\d+):", raw)
+                if m and self.top_kind(int(m.group(1))) == kind:
+                    return raw
+            raise Unresolved(f"target {obj}: no block of it has its first copy on a {kind} top")
+        raise ValueError(f"target {obj}: block is an index or on:<kind>, not {which!r}")
 
     def top(self, vdev):
         tops = [t for t in self.layout["tops"] if t["index"] == vdev]

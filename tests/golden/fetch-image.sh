@@ -12,7 +12,9 @@ set -eu
 TAG=$1; PIN=$2; DEST=$3; SUMS=${4:-}
 REPO=${TESTDATA_REPO:-click0/zvolrescue-testdata}
 command -v zstd >/dev/null || { echo "fetch-image: zstd not found" >&2; exit 1; }
+# Both files by absolute path, before the cd below moves away from them.
 PIN=$(cd "$(dirname "$PIN")" && pwd)/$(basename "$PIN")
+[ -z "$SUMS" ] || SUMS=$(cd "$(dirname "$SUMS")" && pwd)/$(basename "$SUMS")
 mkdir -p "$DEST/dl" "$DEST/members" "$DEST/members-round6"
 cd "$DEST/dl"
 while read -r sum name; do
@@ -27,7 +29,6 @@ for f in *.img.zst; do
     esac
 done
 if [ -n "$SUMS" ]; then
-    SUMS=$(cd "$(dirname "$SUMS")" && pwd)/$(basename "$SUMS")
     (cd ../members && sha256sum -c "$SUMS")
 fi
 du -sh ../members ../members-round6
