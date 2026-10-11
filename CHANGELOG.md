@@ -68,6 +68,26 @@ tagged. `v0.7.1` is the release that carries those six.
   padding) is placed with it. Checked locally against the kernel-built
   image: the five manifests pass, among them every copy of the MOS
   destroyed and the pool read from an older uberblock.
+* **Damage below the object set: a dnode block, an indirect block, one
+  data block of a named volume.** The oracle of `image-v1` held
+  `zdb -dddd` — objects, not their block pointers — so a manifest could
+  aim at an object set and at nothing beneath it. `oracle-capture.yml`
+  runs OpenZFS's own `zdb -dddddd` offline over the published members
+  (checked against the pinned sums and the pool guid first, on a
+  userland at least the image's) and adds the capture to the oracle;
+  the builder keeps the same capture for every image from now on. The
+  harness reads it: `<dataset>:dnode-block`, `<volume>:data` and
+  `<volume>:indirect` with `block` an index or `on:<kind>` (the first
+  block whose first copy lies on a mirror, raidz or dRAID top), `copy`
+  as before, and `pieces = "one"` for one piece of the first copy — a
+  mirror half, one raidz data column, one dRAID column — the loss every
+  geometry survives once. Eight manifests in `zvolrescue-testdata` use
+  them: a data block's one piece and every piece, an encrypted volume's
+  block, a dnode block and an indirect block by one copy and by every
+  copy, and a dnode block beside a missing member. The one shape still
+  not located is `crypto-key`. `tests/golden/fetch-image.sh` is the one
+  place the published image is fetched, pinned and decompressed; the
+  matrix job and the capture use it.
 
 ## v0.9.9 — 2026-10-10
 
