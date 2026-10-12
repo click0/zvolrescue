@@ -171,7 +171,7 @@ what it opens is gone, not only the object set.
   over it (G1–G3).** The `golden` job of `realworld.yml` builds the
   image of SPEC §9.1 with `tests/golden/build-image.sh` on the
   `ubuntu-26.04` runner's OpenZFS 2.4.1 — one pool with mirror, raidz2
-  and dRAID1 top-level vdevs, 12 volumes over every checksum and
+  and dRAID1 top-level vdevs, 11 volumes over every checksum and
   compression, a clone, raw-key and passphrase encryption, snapshots, a
   rename, a destroy, 5015 TXGs — reads every volume of it intact to
   the kernel's hash, then runs the 41 manifests of
