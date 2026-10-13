@@ -223,6 +223,8 @@ docs/SPEC.md                technical specification (ТЗ), English — the sour
 docs/SPEC.uk.md             the same in Ukrainian
 docs/COMPANIONS.md          companion tools specification (EN); COMPANIONS.uk.md in Ukrainian
 docs/DEBUGGING.md           how to verify against a test pool in a VM with zdb and --debug
+docs/REALWORLD-TESTS.md     the real-world matrix: environments, scenarios, how to run it, results
+docs/RELEASING.md           how a release is cut, and what the release workflow does with the tag
 docs/research/              analyses of related tools, on-disk format notes
 Cargo.toml                  cargo workspace
 crates/zvolrescue/          the main binary (scan / list / dump)
@@ -230,14 +232,18 @@ crates/zvoltimeline/        the pool's history from its transaction groups
 crates/zvolreport/          the evidence logs consolidated into one checkable document
 crates/zvolcarve/           raw-space scan for volumes nothing points at any more
 crates/zvolfiles/           the ZFS POSIX layer: directories, files, symlinks, or a raw object dump
-crates/zvol*/               the remaining companion binaries, one crate each (phases 3–4)
 crates/zvol-common/         shared CLI plumbing (evidence log, exit codes, POOLSPEC)
 crates/zvolrescue-io/       read-only device/image access (the only crate allowed `unsafe`)
 crates/zfs-ondisk/          pure on-disk structure parsers (labels, nvlist, uberblocks, blkptr, dnode, ZAP)
 crates/zfs-read/            pool walking: vdev reconstruction, zio, dmu, dsl, zvol extraction, carving
 crates/edonr/               Edon-R checksum port from OpenZFS (CDDL), isolated
 fuzz/                       cargo-fuzz targets
-tests/                      fixture-pool integration tests
+tests/                      fixture-pool integration tests, the ztest cross-check, the manual-page check, benchmarks
+tests/golden/               the golden image: its builder, the damage matrix (run-matrix.py), the pinned sums of the published image
+tests/realworld/            the real-kernel matrix script, the mfsBSD script, the ssh gate
+man/                        a manual page for every program
+packaging/                  the FreeBSD port, the .deb builder, the PKGBUILD
+.github/workflows/          CI on every push; on demand: the real-world matrix, the matrix over ssh, the golden image's publication and oracle capture; the release
 ```
 
 ## Installing

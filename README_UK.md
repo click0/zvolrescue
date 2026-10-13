@@ -225,6 +225,8 @@ docs/SPEC.md                технічне завдання (ТЗ), англі
 docs/SPEC.uk.md             те саме українською
 docs/COMPANIONS.uk.md       ТЗ супутніх інструментів (UK); COMPANIONS.md — англійською
 docs/DEBUGGING.uk.md        як звіряти з тестовим пулом у VM через zdb і --debug
+docs/REALWORLD-TESTS.uk.md  матриця реальних прогонів: середовища, сценарії, як запускати, результати
+docs/RELEASING.md           як робиться реліз і що release-workflow робить із тегом
 docs/research/              аналізи схожих інструментів, нотатки про on-disk формат
 Cargo.toml                  cargo workspace
 crates/zvolrescue/          основний бінарник (scan / list / dump)
@@ -232,14 +234,18 @@ crates/zvoltimeline/        історія пулу з його транзакц
 crates/zvolreport/          логи evidence, зведені в один перевірюваний документ
 crates/zvolcarve/           скан сирого простору по томах, на які вже ніщо не вказує
 crates/zvolfiles/           ZFS POSIX layer: каталоги, файли, симлінки — або сирий дамп об'єктів
-crates/zvol*/               решта супутніх бінарників, по одному crate (етапи 3–4)
 crates/zvol-common/         спільна CLI-обв'язка (лог evidence, коди виходу, POOLSPEC)
 crates/zvolrescue-io/       read-only доступ до пристроїв/образів (єдиний crate з `unsafe`)
 crates/zfs-ondisk/          чисті парсери on-disk структур (мітки, nvlist, uberblock-и, blkptr, dnode, ZAP)
 crates/zfs-read/            обхід пулу: реконструкція vdev, zio, dmu, dsl, витягання zvol, carving
 crates/edonr/               порт checksum Edon-R з OpenZFS (CDDL), ізольований
 fuzz/                       cargo-fuzz target-и
-tests/                      інтеграційні тести на fixture-пулах
+tests/                      інтеграційні тести на fixture-пулах, крос-перевірка з ztest, перевірка man-сторінок, бенчмарки
+tests/golden/               золотий образ: його будівник, матриця пошкоджень (run-matrix.py), піновані суми опублікованого образу
+tests/realworld/            скрипт матриці на справжньому ядрі, скрипт для mfsBSD, ssh-шлюз
+man/                        man-сторінка для кожної програми
+packaging/                  порт FreeBSD, збирач .deb, PKGBUILD
+.github/workflows/          CI на кожен пуш; на вимогу: матриця реальних прогонів, матриця по ssh, публікація золотого образу й захоплення оракула; реліз
 ```
 
 ## Встановлення
