@@ -64,7 +64,7 @@ the same evidence always produce the same bytes. Forensic timelines,
 carving, reports and file-level recovery are *companion tools* that share
 the libraries — they never become modes of the main binary.
 
-## Planned features
+## Features
 
 * **Whole disks or partitions** — given an image of a whole disk, the GPT or MBR says where the ZFS partition began and how long it was; nothing is taken from it until a label checksum verifies there.
 * **Read-only by construction** — evidence is opened `O_RDONLY`; output can never land on an input device.
@@ -79,7 +79,7 @@ the libraries — they never become modes of the main binary.
 * **Machine-readable output** — `-f json` everywhere, append-only evidence log, SHA-256 of every input and output.
 * **`--debug`** — a trace of every read decision with hex dumps of what went wrong, for [verifying against a real pool](docs/DEBUGGING.md).
 
-## Planned CLI
+## CLI
 
 ```
 zvolrescue scan  DEV... [--zero-point] [--psize BYTES]      what is here: labels, pool, TXG window, topology
@@ -202,13 +202,16 @@ Specified in [docs/COMPANIONS.md](docs/COMPANIONS.md).
 
 ## Roadmap
 
-| Phase | Scope |
-|---|---|
-| 0 — Bootstrap | Repo skeleton, spec, CI (FreeBSD + Linux), fixture-pool generator, `scan` |
-| 1 — MVP | `list`, `dump` on single/mirror pools; common compression & checksums; JSON output |
-| 2 — Redundancy & integrity | RAIDZ/dRAID reconstruction, all checksums, `--strict`, `--resume`, bulk extraction |
-| 3 — Forensics | Encrypted datasets; companion tools `zvoltimeline`, `zvolcarve`, `zvolreport` |
-| 4 — Filesystems | Companion tool `zvolfiles`: object dumps, then ZPL file-level recovery |
+| Phase | Scope | Status |
+|---|---|---|
+| 0 — Bootstrap | Repo skeleton, spec, CI (FreeBSD + Linux), fixture-pool generator, `scan` | shipped |
+| 1 — MVP | `list`, `dump` on single/mirror pools; common compression & checksums; JSON output | shipped |
+| 2 — Redundancy & integrity | RAIDZ/dRAID reconstruction, all checksums, `--strict`, `--resume`, bulk extraction | shipped |
+| 3 — Forensics | Encrypted datasets; companion tools `zvoltimeline`, `zvolcarve`, `zvolreport` | shipped |
+| 4 — Filesystems | Companion tool `zvolfiles`: object dumps, then ZPL file-level recovery | shipped (`v0.8.5` closed the functional rows) |
+| 0.9.x — Validation and packaging | the audit (dependency graph, import tables, fuzzing, Miri, signed releases), the real-kernel matrix on Ubuntu, Debian, FreeBSD and mfsBSD and on a machine of your own over ssh, a port, a `.deb` and a PKGBUILD, the golden image and the damage matrix over it | `v0.9.9`, see the [CHANGELOG](CHANGELOG.md) |
+| 1.0.0 | what no CI can supply: three real-world incidents with documented outcomes ([REALWORLD-TESTS](docs/REALWORLD-TESTS.md)) | waiting on them |
+| Later | TUI, `zfs send` stream output, guest-filesystem carving plugins, the port in the FreeBSD ports tree and the PKGBUILD in the AUR, `raidz_expansion` read rather than refused | not started |
 
 Details, requirements and acceptance criteria: [docs/SPEC.md](docs/SPEC.md).
 
