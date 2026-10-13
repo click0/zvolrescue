@@ -479,7 +479,13 @@ bad = [e for e in pending if "disagree" in e["details"]]
 if bad:
     print(bad[0]["details"])
     sys.exit(1)
+# At the newest TXG nothing has been reused yet: every deadlist's own
+# objects must read there. Older TXGs may have lost some to reuse, and
+# a header that could not be checked is reported as that, not as wrong.
 newest = max(pending, key=lambda e: e["txg"])
+if "unverified" in newest["details"] or "unreadable" in newest["details"]:
+    print("newest txg", newest["txg"] + ":", newest["details"])
+    sys.exit(1)
 held = int(re.match(r"(\d+) byte", newest["details"]).group(1))
 lists = int(re.search(r"in (\d+) deadlist", newest["details"]).group(1))
 print(f"   pending: {held} byte(s) still held in {lists} deadlist(s), "

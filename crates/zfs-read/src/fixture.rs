@@ -2168,13 +2168,16 @@ fn build_zpl_objset(
     a.put_objset(m, &objset(&meta_dnode, 2), objects, 100)
 }
 
-/// Bytes the parent block-pointer object of the ZPL fixture's deadlist
-/// holds itself.
-pub const ZPL_BPOBJ_PARENT_BYTES: u64 = 1000;
-/// Bytes the object it swallowed holds.
+/// What the header of the parent block-pointer object of the ZPL
+/// fixture's deadlist says: its own 1000 bytes of pointers and the 500
+/// of the object it swallowed, which `bpobj_enqueue_subobj` added to it
+/// as it filed that object under `bpo_subobjs`.
+pub const ZPL_BPOBJ_PARENT_BYTES: u64 = 1500;
+/// Bytes the swallowed object's own header says.
 pub const ZPL_BPOBJ_CHILD_BYTES: u64 = 500;
-/// What the deadlist's own header therefore says.
-pub const ZPL_DEADLIST_BYTES: u64 = ZPL_BPOBJ_PARENT_BYTES + ZPL_BPOBJ_CHILD_BYTES;
+/// What the deadlist's own header says: the parent's number, which
+/// already has the child's inside it.
+pub const ZPL_DEADLIST_BYTES: u64 = ZPL_BPOBJ_PARENT_BYTES;
 
 /// A block-pointer object: everything it says is in its bonus.
 fn bpobj_obj(bytes: u64, subobjs: u64, num_subobjs: u64) -> Vec<u8> {
@@ -2248,6 +2251,23 @@ pub fn zpl_members_with(
     matching: Matching,
     spill: Spill,
 ) -> Vec<Vec<u8>> {
+    zpl_members_inner(pool, size, matching, spill, 8)
+}
+
+/// The ZPL fixture with `tank/fs`'s deadlist naming `entry` instead of
+/// its block-pointer object: an object number nothing is at, for the
+/// case of a deadlist whose entries do not read.
+pub fn zpl_members_deadlist_naming(pool: &mut Pool, size: u64, entry: u64) -> Vec<Vec<u8>> {
+    zpl_members_inner(pool, size, Matching::Exact, Spill::Attributes, entry)
+}
+
+fn zpl_members_inner(
+    pool: &mut Pool,
+    size: u64,
+    matching: Matching,
+    spill: Spill,
+    deadlist_entry: u64,
+) -> Vec<Vec<u8>> {
     let n = pool.members.len();
     let mut members: Vec<Vec<u8>> = (0..n).map(|_| vec![0u8; size as usize]).collect();
     let layout = match pool.nparity {
@@ -2315,8 +2335,9 @@ pub fn zpl_members_with(
     put(5, dir_obj(6, 7, 2));
     // tank/fs carries a deadlist (object 12) whose entry is a
     // block-pointer object that has swallowed another (COMPANIONS
-    // T-07): the parent's header counts only its own pointers, so the
-    // deadlist's total only adds up if the child is followed.
+    // T-07): the parent's header already counts the child's share, the
+    // way ZFS keeps it, so the deadlist's total is the parent's number
+    // and following the child would count it twice.
     let mut fs_ds = dataset_phys(5, 0, &os_zpl, 20, 0xb2, 0);
     fs_ds.deadlist_obj = 12;
     put(6, ds_obj(&fs_ds));
@@ -2324,7 +2345,10 @@ pub fn zpl_members_with(
     put(8, bpobj_obj(ZPL_BPOBJ_PARENT_BYTES, 10, 1));
     put(9, bpobj_obj(ZPL_BPOBJ_CHILD_BYTES, 0, 0));
     put(10, u64_array_obj(&mut a, m, &[9]));
-    put(12, deadlist_obj(&mut a, m, ZPL_DEADLIST_BYTES, &[("0", 8)]));
+    put(
+        12,
+        deadlist_obj(&mut a, m, ZPL_DEADLIST_BYTES, &[("0", deadlist_entry)]),
+    );
 
     let (dnode_blk, objects) = a.put_dnodes(m, &dnodes, 100);
     let meta = DnodeSpec {

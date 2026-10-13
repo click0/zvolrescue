@@ -201,11 +201,19 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                     },
                     // The deadlists' own objects come to the same total
                     // when this reader has them right; saying so is how
-                    // anyone can tell the number is not invented.
+                    // anyone can tell the number is not invented. At any
+                    // TXG but the newest some of those objects may have
+                    // been reused since, and a header that could not be
+                    // checked is said to be that, not contradicted.
                     if p.inconsistent > 0 {
                         format!(
                             "; {} deadlist(s) disagree with their own objects ({} byte(s) there)",
                             p.inconsistent, p.bpobj_bytes
+                        )
+                    } else if p.unverified > 0 {
+                        format!(
+                            "; {} deadlist(s) unverified, their objects unreadable at this TXG; the other(s)' own objects agree ({})",
+                            p.unverified, p.bpobj_bytes
                         )
                     } else {
                         format!("; the deadlists' own objects agree ({})", p.bpobj_bytes)

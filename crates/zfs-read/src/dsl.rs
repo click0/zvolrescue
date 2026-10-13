@@ -1198,8 +1198,15 @@ pub struct Pending {
     pub bpobj_bytes: u64,
     /// How many deadlists were read.
     pub deadlists: usize,
-    /// Deadlists whose header total and whose objects disagree.
+    /// Deadlists whose header total and whose objects disagree — both
+    /// read whole, and they differ.
     pub inconsistent: usize,
+    /// Deadlists whose header read and whose own objects did not, at
+    /// this TXG: the header stands, unverified. An older transaction
+    /// group's objects are free to reuse from the next one on, so at
+    /// every TXG but the newest this is a matter of course, and a total
+    /// with a piece missing is not a total that disagrees with anything.
+    pub unverified: usize,
     /// Datasets whose deadlist could not be read.
     pub unreadable: usize,
 }
@@ -1244,22 +1251,37 @@ pub fn pending(mos: &DnodeArray<'_, '_>, datasets: &[Dataset]) -> Pending {
         // What the deadlist's own entries come to. Each entry is a
         // transaction group naming a block-pointer object; one object
         // can appear under several transaction groups, and is space
-        // once.
-        let mut objects = BTreeSet::new();
-        if let Ok(obj) = mos.object(ds.phys.deadlist_obj) {
-            if let Ok(entries) = read_zap(&obj) {
-                for e in entries {
-                    if let Some(v) = e.value.as_u64() {
-                        objects.insert(v);
-                    }
-                }
-            }
-        }
-        let mut seen_objects = BTreeSet::new();
-        let mut theirs = 0u64;
+        // once. Anything on the way that does not read leaves the
+        // header unverified rather than contradicted: a sum with a
+        // piece missing is not the deadlist's own number.
+        let entries = mos
+            .object(ds.phys.deadlist_obj)
+            .and_then(|obj| read_zap(&obj));
+        let Ok(entries) = entries else {
+            trace!(
+                "dsl",
+                "deadlist {}: header says {} byte(s), its entries do not read at this TXG",
+                ds.phys.deadlist_obj,
+                dl.used
+            );
+            out.unverified += 1;
+            continue;
+        };
+        let objects: BTreeSet<u64> = entries.iter().filter_map(|e| e.value.as_u64()).collect();
+        let mut theirs = Some(0u64);
         for o in objects {
-            theirs = theirs.saturating_add(bpobj_bytes(mos, o, &mut seen_objects, 0));
+            theirs = theirs.and_then(|t| bpobj_bytes(mos, o).map(|b| t.saturating_add(b)));
         }
+        let Some(theirs) = theirs else {
+            trace!(
+                "dsl",
+                "deadlist {}: header says {} byte(s), one of its objects does not read at this TXG",
+                ds.phys.deadlist_obj,
+                dl.used
+            );
+            out.unverified += 1;
+            continue;
+        };
         out.bpobj_bytes = out.bpobj_bytes.saturating_add(theirs);
         if theirs != dl.used {
             trace!(
@@ -1282,65 +1304,44 @@ pub fn pending(mos: &DnodeArray<'_, '_>, datasets: &[Dataset]) -> Pending {
 /// another — and their space is in *their* headers, not in the parent's.
 /// Stopping at the parent therefore undercounts, which is exactly what
 /// a deadlist's own total will not agree with.
-fn bpobj_bytes(
-    mos: &DnodeArray<'_, '_>,
-    object: u64,
-    seen: &mut BTreeSet<u64>,
-    depth: usize,
-) -> u64 {
-    // A bpobj tree is shallow in practice; the cap is against a cycle in
-    // damaged metadata, and the set against counting one twice.
-    if depth > 32 || object == 0 || !seen.insert(object) {
-        return 0;
+/// Bytes the block-pointer object `object` accounts for: its header's
+/// `bpo_bytes`. That number already covers the objects filed under it —
+/// `bpobj_enqueue_subobj` adds a swallowed object's space to the
+/// parent's header as it files it, whether it copies the pointers in or
+/// lists the object under `bpo_subobjs` — so the children are not read
+/// again: adding them would count their space twice. `None` when the
+/// object does not read: a total is the object's own number or nothing.
+fn bpobj_bytes(mos: &DnodeArray<'_, '_>, object: u64) -> Option<u64> {
+    if object == 0 {
+        return Some(0);
     }
-    let Ok(d) = mos.get(object) else {
-        return 0;
-    };
-    let Ok(p) = BpobjPhys::parse(&d.bonus, mos.endian()) else {
-        return 0;
-    };
-    let mut total = p.bytes;
-    if p.subobjs == 0 || p.num_subobjs == 0 {
-        return total;
-    }
-    // The subobjs object is an array of object numbers, num_subobjs long.
-    let Ok(obj) = mos.object(p.subobjs) else {
-        return total;
-    };
-    let want = (p.num_subobjs.saturating_mul(8)).min(obj.logical_size()) as usize;
-    let Ok(raw) = obj.read_range(0, want) else {
-        return total;
-    };
-    let endian = mos.endian();
-    for c in raw.chunks_exact(8) {
-        let b: [u8; 8] = c.try_into().expect("8 bytes");
-        let sub = match endian {
-            zfs_ondisk::Endian::Little => u64::from_le_bytes(b),
-            zfs_ondisk::Endian::Big => u64::from_be_bytes(b),
-        };
-        total = total.saturating_add(bpobj_bytes(mos, sub, seen, depth + 1));
-    }
-    total
+    let d = mos.get(object).ok()?;
+    let p = BpobjPhys::parse(&d.bonus, mos.endian()).ok()?;
+    Some(p.bytes)
 }
 
 #[cfg(test)]
 mod pending_tests {
     use super::*;
     use crate::fixture::{
-        zpl_members, Pool, ZPL_BPOBJ_CHILD_BYTES, ZPL_BPOBJ_PARENT_BYTES, ZPL_DEADLIST_BYTES,
+        zpl_members, zpl_members_deadlist_naming, Pool, ZPL_BPOBJ_CHILD_BYTES,
+        ZPL_BPOBJ_PARENT_BYTES, ZPL_DEADLIST_BYTES,
     };
     use crate::pool::{assemble, uberblock_candidates};
     use crate::vdev::scan_device;
     use crate::zio::PoolReader;
     use zvolrescue_io::{BlockSource, MemSource};
 
-    /// T-07: a deadlist's total only adds up when the objects filed
-    /// under its own are followed.
+    /// T-07: a deadlist's total is the headers of the objects it names,
+    /// and nothing under them.
     ///
-    /// `bpo_bytes` covers the pointers a block-pointer object holds
-    /// itself; one that has swallowed another keeps that other's space
-    /// in *its* header. Stopping at the parent undercounts, and the
-    /// deadlist's running total is what catches it.
+    /// A block-pointer object that has swallowed another — which is how
+    /// deadlists are merged — carries that other's space in its own
+    /// header: `bpobj_enqueue_subobj` adds the swallowed object's bytes
+    /// to the parent's as it files it under `bpo_subobjs`. The deadlist's
+    /// running total was built the same way. Following the children and
+    /// adding them again counts their space twice; the fixture's parent
+    /// says 1500 with a 500-byte child under it, and the deadlist 1500.
     #[test]
     fn a_deadlist_adds_up_through_the_objects_filed_under_its_own() {
         let mut pool = Pool::mirror("tank", 0x5eed_0000_0000_0004, 12)
@@ -1371,13 +1372,52 @@ mod pending_tests {
         assert_eq!(p.deadlist_bytes, ZPL_DEADLIST_BYTES);
         assert_eq!(p.bpobj_bytes, ZPL_DEADLIST_BYTES, "{p:?}");
         assert_eq!(p.inconsistent, 0, "{p:?}");
+        assert_eq!(p.unverified, 0, "{p:?}");
         assert_eq!(p.unreadable, 0, "{p:?}");
-        // And the child really is the difference: without following it
-        // the parent alone would be short by exactly its share.
-        assert_eq!(
-            ZPL_DEADLIST_BYTES - ZPL_BPOBJ_PARENT_BYTES,
-            ZPL_BPOBJ_CHILD_BYTES
+        // The child is there, under the parent, and its share is inside
+        // the parent's number: adding it again would read this much.
+        assert_ne!(
+            p.bpobj_bytes,
+            ZPL_BPOBJ_PARENT_BYTES + ZPL_BPOBJ_CHILD_BYTES
         );
+    }
+
+    /// A deadlist whose entry names an object that does not read is a
+    /// header nobody could check, not a header that was checked and
+    /// found wrong. The two were one number once: an older TXG whose
+    /// deadlist objects had been reused read as a disagreement, and
+    /// the cross-check against ztest called the pool inconsistent.
+    #[test]
+    fn an_entry_that_does_not_read_leaves_the_header_unverified() {
+        let mut pool = Pool::mirror("tank", 0x5eed_0000_0000_0005, 12)
+            .txgs(&[(4816228, 1757100000), (4816229, 1757100005)]);
+        let members = zpl_members_deadlist_naming(&mut pool, 64 * 1024 * 1024, 10_000);
+        let sources: Vec<MemSource> = members.into_iter().map(MemSource::new).collect();
+        let scans: Vec<_> = sources
+            .iter()
+            .map(|s| Some(scan_device(s).expect("scan")))
+            .collect();
+        let assembled = assemble(&scans);
+        let pool = assembled.first().expect("a pool");
+        let devices: Vec<Option<&dyn BlockSource>> = sources
+            .iter()
+            .map(|s| Some(s as &dyn BlockSource))
+            .collect();
+        let reader = PoolReader::new(pool, devices);
+        let ub = uberblock_candidates(&scans, pool)
+            .into_iter()
+            .next()
+            .expect("an uberblock")
+            .ub;
+        let mos = open_mos(&reader, &ub).expect("mos");
+        let tree = walk(&mos, "tank").expect("walk");
+
+        let p = pending(&mos, &tree.datasets);
+        assert_eq!(p.deadlists, 1, "{p:?}");
+        assert_eq!(p.deadlist_bytes, ZPL_DEADLIST_BYTES, "{p:?}");
+        assert_eq!(p.unverified, 1, "{p:?}");
+        assert_eq!(p.inconsistent, 0, "{p:?}");
+        assert_eq!(p.bpobj_bytes, 0, "{p:?}");
         assert_eq!(p.total(), ZPL_DEADLIST_BYTES);
     }
 }
