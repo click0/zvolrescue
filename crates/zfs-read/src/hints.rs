@@ -248,13 +248,16 @@ pub fn try_layout(
         mismatches: 0,
     };
     let candidates = uberblock_candidates(scans, &pool);
-    let Some(best) = candidates.first() else {
-        return trial;
-    };
     let reader = PoolReader::new(&pool, devices.to_vec()).with_base_offsets(bases);
-    if let Ok(mos) = open_mos(&reader, &best.ub) {
-        if let Ok(tree) = walk(&mos, &pool.name) {
-            trial.datasets = Some(tree.datasets.len());
+    // The newest TXG that reads: one with nothing behind it (a sync
+    // whose MOS never reached the disk, a forged txg) is no evidence
+    // about the layout either way.
+    for c in &candidates {
+        if let Ok(mos) = open_mos(&reader, &c.ub) {
+            if let Ok(tree) = walk(&mos, &pool.name) {
+                trial.datasets = Some(tree.datasets.len());
+                break;
+            }
         }
     }
     trial.mismatches = reader.mismatches();

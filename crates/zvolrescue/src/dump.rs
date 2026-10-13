@@ -92,15 +92,27 @@ struct DumpOut {
     encryption: Option<String>,
 }
 
-/// A TXG that names the dataset but at which it does not read — its
-/// object set, or for a volume the dnodes beneath it: a destroyed
-/// dataset's blocks are free to reuse from the next txg on, and the ring
-/// may still name it at one where they are gone while an older one's
-/// read. Passed over for that older one.
+/// A TXG that was passed over for an older one. At the `dataset` stage
+/// it names the dataset but does not read it — its object set, or for a
+/// volume the dnodes beneath it: a destroyed dataset's blocks are free
+/// to reuse from the next txg on, and the ring may still name it at one
+/// where they are gone while an older one's read. At the `pool` stage
+/// the pool itself does not read there: the object set the uberblock
+/// points at matches no block, which is what a sync leaves behind when
+/// its uberblocks reached the members and its MOS did not — or a ring
+/// slot forged outright.
 #[derive(Debug, Serialize)]
 struct UnreadableAt {
     txg: u64,
+    stage: Stage,
     error: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum Stage {
+    Pool,
+    Dataset,
 }
 
 /// What the search for the dataset went through, for the record.
@@ -218,6 +230,7 @@ fn find_dataset<'c>(
                         }
                         searched.unreadable.push(UnreadableAt {
                             txg: c.ub.txg,
+                            stage: Stage::Dataset,
                             error: e.to_string(),
                         });
                         if stopped {
@@ -226,15 +239,50 @@ fn find_dataset<'c>(
                     }
                 }
             }
-            Err(e) => last_err = Some(format!("txg {}: {e}", c.ub.txg)),
+            Err(e) => {
+                // The pool itself does not read at this TXG. Said and
+                // recorded like a dataset that does not, and passed
+                // over the same way: the ring's newest slot is not
+                // the pool's newest state when nothing is behind it.
+                let stopped = matches!(e, ReadError::Medium { .. });
+                if !quiet {
+                    eprintln!(
+                        "zvolrescue: txg {}: unreadable ({e}){}",
+                        c.ub.txg,
+                        if stopped { "" } else { "; trying an older TXG" }
+                    );
+                }
+                searched.unreadable.push(UnreadableAt {
+                    txg: c.ub.txg,
+                    stage: Stage::Pool,
+                    error: e.to_string(),
+                });
+                last_err = Some(format!("txg {}: {e}", c.ub.txg));
+                if stopped {
+                    break;
+                }
+            }
         }
     }
-    if let Some(u) = searched.unreadable.first() {
+    if let Some(u) = searched
+        .unreadable
+        .iter()
+        .find(|u| u.stage == Stage::Dataset)
+    {
         eprintln!(
             "zvolrescue: dataset {name:?} is named at txg {} but does not read there ({}); readable at none of {} verified TXG(s)",
             u.txg,
             u.error,
             searched.txgs.len()
+        );
+        return Err(exit::UNRECOVERABLE);
+    }
+    let pool_unreadable = searched.unreadable.len();
+    if pool_unreadable > 1 && pool_unreadable == searched.txgs.len() {
+        let u = &searched.unreadable[0];
+        eprintln!(
+            "zvolrescue: cannot read the pool at any of {pool_unreadable} verified TXG(s) (newest: txg {}: {})",
+            u.txg, u.error
         );
         return Err(exit::UNRECOVERABLE);
     }

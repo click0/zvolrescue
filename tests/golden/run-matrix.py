@@ -87,6 +87,81 @@ def label_ranges(spec, length):
     return out
 
 
+UBERBLOCK_MAGIC = 0x00ba_b10c          # "oo-ba-bloc", little-endian on this image
+ZEC_MAGIC = 0x0210_da7a_b10c_7a11      # zio_eck_t magic at the end of a sealed slot
+ECK_SIZE = 40                          # magic plus four checksum words
+BLKPTR_OFFSET = 40                     # ub_rootbp
+BLKPTR_BIRTH = BLKPTR_OFFSET + 80      # blk_birth
+BLKPTR_CKSUM = BLKPTR_OFFSET + 96      # blk_cksum, four words
+
+
+def seal_uberblock_slot(slot, vdev_offset):
+    """The embedded checksum ZFS writes at the end of an uberblock slot
+    (ZIO_CHECKSUM_LABEL): SHA-256 over the slot with the checksum words
+    replaced by a verifier — the slot's own byte offset in the vdev — and
+    the digest stored as four big-endian words. A slot copied anywhere
+    else fails it, which is what makes the offset part of the evidence."""
+    buf = bytearray(slot)
+    eck = len(buf) - ECK_SIZE
+    buf[eck:eck + 8] = ZEC_MAGIC.to_bytes(8, "little")
+    buf[eck + 8:eck + ECK_SIZE] = vdev_offset.to_bytes(8, "little") + bytes(24)
+    digest = hashlib.sha256(buf).digest()
+    for i in range(4):
+        word = int.from_bytes(digest[i * 8:i * 8 + 8], "big")
+        buf[eck + 8 + i * 8:eck + 16 + i * 8] = word.to_bytes(8, "little")
+    return bytes(buf)
+
+
+def uberblock_slot(slot, vdev_offset):
+    """(txg, timestamp) of a slot that carries the magic and verifies at
+    `vdev_offset`, else None."""
+    if int.from_bytes(slot[0:8], "little") != UBERBLOCK_MAGIC:
+        return None
+    if seal_uberblock_slot(slot, vdev_offset) != bytes(slot):
+        return None
+    return int.from_bytes(slot[16:24], "little"), int.from_bytes(slot[32:40], "little")
+
+
+def forge_uberblock(f, off, length, bump, ashift):
+    """`forged-txg:<bump>` on one ring: the ring's newest verified
+    uberblock, copied into the slot ZFS would write txg+bump to (txg
+    modulo the ring's slot count), with that txg, that birth in its root
+    pointer, and the root pointer's checksum words inverted, then sealed
+    for its new slot. Every word of the forged slot verifies — the ring
+    says a newer state of the pool exists — and the object set behind it
+    matches no block, which is what a sync whose uberblocks reached the
+    disk and whose MOS did not leaves behind. Returns (txg forged from,
+    forged txg, slot index)."""
+    slot_size = 1 << min(max(ashift, 10), 13)
+    count = length // slot_size
+    f.seek(off)
+    ring = f.read(length)
+    best = None
+    for i in range(count):
+        s = ring[i * slot_size:(i + 1) * slot_size]
+        key = uberblock_slot(s, off + i * slot_size)
+        if key and (best is None or key > best[0]):
+            best = (key, s)
+    if best is None:
+        raise Unresolved(f"ring at {off} has no verified uberblock to forge from")
+    (txg, ts), s = best
+    if bump % count == 0:
+        raise ValueError(f"forged-txg:{bump} would land on the slot it is forged from")
+    forged = bytearray(s)
+    new_txg = txg + bump
+    forged[16:24] = new_txg.to_bytes(8, "little")
+    forged[32:40] = (ts + bump).to_bytes(8, "little")
+    forged[BLKPTR_BIRTH:BLKPTR_BIRTH + 8] = new_txg.to_bytes(8, "little")
+    for i in range(4):
+        at = BLKPTR_CKSUM + i * 8
+        word = int.from_bytes(forged[at:at + 8], "little") ^ 0xffff_ffff_ffff_ffff
+        forged[at:at + 8] = word.to_bytes(8, "little")
+    index = new_txg % count
+    f.seek(off + index * slot_size)
+    f.write(seal_uberblock_slot(bytes(forged), off + index * slot_size))
+    return txg, new_txg, index
+
+
 def allocated_extents(path):
     """The written parts of a sparse member, label areas excluded, so that
     `data:` damage lands where ZFS actually put something."""
@@ -821,6 +896,7 @@ def apply_damage(oracle, manifest, work, rng):
     manifest addresses something this image does not have."""
     paths = {r: oracle.path(r) for r in oracle.roles}
     missing, notes, plans = set(), [], {}
+    forged = {}   # (role, from txg, forged txg, slot) -> rings it went into
     for d in manifest.get("damage", []):
         pat = d["pattern"]
         if "target" in d:
@@ -836,6 +912,10 @@ def apply_damage(oracle, manifest, work, rng):
             # Resolved here, before any member is copied, so that a
             # manifest this image cannot serve is n/a and not half-done.
             oracle.older_path(role, pat.split(":", 1)[1])
+        if pat.startswith("forged-txg:"):
+            rng_spec = d.get("range", "")
+            if not (rng_spec.startswith("label:") and rng_spec.endswith(("/rings", "/uberblocks"))):
+                raise ValueError(f"{pat} needs a `label:…/rings` range, not {rng_spec!r}")
         for off, length in ranges_for(d.get("range", "0.."), src, os.path.getsize(src),
                                       reference=oracle.min_length):
             plans.setdefault(role, []).append((off, length, pat))
@@ -886,8 +966,21 @@ def apply_damage(oracle, manifest, work, rng):
                                 break
                             f.write(chunk)
                             left -= len(chunk)
+                elif pat.startswith("forged-txg:"):
+                    # A newer txg than any the pool reached, sealed as
+                    # ZFS would have sealed it, pointing at nothing.
+                    frm, to, index = forge_uberblock(
+                        f, off, length, int(pat.split(":")[1]), oracle.layout.get("ashift", 12))
+                    forged[(role, frm, to, index)] = forged.get((role, frm, to, index), 0) + 1
+                elif pat.startswith("grow:"):
+                    # The partition re-created larger: the same bytes,
+                    # then nothing, so the rear labels are no longer
+                    # where the size says they should be.
+                    f.truncate(os.path.getsize(dst) + size(pat.split(":", 1)[1]))
                 else:
                     raise ValueError(f"unknown pattern {pat}")
+    for (role, frm, to, index), rings in forged.items():
+        notes.append(f"{role}: txg {to} forged from {frm} into slot {index} of {rings} ring(s)")
     ordered = [paths[r] for r in oracle.roles if r not in missing]
     return ordered, notes, paths
 

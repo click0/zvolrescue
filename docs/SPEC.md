@@ -186,7 +186,7 @@ Priority: **M** = must (v1), **S** = should (v1 if time permits), **C** = could 
 
 | ID | Pri | Requirement |
 |---|---|---|
-| F-10 | M | Select a TXG explicitly (`--txg N`), by timestamp (`--before "2026-09-01 12:00"`), or "latest valid" (default). |
+| F-10 | M | Select a TXG explicitly (`--txg N`), by timestamp (`--before "2026-09-01 12:00"`), or "latest valid" (default). Latest valid is the newest verified uberblock whose object set *reads*: a slot every ring carries, that verifies, and that no block is behind — what a sync leaves when its uberblocks reached the members and its MOS did not, or a slot forged outright — is passed over for the next older one, said on stderr and listed under `unreadable_at` (`stage: "pool"` in `dump`'s record), by `list` and `dump` alike. `--txg N` means that one or nothing. |
 | F-11 | M | Walk the MOS from the chosen uberblock: object directory, DSL directories, DSL datasets, snapshots, bookmarks, clones. |
 | F-12 | M | List datasets with type (filesystem / zvol / snapshot), GUID, creation TXG and time, referenced size, `volsize`/`volblocksize` for zvols, compression, checksum, encryption, dedup properties. |
 | F-13 | M | Diff dataset lists between two TXGs to show what was created or destroyed in between. |

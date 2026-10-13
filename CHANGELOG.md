@@ -94,6 +94,40 @@ tagged. `v0.7.1` is the release that carries those six.
   so the dnode-block cases are its. `tests/golden/fetch-image.sh` is
   the one place the published image is fetched, pinned and
   decompressed; the matrix job and the capture use it.
+* **The last two classes of SPEC §9.1's catalogue, and no n/a left.**
+  `forged-txg:<bump>` on a `label:…/rings` range copies the ring's
+  newest verified uberblock into the slot ZFS would write that txg to,
+  with the txg bumped, the root pointer's birth to match and its
+  checksum words inverted, and seals the slot for its place: a TXG
+  every member's ring carries, that verifies, and that no block is
+  behind — what a sync leaves when its uberblocks reached the disks and
+  its MOS did not. `grow:<bytes>` makes the member longer by that much
+  of nothing: the partition re-created with another size, the rear
+  labels no longer where the length says. `labels-forged-txg` (every
+  ring forged three TXGs ahead, one member's rear rings gone besides)
+  and `partition-grown` use them, and
+  `combo-across-tops-one-past-budget` now takes two children of this
+  image's dRAID instead of a third leaf of a two-way mirror, so it runs
+  rather than reporting n/a. 61 manifests, every one applicable.
+
+### Fixed
+
+* **`list` stopped at a verified TXG with nothing behind it; `dump`
+  passed it over without a word.** The forged-txg case showed both. A
+  ring slot that verifies and whose object set matches no block is the
+  newest verified uberblock and not the pool's newest state, and `list`
+  answered it with "cannot read the pool at txg N" and exit 3 while
+  `dump` quietly went on to the next TXG. Both now treat it the way
+  `dump` treats a TXG that names a dataset it cannot read (F-20): said
+  on stderr (`txg N: unreadable (…); trying an older TXG`), recorded
+  under `unreadable_at` — in `dump`'s record with `stage: "pool"`, as
+  against `"dataset"` for the case F-20 already named — and passed over
+  for the newest TXG that reads; `--txg N` still means that one or
+  nothing. A pool readable at no TXG is said so in those words rather
+  than as a dataset not found. The binding of a member by reading
+  (F-62), the layout trials behind `--hint`, and `zvolcarve`'s read of
+  the space maps took the first candidate the same way and take the
+  first that reads now.
 
 ## v0.9.9 — 2026-10-10
 

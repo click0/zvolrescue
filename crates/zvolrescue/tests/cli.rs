@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use zfs_ondisk::blkptr::LABEL_START_SIZE;
-use zfs_ondisk::label::LABEL_SIZE;
+use zfs_ondisk::checksum::seal_label;
+use zfs_ondisk::label::{label_offsets, LABEL_SIZE, UBERBLOCK_RING_OFFSET, UBERBLOCK_RING_SIZE};
 use zfs_read::fixture::{
     build_sample_mos, destroyed_zvol_members, objset_reused_members, removed_vdev_members,
     two_top_mirror_members, Alloc, Pool, SAMPLE_ZVOL_BLOCK0_OFFSET,
@@ -404,6 +405,103 @@ fn list_diff_names_what_the_newest_txg_no_longer_has() {
         err.contains("--diff txg 150 has no verified uberblock"),
         "{err}"
     );
+}
+
+/// In every ring of `img`, the slot ZFS would write `txg` to, holding
+/// the uberblock of `from` with that txg, that birth in its root pointer
+/// and the pointer's checksum words inverted, sealed for its place. What
+/// a sync leaves behind when its uberblocks reached the members and its
+/// MOS did not — or a slot someone forged.
+fn forge_uberblock(img: &mut [u8], from: u64, txg: u64) {
+    let slot = 1usize << 12; // ashift 12
+    let count = UBERBLOCK_RING_SIZE as usize / slot;
+    for label_off in label_offsets(img.len() as u64).expect("four labels") {
+        let ring = (label_off + UBERBLOCK_RING_OFFSET) as usize;
+        let source = (0..count)
+            .find(|i| {
+                let s = &img[ring + i * slot..];
+                u64::from_le_bytes(s[16..24].try_into().unwrap()) == from
+            })
+            .expect("the txg forged from is in the ring");
+        let mut forged = img[ring + source * slot..ring + (source + 1) * slot].to_vec();
+        forged[16..24].copy_from_slice(&txg.to_le_bytes());
+        forged[40 + 80..40 + 88].copy_from_slice(&txg.to_le_bytes());
+        for b in forged[40 + 96..40 + 128].iter_mut() {
+            *b ^= 0xff;
+        }
+        let at = ring + (txg as usize % count) * slot;
+        seal_label(&mut forged, at as u64);
+        img[at..at + slot].copy_from_slice(&forged);
+    }
+}
+
+/// A ring slot that verifies and leads nowhere — a newer txg than the
+/// pool ever reached, pointing at an object set no block matches —
+/// is the newest verified uberblock and not the pool's newest state.
+/// `list` and `dump` pass it over for the newest TXG that reads, say
+/// so, and record it; asked for it by `--txg`, they refuse with the
+/// reason.
+#[test]
+fn a_forged_newer_txg_with_nothing_behind_it_is_passed_over() {
+    let dir = scratch("forged-txg");
+    let mut members = plain_members();
+    for m in members.iter_mut() {
+        forge_uberblock(m, 100, 103);
+    }
+    let paths = write_members(&dir, &members);
+
+    let (code, out, err) = run(&["-f", "json", "list", &paths[0], &paths[1]]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    let v = json(&out);
+    assert_eq!(v["available_txgs"][0], 103, "{v}");
+    assert_eq!(v["txg"], 100, "{v}");
+    assert_eq!(v["unreadable_at"][0]["txg"], 103, "{v}");
+    assert!(
+        v["unreadable_at"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("checksum"),
+        "{v}"
+    );
+    assert!(
+        err.contains("txg 103: unreadable") && err.contains("trying an older TXG"),
+        "{err}"
+    );
+    assert!(
+        v["datasets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["name"] == "tank/vm/disk0"),
+        "{v}"
+    );
+
+    let (code, out, err) = run(&[
+        "-f",
+        "json",
+        "dump",
+        "tank/vm/disk0",
+        &paths[0],
+        &paths[1],
+        "-o",
+        &dir.join("vol.img").to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    let v = json(&out);
+    assert_eq!(v["txgs_searched"], serde_json::json!([103, 100]), "{v}");
+    assert_eq!(v["unreadable_at"][0]["txg"], 103, "{v}");
+    assert_eq!(v["unreadable_at"][0]["stage"], "pool", "{v}");
+    assert_eq!(v["volumes"][0]["txg"], 100, "{v}");
+    assert!(
+        err.contains("txg 103: unreadable") && err.contains("trying an older TXG"),
+        "{err}"
+    );
+
+    // By name: that one or nothing.
+    let (code, out, err) = run(&["-q", "-f", "json", "list", "--txg", "103", &paths[0]]);
+    assert_eq!(code, 3, "{out}");
+    assert!(err.contains("cannot read the pool at txg 103"), "{err}");
+    assert_eq!(json(&out)["unreadable_at"][0]["txg"], 103, "{out}");
 }
 
 /// A destroyed volume's object set block is free to reuse from the next

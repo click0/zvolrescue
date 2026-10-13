@@ -317,11 +317,12 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     // elsewhere is not (C-06).
     let space = pool.as_ref().and_then(|p| {
         let reader = PoolReader::new(p, members.devices()).with_base_offsets(&members.bases());
-        let ub = zfs_read::pool::uberblock_candidates(&members.scans, p)
+        // The newest TXG whose object set reads: a ring slot with
+        // nothing behind it (a forged txg, a sync whose MOS never
+        // reached the disk) is not where the allocator's state is.
+        let mos = zfs_read::pool::uberblock_candidates(&members.scans, p)
             .into_iter()
-            .next()?
-            .ub;
-        let mos = zfs_read::dsl::open_mos(&reader, &ub).ok()?;
+            .find_map(|c| zfs_read::dsl::open_mos(&reader, &c.ub).ok())?;
         Some(zfs_read::spacemap::read(&reader, p, &mos))
     });
     if !g.quiet {

@@ -8,7 +8,7 @@ use zfs_read::dmu::DnodeArray;
 use zfs_read::dsl::{
     open_mos, read_properties, walk, Dataset, DatasetTree, Property, PropertyValue,
 };
-use zfs_read::pool::{select_uberblock, uberblock_candidates, TxgSelect};
+use zfs_read::pool::{select_uberblock, uberblock_candidates, Candidate, TxgSelect};
 use zfs_read::zio::{PoolReader, ReadError};
 
 use zvol_common::members::{choose_pool, open_members};
@@ -86,6 +86,16 @@ struct DiffOut {
     destroyed_since: Vec<DatasetOut>,
 }
 
+/// A TXG the rings carry at which the pool does not read: its object
+/// set, or the dataset tree under it, matches no block. What a sync
+/// leaves behind when its uberblocks reached the members and its MOS did
+/// not — or a ring slot forged outright. Passed over for an older one.
+#[derive(Debug, Serialize)]
+struct UnreadableAt {
+    txg: u64,
+    error: String,
+}
+
 #[derive(Debug, Serialize)]
 struct ListOut {
     pool: String,
@@ -95,6 +105,10 @@ struct ListOut {
     time: String,
     /// Verified TXGs available on the scanned members, newest first.
     available_txgs: Vec<u64>,
+    /// TXGs newer than `txg` at which the pool does not read (newest
+    /// first), passed over for it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    unreadable_at: Vec<UnreadableAt>,
     datasets: Vec<DatasetOut>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     errors: Vec<String>,
@@ -304,7 +318,19 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         Err(code) => return zvol_common::end_early(g, "zvolrescue", spec, code),
     };
     let candidates = uberblock_candidates(&members.scans, &pool);
-    let Some(chosen) = select_uberblock(&candidates, sel) else {
+    // `--txg` means that one. The newest, or the newest before a time,
+    // means the newest that *reads* (F-10): a TXG the rings carry and
+    // no block matches — a sync whose uberblocks reached the members
+    // and whose MOS did not, a slot forged outright — verifies like any
+    // other and leads nowhere. It is passed over, said on stderr and
+    // listed in the record, for the next older one, the way `dump`
+    // passes over a TXG that names a dataset it cannot read.
+    let pick: Vec<&Candidate> = match sel {
+        TxgSelect::Exact(_) => select_uberblock(&candidates, sel).into_iter().collect(),
+        TxgSelect::Newest => candidates.iter().collect(),
+        TxgSelect::Before(ts) => candidates.iter().filter(|c| c.ub.timestamp <= ts).collect(),
+    };
+    if pick.is_empty() {
         eprintln!(
             "zvolrescue: no verified uberblock matches the requested TXG; available: {}",
             candidates
@@ -314,38 +340,79 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 .join(" ")
         );
         return zvol_common::end_early(g, "zvolrescue", spec, exit::UNRECOVERABLE);
-    };
+    }
     let reader = PoolReader::new(&pool, members.devices()).with_base_offsets(&members.bases());
-    let (mos, tree) = match walk_at(&reader, &chosen.ub, &pool.name) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!(
-                "zvolrescue: cannot read the pool at txg {}: {e}",
-                chosen.ub.txg
-            );
-            // The run ends the way every run ends: a device may have
-            // refused a read on the way to the dataset tree, and that
-            // is exit 7 and an incident on record, not a bare 3.
-            let out = ListOut {
-                pool: pool.name.clone(),
-                pool_guid: format!("{:#018x}", pool.guid),
-                members: members.paths.clone(),
-                txg: chosen.ub.txg,
-                time: iso8601(chosen.ub.timestamp),
-                available_txgs: candidates.iter().map(|c| c.ub.txg).collect(),
-                datasets: Vec::new(),
-                errors: Vec::new(),
-                diff: None,
-            };
-            let json = serde_json::to_value(&out).expect("serialisable");
-            if g.format == Format::Json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&json).expect("serialisable")
-                );
+    let mut unreadable = Vec::new();
+    let mut found = None;
+    for (i, c) in pick.iter().enumerate() {
+        match walk_at(&reader, &c.ub, &pool.name) {
+            Ok(t) => {
+                found = Some((*c, t));
+                break;
             }
-            return finish(g, &members, &json, exit::UNRECOVERABLE);
+            Err(e) => {
+                // A device that refused a read has stopped the run
+                // (N-10): no older TXG is tried on it.
+                let stopped = matches!(e, ReadError::Medium { .. });
+                let more = !stopped && i + 1 < pick.len();
+                // One TXG asked for by name gets the verdict below and
+                // not a progress line first.
+                if !g.quiet && pick.len() > 1 {
+                    eprintln!(
+                        "zvolrescue: txg {}: unreadable ({e}){}",
+                        c.ub.txg,
+                        if more { "; trying an older TXG" } else { "" }
+                    );
+                }
+                unreadable.push(UnreadableAt {
+                    txg: c.ub.txg,
+                    error: e.to_string(),
+                });
+                if stopped {
+                    break;
+                }
+            }
         }
+    }
+    let Some((chosen, (mos, tree))) = found else {
+        let newest = &pick[0];
+        let first = unreadable.first().expect("one TXG was tried");
+        if unreadable.len() == 1 {
+            eprintln!(
+                "zvolrescue: cannot read the pool at txg {}: {}",
+                first.txg, first.error
+            );
+        } else {
+            eprintln!(
+                "zvolrescue: cannot read the pool at any of {} verified TXG(s) (newest: txg {}: {})",
+                unreadable.len(),
+                first.txg,
+                first.error
+            );
+        }
+        // The run ends the way every run ends: a device may have
+        // refused a read on the way to the dataset tree, and that
+        // is exit 7 and an incident on record, not a bare 3.
+        let out = ListOut {
+            pool: pool.name.clone(),
+            pool_guid: format!("{:#018x}", pool.guid),
+            members: members.paths.clone(),
+            txg: newest.ub.txg,
+            time: iso8601(newest.ub.timestamp),
+            available_txgs: candidates.iter().map(|c| c.ub.txg).collect(),
+            unreadable_at: unreadable,
+            datasets: Vec::new(),
+            errors: Vec::new(),
+            diff: None,
+        };
+        let json = serde_json::to_value(&out).expect("serialisable");
+        if g.format == Format::Json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json).expect("serialisable")
+            );
+        }
+        return finish(g, &members, &json, exit::UNRECOVERABLE);
     };
     let keep = |d: &Dataset| opts.recursive || !d.snapshot;
     let mut out = ListOut {
@@ -355,6 +422,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         txg: chosen.ub.txg,
         time: iso8601(chosen.ub.timestamp),
         available_txgs: candidates.iter().map(|c| c.ub.txg).collect(),
+        unreadable_at: unreadable,
         datasets: tree
             .datasets
             .iter()

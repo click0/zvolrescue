@@ -249,10 +249,15 @@ fn walks(
     bases: &[u64],
 ) -> Option<()> {
     let candidates = uberblock_candidates(scans, pool);
-    let ub = &candidates.first()?.ub;
     let reader = PoolReader::new(pool, devices).with_base_offsets(bases);
-    let mos = open_mos(&reader, ub).ok()?;
-    walk(&mos, &pool.name).ok()?;
+    // The newest TXG that reads, not the newest: a ring slot with
+    // nothing behind it (a sync whose MOS never reached the disk, a
+    // forged txg) verifies on every member and says nothing about which
+    // leaf this one is.
+    candidates.iter().find_map(|c| {
+        let mos = open_mos(&reader, &c.ub).ok()?;
+        walk(&mos, &pool.name).ok()
+    })?;
     Some(())
 }
 
