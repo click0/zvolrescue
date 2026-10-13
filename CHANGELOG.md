@@ -13,7 +13,25 @@ development milestone that names what changed when — the sections below
 are their record — and ships inside the next version that does get
 tagged. `v0.7.1` is the release that carries those six.
 
-## Unreleased
+## v0.9.10 — 2026-10-13
+
+**The catalogue closed.**
+SPEC §9.1's damage catalogue is covered end to end. The golden image is
+published from the run that built it, nobody carrying 2.5 GB through a
+browser, and the matrix runs against the published image, pinned by
+its sums, on every push that asks and every Monday on its own. The
+shapes the manifests named and no image could serve are placed: a
+member replaced by an older copy of itself, from the round-6 copies the
+release carries; a block's copy on the dRAID, found by content rather
+than arithmetic; the dnode blocks, indirect blocks, data blocks and
+crypto key object below a dataset's object set, from the oracle's
+`zdb -dddddd` capture. The last two classes without a manifest have
+theirs — partial rings with a forged txg, a partition re-created with
+another size — and the one case this image could not serve runs now:
+61 manifests, 61 pass, none n/a, no defects, inputs unchanged. The
+forged txg found a gap, and it is fixed: `list` passes over a verified
+TXG with nothing behind it the way `dump` passes over one that names a
+dataset it cannot read, and `dump`'s record says when it did.
 
 ### Added
 
@@ -128,6 +146,26 @@ tagged. `v0.7.1` is the release that carries those six.
   (F-62), the layout trials behind `--hint`, and `zvolcarve`'s read of
   the space maps took the first candidate the same way and take the
   first that reads now.
+* **A deadlist whose objects do not read at a TXG is unverified there,
+  not contradicted — and a swallowed object's space was counted
+  twice.** `zvoltimeline --pending` checks every deadlist's running
+  total against the block-pointer objects it names, at every TXG. An
+  object that did not read counted as zero, and the header was then
+  reported as disagreeing with its own objects; at any TXG but the
+  newest that is a matter of course — the objects of an older
+  transaction group are free to reuse from the next one on — and one
+  such TXG on a `ztest` pool failed the cross-check with "1 deadlist
+  disagrees with its own objects (0 bytes there)". Such a deadlist is
+  now `unverified` at that TXG, with its header taken as it is, and
+  `disagree` is kept for a total that was read whole and differs; the
+  cross-check requires every deadlist to read at the newest TXG, where
+  nothing has been reused. Reading the OpenZFS source for that turned
+  up the other half: `bpobj_enqueue_subobj` adds a swallowed object's
+  bytes to the parent's header as it files it, so the reader's walk into
+  the children — added in 0.7.0 against a cross-check failure that this
+  reading explains better — counted their space twice wherever a pool
+  had nested objects. The total is the headers of the objects the
+  deadlist names now, and the fixture says what ZFS says.
 
 ## v0.9.9 — 2026-10-10
 
