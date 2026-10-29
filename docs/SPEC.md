@@ -1,6 +1,6 @@
 # zvolrescue — Technical Specification (ТЗ)
 
-**Status:** living document, revised 2026-10-13 (tool at v0.9.10) · **Owner:** Vladyslav V. Prodan
+**Status:** living document, revised 2026-10-29 (tool at v0.9.11) · **Owner:** Vladyslav V. Prodan
 
 **Ukrainian version:** [SPEC.uk.md](SPEC.uk.md) · **Companion tools:** [COMPANIONS.md](COMPANIONS.md)
 
@@ -672,6 +672,9 @@ placed — a member replaced by an older copy of itself, blocks below the
 object set, copies on the dRAID found by content — the last two classes
 of §9.1 have manifests, every one of the 61 applies, and `list` passes
 over a verified TXG with nothing behind it the way `dump` does (F-10).
+`v0.9.11` bounds the zstd decoder: `ruzstd` 0.9.1, after an advisory
+(RUSTSEC-2026-0344) showed that a crafted block under 128 KiB could make
+0.9.0 allocate gigabytes — a pool is hostile input (N-03, N-04).
 `1.0.0` is the full release, and waits for what no CI can supply: three real-world incidents with
 documented outcomes ([REALWORLD-TESTS.md](REALWORLD-TESTS.md)). The
 packaging it also waited for — a FreeBSD port, a `.deb`, an AUR

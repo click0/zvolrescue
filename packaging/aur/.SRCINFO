@@ -1,6 +1,6 @@
 pkgbase = zvolrescue
 	pkgdesc = Read-only extraction of zvols and files from ZFS pools that no longer import
-	pkgver = 0.9.10
+	pkgver = 0.9.11
 	pkgrel = 1
 	url = https://github.com/click0/zvolrescue
 	arch = x86_64
@@ -9,7 +9,7 @@ pkgbase = zvolrescue
 	makedepends = cargo
 	depends = gcc-libs
 	depends = glibc
-	source = zvolrescue-0.9.10.tar.gz::https://github.com/click0/zvolrescue/archive/refs/tags/v0.9.10.tar.gz
+	source = zvolrescue-0.9.11.tar.gz::https://github.com/click0/zvolrescue/archive/refs/tags/v0.9.11.tar.gz
 	sha256sums = 734051f9c44e58240412d98a9f19cf372351537bc29e4039e2e1c8aad3f65307
 
 pkgname = zvolrescue

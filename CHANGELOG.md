@@ -13,7 +13,16 @@ development milestone that names what changed when — the sections below
 are their record — and ships inside the next version that does get
 tagged. `v0.7.1` is the release that carries those six.
 
-## Unreleased
+## v0.9.11 — 2026-10-29
+
+**The zstd decoder bounded.**
+A security fix and two things for whoever works on the code. `ruzstd`,
+the decoder every zstd-compressed block of a pool goes through, is 0.9.1:
+a crafted block under 128 KiB could make 0.9.0 allocate gigabytes and
+take the process down (RUSTSEC-2026-0344), and a pool is hostile input.
+A pre-push hook runs CI's `fmt` and `clippy` before a push leaves, and
+the on-disk format traps found on real pools are written down where
+people read them, in `docs/REALWORLD-TESTS.md`.
 
 ### Fixed
 
