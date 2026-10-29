@@ -225,7 +225,7 @@ docs/SPEC.md                технічне завдання (ТЗ), англі
 docs/SPEC.uk.md             те саме українською
 docs/COMPANIONS.uk.md       ТЗ супутніх інструментів (UK); COMPANIONS.md — англійською
 docs/DEBUGGING.uk.md        як звіряти з тестовим пулом у VM через zdb і --debug
-docs/REALWORLD-TESTS.uk.md  матриця реальних прогонів: середовища, сценарії, як запускати, результати
+docs/REALWORLD-TESTS.uk.md  матриця реальних прогонів: середовища, сценарії, як запускати, пастки формату, результати
 docs/RELEASING.md           як робиться реліз і що release-workflow робить із тегом
 docs/research/              аналізи схожих інструментів, нотатки про on-disk формат
 Cargo.toml                  cargo workspace

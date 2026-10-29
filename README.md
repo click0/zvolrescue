@@ -223,7 +223,7 @@ docs/SPEC.md                technical specification (ТЗ), English — the sour
 docs/SPEC.uk.md             the same in Ukrainian
 docs/COMPANIONS.md          companion tools specification (EN); COMPANIONS.uk.md in Ukrainian
 docs/DEBUGGING.md           how to verify against a test pool in a VM with zdb and --debug
-docs/REALWORLD-TESTS.md     the real-world matrix: environments, scenarios, how to run it, results
+docs/REALWORLD-TESTS.md     the real-world matrix: environments, scenarios, how to run it, format traps, results
 docs/RELEASING.md           how a release is cut, and what the release workflow does with the tag
 docs/research/              analyses of related tools, on-disk format notes
 Cargo.toml                  cargo workspace

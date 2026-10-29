@@ -345,6 +345,36 @@ with the same requests.
   — the runner is then the bastion, and `SSH_HOST` is the machine's
   address on the LAN.
 
+## Format traps found on real pools
+
+The fixture pools are written by the same code that reads them, so they
+cannot catch a wrong byte or word order, or a field read from the wrong
+place. Each trap below was found only on a real pool (`ztest` or kernel
+ZFS), and each cost time. Read this list before changing a parser, the
+reader or the checksums; when a real pool shows a new one, add it here
+and in [the Ukrainian version](REALWORLD-TESTS.uk.md), next to its row in
+Results.
+
+- `sha512` stores the digest words in the writer's native byte order
+  (like `blake3`, `skein` and `edonr`); `sha256` stores them big-endian.
+- `edonr` has no DEDUP flag, so in an encrypted dataset its words are
+  folded with XOR, as fletcher's are; `skein`, `blake3` and `sha*` are not
+  folded.
+- The gang header of an encrypted block carries the *folded* checksum.
+- OpenZFS zstd frames have no magic number; the level is in the top byte
+  of the header's second word.
+- The `dmu_ot` table: other-ZAP, zvol-prop, znode, master-node and
+  FUID-size objects are only authenticated, not encrypted (the
+  `ot_encrypt` column).
+- `keyformat` and `pbkdf2*` are in the crypto ZAP; `keylocation` is in the
+  DSL directory's props.
+- The AAD of a dnode block: `dn_used` is at offset 24; the bonus buffer
+  starts after *all* `dn_nblkptr` block pointers.
+- dRAID parity is computed over the whole group width (empty trailing
+  columns shift Q and R); RAIDZ parity covers only the occupied columns.
+- A label with `txg 0` (a device being attached or replaced) does not
+  describe the topology.
+
 ## Results
 
 Append one row per run.
