@@ -13,6 +13,32 @@ development milestone that names what changed when — the sections below
 are their record — and ships inside the next version that does get
 tagged. `v0.7.1` is the release that carries those six.
 
+## Unreleased
+
+### Fixed
+
+* **A tiny zstd block no longer decodes to gigabytes.** The zstd decoder
+  behind every zstd-compressed block of a pool, `ruzstd`, is 0.9.1: 0.9.0
+  never bounded a block's decompressed size, so a crafted block under
+  128 KiB could make it allocate gigabytes and take the process down
+  (RUSTSEC-2026-0344). A pool is hostile input, and a hostile pool could
+  have stopped a recovery this way. The port's crate list follows.
+
+### Added
+
+* **A pre-push hook.** With `git config core.hooksPath .githooks`,
+  `git push` first runs the `cargo fmt --check` and `clippy` of CI's first
+  step and refuses the push when either fails (`--no-verify` skips it
+  once).
+
+### Documented
+
+* **The format traps are in the real-world matrix.** The on-disk facts
+  that fixtures could not catch and that cost time on real pools (the
+  `sha512` word order, `edonr`'s fold, magicless zstd frames, a dnode
+  block's AAD, dRAID parity, a `txg 0` label, …) are a section of
+  `docs/REALWORLD-TESTS.md`, next to the results they were found in.
+
 ## v0.9.10 — 2026-10-13
 
 **The catalogue closed.**
