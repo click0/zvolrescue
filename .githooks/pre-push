@@ -1,0 +1,58 @@
+#!/bin/sh
+# pre-push — перед пушем ганяє ті самі fmt і clippy, що й перший крок CI
+# (.github/workflows/ci.yml), щоб червоний CI ловився тут: розробка йде
+# прямо в main, тож після пушу виправляти вже нікуди, крім наступного коміту.
+#
+# Активація (один раз на клон, разом із prepare-commit-msg):
+#     git config core.hooksPath .githooks
+#
+# Пропустити один раз:  git push --no-verify
+#
+# Перевіряється робоче дерево, не самі коміти, що йдуть у пуш: незакомічені
+# зміни в .rs/Cargo-файлах хук показує, бо з ними результат може відрізнятися
+# від того, що побачить CI.
+#
+# CI бере найновіший stable; старіший локальний rustc пропускає лінти, які
+# CI потім ловить (rustup update stable).
+
+ZERO=0000000000000000000000000000000000000000
+
+# stdin: "<local ref> <local sha> <remote ref> <remote sha>" на кожен ref.
+# Пуш, що лише видаляє refs, нічого не приносить — перевіряти нічого.
+pushes=0
+while read -r _lref lsha _rref _rsha; do
+    case "$lsha" in
+        "$ZERO" | 0000000000000000000000000000000000000000000000000000000000000000) ;;
+        *) pushes=1 ;;
+    esac
+done
+[ "$pushes" -eq 1 ] || exit 0
+
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "pre-push: cargo не знайдено — fmt і clippy не перевірено (CI перевірить)." >&2
+    exit 0
+fi
+
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+dirty=$(git status --porcelain --untracked-files=no -- '*.rs' '*Cargo.toml' 'Cargo.lock')
+if [ -n "$dirty" ]; then
+    echo "pre-push: увага — незакомічені зміни, перевірка бачить їх, а CI ні:" >&2
+    echo "$dirty" | sed 's/^/    /' >&2
+fi
+
+echo "pre-push: $(rustc --version 2>/dev/null)" >&2
+
+echo "pre-push: cargo fmt --all --check" >&2
+if ! cargo fmt --all --check; then
+    echo "pre-push: формат не той — cargo fmt --all, закомітити, пушити знову." >&2
+    echo "          (пропустити: git push --no-verify)" >&2
+    exit 1
+fi
+
+echo "pre-push: cargo clippy --all-targets --all-features -- -D warnings" >&2
+if ! cargo clippy --all-targets --all-features -- -D warnings; then
+    echo "pre-push: clippy знайшов, що CI теж знайде. Виправити й пушити знову." >&2
+    echo "          (пропустити: git push --no-verify)" >&2
+    exit 1
+fi

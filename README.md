@@ -296,6 +296,14 @@ cargo clippy --all-targets -- -D warnings
 Rust stable (`lang/rust` from FreeBSD ports, or `rustup`). No C toolchain
 and no system libraries are required: the whole decode stack is pure Rust.
 
+To have `git push` run the same `cargo fmt --check` and `clippy` as CI
+first, and refuse the push when either fails (`git push --no-verify`
+skips it once), turn on the repository's hooks once per clone:
+
+```sh
+git config core.hooksPath .githooks
+```
+
 ## Platforms
 
 FreeBSD 15.x is the first-class target; 14.x is best-effort (it builds and

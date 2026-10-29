@@ -3,7 +3,7 @@
 ## Перше, що зробити в новому клоні
 
 ```bash
-git config core.hooksPath .githooks        # хук додає трейлери атрибуції до комітів із Claude Code
+git config core.hooksPath .githooks        # prepare-commit-msg: трейлери атрибуції; pre-push: fmt + clippy, як у CI
 rustup update stable                        # CI ганяє clippy на найновішому stable; локальний старіший
                                             # rustc пропускає лінти, які CI потім ловить
 sudo apt-get install -y zfsutils-linux zfs-test   # ztest + zdb для tests/crosscheck-ztest.sh (ядро не потрібне)
