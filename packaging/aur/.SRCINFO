@@ -10,6 +10,6 @@ pkgbase = zvolrescue
 	depends = gcc-libs
 	depends = glibc
 	source = zvolrescue-0.9.11.tar.gz::https://github.com/click0/zvolrescue/archive/refs/tags/v0.9.11.tar.gz
-	sha256sums = 734051f9c44e58240412d98a9f19cf372351537bc29e4039e2e1c8aad3f65307
+	sha256sums = dc6cbdac79b49a4a6601d66d247b870870cdad9947dbb2cc5a5d44ee050932aa
 
 pkgname = zvolrescue

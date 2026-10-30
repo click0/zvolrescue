@@ -14,7 +14,7 @@ license=('BSD-3-Clause')
 depends=('gcc-libs' 'glibc')
 makedepends=('cargo')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('734051f9c44e58240412d98a9f19cf372351537bc29e4039e2e1c8aad3f65307')
+sha256sums=('dc6cbdac79b49a4a6601d66d247b870870cdad9947dbb2cc5a5d44ee050932aa')
 
 prepare() {
     cd "$pkgname-$pkgver"
