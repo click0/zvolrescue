@@ -90,7 +90,8 @@ enum Cmd {
         /// Transaction group to read (default: newest valid).
         #[arg(long, value_name = "N", conflicts_with = "before")]
         txg: Option<u64>,
-        /// Newest TXG synced at or before this time (RFC 3339 or unix seconds).
+        /// Newest TXG synced at or before this time: RFC 3339 (a time
+        /// without an offset is UTC), a date, or Unix seconds.
         #[arg(long, value_name = "TS")]
         before: Option<String>,
         /// Also show what was created or destroyed relative to this TXG.

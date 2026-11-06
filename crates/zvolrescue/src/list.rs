@@ -303,7 +303,9 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         (None, Some(b)) => match parse_timestamp(b) {
             Some(ts) => TxgSelect::Before(ts),
             None => {
-                eprintln!("zvolrescue: --before wants Unix seconds or YYYY-MM-DD[THH:MM[:SS]]");
+                eprintln!(
+                    "zvolrescue: --before wants an RFC 3339 time (YYYY-MM-DDTHH:MM[:SS][Z|±HH:MM]; UTC without an offset), a date that exists, or Unix seconds"
+                );
                 return exit::USAGE;
             }
         },

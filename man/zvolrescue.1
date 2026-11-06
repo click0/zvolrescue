@@ -207,8 +207,12 @@ their size and block size.
 .It Fl -txg Ar n
 Transaction group to read; default the newest that verifies.
 .It Fl -before Ar timestamp
-The newest TXG synced at or before this time, RFC 3339 or Unix
-seconds.
+The newest TXG synced at or before this time: RFC 3339
+.Pq Ql 2026-09-01T12:00:00+03:00 ,
+a time without an offset being UTC, a date alone
+.Pq its midnight, UTC ,
+or Unix seconds.
+A date that does not exist, such as February 30, is refused.
 .It Fl -diff Ar txg2
 Also show what was created or destroyed relative to this TXG, with the
 .Fl -txg

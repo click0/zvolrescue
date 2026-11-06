@@ -88,6 +88,14 @@ tagged. `v0.7.1` is the release that carries those six.
   and went on as though they were the volume. The image is now flushed
   before each state is written, a flush that fails writes no state, and
   the state goes in under a temporary name renamed into place.
+* **`list --before` was not the RFC 3339 its manual promised.** An
+  offset (`2026-09-01T12:00:00+03:00`) or a fraction of a second was a
+  usage error, and a date that does not exist rolled over: February 31st
+  meant March 3rd and moved the chosen TXG by days without a word. Both
+  are read now — the offset applied, the fraction dropped, since
+  uberblock times are whole seconds — `t` and `z` count as `T` and `Z`,
+  and a date the calendar does not have is refused. A time without an
+  offset is still UTC, and the manual and the error now say so.
 
 ## v0.9.11 — 2026-10-29
 
