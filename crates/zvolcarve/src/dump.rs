@@ -153,7 +153,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     let state_file = state_path.clone();
     let progress = |done: u64, total: u64| {
         if last_state.elapsed().as_secs() >= 5 && done < total {
-            resume::write(&state_file, &expected_state, done);
+            resume::write(&opts.output, &state_file, &expected_state, done);
             last_state = Instant::now();
         }
     };
@@ -184,7 +184,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             .interrupted_at
             .or_else(|| report.bad.first().map(|b| b.blkid))
             .unwrap_or(start_block);
-        resume::write(&state_path, &expected_state, done);
+        resume::write(&opts.output, &state_path, &expected_state, done);
     } else {
         resume::clear(&state_path);
     }

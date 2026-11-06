@@ -411,7 +411,7 @@ fn dump_one(
             last_report = Instant::now();
         }
         if last_state.elapsed().as_secs() >= 5 && done < total {
-            resume::write(&state_file, &expected_state, done);
+            resume::write(output, &state_file, &expected_state, done);
             last_state = Instant::now();
         }
     };
@@ -456,7 +456,7 @@ fn dump_one(
             .interrupted_at
             .or_else(|| report.bad.first().map(|b| b.blkid))
             .unwrap_or(start_block);
-        resume::write(&state_path, &expected_state, done);
+        resume::write(output, &state_path, &expected_state, done);
     } else {
         resume::clear(&state_path);
     }

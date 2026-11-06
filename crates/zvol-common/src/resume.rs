@@ -54,15 +54,48 @@ pub fn path(output: &Path) -> PathBuf {
     PathBuf::from(p)
 }
 
-/// Record that blocks `0..blocks_done` are complete. Best effort: a
-/// state that cannot be written costs a resume, not the run.
-pub fn write(state_path: &Path, expected: &State, blocks_done: u64) {
+/// Record that blocks `0..blocks_done` of `image` are complete — once
+/// they are on stable storage.
+///
+/// The image is flushed first, and the state is written beside it under
+/// a temporary name and renamed into place. Without the flush a crash
+/// could keep a state that names blocks the image never received: the
+/// image is sparse, the missing blocks read back as zeros, and a resume
+/// would hash them and carry on as though they were the volume. Without
+/// the rename a crash could leave half a state. A flush that fails
+/// writes no state — the next resume starts earlier, never wrong — and
+/// otherwise this is best effort: a state that cannot be written costs
+/// a resume, not the run.
+pub fn write(image: &Path, state_path: &Path, expected: &State, blocks_done: u64) {
+    use std::io::Write;
+    let flushed = std::fs::OpenOptions::new()
+        .write(true)
+        .open(image)
+        .and_then(|f| f.sync_data());
+    if flushed.is_err() {
+        return;
+    }
     let s = State {
         blocks_done,
         ..expected.key()
     };
-    if let Ok(json) = serde_json::to_vec(&s) {
-        let _ = std::fs::write(state_path, json);
+    let Ok(json) = serde_json::to_vec(&s) else {
+        return;
+    };
+    let mut tmp = state_path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    let written = std::fs::File::create(&tmp).and_then(|mut f| {
+        f.write_all(&json)?;
+        f.sync_all()
+    });
+    if written.is_err() || std::fs::rename(&tmp, state_path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return;
+    }
+    // The rename is an entry in the directory; flush that too.
+    if let Some(dir) = state_path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
     }
 }
 
@@ -187,7 +220,7 @@ mod tests {
         // Two blocks of a four-block image, then a state that says so.
         let prefix: Vec<u8> = (0..8192u32).map(|i| (i % 251) as u8).collect();
         std::fs::write(&out, &prefix).unwrap();
-        write(&path(&out), &exp, 2);
+        write(&out, &path(&out), &exp, 2);
 
         let (start, digests, mut sink) = open(
             "test",
@@ -220,7 +253,7 @@ mod tests {
         assert_eq!(std::fs::metadata(&out).unwrap().len(), 0);
 
         // Not asked to resume: from the start, whatever the state says.
-        write(&path(&out), &exp, 2);
+        write(&out, &path(&out), &exp, 2);
         let (start, _, _) = open(
             "test",
             "tank/vm/disk0",
@@ -236,7 +269,7 @@ mod tests {
         // A state whose prefix the image no longer holds starts over
         // rather than hashing bytes that are not there.
         std::fs::write(&out, &prefix[..100]).unwrap();
-        write(&path(&out), &exp, 2);
+        write(&out, &path(&out), &exp, 2);
         let (start, _, _) = open(
             "test",
             "tank/vm/disk0",
@@ -251,6 +284,32 @@ mod tests {
 
         clear(&path(&out));
         assert!(!path(&out).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A state is written only for an image that could be flushed, in one
+    /// piece, with nothing left beside it.
+    #[test]
+    fn a_state_follows_the_image_to_disk() {
+        let dir = scratch("durable");
+        let out = dir.join("out.img");
+        let exp = expected();
+        write(&out, &path(&out), &exp, 1);
+        assert!(
+            !path(&out).exists(),
+            "a state for an image that is not there"
+        );
+        std::fs::write(&out, [9u8; 4096]).unwrap();
+        write(&out, &path(&out), &exp, 1);
+        let back: State = serde_json::from_slice(&std::fs::read(path(&out)).unwrap()).unwrap();
+        assert_eq!(back.blocks_done, 1);
+        assert_eq!(back.key(), exp.key());
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

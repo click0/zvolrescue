@@ -3,6 +3,7 @@
 *.jsonl
 *.key
 *.resume.json
+*.resume.json.tmp
 manifest.json
 ztest.*
 zpool.cache

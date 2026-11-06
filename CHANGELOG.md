@@ -79,6 +79,15 @@ tagged. `v0.7.1` is the release that carries those six.
   the key — and was "wrong key" here, and so was any file with a second
   line. Both read the first line now, as ZFS does; so does `--key
   prompt`, which also no longer strips a trailing `\r`.
+* **A resume after a crash could keep zeros as the volume.** `dump` (and
+  `zvolcarve dump`) wrote the `--resume` state every five seconds with
+  nothing between it and the image's data in the page cache. After a
+  power loss on a filesystem that does not order the two, the state
+  could survive and name blocks the image never received; the image is
+  sparse, so they read back as zeros, and the resumed run hashed them
+  and went on as though they were the volume. The image is now flushed
+  before each state is written, a flush that fails writes no state, and
+  the state goes in under a temporary name renamed into place.
 
 ## v0.9.11 — 2026-10-29
 
