@@ -13,6 +13,31 @@ development milestone that names what changed when — the sections below
 are their record — and ships inside the next version that does get
 tagged. `v0.7.1` is the release that carries those six.
 
+## Unreleased
+
+### Fixed
+
+* **The check that keeps output off the evidence missed most devices.**
+  `refuse_if_evidence` compared an output with the inputs by file and,
+  for a block-device input, by the device the output's parent directory
+  is on. FreeBSD has no block devices — its disks are character devices
+  — so there the second half never fired at all. On either system an
+  output on a second node for an input device (a copy made with `mknod`,
+  a FreeBSD alias), on a partition of an input disk or on the disk under
+  an input partition went through, and so did a file under a mount point
+  given as the output directory of `dump -r` or `zvolfiles extract`,
+  because the parent of the directory was checked rather than the
+  directory. Devices now overlap when one is the other or is built on it
+  — a partition on its disk, a logical volume or md array on its members,
+  read from sysfs on Linux and from GEOM's names under `/dev` on FreeBSD
+  — and an output is judged where its bytes land: a device by itself,
+  an existing file or directory by its own filesystem, a new path by its
+  nearest existing ancestor. Two partitions of one disk do not overlap:
+  an image written to the root filesystem beside the damaged pool's
+  partition touches nothing of the evidence. A GEOM label (`/dev/gpt/…`,
+  `/dev/diskid/…`) is a provider of its own and is not traced to the
+  disk under it.
+
 ## v0.9.11 — 2026-10-29
 
 **The zstd decoder bounded.**
