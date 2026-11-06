@@ -1566,7 +1566,12 @@ jobs:
 
   crosscheck:
     name: Cross-check against OpenZFS userland (ztest + zdb)
-    runs-on: ubuntu-latest
+    # Pinned: the oracle is OpenZFS 2.2's userland, which is what every
+    # release says it was validated against. ubuntu-latest moved on in
+    # November 2026 to a release whose ztest (libzpool.so.7) aborts within
+    # seconds on the draid2 configuration below, before zvolrescue reads
+    # anything — a crash of the oracle, not a disagreement with it.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable

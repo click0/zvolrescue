@@ -55,7 +55,7 @@ run_pool() {
     name=$1; redundancy=$2; shift 2
     dir="$WORK/$name"; mkdir -p "$dir"
     echo "== $name: ztest $* -a ${ASHIFT:-12}"
-    ( cd "$dir" && ztest -f "$dir" -v 1 "$@" -s 96m -a "${ASHIFT:-12}" -d 3 -t 2 -k 0 -T 15 -P 8 > "$dir/ztest.log" 2>&1 ) || { echo "ztest failed:"; tail -5 "$dir/ztest.log"; fail=1; return; }
+    ( cd "$dir" && ztest -f "$dir" -v 1 "$@" -s 96m -a "${ASHIFT:-12}" -d 3 -t 2 -k 0 -T 15 -P 8 > "$dir/ztest.log" 2>&1 ) || { echo "ztest failed:"; grep -m5 -iE 'assert|verify|panic|failed' "$dir/ztest.log"; tail -5 "$dir/ztest.log"; fail=1; return; }
     members=$(ls "$dir"/ztest.*a)
 
     # 1. datasets: name + creation txg, from zdb and from zvolrescue.
