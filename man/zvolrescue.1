@@ -253,6 +253,9 @@ Encryption key of an encrypted dataset:
 .Ql passphrase: Ns Ar file ,
 or
 .Ql prompt .
+A hex or passphrase file is read as
+.Ql zfs load-key
+reads one: its first line, without the newline that ends it.
 .It Fl -resume
 Continue an interrupted extraction of the same dataset and TXG.
 A SIGINT or SIGTERM ends a run at the next block with its state

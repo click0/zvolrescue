@@ -69,10 +69,14 @@ impl KeyMaterial {
     }
 
     /// Parse a `--key` spec: `raw:FILE` (32 bytes), `hex:HEXSTRING` or
-    /// `hex:@FILE`, `passphrase:FILE` (the passphrase is the file's
-    /// content; one trailing newline is dropped). `prompt` is handled by
-    /// the caller with [`KeyMaterial::prompt`], as it needs the dataset's
-    /// key format.
+    /// `hex:@FILE`, `passphrase:FILE`. A hex or passphrase file is read
+    /// the way `zfs load-key` reads `keylocation=file://`: its first line,
+    /// without the newline that ends it and with nothing else taken off
+    /// (libzfs `get_key_material_raw`, `getline` then one `'\n'`). A file
+    /// written on Windows therefore keeps its `'\r'` — so did the key ZFS
+    /// derived from it — and a second line is not part of the key.
+    /// `prompt` is handled by the caller with [`KeyMaterial::prompt`], as
+    /// it needs the dataset's key format.
     pub fn from_spec(spec: &str) -> Result<KeyMaterial, CryptError> {
         let (kind, rest) = spec.split_once(':').ok_or_else(|| {
             CryptError::Spec("expected raw:FILE, hex:HEX|@FILE, passphrase:FILE or prompt".into())
@@ -80,20 +84,15 @@ impl KeyMaterial {
         let read =
             |path: &str| std::fs::read(path).map_err(|e| CryptError::Spec(format!("{path}: {e}")));
         let text = |arg: &str| -> Result<String, CryptError> {
-            let bytes = if let Some(path) = arg.strip_prefix('@') {
-                read(path)?
-            } else {
-                arg.as_bytes().to_vec()
-            };
-            let mut s = String::from_utf8(bytes)
-                .map_err(|_| CryptError::Spec("key text is not UTF-8".into()))?;
-            if s.ends_with('\n') {
-                s.pop();
-                if s.ends_with('\r') {
-                    s.pop();
+            let bytes = match arg.strip_prefix('@') {
+                Some(path) => {
+                    let mut b = read(path)?;
+                    b.truncate(b.iter().position(|&c| c == b'\n').unwrap_or(b.len()));
+                    b
                 }
-            }
-            Ok(s)
+                None => arg.as_bytes().to_vec(),
+            };
+            String::from_utf8(bytes).map_err(|_| CryptError::Spec("key text is not UTF-8".into()))
         };
         match kind {
             "raw" => {
@@ -119,10 +118,11 @@ impl KeyMaterial {
         use std::io::Read;
         let mut stdin = std::io::stdin().lock();
         let fail = |e: std::io::Error| CryptError::Spec(format!("stdin: {e}"));
+        // One line without its newline, as `zfs load-key` reads one.
         let line = |stdin: &mut std::io::StdinLock<'_>| -> Result<String, CryptError> {
             let mut s = String::new();
             std::io::BufRead::read_line(stdin, &mut s).map_err(fail)?;
-            while s.ends_with('\n') || s.ends_with('\r') {
+            if s.ends_with('\n') {
                 s.pop();
             }
             Ok(s)
@@ -712,6 +712,22 @@ mod tests {
         assert!(matches!(
             KeyMaterial::from_spec("hex:abcd").unwrap(),
             KeyMaterial::Hex(h) if h == "abcd"
+        ));
+        // As `zfs load-key` reads the file: the first line, a '\r' kept.
+        std::fs::write(&pw, "secret\r\n").unwrap();
+        assert!(matches!(
+            KeyMaterial::from_spec(&format!("passphrase:{}", pw.display())).unwrap(),
+            KeyMaterial::Passphrase(p) if p == "secret\r"
+        ));
+        std::fs::write(&pw, "secret\nnot part of it\n").unwrap();
+        assert!(matches!(
+            KeyMaterial::from_spec(&format!("passphrase:{}", pw.display())).unwrap(),
+            KeyMaterial::Passphrase(p) if p == "secret"
+        ));
+        std::fs::write(&pw, "no newline").unwrap();
+        assert!(matches!(
+            KeyMaterial::from_spec(&format!("passphrase:{}", pw.display())).unwrap(),
+            KeyMaterial::Passphrase(p) if p == "no newline"
         ));
         assert!(KeyMaterial::from_spec("pem:x").is_err());
         assert!(KeyMaterial::from_spec("nocolon").is_err());

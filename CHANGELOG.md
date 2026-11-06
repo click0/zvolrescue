@@ -70,6 +70,15 @@ tagged. `v0.7.1` is the release that carries those six.
   And a replaced private key is owner-only again: the 0600 mode applied
   only to a file the call created, so a key written into an existing
   0644 file stayed readable by everyone.
+* **A key file ZFS accepts could be called the wrong key.** `zfs
+  load-key` reads a `keylocation=file://` passphrase or hex key as its
+  first line, without the newline that ends it, and takes nothing else
+  off (libzfs `get_key_material_raw`). `--key passphrase:FILE` and
+  `hex:@FILE` took the whole file and dropped a trailing `\r\n`: a key
+  file saved on Windows unlocked the dataset in ZFS — with the `\r` in
+  the key — and was "wrong key" here, and so was any file with a second
+  line. Both read the first line now, as ZFS does; so does `--key
+  prompt`, which also no longer strips a trailing `\r`.
 
 ## v0.9.11 — 2026-10-29
 
