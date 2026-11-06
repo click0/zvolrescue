@@ -1075,10 +1075,26 @@ fn emit_label(
         ));
     }
     let index = opts.emit_label_index.unwrap_or(0);
+    // The label is for a *copy* of the disk, and so is its geometry: a
+    // path among the members, the hints, or a device under them is
+    // refused before either file is written — and so is a FILE that ends
+    // in .json, whose geometry would land on the label just written.
+    let meta = out.with_extension("json");
+    if meta == *out {
+        return Err(format!(
+            "--emit-label {}: the geometry goes to FILE.json beside the label; name the label something else",
+            out.display()
+        ));
+    }
+    let mut inputs = devices.to_vec();
+    inputs.push(file.clone());
+    for path in [out, &meta] {
+        zvolrescue_io::refuse_if_evidence(path, &inputs)
+            .map_err(|e| format!("refusing --emit-label: {e}"))?;
+    }
     let nv = zfs_read::hints::label_nvlist(&hints.layout, top, leaf, txg.unwrap_or(0), None);
     let img = zfs_read::hints::label_image(&nv, index, psize)?;
     std::fs::write(out, &img).map_err(|e| format!("{}: {e}", out.display()))?;
-    let meta = out.with_extension("json");
     let json = json!({
         "label_index": index,
         "label_bytes": img.len(),

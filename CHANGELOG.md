@@ -46,6 +46,13 @@ tagged. `v0.7.1` is the release that carries those six.
   that is a path the command line names — a member, an image, a map, the
   hints, a key file, an existing `-o` — or that lives on one of the input
   devices, and a debug log that is the evidence log (exit 1).
+* **`scan --emit-label` wrote wherever it was pointed.** Its help says
+  nothing is ever written to the evidence, and nothing checked: a member
+  given as the label's path got 256 KiB of label over its start, the
+  hints file got replaced, and a label named `*.json` was overwritten at
+  once by its own geometry file. Both files are checked against the
+  members and the hints before either is written, and a `.json` name is
+  refused (exit 1).
 
 ## v0.9.11 — 2026-10-29
 

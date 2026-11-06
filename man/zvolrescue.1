@@ -175,8 +175,15 @@ position, to place on a
 of the disk.
 The geometry goes to
 .Ar file Ns .json
-beside it.
-Nothing is ever written to the evidence.
+beside it, so a
+.Ar file
+ending in
+.Ql .json
+is refused.
+Nothing is ever written to the evidence: a
+.Ar file
+that is a member, the hints file, or on a device among the members is
+refused before either file is written.
 .It Fl -emit-for Ar top : Ns Ar leaf
 Which member of the layout the emitted label belongs to; default
 .Ql 0:0 .

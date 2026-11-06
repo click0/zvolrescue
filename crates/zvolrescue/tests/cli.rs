@@ -124,6 +124,68 @@ fn a_log_is_never_written_over_a_member() {
     assert!(std::fs::metadata(&log).unwrap().len() > 0);
 }
 
+/// `--emit-label` writes a label and its geometry for a *copy* of a
+/// member; neither may land on a member or on the layout it was made
+/// from, and a label called `*.json` would be overwritten by its own
+/// geometry, so that name is refused too.
+#[test]
+fn emit_label_is_never_written_over_the_evidence() {
+    let dir = scratch("emit-label");
+    let paths = write_members(&dir, &plain_members());
+    // Not `*.json`, so that what refuses it is the evidence check.
+    let hints = dir.join("layout.hints");
+    std::fs::write(
+        &hints,
+        serde_json::json!({"name": "tank", "ashift": 12,
+            "tops": [{"kind": "mirror", "members": [&paths[0], &paths[1]]}]})
+        .to_string(),
+    )
+    .unwrap();
+    let hints = hints.to_string_lossy().into_owned();
+    let before = std::fs::read(&paths[0]).unwrap();
+    for target in [paths[0].clone(), hints.clone()] {
+        let (code, _, err) = run(&[
+            "-q",
+            "scan",
+            &paths[0],
+            &paths[1],
+            "--hints",
+            &hints,
+            "--emit-label",
+            &target,
+        ]);
+        assert_eq!(code, 1, "{target}: {err}");
+        assert!(err.contains("refusing --emit-label"), "{err}");
+    }
+    assert_eq!(std::fs::read(&paths[0]).unwrap(), before);
+    let json_name = dir.join("label.json").to_string_lossy().into_owned();
+    let (code, _, err) = run(&[
+        "-q",
+        "scan",
+        &paths[0],
+        &paths[1],
+        "--hints",
+        &hints,
+        "--emit-label",
+        &json_name,
+    ]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("name the label something else"), "{err}");
+    let label = dir.join("L0.bin").to_string_lossy().into_owned();
+    let (code, _, err) = run(&[
+        "-q",
+        "scan",
+        &paths[0],
+        &paths[1],
+        "--hints",
+        &hints,
+        "--emit-label",
+        &label,
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(dir.join("L0.bin").exists() && dir.join("L0.json").exists());
+}
+
 #[test]
 fn scan_tells_a_removed_vdev_from_a_missing_one() {
     let dir = scratch("scan-removed");
