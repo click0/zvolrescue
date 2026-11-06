@@ -185,6 +185,54 @@ fn is_broken_pipe_panic(message: &str) -> bool {
 }
 
 #[cfg(test)]
+mod command_line_paths_tests {
+    use super::paths_on_command_line;
+    use std::path::PathBuf;
+
+    fn paths(args: &[&str]) -> Vec<PathBuf> {
+        paths_on_command_line(args.iter().map(|a| a.into()))
+    }
+
+    #[test]
+    fn every_word_that_may_be_a_file_is_named_and_the_logs_are_not() {
+        let got = paths(&[
+            "--debug-log",
+            "trace.txt",
+            "--evidence-log=case.jsonl",
+            "-q",
+            "dump",
+            "tank/vm",
+            "/dev/ada0p3",
+            "--image=disk.img",
+            "--map",
+            "disk.img=disk.map",
+            "--key",
+            "passphrase:pw.txt",
+            "hex:@hex.txt",
+            "-o",
+            "out.img",
+        ]);
+        for want in [
+            "tank/vm",
+            "/dev/ada0p3",
+            "disk.img",
+            "disk.map",
+            "pw.txt",
+            "hex.txt",
+            "out.img",
+        ] {
+            assert!(
+                got.contains(&PathBuf::from(want)),
+                "{want} missing: {got:?}"
+            );
+        }
+        for not in ["trace.txt", "case.jsonl", "-q", "--map", "-o"] {
+            assert!(!got.contains(&PathBuf::from(not)), "{not} named: {got:?}");
+        }
+    }
+}
+
+#[cfg(test)]
 mod broken_pipe_tests {
     use super::is_broken_pipe_panic;
 
@@ -236,12 +284,51 @@ mod broken_pipe_tests {
 }
 
 impl Global {
-    /// Turn on the read trace when `--debug`/`--debug-log` asked for it.
+    /// Refuse a `--debug-log` or `--evidence-log` that would write over
+    /// something this run reads, before anything is opened.
+    ///
+    /// `-o` has been checked against the inputs since the first release
+    /// (`refuse_if_evidence`); the two logs were not, and they are opened
+    /// first: `--debug-log disk.img scan disk.img` truncated the image to
+    /// the size of a trace line, `--evidence-log disk.img` appended JSON
+    /// to it and exited 0. A log may not be any path the command line
+    /// names — members, images, maps, hints, key files, an `-o` that
+    /// exists — nor live on a device among them, nor be the other log.
+    pub fn refuse_logs_over_inputs(&self, tool: &str) -> Result<(), u8> {
+        let named = paths_on_command_line(std::env::args_os().skip(1));
+        for (flag, log) in [
+            ("--debug-log", &self.debug_log),
+            ("--evidence-log", &self.evidence_log),
+        ] {
+            let Some(log) = log else { continue };
+            if let Err(e) = zvolrescue_io::refuse_if_evidence(log, &named) {
+                eprintln!("{tool}: refusing {flag} {}: {e}", log.display());
+                return Err(exit::USAGE);
+            }
+        }
+        if let (Some(d), Some(e)) = (&self.debug_log, &self.evidence_log) {
+            // Neither may exist yet, so the paths are compared as well as
+            // the files.
+            let same_path = resolved(d).is_some() && resolved(d) == resolved(e);
+            if same_path || zvolrescue_io::refuse_if_evidence(d, std::slice::from_ref(e)).is_err() {
+                eprintln!(
+                    "{tool}: refusing --debug-log {}: it is the evidence log, which the trace would overwrite",
+                    d.display()
+                );
+                return Err(exit::USAGE);
+            }
+        }
+        Ok(())
+    }
+
+    /// Turn on the read trace when `--debug`/`--debug-log` asked for it,
+    /// after [`refuse_logs_over_inputs`](Self::refuse_logs_over_inputs).
     ///
     /// Returns the exit code to use when the log file cannot be created,
     /// so a caller can `return` it: a run that was asked to record what
     /// it did must not silently do it without recording.
     pub fn enable_tracing(&self, tool: &str) -> Result<(), u8> {
+        self.refuse_logs_over_inputs(tool)?;
         if !self.debug && self.debug_log.is_none() {
             return Ok(());
         }
@@ -302,6 +389,64 @@ impl Global {
         }
         status
     }
+}
+
+/// `path` with its directory resolved, so that two spellings of a file
+/// that does not exist yet compare equal.
+fn resolved(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?;
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    Some(std::fs::canonicalize(dir).ok()?.join(name))
+}
+
+/// Every path a command line names, for [`Global::refuse_logs_over_inputs`].
+///
+/// Deliberately generous: any word that is not an option, the value of a
+/// `--long=VALUE`, both sides of a `MEMBER=MAPFILE` and what follows the
+/// format of a key spec (`raw:FILE`, `passphrase:FILE`, `hex:@FILE`). A
+/// word that names nothing on disk costs a failed `stat` and nothing
+/// else; one left out is a file a log could be written over. The logs'
+/// own values are left out, or every log would name itself.
+pub fn paths_on_command_line<I>(args: I) -> Vec<PathBuf>
+where
+    I: IntoIterator<Item = std::ffi::OsString>,
+{
+    const LOGS: [&str; 2] = ["--debug-log", "--evidence-log"];
+    let mut out = Vec::new();
+    let mut skip_next = false;
+    for arg in args {
+        if std::mem::take(&mut skip_next) {
+            continue;
+        }
+        let s = arg.to_string_lossy();
+        if LOGS.contains(&s.as_ref()) {
+            skip_next = true;
+            continue;
+        }
+        if let Some(long) = s.strip_prefix("--") {
+            if let Some((name, value)) = long.split_once('=') {
+                if !LOGS.contains(&format!("--{name}").as_str()) {
+                    out.push(PathBuf::from(value));
+                }
+            }
+            continue;
+        }
+        if s.len() > 1 && s.starts_with('-') {
+            continue;
+        }
+        out.push(PathBuf::from(&arg));
+        if let Some((a, b)) = s.split_once('=') {
+            out.push(PathBuf::from(a));
+            out.push(PathBuf::from(b));
+        }
+        if let Some((_, rest)) = s.split_once(':') {
+            out.push(PathBuf::from(rest.strip_prefix('@').unwrap_or(rest)));
+        }
+    }
+    out
 }
 
 /// Quote one argument for a POSIX shell.

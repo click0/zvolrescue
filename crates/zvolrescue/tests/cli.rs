@@ -88,6 +88,42 @@ fn json(stdout: &str) -> serde_json::Value {
     serde_json::from_str(stdout).unwrap_or_else(|e| panic!("not JSON ({e}): {stdout}"))
 }
 
+/// Neither log may be written over a member: `--debug-log` truncated
+/// it before the run began, `--evidence-log` appended JSON to it and
+/// exited 0. Both are refused now, with the member untouched, and a log
+/// beside the members is still fine.
+#[test]
+fn a_log_is_never_written_over_a_member() {
+    let dir = scratch("log-over-member");
+    let paths = write_members(&dir, &plain_members());
+    let before = std::fs::read(&paths[0]).unwrap();
+    for flag in ["--debug-log", "--evidence-log"] {
+        let (code, _, err) = run(&[flag, &paths[0], "-q", "scan", &paths[0], &paths[1]]);
+        assert_eq!(code, 1, "{flag}: {err}");
+        assert!(err.contains(&format!("refusing {flag}")), "{flag}: {err}");
+        assert_eq!(
+            std::fs::read(&paths[0]).unwrap(),
+            before,
+            "{flag} wrote the member"
+        );
+    }
+    let both = dir.join("both.log").to_string_lossy().into_owned();
+    let (code, _, err) = run(&[
+        "--debug-log",
+        &both,
+        "--evidence-log",
+        &both,
+        "-q",
+        "scan",
+        &paths[0],
+    ]);
+    assert_eq!(code, 1, "{err}");
+    let log = dir.join("case.jsonl").to_string_lossy().into_owned();
+    let (code, _, err) = run(&["--evidence-log", &log, "-q", "scan", &paths[0], &paths[1]]);
+    assert_eq!(code, 0, "{err}");
+    assert!(std::fs::metadata(&log).unwrap().len() > 0);
+}
+
 #[test]
 fn scan_tells_a_removed_vdev_from_a_missing_one() {
     let dir = scratch("scan-removed");

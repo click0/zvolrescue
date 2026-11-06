@@ -37,6 +37,15 @@ tagged. `v0.7.1` is the release that carries those six.
   partition touches nothing of the evidence. A GEOM label (`/dev/gpt/…`,
   `/dev/diskid/…`) is a provider of its own and is not traced to the
   disk under it.
+* **`--debug-log` and `--evidence-log` could be written over the
+  evidence.** `-o` has been checked against the inputs from the start;
+  the two logs never were, and they are opened before anything else:
+  `--debug-log disk.img scan disk.img` truncated the image to one trace
+  line, `--evidence-log disk.img scan disk.img` appended a JSON record to
+  it and exited 0. Every tool now refuses, before opening either, a log
+  that is a path the command line names — a member, an image, a map, the
+  hints, a key file, an existing `-o` — or that lives on one of the input
+  devices, and a debug log that is the evidence log (exit 1).
 
 ## v0.9.11 — 2026-10-29
 

@@ -149,6 +149,9 @@ enum Cmd {
 fn main() -> ExitCode {
     zvol_common::quiet_broken_pipe();
     let cli = Cli::parse();
+    if let Err(code) = cli.global.refuse_logs_over_inputs("zvolrescue") {
+        return ExitCode::from(code);
+    }
     if cli.global.debug || cli.global.debug_log.is_some() {
         let file = match &cli.global.debug_log {
             Some(p) => match std::fs::File::create(p) {
