@@ -91,6 +91,11 @@ enum Command {
         /// Write the public key here instead of at `KEY.pub`.
         #[arg(long, value_name = "KEY.pub")]
         public: Option<PathBuf>,
+        /// Replace a key pair that is already there. Without it an
+        /// existing file is refused: a private key written over is gone,
+        /// and so is the ability to sign as that examiner again.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -139,18 +144,38 @@ fn main() -> ExitCode {
                 signature,
             },
         ),
-        Command::Keygen { output, public } => keygen(&cli.global, &output, public),
+        Command::Keygen {
+            output,
+            public,
+            force,
+        } => keygen(&cli.global, &output, public, force),
     };
     ExitCode::from(code)
 }
 
 /// Write a key pair, and say where it went.
-fn keygen(g: &Global, private: &std::path::Path, public: Option<PathBuf>) -> u8 {
+fn keygen(g: &Global, private: &std::path::Path, public: Option<PathBuf>, force: bool) -> u8 {
     let public = public.unwrap_or_else(|| {
         let mut p = private.as_os_str().to_os_string();
         p.push(".pub");
         PathBuf::from(p)
     });
+    if zvol_common::same_file(private, &public) {
+        eprintln!(
+            "zvolreport: --public {} is the private key's own path",
+            public.display()
+        );
+        return exit::USAGE;
+    }
+    if !force {
+        if let Some(there) = [private, public.as_path()].into_iter().find(|p| p.exists()) {
+            eprintln!(
+                "zvolreport: {} already exists; --force replaces the key pair",
+                there.display()
+            );
+            return exit::USAGE;
+        }
+    }
     match sign::keygen(private, &public) {
         Err(e) => {
             eprintln!("zvolreport: {e}");

@@ -18,6 +18,7 @@ use std::sync::{Arc, OnceLock};
 
 use clap::{Args, ValueEnum};
 use zvolrescue_io::medium::{Incident, Ledger};
+pub use zvolrescue_io::refuse_if_evidence;
 use zvolrescue_io::{ddrescue, FileSource};
 
 /// Exit codes from SPEC §7.
@@ -309,8 +310,7 @@ impl Global {
         if let (Some(d), Some(e)) = (&self.debug_log, &self.evidence_log) {
             // Neither may exist yet, so the paths are compared as well as
             // the files.
-            let same_path = resolved(d).is_some() && resolved(d) == resolved(e);
-            if same_path || zvolrescue_io::refuse_if_evidence(d, std::slice::from_ref(e)).is_err() {
+            if same_file(d, e) {
                 eprintln!(
                     "{tool}: refusing --debug-log {}: it is the evidence log, which the trace would overwrite",
                     d.display()
@@ -389,6 +389,17 @@ impl Global {
         }
         status
     }
+}
+
+/// Whether `a` and `b` are one file: the same inode when both exist, the
+/// same path once their directories are resolved when either does not
+/// yet — two outputs a run is about to create can collide too.
+pub fn same_file(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    if let (Ok(x), Ok(y)) = (std::fs::metadata(a), std::fs::metadata(b)) {
+        return x.dev() == y.dev() && x.ino() == y.ino();
+    }
+    resolved(a).is_some() && resolved(a) == resolved(b)
 }
 
 /// `path` with its directory resolved, so that two spellings of a file

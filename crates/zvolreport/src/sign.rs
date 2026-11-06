@@ -234,13 +234,19 @@ pub fn keygen(private: &Path, public: &Path) -> Result<VerifyingKey, String> {
 #[cfg(unix)]
 fn write_private(path: &Path, pem: &str) -> Result<(), String> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .mode(0o600)
         .open(path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    // `mode` applies to a file this call creates. One that was there —
+    // replaced with `keygen --force` — keeps the bits it had, and a key
+    // written into a 0644 file is readable by everyone: set them here,
+    // before a byte of the key goes in.
+    f.set_permissions(std::fs::Permissions::from_mode(0o600))
         .map_err(|e| format!("{}: {e}", path.display()))?;
     f.write_all(pem.as_bytes())
         .map_err(|e| format!("{}: {e}", path.display()))
@@ -388,6 +394,23 @@ mod tests {
             let mode = std::fs::metadata(&priv_path).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A key written over a file that was there — `keygen --force` —
+    /// is owner-only too: the creation mode alone left a 0644 file 0644.
+    #[cfg(unix)]
+    #[test]
+    fn a_replaced_private_key_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("zvolreport-regen-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let priv_path = dir.join("k");
+        std::fs::write(&priv_path, "old").unwrap();
+        std::fs::set_permissions(&priv_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        keygen(&priv_path, &dir.join("k.pub")).unwrap();
+        let mode = std::fs::metadata(&priv_path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -328,6 +328,40 @@ pub fn assemble(records: &[(LogRef, Vec<Record>)], opts: &Options) -> Report {
 
 /// Run `build`.
 pub fn run(g: &Global, opts: &Options) -> u8 {
+    // Nothing a build writes may be a log it reads or the key it signs
+    // with — `build case.jsonl -o case.jsonl` replaced the evidence log
+    // with the report about it — nor another file it writes.
+    let signature = opts.sign.as_ref().map(|_| {
+        opts.signature
+            .clone()
+            .unwrap_or_else(|| crate::sign::beside(&opts.output))
+    });
+    let mut reads = opts.logs.clone();
+    reads.extend(opts.sign.iter().cloned());
+    let writes: Vec<(&str, &std::path::Path)> = [
+        ("-o", Some(opts.output.as_path())),
+        ("--md", opts.md.as_deref()),
+        ("--signature", signature.as_deref()),
+    ]
+    .into_iter()
+    .filter_map(|(flag, p)| p.map(|p| (flag, p)))
+    .collect();
+    for (i, (flag, path)) in writes.iter().enumerate() {
+        if let Err(e) = zvol_common::refuse_if_evidence(path, &reads) {
+            eprintln!("zvolreport: refusing {flag} {}: {e}", path.display());
+            return exit::USAGE;
+        }
+        if let Some((other, _)) = writes[..i]
+            .iter()
+            .find(|(_, o)| zvol_common::same_file(path, o))
+        {
+            eprintln!(
+                "zvolreport: {flag} {} is also where {other} goes",
+                path.display()
+            );
+            return exit::USAGE;
+        }
+    }
     let mut logs = Vec::new();
     for path in &opts.logs {
         let records = match read_log(path) {
@@ -668,5 +702,41 @@ mod tests {
             r.warnings
         );
         assert_eq!(r.tools.len(), 2);
+    }
+
+    /// A build may not write over a log it reads, nor two of its own
+    /// files over each other; nothing is written when it refuses.
+    #[test]
+    fn a_report_is_never_written_over_its_own_inputs() {
+        let dir = std::env::temp_dir().join(format!("zvolreport-over-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("case.jsonl");
+        std::fs::write(&log, "").unwrap();
+        let g = Global {
+            format: zvol_common::Format::Text,
+            verbose: 0,
+            quiet: true,
+            evidence_log: None,
+            hash_inputs: false,
+            no_color: false,
+            debug: false,
+            debug_log: None,
+        };
+        let over_log = Options {
+            logs: vec![log.clone()],
+            output: log.clone(),
+            ..opts()
+        };
+        assert_eq!(run(&g, &over_log), exit::USAGE);
+        assert_eq!(std::fs::read(&log).unwrap(), b"");
+        let md_over_json = Options {
+            logs: vec![log.clone()],
+            output: dir.join("r.json"),
+            md: Some(dir.join("r.json")),
+            ..opts()
+        };
+        assert_eq!(run(&g, &md_over_json), exit::USAGE);
+        assert!(!dir.join("r.json").exists());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

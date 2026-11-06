@@ -23,6 +23,7 @@
 .Cm keygen
 .Fl o Ar key
 .Op Fl -public Ar key.pub
+.Op Fl -force
 .Sh DESCRIPTION
 .Nm
 consolidates the JSON Lines evidence logs that
@@ -66,6 +67,8 @@ Consolidate evidence logs into one report.
 .Bl -tag -width Ds
 .It Fl o , Fl -output Ar report.json
 Write the report here.
+Neither it, the Markdown nor the signature may be one of the logs, the
+signing key, or each other.
 .It Fl -md Ar report.md
 Also render the report as Markdown.
 .It Fl -case Ar id
@@ -106,14 +109,22 @@ Read the signature here instead of next to the report.
 .Nm Cm keygen
 .Fl o Ar key
 .Op Fl -public Ar key.pub
+.Op Fl -force
 .Pp
 Write a new Ed25519 key pair to sign reports with.
+The private key is written owner-only (mode 0600).
 .Bl -tag -width Ds
 .It Fl o , Fl -output Ar key
 Write the private key here, and the public key at
 .Ar key Ns .pub .
 .It Fl -public Ar key.pub
 Write the public key here instead.
+.It Fl -force
+Replace a key pair that is already there; without it an existing
+.Ar key
+or
+.Ar key.pub
+is refused.
 .El
 .Sh EXIT STATUS
 0 when the report was built, or when everything it names still
