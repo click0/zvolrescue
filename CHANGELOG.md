@@ -53,6 +53,13 @@ tagged. `v0.7.1` is the release that carries those six.
   once by its own geometry file. Both files are checked against the
   members and the hints before either is written, and a `.json` name is
   refused (exit 1).
+* **`dump -r` could write two volumes to one file.** An image is named
+  after its volume with `/` as `_`, so `tank/vm/web_1` and
+  `tank/vm_web/1` were both `tank_vm_web_1.img`, and the second
+  extraction truncated the first one's image while the manifest listed
+  both. Names that come out alike now both carry the dataset's GUID
+  (`tank_vm_web_1.000000000000000a.img`); every other name stays as it
+  was.
 
 ## v0.9.11 — 2026-10-29
 

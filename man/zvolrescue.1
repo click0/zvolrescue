@@ -267,6 +267,14 @@ into the directory
 .Ar out ,
 one image per volume plus
 .Pa manifest.json .
+An image is named after its volume with
+.Ql /
+as
+.Ql _
+and
+.Ql .img
+added; volumes whose names come out the same that way also carry their
+GUID, so that no image is written over another.
 .It Fl -hash Ar list
 Also hash the image with these, as it is written, for a toolchain
 that wants them:

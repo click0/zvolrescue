@@ -596,6 +596,39 @@ fn finish(
 }
 
 /// Run `dump`.
+/// The file each volume of a `-r` run goes to: its name with `/` as `_`
+/// and `.img` after it.
+///
+/// Two names can come out the same — `tank/vm/web_1` and `tank/vm_web/1`
+/// are both `tank_vm_web_1.img` — and the second extraction used to
+/// truncate the first one's image. Every name of such a group gets its
+/// dataset GUID as well, which keeps the plain names everyone else has
+/// and makes the same pool give the same files whatever order its
+/// datasets are walked in; a name that still repeats after that (a
+/// dataset named like another's GUID-suffixed file) gets a counter.
+fn image_file_names(datasets: &[(&str, u64)]) -> Vec<String> {
+    let flat: Vec<String> = datasets.iter().map(|(n, _)| n.replace('/', "_")).collect();
+    let mut used = std::collections::BTreeSet::new();
+    datasets
+        .iter()
+        .zip(&flat)
+        .map(|((_, guid), f)| {
+            let base = if flat.iter().filter(|g| *g == f).count() > 1 {
+                format!("{f}.{guid:016x}")
+            } else {
+                f.clone()
+            };
+            let mut name = format!("{base}.img");
+            let mut n = 2;
+            while !used.insert(name.clone()) {
+                name = format!("{base}.{n}.img");
+                n += 1;
+            }
+            name
+        })
+        .collect()
+}
+
 pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     // From here a SIGINT sets the flag the extraction looks at between
     // blocks; before the first block it is the default action still.
@@ -668,16 +701,21 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             return zvol_common::end_early(g, "zvolrescue", spec, exit::USAGE);
         }
         let prefix = format!("{}/", opts.dataset);
-        tree.datasets
+        let chosen: Vec<&Dataset> = tree
+            .datasets
             .iter()
             .filter(|d| !d.snapshot && (d.name == opts.dataset || d.name.starts_with(&prefix)))
-            .map(|d| {
-                (
-                    d,
-                    opts.output
-                        .join(format!("{}.img", d.name.replace('/', "_"))),
-                )
-            })
+            .collect();
+        let names = image_file_names(
+            &chosen
+                .iter()
+                .map(|d| (d.name.as_str(), d.guid))
+                .collect::<Vec<_>>(),
+        );
+        chosen
+            .into_iter()
+            .zip(names)
+            .map(|(d, name)| (d, opts.output.join(name)))
             .collect()
     } else {
         vec![(
@@ -813,4 +851,33 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         }
     }
     finish(g, &members, &json, code, written)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::image_file_names;
+
+    #[test]
+    fn every_volume_of_a_recursive_dump_gets_a_file_of_its_own() {
+        // The names everyone has stay what they were.
+        assert_eq!(
+            image_file_names(&[("tank/vm/a", 1), ("tank/vm/b", 2)]),
+            ["tank_vm_a.img", "tank_vm_b.img"]
+        );
+        // Two that flatten alike both carry their GUID, whichever comes first.
+        let one = image_file_names(&[("tank/vm/web_1", 0xa), ("tank/vm_web/1", 0xb)]);
+        let other = image_file_names(&[("tank/vm_web/1", 0xb), ("tank/vm/web_1", 0xa)]);
+        assert_eq!(
+            one,
+            [
+                "tank_vm_web_1.000000000000000a.img",
+                "tank_vm_web_1.000000000000000b.img"
+            ]
+        );
+        assert_eq!(other, [one[1].clone(), one[0].clone()]);
+        // A name built to look like another's suffixed file still gets its own.
+        let odd = image_file_names(&[("t/a_b", 1), ("t_a/b", 2), ("t/a_b.0000000000000001", 3)]);
+        let unique: std::collections::BTreeSet<_> = odd.iter().collect();
+        assert_eq!(unique.len(), 3, "{odd:?}");
+    }
 }
