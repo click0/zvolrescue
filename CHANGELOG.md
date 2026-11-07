@@ -271,6 +271,12 @@ tagged. `v0.7.1` is the release that carries those six.
   map line whose position and size ran past `u64` wrapped: its range
   merged with one at the start of the disk, whose sectors were then not
   refused. Such a line is now an error in the map.
+* **`zvolfiles list --path FILE` and `mkfixture --help`.** A path that
+  names a file was walked as a directory — "object is not a ZAP", the
+  file's metadata as `?`, exit 4 — and now lists that file, as `extract
+  --path` takes it. The `mkfixture` example took `--help` for the
+  directory to write into and left `./--help/member*.img` behind; it
+  prints its usage, and refuses any other word that starts with `-`.
 * **`zvolreport` wrote over its own inputs and over keys.** `build
   case.jsonl -o case.jsonl` replaced the evidence log with the report
   about it and exited 0, and `--md` or the signature could land on the

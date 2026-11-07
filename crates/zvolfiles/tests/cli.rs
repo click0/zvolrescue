@@ -181,3 +181,36 @@ fn extract_puts_back_times_and_keeps_holes() {
     assert_eq!(code, 1, "{err}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// `list --path` naming a file lists that file, as `extract --path`
+/// takes it; it was walked as a directory, "object is not a ZAP", exit 4.
+#[test]
+fn list_of_a_file_is_that_file() {
+    let dir = scratch("list-file");
+    let m = members(&dir, ["member0.img", "member1.img"]);
+    let out = Command::new(env!("CARGO_BIN_EXE_zvolfiles"))
+        .args([
+            "-q",
+            "-f",
+            "json",
+            "list",
+            "tank/fs",
+            &m[0],
+            &m[1],
+            "--path",
+            "hello.txt",
+        ])
+        .output()
+        .expect("run");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let files = v["files"].as_array().unwrap();
+    assert_eq!(files.len(), 1, "{v}");
+    assert_eq!(files[0]["path"], "hello.txt");
+    std::fs::remove_dir_all(&dir).unwrap();
+}

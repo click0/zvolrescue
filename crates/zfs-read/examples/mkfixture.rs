@@ -32,12 +32,25 @@ use zfs_read::fixture::{
     removed_vdev_members, two_top_mirror_members, zpl_members, Dense, Pool,
 };
 
+const USAGE: &str = "usage: mkfixture DIR [mirror|mirror3|raidz2|striped|bench|bench-raidz2] [ashift] [carved|zpl|removed|dedup] [feature]";
+
 fn main() {
     let mut args = std::env::args().skip(1);
-    let dir = PathBuf::from(
-        args.next()
-            .expect("usage: mkfixture DIR [mirror|raidz2] [ashift]"),
-    );
+    // `--help` is not a directory to write images into: it was taken as
+    // one, and `mkfixture --help` left ./--help/member*.img behind.
+    let Some(first) = args.next() else {
+        eprintln!("{USAGE}");
+        std::process::exit(1);
+    };
+    if first == "-h" || first == "--help" {
+        println!("{USAGE}");
+        return;
+    }
+    if first.starts_with('-') {
+        eprintln!("mkfixture: {first}: not a directory to write into\n{USAGE}");
+        std::process::exit(1);
+    }
+    let dir = PathBuf::from(first);
     let kind = args.next().unwrap_or_else(|| "mirror".into());
     let ashift: u32 = args
         .next()

@@ -1,7 +1,7 @@
 //! `zvolfiles list` — what is in the dataset.
 
 use serde::Serialize;
-use zfs_ondisk::zpl::Znode;
+use zfs_ondisk::zpl::{FileType, Znode};
 use zfs_read::zpl::{walk_from, Entry};
 use zvol_common::timefmt::iso8601;
 use zvol_common::{exit, Format, Global, PoolSpec};
@@ -102,7 +102,22 @@ pub fn run(
             .collect::<Vec<_>>()
             .join(&b'/');
         let prefix = String::from_utf8_lossy(&raw_prefix).into_owned();
-        let entries = walk_from(fs, from, &prefix, &raw_prefix, recursive);
+        // A path that names a file is that one entry, as `extract` takes
+        // it: walking it as a directory said "object is not a ZAP", with
+        // the file's metadata as `?`, and exit 4.
+        let z = fs.znode(from).ok();
+        let entries =
+            if path.is_some() && z.as_ref().is_some_and(|z| z.file_type() != FileType::Dir) {
+                vec![Entry {
+                    path: prefix.clone(),
+                    raw_path: raw_prefix.clone(),
+                    object: from,
+                    znode: z,
+                    error: None,
+                }]
+            } else {
+                walk_from(fs, from, &prefix, &raw_prefix, recursive)
+            };
         let files: Vec<FileOut> = entries
             .iter()
             .map(|e| {
