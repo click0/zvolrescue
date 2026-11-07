@@ -20,7 +20,7 @@ use zfs_ondisk::Endian;
 use zfs_read::carve::{scan_member, Codec, Options as ScanOptions, RootHit};
 use zfs_read::zio::PoolReader;
 use zvol_common::members::{choose_pool, open_members};
-use zvol_common::{exit, Format, Global, PoolSpec};
+use zvol_common::{exit, Format, Global, PoolSpec, WriteGuard};
 
 /// Name of the file a run writes into the workspace.
 pub const ROOTS: &str = "roots.json";
@@ -160,9 +160,16 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         None => None,
     };
 
-    if let Err(e) = zvolrescue_io::refuse_if_evidence(&opts.output, &members.paths) {
-        eprintln!("zvolcarve: {e}");
-        return exit::REFUSED;
+    let mut reads = spec.reads();
+    reads.extend(members.paths.iter().cloned());
+    let guard = WriteGuard::new(g, &reads);
+    for (what, path) in [
+        ("-o", opts.output.clone()),
+        ("to write", opts.output.join(ROOTS)),
+    ] {
+        if let Err(code) = guard.refuse("zvolcarve", what, &path) {
+            return code;
+        }
     }
     if let Err(e) = std::fs::create_dir_all(&opts.output) {
         eprintln!("zvolcarve: {}: {e}", opts.output.display());

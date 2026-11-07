@@ -14,7 +14,7 @@ use zfs_read::dmu::ObjectReader;
 use zfs_read::zio::PoolReader;
 use zvol_common::evidence::FileRef;
 use zvol_common::members::{choose_pool, open_members};
-use zvol_common::{exit, Format, Global, PoolSpec};
+use zvol_common::{exit, Format, Global, PoolSpec, WriteGuard};
 use zvolrescue_io::BlockSource;
 
 use crate::model::{
@@ -287,9 +287,20 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     // The workspace must never be the evidence — asked before anything
     // is created, so a workspace named after a member is refused rather
     // than failing later on some unrelated error.
-    if let Err(e) = zvolrescue_io::refuse_if_evidence(&opts.output, &members.paths) {
-        eprintln!("zvolcarve: {e}");
-        return exit::REFUSED;
+    // ... and neither may anything written inside it: a member lying in
+    // the workspace as `candidates.json` was replaced by the index.
+    let mut reads = spec.reads();
+    reads.extend(members.paths.iter().cloned());
+    reads.extend(opts.profile.profile.iter().cloned());
+    let guard = WriteGuard::new(g, &reads);
+    for (what, path) in [
+        ("-o", opts.output.clone()),
+        ("to write", opts.output.join(INDEX)),
+        ("to write", opts.output.join(STATE)),
+    ] {
+        if let Err(code) = guard.refuse("zvolcarve", what, &path) {
+            return code;
+        }
     }
     if let Err(e) = std::fs::create_dir_all(&opts.output) {
         eprintln!("zvolcarve: {}: {e}", opts.output.display());

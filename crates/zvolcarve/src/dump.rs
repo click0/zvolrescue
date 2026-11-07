@@ -17,8 +17,7 @@ use zfs_read::zio::PoolReader;
 use zfs_read::zvol::{extract_from, OnError};
 use zvol_common::evidence::FileRef;
 use zvol_common::members::{choose_pool, open_members};
-use zvol_common::{exit, resume, Format, Global, PoolSpec};
-use zvolrescue_io::refuse_if_evidence;
+use zvol_common::{exit, resume, Format, Global, PoolSpec, WriteGuard};
 
 use crate::model::{from_hex, load_index};
 
@@ -75,9 +74,20 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         Ok(m) => m,
         Err(code) => return zvol_common::end_early(g, "zvolcarve", spec, code),
     };
-    if let Err(e) = refuse_if_evidence(&opts.output, &members.paths) {
-        eprintln!("zvolcarve: {e}");
-        return zvol_common::end_early(g, "zvolcarve", spec, exit::REFUSED);
+    // The image and its state go nowhere the run reads: the members,
+    // the maps and hints, and the scan's own index this candidate came
+    // from.
+    let mut reads = spec.reads();
+    reads.extend(members.paths.iter().cloned());
+    reads.push(opts.dir.join(crate::model::INDEX));
+    let guard = WriteGuard::new(g, &reads);
+    for (what, path) in [
+        ("-o", opts.output.clone()),
+        ("to write", resume::path(&opts.output)),
+    ] {
+        if let Err(code) = guard.refuse("zvolcarve", what, &path) {
+            return zvol_common::end_early(g, "zvolcarve", spec, code);
+        }
     }
     let pool = match choose_pool(members.pools.clone(), spec.pool_guid.as_deref()) {
         Ok(p) => p,

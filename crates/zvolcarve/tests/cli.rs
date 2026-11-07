@@ -48,6 +48,63 @@ fn json(stdout: &str) -> serde_json::Value {
     serde_json::from_str(stdout).unwrap_or_else(|e| panic!("not JSON ({e}): {stdout}"))
 }
 
+/// Nothing a carve writes lands on what it reads: a member lying in the
+/// workspace as `candidates.json` was replaced by the index, and
+/// `dump -o` naming the index replaced the index with the image.
+#[test]
+fn a_carve_writes_nothing_over_what_it_reads() {
+    let dir = scratch("over-inputs");
+    let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1)]);
+    let carve = dir.join("carve");
+    std::fs::create_dir_all(&carve).unwrap();
+    let names = [carve.join("candidates.json"), dir.join("member1.img")];
+    let members: Vec<String> = carved_zvol_members(&mut pool, SIZE)
+        .iter()
+        .zip(&names)
+        .map(|(m, p)| {
+            std::fs::write(p, m).expect("write member");
+            p.to_string_lossy().into_owned()
+        })
+        .collect();
+    let before = std::fs::read(&members[0]).unwrap();
+    let carve_s = carve.to_string_lossy().into_owned();
+    let (code, _, err) = run(&["-q", "scan", &members[0], &members[1], "-o", &carve_s]);
+    assert_eq!(code, 5, "{err}");
+    assert_eq!(
+        std::fs::read(&members[0]).unwrap(),
+        before,
+        "the member was written"
+    );
+
+    // A proper workspace, then a dump told to write over its index.
+    let ws = dir.join("ws").to_string_lossy().into_owned();
+    let (code, _, err) = run(&["-q", "scan", &members[0], &members[1], "-o", &ws]);
+    assert_eq!(code, 0, "{err}");
+    let index_path = dir.join("ws/candidates.json");
+    let index = std::fs::read(&index_path).unwrap();
+    let id = serde_json::from_slice::<serde_json::Value>(&index).unwrap()["candidates"][0]["id"]
+        .as_str()
+        .expect("a candidate")
+        .to_owned();
+    let index_s = index_path.to_string_lossy().into_owned();
+    let (code, _, err) = run(&[
+        "-q",
+        "dump",
+        &ws,
+        &id,
+        &members[0],
+        &members[1],
+        "-o",
+        &index_s,
+    ]);
+    assert_eq!(code, 5, "{err}");
+    assert_eq!(
+        std::fs::read(&index_path).unwrap(),
+        index,
+        "the index was written"
+    );
+}
+
 #[test]
 fn a_carved_volume_is_hashed_in_the_same_pass_and_only_when_asked() {
     let dir = scratch("hash");

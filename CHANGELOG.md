@@ -96,6 +96,14 @@ tagged. `v0.7.1` is the release that carries those six.
   run reads — an entry that is a member is refused (exit 5) and the rest
   of the tree still written. A second run into the same directory no
   longer fails on the hard links the first one made.
+* **`zvolcarve` checked its workspace, not what it wrote there.**
+  `scan`, `roots` and `zeropoint` checked the directory against the
+  members and then wrote `candidates.json`, `state.json`, `roots.json`
+  or `zeropoint.json` into it unchecked, so a member lying there under
+  one of those names was replaced; `dump -o` could name the maps, the
+  hints or the workspace's own index. Each file is now checked against
+  everything the run reads — the profile and the index included — and
+  against the logs, before anything is written (exit 5).
 * **`zvolreport` wrote over its own inputs and over keys.** `build
   case.jsonl -o case.jsonl` replaced the evidence log with the report
   about it and exited 0, and `--md` or the signature could land on the

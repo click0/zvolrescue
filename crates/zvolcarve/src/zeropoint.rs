@@ -22,7 +22,7 @@ use serde::Serialize;
 use zfs_read::carve::{scan_member, Codec, Options as ScanOptions};
 use zfs_read::pointers::{anchors, search, shifts, Options as SearchOptions};
 use zvol_common::members::open_members;
-use zvol_common::{exit, Format, Global, PoolSpec};
+use zvol_common::{exit, Format, Global, PoolSpec, WriteGuard};
 
 /// Name of the file a run writes when a workspace was given.
 pub const ZEROPOINT: &str = "zeropoint.json";
@@ -139,9 +139,13 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         None => None,
     };
     if let Some(dir) = &opts.output {
-        if let Err(e) = zvolrescue_io::refuse_if_evidence(dir, &members.paths) {
-            eprintln!("zvolcarve: {e}");
-            return exit::REFUSED;
+        let mut reads = spec.reads();
+        reads.extend(members.paths.iter().cloned());
+        let guard = WriteGuard::new(g, &reads);
+        for (what, path) in [("-o", dir.clone()), ("to write", dir.join(ZEROPOINT))] {
+            if let Err(code) = guard.refuse("zvolcarve", what, &path) {
+                return code;
+            }
         }
         if let Err(e) = std::fs::create_dir_all(dir) {
             eprintln!("zvolcarve: {}: {e}", dir.display());

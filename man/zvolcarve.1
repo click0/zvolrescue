@@ -83,6 +83,10 @@ one every recognised dnode is a candidate.
 .Bl -tag -width Ds
 .It Fl o , Fl -output Ar dir
 The carve workspace, where candidates and the scan's state go.
+The directory and both files in it are refused, with exit 5, if they
+are anything the run reads or share bytes with it: a member under any
+name, a map, the hints, the profile, a device a member is on, or the
+path a log goes to.
 .It Fl -volblocksize Ar bytes
 Data block size of the volume being looked for.
 .It Fl -levels Ar n
@@ -151,6 +155,9 @@ Extract one candidate, verifying every block by its checksum.
 .Bl -tag -width Ds
 .It Fl o , Fl -output Ar out.img
 Write the image here.
+Refused, with exit 5, as the workspace of
+.Cm scan
+is, and also when it is the workspace's own index.
 .It Fl -strict
 Stop at the first block that cannot be read.
 .It Fl -size Ar bytes
@@ -178,7 +185,10 @@ scanned for object set headers, which are ranked into
 .Ar dir .
 .Bl -tag -width Ds
 .It Fl o , Fl -output Ar dir
-Carve workspace, where the ranked headers are written.
+Carve workspace, where the ranked headers are written; refused as the
+workspace of
+.Cm scan
+is.
 .It Fl -range Ar start Ns - Ns Ar end
 Only this byte range of each member.
 .It Fl -compressed Ar list
@@ -199,7 +209,9 @@ point at.
 .It Fl o , Fl -output Ar dir
 Also write
 .Pa zeropoint.json
-here.
+here; refused as the workspace of
+.Cm scan
+is.
 .It Fl -window Ar start Ns - Ns Ar end
 Consider only bases in this byte range; default the first 64 MiB,
 where a partition begins.
