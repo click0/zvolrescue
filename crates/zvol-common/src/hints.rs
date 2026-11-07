@@ -131,9 +131,19 @@ fn top_hint(
             }
         }
     }
+    let nparity = t.get("nparity").map(|v| as_u64(v, "nparity")).transpose()?;
+    if matches!(kind.as_str(), "raidz" | "draid") {
+        let width = members.len() + children.len();
+        let p = nparity.unwrap_or(1);
+        if !(1..=3).contains(&p) || (kind == "raidz" && p as usize >= width) {
+            return Err(format!(
+                "hints: {what}: {kind} with nparity {p} over {width} member(s); parity is 1 to 3, and a raidz needs more members than parity"
+            ));
+        }
+    }
     Ok(TopHint {
         kind,
-        nparity: t.get("nparity").map(|v| as_u64(v, "nparity")).transpose()?,
+        nparity,
         draid_ndata: t
             .get("draid_ndata")
             .map(|v| as_u64(v, "draid_ndata"))
@@ -168,6 +178,11 @@ pub fn load(file: &Path, paths: &[PathBuf]) -> Result<Hints, String> {
             )
         }
     };
+    if !(9..=16).contains(&ashift) {
+        return Err(format!(
+            "hints: ashift {ashift}: a vdev's sectors are 2^9 to 2^16 bytes (ashift 9 to 16)"
+        ));
+    }
     let mut bases = vec![0u64; paths.len()];
     let mut tops = Vec::new();
     let list = obj

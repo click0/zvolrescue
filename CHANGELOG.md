@@ -104,6 +104,16 @@ tagged. `v0.7.1` is the release that carries those six.
   hints or the workspace's own index. Each file is now checked against
   everything the run reads — the profile and the index included — and
   against the logs, before anything is written (exit 5).
+* **A vdev geometry no pool has crashed every reader.** The layout of
+  a top-level vdev comes from a label or from `--hints`, and was handed
+  to the RAIDZ and dRAID code as it came: raidz parity of 4 over 4
+  members divided by zero, an ashift of 63 shifted a sector out of the
+  word, and a dRAID `draid_ndata` of `u64::MAX` wrapped past the check
+  that it fits its children. A label whose checksum a forger got right
+  was enough to make `list`, `dump` and `zvoltimeline` panic (exit 101).
+  Such a vdev is now one that cannot be read, named with what is wrong
+  with it; the dRAID checks are made without overflow; and `--hints`
+  refuses an ashift outside 9 to 16 or a parity of no pool (exit 1).
 * **`zvolreport` wrote over its own inputs and over keys.** `build
   case.jsonl -o case.jsonl` replaced the evidence log with the report
   about it and exited 0, and `--md` or the signature could land on the

@@ -90,6 +90,22 @@ impl Node {
             .ashift
             .and_then(|a| u32::try_from(a).ok())
             .unwrap_or(ashift);
+        // The geometry comes from a label or a hand-written layout, and
+        // either can say anything; what the layout code is handed must be
+        // a layout ZFS could have made. `raidz2` over two children leaves
+        // no data column, and an ashift of 63 shifts a sector out of the
+        // word: both reached a division or a shift that does not exist.
+        let width = tree.children.len() as u64;
+        if matches!(tree.kind.as_str(), "raidz" | "draid")
+            && !(ASHIFT_MIN..=ASHIFT_MAX).contains(&ashift)
+        {
+            return Node::Unsupported {
+                kind: format!(
+                    "{} with ashift {ashift} (ZFS uses {ASHIFT_MIN}..={ASHIFT_MAX})",
+                    tree.kind
+                ),
+            };
+        }
         match tree.kind.as_str() {
             // spare and replacing vdevs are mirrors of the old and new child.
             "mirror" | "spare" | "replacing" => Node::Mirror { children },
@@ -109,10 +125,15 @@ impl Node {
                     kind: format!("draid ({e})"),
                 },
             },
-            "raidz" => Node::Raidz {
-                nparity: tree.nparity.unwrap_or(1),
-                ashift,
-                children,
+            "raidz" => match tree.nparity.unwrap_or(1) {
+                nparity @ 1..=3 if nparity < width => Node::Raidz {
+                    nparity,
+                    ashift,
+                    children,
+                },
+                nparity => Node::Unsupported {
+                    kind: format!("raidz{nparity} of {width} children (parity 1 to 3, and fewer than the children)"),
+                },
             },
             other => Node::Unsupported {
                 kind: other.to_string(),
@@ -167,6 +188,11 @@ impl Node {
         }
     }
 }
+
+/// The sector sizes a vdev can have: `ASHIFT_MIN` and `ASHIFT_MAX` of
+/// OpenZFS's `vdev_impl.h`.
+const ASHIFT_MIN: u32 = 9;
+const ASHIFT_MAX: u32 = 16;
 
 /// What a DVA's top-level vdev id resolves to.
 enum Where<'n> {
@@ -1761,6 +1787,50 @@ mod tests {
             reader.read_block(&on_raidz, false).unwrap_err(),
             ReadError::AllCopiesBad
         );
+    }
+
+    /// A geometry no pool could have — from a label whose checksum a
+    /// forger got right, or from a layout typed by hand — is a vdev that
+    /// cannot be read, never a division by zero or a shift out of the
+    /// word in the layout code.
+    #[test]
+    fn a_geometry_no_pool_has_is_not_read() {
+        use zfs_ondisk::label::VdevNode;
+        let top = |kind: &str, nparity: u64, ashift: u64, width: usize| VdevNode {
+            kind: kind.into(),
+            nparity: Some(nparity),
+            ashift: Some(ashift),
+            draid_ndata: Some(u64::MAX),
+            draid_nspares: Some(0),
+            draid_ngroups: Some(1),
+            children: (0..width)
+                .map(|i| VdevNode {
+                    kind: "file".into(),
+                    guid: i as u64 + 1,
+                    ..VdevNode::default()
+                })
+                .collect(),
+            ..VdevNode::default()
+        };
+        let bad = [
+            top("raidz", 4, 12, 4),
+            top("raidz", 5, 12, 4),
+            top("raidz", u64::MAX, 12, 4),
+            top("raidz", 0, 12, 4),
+            top("raidz", 2, 63, 4),
+            top("raidz", 2, 8, 4),
+            top("draid", 1, 12, 6),
+        ];
+        for t in &bad {
+            assert!(
+                matches!(Node::from_tree(t, &[], 12), Node::Unsupported { .. }),
+                "{t:?}"
+            );
+        }
+        assert!(matches!(
+            Node::from_tree(&top("raidz", 2, 12, 4), &[], 12),
+            Node::Raidz { nparity: 2, .. }
+        ));
     }
 
     mod raidz_tests {

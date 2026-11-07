@@ -385,7 +385,13 @@ impl Config {
         if nparity == 0 || nparity > MAX_PARITY {
             return Err(DraidError::Geometry(format!("nparity {nparity}")));
         }
-        if ngroups == 0 || children < ndata + nparity + nspares || ndata == 0 {
+        // Every sum and product below is of numbers a label carries, and
+        // a label can carry anything: one that overflows is no geometry.
+        let fits = ndata
+            .checked_add(nparity)
+            .and_then(|w| w.checked_add(nspares))
+            .is_some_and(|need| need <= children);
+        if ngroups == 0 || !fits || ndata == 0 {
             return Err(DraidError::Geometry(format!(
                 "ndata {ndata} + nparity {nparity} + nspares {nspares} does not fit {children} children (ngroups {ngroups})"
             )));
@@ -405,12 +411,20 @@ impl Config {
         }
         let groupwidth = ndata + nparity;
         let ndisks = children - nspares;
-        if groupwidth > ndisks || (groupwidth * ngroups) % ndisks != 0 {
+        if groupwidth > ndisks
+            || groupwidth
+                .checked_mul(ngroups)
+                .is_none_or(|n| n % ndisks != 0)
+        {
             return Err(DraidError::Geometry(format!(
                 "groupwidth {groupwidth}, ndisks {ndisks}, ngroups {ngroups}"
             )));
         }
         let groupsz = groupwidth * ROWHEIGHT;
+        let devslicesz = groupsz
+            .checked_mul(ngroups)
+            .map(|n| n / ndisks)
+            .ok_or_else(|| DraidError::Geometry(format!("ngroups {ngroups}")))?;
         Ok(Config {
             ndata,
             nparity,
@@ -422,7 +436,7 @@ impl Config {
             groupwidth,
             ndisks,
             groupsz,
-            devslicesz: (groupsz * ngroups) / ndisks,
+            devslicesz,
         })
     }
 
@@ -574,6 +588,19 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A geometry whose sums or products overflow is refused, not
+    /// wrapped into one that looks as if it fits: `draid_ndata` of
+    /// `u64::MAX` wrapped past the children check and divided by zero
+    /// further on.
+    #[test]
+    fn a_geometry_that_overflows_is_refused() {
+        assert!(Config::new(u64::MAX, 1, 0, 6, 1).is_err());
+        assert!(Config::new(4, 1, u64::MAX, 6, 1).is_err());
+        assert!(Config::new(4, 1, 1, 6, u64::MAX).is_err());
+        assert!(Config::new(4, 1, 1, 6, u64::MAX / 5).is_err());
+        assert!(Config::new(4, 1, 1, 6, 1).is_ok());
     }
 
     #[test]

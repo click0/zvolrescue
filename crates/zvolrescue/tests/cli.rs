@@ -88,6 +88,42 @@ fn json(stdout: &str) -> serde_json::Value {
     serde_json::from_str(stdout).unwrap_or_else(|e| panic!("not JSON ({e}): {stdout}"))
 }
 
+/// A layout no pool could have is refused when the hints are read (exit
+/// 1), with what is wrong with it: raidz parity of 4 over 4 members, or
+/// an ashift of 63, reached a division by zero or a shift out of the
+/// word in the reader.
+#[test]
+fn hints_with_an_impossible_geometry_are_refused() {
+    let dir = scratch("bad-geometry");
+    let paths = write_members(&dir, &plain_members());
+    for (kind, nparity, ashift, want) in [
+        ("raidz", 2, 12, "nparity 2 over 2"),
+        ("raidz", 4, 12, "nparity 4 over 2"),
+        ("draid", 9, 12, "nparity 9"),
+        ("mirror", 0, 63, "ashift 63"),
+        ("mirror", 0, 0, "ashift 0"),
+    ] {
+        let hints = dir.join("layout.hints");
+        std::fs::write(
+            &hints,
+            serde_json::json!({"name": "tank", "ashift": ashift,
+                "tops": [{"kind": kind, "nparity": nparity, "members": [&paths[0], &paths[1]]}]})
+            .to_string(),
+        )
+        .unwrap();
+        let (code, _, err) = run(&[
+            "-q",
+            "list",
+            &paths[0],
+            &paths[1],
+            "--hints",
+            &hints.to_string_lossy(),
+        ]);
+        assert_eq!(code, 1, "{kind} {nparity} {ashift}: {err}");
+        assert!(err.contains(want), "{want}: {err}");
+    }
+}
+
 /// `dump` writes nothing over anything the run reads: not an image of
 /// `-r` named like a member beside it (one called `tank_vm_disk0.img`
 /// was truncated to the volume), not a mapfile or a key file given as
