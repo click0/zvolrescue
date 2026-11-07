@@ -13,7 +13,18 @@ development milestone that names what changed when — the sections below
 are their record — and ships inside the next version that does get
 tagged. `v0.7.1` is the release that carries those six.
 
-## Unreleased
+## v0.9.12 — 2026-11-07
+
+**Nothing written over the evidence, and no crash on a forged pool.**
+What a review of the code turned up, fixed. Every file a run writes —
+images, reports, labels, extracted trees, the two logs — is now checked
+against everything the run reads, not just the members, and nothing
+already in an output directory is written through. A label, a dnode or
+a hand-written layout that no pool could have, and a file name that is
+not UTF-8, no longer bring a tool down. Results that were incomplete
+say so: an interrupted dump in a report, a sector a carve could not
+read, a file below the deepest directory walked. And the companions do
+what their manuals say, which several did not.
 
 ### Fixed
 
