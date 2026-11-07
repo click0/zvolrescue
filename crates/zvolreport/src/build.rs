@@ -121,11 +121,17 @@ fn extractions_of(result: &serde_json::Value) -> Vec<Extraction> {
                 sha256: str_at(v, "sha256"),
                 sha1: str_at(v, "sha1"),
                 md5: str_at(v, "md5"),
-                errors: u64_at(v, "blocks_zeroed").unwrap_or(0),
+                // A salvaged block kept what its member would give and
+                // zeroed the rest: not read whole either.
+                errors: u64_at(v, "blocks_zeroed")
+                    .unwrap_or(0)
+                    .saturating_add(u64_at(v, "blocks_salvaged").unwrap_or(0)),
                 aborted: v
                     .get("aborted")
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false),
+                interrupted_at: u64_at(v, "interrupted_at"),
+                stopped_by_medium: str_at(v, "stopped_by_medium"),
             })
         })
         .collect()
@@ -269,9 +275,23 @@ pub fn assemble(records: &[(LogRef, Vec<Record>)], opts: &Options) -> Report {
                 e.output.display()
             ));
         }
+        if let Some(at) = e.interrupted_at {
+            warnings.push(format!(
+                "{}: the extraction was interrupted at block {at}; {} is not the whole volume (--resume continues it)",
+                e.dataset,
+                e.output.display()
+            ));
+        }
+        if let Some(why) = &e.stopped_by_medium {
+            warnings.push(format!(
+                "{}: a device refused a read and the extraction stopped ({why}); {} is not the whole volume",
+                e.dataset,
+                e.output.display()
+            ));
+        }
         if e.errors > 0 {
             warnings.push(format!(
-                "{}: {} block(s) could not be read and were written as zeros",
+                "{}: {} block(s) could not be read whole and were written as zeros, in whole or in part",
                 e.dataset, e.errors
             ));
         }
@@ -594,6 +614,41 @@ mod tests {
         assert!(r.warnings.iter().any(|w| w.contains("written as zeros")));
         assert!(r.warnings.iter().any(|w| w.contains("stopped early")));
         assert_eq!(r.extractions[0].errors, 3);
+    }
+
+    /// An extraction a signal or a device stopped, or one with blocks
+    /// kept only in part, is not the whole volume, and the report says so
+    /// — it used to read `errors: 0, aborted: false` for a dump cut at
+    /// block 599 of 4096.
+    #[test]
+    fn an_interrupted_or_salvaged_extraction_is_not_complete() {
+        let mut d = dump(9, 1, false);
+        let v = &mut d["volumes"][0];
+        v["blocks_salvaged"] = serde_json::json!(2);
+        v["interrupted_at"] = serde_json::json!(599);
+        v["stopped_by_medium"] = serde_json::json!("ada1 refused a read");
+        let r = assemble(&log(vec![record("zvolrescue", 11, 6, d)]), &opts());
+        let e = &r.extractions[0];
+        assert_eq!(e.errors, 3);
+        assert_eq!(e.interrupted_at, Some(599));
+        assert!(!e.complete());
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("interrupted at block 599")),
+            "{:?}",
+            r.warnings
+        );
+        assert!(r
+            .warnings
+            .iter()
+            .any(|w| w.contains("a device refused a read")));
+        assert!(assemble(
+            &log(vec![record("zvolrescue", 11, 0, dump(9, 0, false))]),
+            &opts()
+        )
+        .extractions[0]
+            .complete());
     }
 
     #[test]

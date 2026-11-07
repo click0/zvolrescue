@@ -195,6 +195,18 @@ tagged. `v0.7.1` is the release that carries those six.
   not do is said once and listed in the manifest. Holes stay holes: a
   file of 256 MiB with one block took 256 MiB on disk, and a size no
   file has could fill it; `objects` writes sparse too.
+* **`zvolreport` called incomplete images complete and missing evidence
+  fine.** `build` took an extraction's errors from `blocks_zeroed` and
+  its completeness from `aborted` alone: a dump cut by SIGINT at block
+  599 of 4096, one stopped by a device's refusal, and blocks kept only in
+  part (`blocks_salvaged`) all came out as `errors: 0`, complete, no
+  warning. They count and warn now, and the Markdown's "complete" column
+  agrees. `verify` gave a file read without a hash "nothing to check
+  against" without looking for it: a deleted member and one truncated to
+  nothing both passed with exit 0. It is now `MISSING` when gone and
+  `FAIL` when its size is not the one recorded. And the logs the report
+  was built from — whose hashes it records — were never checked; an
+  edited or deleted log is now a failure too (exit 4).
 * **`zvolreport` wrote over its own inputs and over keys.** `build
   case.jsonl -o case.jsonl` replaced the evidence log with the report
   about it and exited 0, and `--md` or the signature could land on the

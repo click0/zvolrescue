@@ -96,10 +96,25 @@ pub struct Extraction {
     pub sha1: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub md5: Option<String>,
-    /// Blocks that could not be read and were written as zeros.
+    /// Blocks that could not be read whole: written as zeros, or kept
+    /// with their unreadable sectors zeroed.
     pub errors: u64,
     /// The extraction stopped early (`--strict` on an unreadable block).
     pub aborted: bool,
+    /// A signal ended it before this block; `--resume` goes on from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interrupted_at: Option<u64>,
+    /// A device refused a read and the run stopped there (SPEC F-33).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped_by_medium: Option<String>,
+}
+
+impl Extraction {
+    /// Whether the image is the whole volume as it could be read: not
+    /// stopped by `--strict`, by a signal or by a device.
+    pub fn complete(&self) -> bool {
+        !self.aborted && self.interrupted_at.is_none() && self.stopped_by_medium.is_none()
+    }
 }
 
 /// The whole report.

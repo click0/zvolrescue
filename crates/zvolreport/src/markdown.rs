@@ -145,7 +145,7 @@ pub fn render(r: &Report) -> String {
                     .as_deref()
                     .map_or("—".to_string(), |h| format!("`{h}`")),
                 e.errors,
-                if e.aborted { "no" } else { "yes" }
+                if e.complete() { "yes" } else { "no" }
             );
         }
         let _ = writeln!(s);

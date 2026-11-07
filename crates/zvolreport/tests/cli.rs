@@ -89,7 +89,8 @@ fn the_legacy_digests_reach_the_report_and_are_checked_back() {
     let (code, out, err) = run(&["-q", "-f", "json", "verify", &report.to_string_lossy()]);
     assert_eq!(code, 0, "{err}\n{out}");
     let v: serde_json::Value = serde_json::from_str(&out).expect("json");
-    assert_eq!(v["passed"], 3, "{v}");
+    // Three digests of the image, and the log the report was built from.
+    assert_eq!(v["passed"], 4, "{v}");
     assert_eq!(v["failed"], 0);
     let rows: Vec<(String, String)> = v["checked"]
         .as_array()
@@ -121,7 +122,8 @@ fn the_legacy_digests_reach_the_report_and_are_checked_back() {
     assert_eq!(code, 4, "{out}");
     let v: serde_json::Value = serde_json::from_str(&out).expect("json");
     assert_eq!(v["failed"], 3, "{v}");
-    assert_eq!(v["passed"], 0);
+    // The log is as it was.
+    assert_eq!(v["passed"], 1);
 }
 
 /// `verify` reads and hashes every file the report names, and a log may
@@ -157,4 +159,32 @@ fn a_log_is_never_written_over_a_file_the_report_names() {
     let trace = dir.join("trace.log").to_string_lossy().into_owned();
     let (code, _, err) = run(&["--debug-log", &trace, "-q", "verify", &report]);
     assert_eq!(code, 0, "{err}");
+}
+
+/// The report's own logs are checked back: one edited since the report
+/// was built breaks the chain, and verify says so (exit 4) instead of
+/// passing everything else.
+#[test]
+fn an_edited_log_breaks_the_report() {
+    let dir = scratch("edited-log");
+    let img = dir.join("vol.img");
+    std::fs::write(&img, b"the bytes of a volume, such as they are").expect("write");
+    let log = evidence_log(&dir, &img);
+    let report = dir.join("report.json").to_string_lossy().into_owned();
+    let (code, _, err) = run(&["-q", "build", &log.to_string_lossy(), "-o", &report]);
+    assert_eq!(code, 0, "{err}");
+    let mut text = std::fs::read_to_string(&log).unwrap();
+    text.push_str("{}\n");
+    std::fs::write(&log, text).unwrap();
+    let (code, out, err) = run(&["-q", "-f", "json", "verify", &report]);
+    assert_eq!(code, 4, "{err}\n{out}");
+    let v: serde_json::Value = serde_json::from_str(&out).expect("json");
+    assert!(
+        v["checked"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["kind"] == "log" && c["status"] == "fail"),
+        "{v}"
+    );
 }

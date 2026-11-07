@@ -92,7 +92,11 @@ Write the signature here instead of next to the report.
 .Op Ar options
 .Ar report.json
 .Pp
-Recompute the hashes a report recorded and say what still matches.
+Recompute the hashes a report recorded and say what still matches:
+of the logs it was built from, of the evidence, and of the outputs.
+A file read without a hash is still looked for, and its size compared
+with the one recorded.
+A log not where it was recorded is looked for beside the report.
 A
 .Fl -debug-log
 on any file the report names, as

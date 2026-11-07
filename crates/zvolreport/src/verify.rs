@@ -142,6 +142,9 @@ struct Recorded<'a> {
     sha256: Option<&'a String>,
     sha1: Option<&'a String>,
     md5: Option<&'a String>,
+    /// Its size, where the report has one: all there is to check when
+    /// no hash was taken.
+    size: Option<u64>,
 }
 
 /// Check a file against every digest the report recorded for it.
@@ -159,15 +162,45 @@ fn check(kind: &'static str, path: &Path, recorded: &Recorded<'_>) -> Vec<Checke
     .filter_map(|(name, v)| v.map(|v| (name, v)))
     .collect();
     if want.is_empty() {
-        return vec![Checked {
-            kind,
-            algorithm: "sha256",
-            path: path.to_path_buf(),
-            status: Status::Unhashed,
-            recorded: None,
-            found: None,
-            detail: Some("no hash was recorded when it was read".into()),
-        }];
+        // No hash to check against is not nothing to check: a file that
+        // is gone is missing, and one whose size changed has changed. A
+        // deleted member and one truncated to nothing both passed.
+        let row =
+            |status, algorithm, recorded: Option<String>, found: Option<String>, detail: String| {
+                vec![Checked {
+                    kind,
+                    algorithm,
+                    path: path.to_path_buf(),
+                    status,
+                    recorded,
+                    found,
+                    detail: Some(detail),
+                }]
+            };
+        return match std::fs::metadata(path) {
+            Err(e) => row(
+                Status::Missing,
+                "-",
+                None,
+                None,
+                format!("{e}; no hash was recorded when it was read"),
+            ),
+            Ok(m) if m.is_file() && recorded.size.is_some_and(|s| s != m.len()) => row(
+                Status::Fail,
+                "size",
+                recorded.size.map(|s| s.to_string()),
+                Some(m.len().to_string()),
+                "no hash was recorded when it was read, and the size is not the one recorded"
+                    .into(),
+            ),
+            Ok(_) => row(
+                Status::Unhashed,
+                "sha256",
+                None,
+                None,
+                "present, at the size recorded; no hash was recorded when it was read".into(),
+            ),
+        };
     }
     let extra = Extra {
         sha1: recorded.sha1.is_some(),
@@ -300,6 +333,29 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
     }
 
     let mut checked = Vec::new();
+    // The logs the report was built from carry its chain (R-01): one
+    // deleted or edited since is a break in it. A log not where it was
+    // recorded is looked for beside the report.
+    for l in &report.logs {
+        let path = if l.path.exists() {
+            l.path.clone()
+        } else {
+            match (opts.report.parent(), l.path.file_name()) {
+                (Some(dir), Some(name)) if dir.join(name).exists() => dir.join(name),
+                _ => l.path.clone(),
+            }
+        };
+        checked.extend(check(
+            "log",
+            &path,
+            &Recorded {
+                sha256: Some(&l.sha256),
+                sha1: None,
+                md5: None,
+                size: None,
+            },
+        ));
+    }
     for e in &report.evidence {
         let path = locate(&e.file.path, opts.evidence_root.as_ref());
         checked.extend(check(
@@ -309,6 +365,7 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
                 sha256: e.file.sha256.as_ref(),
                 sha1: e.file.sha1.as_ref(),
                 md5: e.file.md5.as_ref(),
+                size: Some(e.file.size),
             },
         ));
     }
@@ -321,6 +378,7 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
                 sha256: o.sha256.as_ref(),
                 sha1: o.sha1.as_ref(),
                 md5: o.md5.as_ref(),
+                size: Some(o.size),
             },
         ));
     }
@@ -452,6 +510,7 @@ mod check_tests {
                 sha256: Some(&h256),
                 sha1: Some(&h1),
                 md5: Some(&h5),
+                size: None,
             },
         );
         assert_eq!(algorithms(&rows), vec!["sha256", "sha1", "md5"]);
@@ -474,6 +533,7 @@ mod check_tests {
                 sha256: Some(&h256),
                 sha1: Some(&h1),
                 md5: Some(&h5),
+                size: None,
             },
         );
         assert_eq!(rows.len(), 3);
@@ -496,6 +556,7 @@ mod check_tests {
                 sha256: Some(&h256),
                 sha1: Some(&h1),
                 md5: Some(&h5),
+                size: None,
             },
         );
         assert_eq!(rows.len(), 3);
@@ -516,11 +577,35 @@ mod check_tests {
                 sha256: None,
                 sha1: None,
                 md5: None,
+                size: Some(fs::metadata(&p).unwrap().len()),
             },
         );
         assert_eq!(rows.len(), 1);
         assert!(rows[0].status == Status::Unhashed);
         assert!(rows[0].recorded.is_none() && rows[0].found.is_none());
+    }
+
+    /// With no hash recorded there is still something to check: whether
+    /// the file is there, and whether it is the size it was. A member
+    /// deleted, and one truncated to nothing, both used to pass.
+    #[test]
+    fn with_nothing_hashed_a_file_gone_or_resized_is_still_seen() {
+        let dir = scratch("unhashed-gone");
+        let p = image(&dir);
+        let size = fs::metadata(&p).unwrap().len();
+        let none = |size| Recorded {
+            sha256: None,
+            sha1: None,
+            md5: None,
+            size,
+        };
+        fs::write(&p, b"").unwrap();
+        let rows = check("evidence", &p, &none(Some(size)));
+        assert!(rows[0].status == Status::Fail, "{rows:?}");
+        assert_eq!(rows[0].algorithm, "size");
+        fs::remove_file(&p).unwrap();
+        let rows = check("evidence", &p, &none(Some(size)));
+        assert!(rows[0].status == Status::Missing, "{rows:?}");
     }
 
     /// Only what was recorded is checked: a record with SHA-256 and MD5
@@ -537,6 +622,7 @@ mod check_tests {
                 sha256: Some(&h256),
                 sha1: None,
                 md5: Some(&h5),
+                size: None,
             },
         );
         assert_eq!(algorithms(&rows), vec!["sha256", "md5"]);
