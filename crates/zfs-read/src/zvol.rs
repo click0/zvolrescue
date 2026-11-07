@@ -340,15 +340,39 @@ pub fn extract_from(
         hashed_to = offset + take as u64;
         progress(blkid + 1, blocks_total);
     }
-    if !report.aborted {
-        // Everything past the last block is implicit zeros.
+    if !report.aborted && report.interrupted_at.is_none() {
+        // Everything past the last block is implicit zeros — which for a
+        // thin volume can be terabytes of hashing, so the stop flag is
+        // looked at here too: a signal used to go unheard until the end.
+        // Interrupted here, every block is done and a resume starts at
+        // the tail.
         let mut rest = volsize - hashed_to;
+        let mut chunks = 0u32;
         while rest > 0 {
+            chunks = chunks.wrapping_add(1);
+            if chunks % 64 == 0 && stop.is_some_and(|s| s.load(Ordering::Relaxed)) {
+                trace!(
+                    "zvol",
+                    "interrupted while hashing the zeros after block {blocks_total}"
+                );
+                report.interrupted_at = Some(blocks_total);
+                break;
+            }
             let n = rest.min(bs) as usize;
             digests.update(&zeros[..n]);
             rest -= n as u64;
         }
-        sink.finish(volsize)
+        if report.interrupted_at.is_none() {
+            sink.finish(volsize)
+                .map_err(|e| ReadError::Io(e.to_string()))?;
+        }
+    }
+    if let Some(at) = report.interrupted_at {
+        // The image holds the blocks before `at` and is exactly that
+        // long, holes included, so a resume can read them back to hash
+        // them; finishing it to the whole volume would have claimed
+        // bytes nobody wrote.
+        sink.finish(at.saturating_mul(bs).min(volsize))
             .map_err(|e| ReadError::Io(e.to_string()))?;
     }
     let done = digests.finish();
@@ -1217,5 +1241,31 @@ mod tests {
         assert_eq!(sink.data, full.data);
         assert_eq!(rest.sha256, whole.sha256);
         assert_eq!((rest.blocks_read, rest.blocks_holes), (1, 2));
+
+        // A volume far larger than its last block — a thin volume, or a
+        // size taken from a filesystem inside it — spends its time
+        // hashing the zeros after the blocks. A stop asked for then is
+        // heard there: every block is done, a resume starts at the tail,
+        // and the image is not finished to a length it was never given.
+        let mut tail = MemSink::default();
+        let flag = AtomicBool::new(false);
+        let big = extract_from(
+            &obj,
+            volsize << 30,
+            &mut tail,
+            OnError::Zero,
+            0,
+            Digests::new(Extra::none()),
+            Some(&flag),
+            |done, total| {
+                if done == total {
+                    flag.store(true, Ordering::Relaxed);
+                }
+            },
+        )
+        .unwrap();
+        let blocks = big.blocks_total;
+        assert_eq!(big.interrupted_at, Some(blocks));
+        assert_eq!(tail.data.len() as u64, blocks * 8192);
     }
 }

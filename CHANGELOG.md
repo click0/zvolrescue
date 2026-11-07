@@ -149,6 +149,16 @@ tagged. `v0.7.1` is the release that carries those six.
   OpenZFS gives one to every object of a single block — 1.5K, 2.5K,
   11.5K — so `--dnode-type file` missed most small files; such a size is
   accepted for an object of one block.
+* **A signal went unheard while `dump` hashed the zeros after the last
+  block.** A volume much larger than its last written block — a thin
+  volume, or a size `zvolcarve dump` took from the filesystem inside it
+  — spends its time hashing the implied zeros at the end, and that loop
+  never looked at the stop flag: SIGINT and SIGTERM did nothing, the
+  second signal killed the run, and neither a state file nor a record
+  was left. The loop now stops when asked, with every block done and the
+  state saying a resume starts at the tail (exit 6). An interrupted image
+  is also left exactly as long as the blocks it holds, holes included,
+  instead of being finished to the whole volume.
 * **`zvolreport` wrote over its own inputs and over keys.** `build
   case.jsonl -o case.jsonl` replaced the evidence log with the report
   about it and exited 0, and `--md` or the signature could land on the
