@@ -80,6 +80,12 @@ and
 Scan the members and record what could be a volume.
 A profile of the volume being looked for narrows the search; without
 one every recognised dnode is a candidate.
+The leaves of a mirror are copies of one another: a dnode found at the
+same place on two of them is one candidate, and
+.Pa candidates.json
+counts the copies it left out
+.Pq Li mirror_duplicates .
+A scan that finds no candidate exits 3.
 .Bl -tag -width Ds
 .It Fl o , Fl -output Ar dir
 The carve workspace, where candidates and the scan's state go.
@@ -98,10 +104,11 @@ Estimated size range in bytes.
 .It Fl -dnode-type Ar type
 Object type to look for:
 .Ql zvol
-(the default),
+(the default, unless the profile names one),
 .Ql file ,
 a numeric dnode type, or
 .Ql any .
+Given here, it wins over the profile's.
 .It Fl -profile Ar file
 Read the profile from a JSON file; command-line fields win.
 .It Fl -like Ar dataset
@@ -111,7 +118,9 @@ neighbours.
 .It Fl -strict-profile
 Treat profile fields as hard filters, not as hints.
 .It Fl -range Ar start Ns - Ns Ar end
-Only this byte range of each member.
+Only this byte range of each member; a
+.Ar start
+between two 512-byte slots is taken down to the slot it is in.
 .It Fl -resume
 Continue a scan that was interrupted; a SIGINT or SIGTERM ends a scan
 with its state written (exit status 6).
@@ -121,7 +130,7 @@ sample.
 Slow, and rarely worth it before a
 .Cm dump .
 .It Fl -max-hits Ar n
-Stop after this many candidates; default 100000.
+Stop each member's scan after this many hits; default 100000.
 .It Fl -sample Ar n
 Report what the first
 .Ar n
@@ -233,8 +242,8 @@ The state of an interrupted
 .Sh EXIT STATUS
 As in
 .Xr zvolrescue 1 :
-0 success, 1 usage, 2 evidence unreadable, 3 nothing found or the
-candidate unreadable, 4 a partial image or a scan that could not read
+0 success, 1 usage, 2 evidence unreadable, 3 nothing found (a scan
+with no candidate) or the candidate unreadable, 4 a partial image or a scan that could not read
 every byte of the range (what lay in the bytes it could not read was not
 searched, and
 .Pa candidates.json

@@ -37,10 +37,11 @@ pub struct ProfileArgs {
     /// Estimated size range in bytes, as MIN..MAX.
     #[arg(long, value_name = "MIN..MAX")]
     pub size: Option<String>,
-    /// Object type to look for: `zvol` (the default), `file`, or a
-    /// numeric `dn_type`. `any` follows every type the scan recognises.
-    #[arg(long, value_name = "TYPE", default_value = "zvol")]
-    pub dnode_type: String,
+    /// Object type to look for: `zvol` (the default, unless a profile
+    /// names one), `file`, or a numeric `dn_type`. `any` follows every
+    /// type the scan recognises. Given here, it wins over the profile.
+    #[arg(long, value_name = "TYPE")]
+    pub dnode_type: Option<String>,
     /// Read the profile from a JSON file; command-line fields win.
     #[arg(long, value_name = "FILE")]
     pub profile: Option<PathBuf>,
@@ -132,6 +133,25 @@ struct ProfileFile {
     dnode_type: Option<String>,
 }
 
+/// For each member, the top-level mirror whose leaf it is, if any (C-09).
+fn mirror_groups(pool: Option<&zfs_read::pool::PoolAssembly>, n: usize) -> Vec<Option<u64>> {
+    let mut groups = vec![None; n];
+    let Some(pool) = pool else {
+        return groups;
+    };
+    for top in &pool.tops {
+        let flat = top.tree.children.iter().all(|c| c.children.is_empty());
+        if matches!(top.kind.as_str(), "mirror" | "spare" | "replacing") && flat {
+            for m in &top.members {
+                if let Some(slot) = m.present.and_then(|i| groups.get_mut(i)) {
+                    *slot = Some(top.id);
+                }
+            }
+        }
+    }
+    groups
+}
+
 /// Build the profile from the file, the command line and `--like`, in
 /// that order of precedence.
 fn build_profile(
@@ -139,6 +159,7 @@ fn build_profile(
     like: Option<(u64, u8, u64)>,
 ) -> Result<(Profile, ProfileOut), String> {
     let mut p = Profile::default();
+    let mut profile_named_a_type = false;
     if let Some(path) = &args.profile {
         let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let f: ProfileFile = serde_json::from_str(&text)
@@ -149,6 +170,7 @@ fn build_profile(
         p.size = f.size.map(|s| (s[0], s[1]));
         if let Some(t) = f.dnode_type {
             p.dnode_type = dnode_type_code(&t)?;
+            profile_named_a_type = true;
         }
     }
     // A sibling that still exists knows these better than memory does.
@@ -169,8 +191,14 @@ fn build_profile(
     if let Some(s) = &args.size {
         p.size = Some(range_pair(s, "size")?);
     }
-    if args.profile.is_none() || args.dnode_type != "zvol" {
-        p.dnode_type = dnode_type_code(&args.dnode_type)?;
+    // The command line wins, as for every other field: an explicit
+    // `--dnode-type zvol` used to lose to a profile's `file`, being the
+    // same word as the default. Without either, it is a volume that is
+    // looked for — a profile that named no type searched every one.
+    match &args.dnode_type {
+        Some(t) => p.dnode_type = dnode_type_code(t)?,
+        None if !profile_named_a_type => p.dnode_type = dnode_type_code("zvol")?,
+        None => {}
     }
     let out = ProfileOut {
         dnode_type: p.dnode_type.map(object_type_name),
@@ -274,8 +302,11 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         v
     };
     let range = match &opts.range {
+        // Dnodes sit on 512-byte slots, and a start between two of them
+        // put every slot of the range off by the difference: `--range
+        // 1000-…` found nothing. The start is taken down to its slot.
         Some(s) => match byte_range(s) {
-            Ok(r) => Some(r),
+            Ok((a, b)) => Some((a / 512 * 512, b)),
             Err(e) => {
                 eprintln!("zvolcarve: {e}");
                 return exit::USAGE;
@@ -360,6 +391,12 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     let mut slots = earlier.as_ref().map_or(0, |i| i.slots_examined);
     let mut reached = vec![0u64; members.paths.len()];
     let mut complete = true;
+    // C-09: the leaves of a mirror are copies of one another, and a
+    // dnode met at the same place in two of them is one candidate. It
+    // was listed — and walked — once per member.
+    let groups = mirror_groups(pool.as_ref(), members.paths.len());
+    let mut seen_in_mirror = std::collections::BTreeSet::new();
+    let mut mirror_duplicates = earlier.as_ref().map_or(0, |i| i.mirror_duplicates);
 
     for (i, src) in members.sources.iter().enumerate() {
         let Some(src) = src else {
@@ -424,6 +461,19 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             .as_ref()
             .map(|p| PoolReader::new(p, members.devices()).with_base_offsets(&members.bases()));
         for hit in &scan.hits {
+            if let Some(g) = groups[i] {
+                let base = members.base_offsets.get(i).copied().unwrap_or(0);
+                let key = (
+                    g,
+                    hit.offset.saturating_sub(base),
+                    hit.slot,
+                    format!("{:?}", hit.dnode),
+                );
+                if !seen_in_mirror.insert(key) {
+                    mirror_duplicates += 1;
+                    continue;
+                }
+            }
             let assessed = reader.as_ref().map(|r| {
                 let obj = ObjectReader::new(r, hit.dnode.clone(), Endian::Little);
                 assess_against(
@@ -525,6 +575,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         rejected: by_reason,
         bytes_read,
         unreadable_bytes: unreadable,
+        mirror_duplicates,
         slots_examined: slots,
         datasets_met,
         space: space.as_ref().map(|s| SpaceOut {
@@ -580,8 +631,12 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             "zvolcarve: {unreadable} byte(s) could not be read and were not searched; a candidate there is missed (exit 4)"
         );
     }
+    // Exit 3: nothing found, as the manual has always said; a scan that
+    // turned up no candidate exited 0.
     let code = if !complete {
         exit::INTERRUPTED
+    } else if index.candidates.is_empty() {
+        exit::UNRECOVERABLE
     } else if unreadable > 0 {
         exit::PARTIAL
     } else {

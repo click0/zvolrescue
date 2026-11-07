@@ -145,6 +145,11 @@ pub struct Index {
     /// Bytes of the members that could not be read and were not searched.
     #[serde(default)]
     pub unreadable_bytes: u64,
+    /// Hits on one leaf of a mirror that were the same dnode, at the
+    /// same place, as one already found on another (C-09), and so not
+    /// listed again.
+    #[serde(default)]
+    pub mirror_duplicates: u64,
     pub slots_examined: u64,
     /// Dataset dnodes the scan met, which is what can name a candidate.
     #[serde(default)]

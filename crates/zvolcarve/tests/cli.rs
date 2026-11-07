@@ -429,3 +429,83 @@ fn a_block_device_is_not_carved_without_leave() {
     ]);
     assert_ne!(code, 5, "{err}");
 }
+
+/// The scan's contract as the manual states it: a mirror's leaves are
+/// copies and each candidate is listed once (C-09); a scan that finds
+/// nothing is exit 3; a range that starts between two slots finds what
+/// the slot-aligned one does; and `--dnode-type` given on the command
+/// line wins over the profile's, while a profile that names no type
+/// looks for volumes.
+#[test]
+fn the_scan_does_what_the_manual_says() {
+    let dir = scratch("contract");
+    let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1)]);
+    let members: Vec<String> = carved_zvol_members(&mut pool, SIZE)
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let p = dir.join(format!("member{i}.img"));
+            std::fs::write(&p, m).expect("write member");
+            p.to_string_lossy().into_owned()
+        })
+        .collect();
+    let index = |ws: &str| -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(format!("{ws}/candidates.json")).unwrap()).unwrap()
+    };
+    let ws = |n: &str| dir.join(n).to_string_lossy().into_owned();
+
+    let both = ws("both");
+    let (code, _, err) = run(&["-q", "scan", &members[0], &members[1], "-o", &both]);
+    assert_eq!(code, 0, "{err}");
+    let one = ws("one");
+    let (code, _, err) = run(&["-q", "scan", &members[0], "-o", &one]);
+    assert_eq!(code, 0, "{err}");
+    let (b, o) = (index(&both), index(&one));
+    assert_eq!(
+        b["candidates"].as_array().unwrap().len(),
+        o["candidates"].as_array().unwrap().len()
+    );
+    assert!(b["mirror_duplicates"].as_u64().unwrap() > 0, "{b}");
+
+    let off = ws("off");
+    let range = format!("1000-{SIZE}");
+    let (code, _, err) = run(&["-q", "scan", &members[0], "--range", &range, "-o", &off]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(index(&off)["candidates"], o["candidates"]);
+
+    let none = ws("none");
+    let (code, _, err) = run(&[
+        "-q",
+        "scan",
+        &members[0],
+        "-o",
+        &none,
+        "--volblocksize",
+        "1048576",
+        "--strict-profile",
+    ]);
+    assert_eq!(code, 3, "{err}");
+
+    let profile = dir.join("p.json");
+    std::fs::write(&profile, r#"{"dnode_type": "file"}"#).unwrap();
+    let p = profile.to_string_lossy().into_owned();
+    let pw = ws("profile");
+    let (code, _, err) = run(&[
+        "-q",
+        "scan",
+        &members[0],
+        "-o",
+        &pw,
+        "--profile",
+        &p,
+        "--dnode-type",
+        "zvol",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(index(&pw)["profile"]["dnode_type"], "zvol object");
+    std::fs::write(&profile, r#"{"volblocksize": 8192}"#).unwrap();
+    let pv = ws("profile-vbs");
+    let (code, _, err) = run(&["-q", "scan", &members[0], "-o", &pv, "--profile", &p]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(index(&pv)["profile"]["dnode_type"], "zvol object");
+}

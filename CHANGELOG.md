@@ -222,6 +222,19 @@ tagged. `v0.7.1` is the release that carries those six.
   `--hash-inputs`, listed among its options, were accepted and did
   nothing: a build now records the logs it read and the hashes of the
   report, Markdown and signature it wrote, and a verify what it checked.
+* **`zvolcarve scan` did not do what its manual said.** A scan that
+  found nothing exited 0, where the page says 3; it is 3 now. A
+  `--range` whose start was not on a 512-byte slot put every slot off
+  by the difference and found nothing; the start is taken down to its
+  slot. A profile that named no `dnode_type` searched every type, where
+  the default is a volume, and an explicit `--dnode-type zvol` lost to a
+  profile's `file`, being the same word as the default, against
+  "command-line fields win"; both follow the page now. And every
+  candidate on a mirror was listed — and walked — once per leaf, though
+  C-09 says mirror members are copies: a dnode met at the same place on
+  two leaves is one candidate, and `candidates.json` counts the copies
+  (`mirror_duplicates`). `--max-hits` is documented as what it is, a
+  bound on each member's hits.
 * **`zvolreport` wrote over its own inputs and over keys.** `build
   case.jsonl -o case.jsonl` replaced the evidence log with the report
   about it and exited 0, and `--md` or the signature could land on the
