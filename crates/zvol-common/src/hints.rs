@@ -132,6 +132,12 @@ fn top_hint(
         }
     }
     let nparity = t.get("nparity").map(|v| as_u64(v, "nparity")).transpose()?;
+    if matches!(kind.as_str(), "disk" | "file") && (members.len() != 1 || !children.is_empty()) {
+        return Err(format!(
+            "hints: {what}: a {kind} vdev is one member; {} given",
+            members.len() + children.len()
+        ));
+    }
     if matches!(kind.as_str(), "raidz" | "draid") {
         let width = members.len() + children.len();
         let p = nparity.unwrap_or(1);

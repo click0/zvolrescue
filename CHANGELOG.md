@@ -254,6 +254,12 @@ tagged. `v0.7.1` is the release that carries those six.
   extract`, anything else no command; the pool's own maps and feature
   leave go with it, and an encrypted dataset `--key prompt`. The
   evidence record of a timeline also names the maps it read.
+* **`--hints` could not describe a plain disk.** `"kind": "disk"` is
+  one of the kinds the page lists, and a top of that kind was built as a
+  "disk" node with its member under it — a vdev type the reader does not
+  know, exit 3 — so a stripe of single disks could not be laid out by
+  hand at all. A disk top is now the leaf itself, as a label has it, and
+  one with other than one member is refused (exit 1).
 * **`zvolreport` wrote over its own inputs and over keys.** `build
   case.jsonl -o case.jsonl` replaced the evidence log with the report
   about it and exited 0, and `--md` or the signature could land on the

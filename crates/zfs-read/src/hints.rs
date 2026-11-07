@@ -127,6 +127,38 @@ impl LayoutHints {
         members: &mut Vec<Member>,
     ) -> VdevNode {
         let mut children = Vec::new();
+        // A top-level vdev of one disk is that disk: the leaf itself, as
+        // a label describes a plain stripe. Wrapped in a "disk" node of
+        // its own, it was a vdev type the reader does not know.
+        if matches!(hint.kind.as_str(), "disk" | "file")
+            && hint.children.is_empty()
+            && hint.members.len() == 1
+        {
+            let guid = synthetic_guid(top, *leaf);
+            members.push(Member {
+                guid,
+                path: None,
+                present: hint.members[0],
+            });
+            *leaf += 1;
+            return VdevNode {
+                kind: hint.kind.clone(),
+                id,
+                guid,
+                path: None,
+                ashift: Some(self.ashift),
+                asize: None,
+                metaslab_array: None,
+                metaslab_shift: None,
+                nparity: None,
+                draid_ndata: None,
+                draid_nspares: None,
+                draid_ngroups: None,
+                is_log: false,
+                indirect_object: None,
+                children: Vec::new(),
+            };
+        }
         if hint.children.is_empty() {
             for present in &hint.members {
                 let guid = synthetic_guid(top, *leaf);

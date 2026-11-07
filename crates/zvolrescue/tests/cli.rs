@@ -171,6 +171,41 @@ fn an_image_is_not_written_into_a_pipe() {
     assert!(err.contains("a pipe cannot take an image"), "{err}");
 }
 
+/// A layout of one plain disk can be described by hand: `"kind":
+/// "disk"` is the leaf itself, as a label describes a single-disk top.
+/// It was wrapped in a "disk" node of its own, a vdev type the reader
+/// did not know (exit 3), and a disk of two members was taken.
+#[test]
+fn a_hand_written_layout_of_one_disk_reads() {
+    let dir = scratch("hints-disk");
+    let paths = write_members(&dir, &plain_members());
+    let hints = dir.join("disk.hints");
+    for (members, want) in [(vec![&paths[0]], 0), (vec![&paths[0], &paths[1]], 1)] {
+        std::fs::write(
+            &hints,
+            serde_json::json!({"name": "tank", "ashift": 12,
+                "tops": [{"kind": "disk", "members": members}]})
+            .to_string(),
+        )
+        .unwrap();
+        let mut args = vec!["-q", "-f", "json", "list", "--hints"];
+        let h = hints.to_string_lossy().into_owned();
+        args.push(&h);
+        args.extend(members.iter().map(|m| m.as_str()));
+        let (code, out, err) = run(&args);
+        assert_eq!(code, want, "{err}");
+        if want == 0 {
+            let names: Vec<String> = json(&out)["datasets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|d| d["name"].as_str().unwrap().to_string())
+                .collect();
+            assert!(names.contains(&"tank/vm/disk0".to_string()), "{names:?}");
+        }
+    }
+}
+
 /// `dump` writes nothing over anything the run reads: not an image of
 /// `-r` named like a member beside it (one called `tank_vm_disk0.img`
 /// was truncated to the volume), not a mapfile or a key file given as
