@@ -453,11 +453,23 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
         .signature
         .as_ref()
         .is_some_and(|s| s.status != Status::Pass);
-    if out.failed > 0 || out.missing > 0 || signature_broken {
+    let code = if out.failed > 0 || out.missing > 0 || signature_broken {
         exit::PARTIAL
     } else {
         0
+    };
+    // What was read to say so: the report, the key and signature, and
+    // every file checked (`--evidence-log`, `--hash-inputs`).
+    let mut read: Vec<PathBuf> = vec![opts.report.clone()];
+    read.extend(opts.key.iter().cloned());
+    read.extend(out.signature.iter().map(|s| s.path.clone()));
+    for c in &out.checked {
+        if !read.contains(&c.path) {
+            read.push(c.path.clone());
+        }
     }
+    let json = serde_json::to_value(&out).expect("serialisable");
+    g.log_evidence("zvolreport", &json, code, &read, Vec::new())
 }
 
 /// `check`: every digest a record carries is checked back, one row

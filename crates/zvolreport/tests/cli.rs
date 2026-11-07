@@ -188,3 +188,54 @@ fn an_edited_log_breaks_the_report() {
         "{v}"
     );
 }
+
+/// `--evidence-log` and `--hash-inputs` do what they say for this tool
+/// too: a build records the logs it read and the hashes of what it
+/// wrote, and a verify what it checked. Both flags were accepted and did
+/// nothing.
+#[test]
+fn a_report_run_is_on_the_evidence_record() {
+    let dir = scratch("own-record");
+    let img = dir.join("vol.img");
+    std::fs::write(&img, b"the bytes of a volume, such as they are").expect("write");
+    let log = evidence_log(&dir, &img);
+    let report = dir.join("report.json").to_string_lossy().into_owned();
+    let ev = dir.join("runs.jsonl").to_string_lossy().into_owned();
+    let (code, _, err) = run(&[
+        "--evidence-log",
+        &ev,
+        "--hash-inputs",
+        "-q",
+        "build",
+        &log.to_string_lossy(),
+        "-o",
+        &report,
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let (code, _, err) = run(&["--evidence-log", &ev, "-q", "verify", &report]);
+    assert_eq!(code, 0, "{err}");
+    let records: Vec<serde_json::Value> = std::fs::read_to_string(&ev)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(records.len(), 2, "{records:?}");
+    assert!(records.iter().all(|r| r["tool"] == "zvolreport"));
+    let build = &records[0];
+    assert!(build["inputs"][0]["sha256"].is_string(), "{build}");
+    assert!(
+        build["outputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(
+                |o| o["path"].as_str().unwrap().ends_with("report.json") && o["sha256"].is_string()
+            ),
+        "{build}"
+    );
+    assert!(
+        records[1]["inputs"].as_array().unwrap().len() >= 3,
+        "{}",
+        records[1]
+    );
+}

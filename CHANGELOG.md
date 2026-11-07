@@ -215,6 +215,13 @@ tagged. `v0.7.1` is the release that carries those six.
   The header counts only the groups it walked, a history with none is
   exit 3, and an unopened member exit 2. The JSON `txgs` is unchanged:
   every TXG whose uberblock verified.
+* **`zvolreport` did not do what its manual said.** The page gave exit 3
+  for a mismatch and 2 for a file the report names that cannot be read;
+  `verify` exits 4 for both, as COMPANIONS R-04 specifies, and the page
+  now says so (and 5 for a refused output). `--evidence-log` and
+  `--hash-inputs`, listed among its options, were accepted and did
+  nothing: a build now records the logs it read and the hashes of the
+  report, Markdown and signature it wrote, and a verify what it checked.
 * **`zvolreport` wrote over its own inputs and over keys.** `build
   case.jsonl -o case.jsonl` replaced the evidence log with the report
   about it and exited 0, and `--md` or the signature could land on the

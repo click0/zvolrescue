@@ -468,7 +468,21 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
             }
         }
     }
-    0
+    // The run is evidence too: which logs a report was built from, and
+    // the hashes of what it wrote (`--evidence-log`, `--hash-inputs`).
+    // The report itself stays a function of the logs alone (R-03).
+    let written = [Some(&opts.output), opts.md.as_ref(), signed.as_ref()]
+        .into_iter()
+        .flatten()
+        .filter_map(|p| evidence::FileRef::hashed(p).ok())
+        .collect();
+    let summary = serde_json::json!({
+        "report": opts.output,
+        "logs": opts.logs,
+        "commands": report.commands.len(),
+        "warnings": report.warnings.len(),
+    });
+    g.log_evidence("zvolreport", &summary, 0, &reads, written)
 }
 
 #[cfg(test)]
