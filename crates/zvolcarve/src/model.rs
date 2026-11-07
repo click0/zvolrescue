@@ -142,6 +142,9 @@ pub struct Index {
     /// what tells "the filter is too tight" from "there is nothing here".
     pub rejected_by_profile: u64,
     pub bytes_read: u64,
+    /// Bytes of the members that could not be read and were not searched.
+    #[serde(default)]
+    pub unreadable_bytes: u64,
     pub slots_examined: u64,
     /// Dataset dnodes the scan met, which is what can name a candidate.
     #[serde(default)]

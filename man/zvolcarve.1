@@ -234,8 +234,12 @@ The state of an interrupted
 As in
 .Xr zvolrescue 1 :
 0 success, 1 usage, 2 evidence unreadable, 3 nothing found or the
-candidate unreadable, 4 a partial image, 5 refused, 6 interrupted with
-the state written, 7 the medium refused a read.
+candidate unreadable, 4 a partial image or a scan that could not read
+every byte of the range (what lay in the bytes it could not read was not
+searched, and
+.Pa candidates.json
+says how many), 5 refused, 6 interrupted with the state written, 7 the
+medium refused a read.
 .Sh EXAMPLES
 A volume made like its surviving neighbour, found and extracted from
 images of two mirror members:

@@ -48,6 +48,60 @@ fn json(stdout: &str) -> serde_json::Value {
     serde_json::from_str(stdout).unwrap_or_else(|e| panic!("not JSON ({e}): {stdout}"))
 }
 
+/// One sector an imager could not read costs that sector, not the 4 MiB
+/// chunk around it: the scan finds what it finds without the map, says
+/// how many bytes it could not search, and exits 4 rather than 0.
+#[test]
+fn an_unreadable_sector_costs_a_sector_not_a_chunk() {
+    let dir = scratch("map-sector");
+    let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1)]);
+    let members: Vec<String> = carved_zvol_members(&mut pool, SIZE)
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let p = dir.join(format!("member{i}.img"));
+            std::fs::write(&p, m).expect("write member");
+            p.to_string_lossy().into_owned()
+        })
+        .collect();
+    let count = |ws: &str| -> usize {
+        let index: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(format!("{ws}/candidates.json")).unwrap())
+                .unwrap();
+        assert!(index["unreadable_bytes"].is_u64(), "{index}");
+        index["candidates"].as_array().unwrap().len()
+    };
+    let plain = dir.join("plain").to_string_lossy().into_owned();
+    let (code, _, err) = run(&["-q", "scan", &members[0], &members[1], "-o", &plain]);
+    assert_eq!(code, 0, "{err}");
+    let want = count(&plain);
+    assert!(want > 0);
+
+    let map = dir.join("m0.map");
+    std::fs::write(
+        &map,
+        format!(
+            "0x0 +\n0x0 0x800000 +\n0x800000 0x200 -\n0x800200 {:#x} +\n",
+            SIZE - 0x800200
+        ),
+    )
+    .unwrap();
+    let mapped = dir.join("mapped").to_string_lossy().into_owned();
+    let (code, _, err) = run(&[
+        "-q",
+        "scan",
+        &members[0],
+        &members[1],
+        "--map",
+        &format!("{}={}", members[0], map.display()),
+        "-o",
+        &mapped,
+    ]);
+    assert_eq!(code, 4, "{err}");
+    assert!(err.contains("512 byte(s) could not be read"), "{err}");
+    assert_eq!(count(&mapped), want);
+}
+
 /// Nothing a carve writes lands on what it reads: a member lying in the
 /// workspace as `candidates.json` was replaced by the index, and
 /// `dump -o` naming the index replaced the index with the image.

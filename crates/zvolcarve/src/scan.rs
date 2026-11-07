@@ -356,6 +356,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     }
     let mut datasets_met = 0usize;
     let mut bytes_read = earlier.as_ref().map_or(0, |i| i.bytes_read);
+    let mut unreadable = earlier.as_ref().map_or(0, |i| i.unreadable_bytes);
     let mut slots = earlier.as_ref().map_or(0, |i| i.slots_examined);
     let mut reached = vec![0u64; members.paths.len()];
     let mut complete = true;
@@ -406,6 +407,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             }
         };
         bytes_read += scan.bytes_read;
+        unreadable += scan.unreadable_bytes;
         datasets_met += scan.datasets.len();
         slots += scan.slots_examined;
         reached[i] = scan.resume_at;
@@ -424,7 +426,12 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         for hit in &scan.hits {
             let assessed = reader.as_ref().map(|r| {
                 let obj = ObjectReader::new(r, hit.dnode.clone(), Endian::Little);
-                assess_against(&obj, if opts.full_assess { 0 } else { 256 }, space.as_ref())
+                assess_against(
+                    &obj,
+                    if opts.full_assess { 0 } else { 256 },
+                    space.as_ref(),
+                    Some(interrupt.as_ref()),
+                )
             });
             let named = reader
                 .as_ref()
@@ -517,6 +524,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             .sum(),
         rejected: by_reason,
         bytes_read,
+        unreadable_bytes: unreadable,
         slots_examined: slots,
         datasets_met,
         space: space.as_ref().map(|s| SpaceOut {
@@ -565,8 +573,20 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         Format::Text => crate::list::print(&index),
     }
     // Exit 6: a scan that stopped early left a state file to go on
-    // from (COMPANIONS §1.2).
-    let code = if complete { 0 } else { exit::INTERRUPTED };
+    // from (COMPANIONS §1.2). Exit 4: it went to the end, but not over
+    // every byte — what lay in the unreadable ones was not searched.
+    if unreadable > 0 {
+        eprintln!(
+            "zvolcarve: {unreadable} byte(s) could not be read and were not searched; a candidate there is missed (exit 4)"
+        );
+    }
+    let code = if !complete {
+        exit::INTERRUPTED
+    } else if unreadable > 0 {
+        exit::PARTIAL
+    } else {
+        0
+    };
     let written = [index_path, state_path]
         .iter()
         .filter_map(|p| FileRef::hashed(p).ok())

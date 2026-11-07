@@ -133,6 +133,22 @@ tagged. `v0.7.1` is the release that carries those six.
   changed to fit would have been worse, a record naming a file that is
   not the evidence. Paths inside a dataset given to `zvolfiles --path`
   are bytes as before.
+* **`zvolcarve scan` hung on one planted dnode, lost 4 MiB to one bad
+  sector, and passed over most small files.** A candidate's walk took
+  block ids `step` apart until past `maxblkid`; at `u64::MAX` the next id
+  saturated at `u64::MAX`, which is never past it, and the scan spun at
+  full CPU for ever, the first Ctrl-C unheard — 512 bytes in an ordinary
+  file on the pool were enough. The walk now visits a counted number of
+  ids and stops when asked (exit 6, the state written). A read that
+  failed skipped the whole chunk around it: one sector an imager's map
+  marked bad cost 4 MiB of the search, and the scan still said complete
+  with exit 0. The chunk is read around the sector now, the sector left
+  as zeros, and what could not be searched is counted in
+  `candidates.json` (`unreadable_bytes`) and makes the exit 4. And a
+  data block size that is not a power of two was rejected, though
+  OpenZFS gives one to every object of a single block — 1.5K, 2.5K,
+  11.5K — so `--dnode-type file` missed most small files; such a size is
+  accepted for an object of one block.
 * **`zvolreport` wrote over its own inputs and over keys.** `build
   case.jsonl -o case.jsonl` replaced the evidence log with the report
   about it and exited 0, and `--md` or the signature could land on the

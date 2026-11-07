@@ -194,8 +194,14 @@ pub fn plausible_dnode(d: &DnodePhys) -> Result<(), Reject> {
     if !(1..=3).contains(&d.nblkptr) {
         return Err(Reject::NBlkPtr);
     }
+    // An object of one block has the block size of its contents rounded
+    // up to a sector — 1.5K, 2.5K, 11.5K, as zdb shows them; the dnode
+    // counts it in sectors, so any count is a whole one — and only an
+    // object of several blocks has a power of two. Holding every object
+    // to a power of two passed over most small files.
     let dbs = d.datablksz();
-    if dbs == 0 || !dbs.is_power_of_two() || dbs > MAX_BLOCKSIZE {
+    let shape = d.maxblkid == 0 || dbs.is_power_of_two();
+    if dbs == 0 || !shape || dbs > MAX_BLOCKSIZE {
         return Err(Reject::DataBlkSz);
     }
     let core = crate::dmu::DNODE_CORE_SIZE + d.nblkptr as usize * blkptr::SIZE;
@@ -471,6 +477,22 @@ mod tests {
         ];
         for (what, spec, want) in cases {
             assert_eq!(plausible_dnode(&parse(&spec)), Err(want), "{what}");
+        }
+    }
+
+    /// An object of one block is the size of its contents rounded up to a
+    /// sector — 1.5K is what zdb shows for a small file — and only an
+    /// object of several blocks has a power of two.
+    #[test]
+    fn a_single_block_object_has_any_whole_number_of_sectors() {
+        let one = |datablksz| DnodeSpec {
+            datablksz,
+            maxblkid: 0,
+            nlevels: 1,
+            ..zvol()
+        };
+        for ok in [512, 1536, 2560, 11776] {
+            assert_eq!(plausible_dnode(&parse(&one(ok))), Ok(()), "{ok}");
         }
     }
 

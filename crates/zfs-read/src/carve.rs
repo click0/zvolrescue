@@ -262,6 +262,9 @@ pub struct Scan {
     pub resume_at: u64,
     /// The scan stopped before the end of the range.
     pub stopped_early: bool,
+    /// Bytes of the range that could not be read, and so were not
+    /// searched: sectors an imager's map refuses, chunks a device did.
+    pub unreadable_bytes: u64,
     /// Dataset dnodes met along the way, whatever the profile asked for
     /// (C-11). A candidate whose DSL metadata survived somewhere on the
     /// disk can be named from these, and a search for volumes would
@@ -543,21 +546,39 @@ pub fn scan_member(
             break;
         }
         let window = &mut buf[..readable];
-        if let Err(e) = src.read_at(at, window) {
-            // A member with a bad sector is not a reason to lose the
-            // rest of it: skip the chunk and say so.
-            trace!(
-                "carve",
-                "device {device} offset {at:#x}: {e}; skipping chunk"
-            );
-            at += opts.chunk as u64;
-            scan.resume_at = at;
-            continue;
-        }
-        scan.bytes_read += readable as u64;
         // Only offsets that start inside this chunk are examined; the
         // overlap belongs to the next one.
         let own = (opts.chunk).min((end - at) as usize);
+        // A sector the imager could not read is not a reason to lose
+        // the 4 MiB around it: the chunk is read again around it, the
+        // sector left as zeros, and counted (SPEC F-72). A device is
+        // asked once (N-10); its refusal skips the chunk, counted too.
+        match src.read_at_salvaging(at, window) {
+            Ok(bad) => {
+                scan.unreadable_bytes += bad
+                    .iter()
+                    .map(|&(s, l)| (s + l).min(own as u64).saturating_sub(s))
+                    .sum::<u64>();
+                if !bad.is_empty() {
+                    trace!(
+                        "carve",
+                        "device {device} offset {at:#x}: {} unreadable range(s), read around",
+                        bad.len()
+                    );
+                }
+            }
+            Err(e) => {
+                trace!(
+                    "carve",
+                    "device {device} offset {at:#x}: {e}; skipping chunk"
+                );
+                scan.unreadable_bytes += own as u64;
+                at += opts.chunk as u64;
+                scan.resume_at = at;
+                continue;
+            }
+        }
+        scan.bytes_read += readable as u64;
         plaintext_pass(&mut scan, opts, device, at, &window[..own.min(readable)]);
         if !opts.codecs.is_empty() {
             let mut off = 0usize;
@@ -722,7 +743,7 @@ impl Assessment {
 /// front, because the front of an overwritten volume is the part most
 /// likely to still look intact.
 pub fn assess(obj: &crate::dmu::ObjectReader<'_, '_>, sample: u64) -> Assessment {
-    assess_against(obj, sample, None)
+    assess_against(obj, sample, None, None)
 }
 
 /// Like [`assess`], and also asking the space maps about each block it
@@ -733,10 +754,16 @@ pub fn assess(obj: &crate::dmu::ObjectReader<'_, '_>, sample: u64) -> Assessment
 /// tell "released, and still there until something overwrites it" from
 /// "handed to something else", which is the difference between a
 /// recovery worth starting now and one that is already too late.
+///
+/// The walk visits a counted number of block ids, so a `maxblkid` of
+/// `u64::MAX` — one planted dnode is enough — ends like any other: the
+/// next id used to saturate at `u64::MAX`, which is never past it, and
+/// the scan spun for ever. `stop` ends it early, marked as sampled.
 pub fn assess_against(
     obj: &crate::dmu::ObjectReader<'_, '_>,
     sample: u64,
     space: Option<&crate::spacemap::Space>,
+    stop: Option<&std::sync::atomic::AtomicBool>,
 ) -> Assessment {
     let d = obj.dnode();
     let total = d.maxblkid.saturating_add(1);
@@ -750,8 +777,14 @@ pub fn assess_against(
         sampled: step > 1,
         ..Assessment::default()
     };
-    let mut blkid = 0u64;
-    while blkid <= d.maxblkid {
+    // `i * step` stays below `total` for every `i` below `visits`.
+    let visits = total.div_ceil(step);
+    for i in 0..visits {
+        if stop.is_some_and(|s| s.load(Ordering::Relaxed)) {
+            a.sampled = true;
+            break;
+        }
+        let blkid = i * step;
         match obj.locate(blkid) {
             Err(_) => a.blocks_failed += 1,
             Ok(None) => a.blocks_holes += 1,
@@ -775,10 +808,6 @@ pub fn assess_against(
                     Err(_) => a.blocks_failed += 1,
                 }
             }
-        }
-        blkid = blkid.saturating_add(step);
-        if step > 1 && blkid > d.maxblkid {
-            break;
         }
     }
     a
@@ -1062,6 +1091,25 @@ mod tests {
         assert_eq!(a.blocks_failed, 0, "{a:?}");
         assert_eq!(a.blocks_verified + a.blocks_holes, 4, "{a:?}");
         assert_eq!(a.agreement(), 1.0);
+
+        // The same dnode claiming every block id there is: a sampled walk
+        // ends after its samples — the next id used to saturate at
+        // u64::MAX and the walk never ended — and a full one ends when
+        // asked to stop.
+        let mut huge = best.dnode.clone();
+        huge.maxblkid = u64::MAX;
+        let obj = crate::dmu::ObjectReader::new(&reader, huge, Endian::Little);
+        let a = assess(&obj, 256);
+        assert!(a.sampled);
+        assert_eq!(
+            a.blocks_verified + a.blocks_holes + a.blocks_failed,
+            256,
+            "{a:?}"
+        );
+        let stop = AtomicBool::new(true);
+        let a = assess_against(&obj, 0, None, Some(&stop));
+        assert!(a.sampled);
+        assert_eq!(a.blocks_verified + a.blocks_holes + a.blocks_failed, 0);
     }
 
     /// The counters are what makes an empty result readable, so every
