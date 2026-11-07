@@ -83,6 +83,19 @@ tagged. `v0.7.1` is the release that carries those six.
   output: `zvoltimeline -o member1.img member0.img member1.img` replaced
   the 64 MiB member with a 1.3 KB report and exited 0. It is checked
   like every other output now (exit 5).
+* **`zvolfiles extract` and `objects` wrote through what was already
+  in the output directory.** Only the directory was checked. A symbolic
+  link left in it was followed: one named like a file of the dataset and
+  pointing at a member truncated the member to that file, and a linked
+  subdirectory sent files outside the tree. A member lying in the
+  directory under such a name was truncated the same way. Every path is
+  now made from the output directory down: a link in the way is removed
+  and the entry made in its place, a file in the way is replaced as
+  `tar` replaces one, files are opened with `create_new`, and before
+  anything is removed or made the path is checked against everything the
+  run reads — an entry that is a member is refused (exit 5) and the rest
+  of the tree still written. A second run into the same directory no
+  longer fails on the hard links the first one made.
 * **`zvolreport` wrote over its own inputs and over keys.** `build
   case.jsonl -o case.jsonl` replaced the evidence log with the report
   about it and exited 0, and `--md` or the signature could land on the

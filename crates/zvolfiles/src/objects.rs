@@ -13,9 +13,9 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use zvol_common::evidence::FileRef;
 use zvol_common::{exit, Format, Global, PoolSpec};
-use zvolrescue_io::refuse_if_evidence;
 
 use crate::common::{with_dataset, AtArgs};
+use crate::out::{OutError, OutTree};
 
 #[derive(Debug, Serialize)]
 struct ObjectOut {
@@ -32,6 +32,9 @@ struct ObjectOut {
     errors: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    /// The error was a refusal (exit 5).
+    #[serde(skip)]
+    refused: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -56,14 +59,7 @@ pub fn run(
     strict: bool,
 ) -> u8 {
     let result = with_dataset(spec, dataset, at, |fs, opened| {
-        if let Err(e) = refuse_if_evidence(output, &opened.members.paths) {
-            eprintln!("zvolfiles: {e}");
-            return Err(exit::REFUSED);
-        }
-        std::fs::create_dir_all(output).map_err(|e| {
-            eprintln!("zvolfiles: {}: {e}", output.display());
-            exit::USAGE
-        })?;
+        let tree = OutTree::open(g, spec, at, opened, output)?;
         let max = fs.objects.max_object();
         let mut objects = Vec::new();
         let mut obj = 0;
@@ -92,13 +88,17 @@ pub fn run(
                 sha256: None,
                 errors: 0,
                 error: None,
+                refused: false,
             };
-            match write_object(fs, obj, record.size, output, strict) {
+            match write_object(fs, &tree, obj, record.size, output, strict) {
                 Ok((hash, errors)) => {
                     record.sha256 = Some(hash);
                     record.errors = errors;
                 }
-                Err(e) => record.error = Some(e),
+                Err(e) => {
+                    record.refused = matches!(e, OutError::Refused(_));
+                    record.error = Some(e.to_string());
+                }
             }
             objects.push(record);
             obj = next;
@@ -116,9 +116,10 @@ pub fn run(
             },
             opened.members.paths.clone(),
             opened.members.ledger.clone(),
+            tree,
         ))
     });
-    let (out, paths, ledger) = match result {
+    let (out, paths, ledger, tree) = match result {
         Ok(v) => v,
         // Nothing was produced — the members did not open, or the
         // dataset was not reached — but a device may have refused a
@@ -129,12 +130,17 @@ pub fn run(
 
     let json = serde_json::to_value(&out).expect("serialisable");
     let index = output.join("objects.json");
-    if let Err(e) = std::fs::write(
-        &index,
-        serde_json::to_string_pretty(&json).expect("serialisable") + "\n",
-    ) {
+    let wrote = tree.create(&index).and_then(|mut f| {
+        f.write_all((serde_json::to_string_pretty(&json).expect("serialisable") + "\n").as_bytes())
+            .map_err(|e| OutError::Failed(format!("{}: {e}", index.display())))
+    });
+    if let Err(e) = wrote {
         eprintln!("zvolfiles: {}: {e}", index.display());
-        return exit::USAGE;
+        return if matches!(e, OutError::Refused(_)) {
+            exit::REFUSED
+        } else {
+            exit::USAGE
+        };
     }
     match g.format {
         Format::Json => println!(
@@ -164,7 +170,15 @@ pub fn run(
             println!("  index: {}", index.display());
         }
     }
-    let code = if out.incomplete > 0 || out.written < out.objects.len() {
+    let refused = out.objects.iter().filter(|o| o.refused).count();
+    if refused > 0 {
+        eprintln!(
+            "zvolfiles: {refused} object(s) refused: the path holds something this run reads (exit 5)"
+        );
+    }
+    let code = if refused > 0 {
+        exit::REFUSED
+    } else if out.incomplete > 0 || out.written < out.objects.len() {
         exit::PARTIAL
     } else {
         0
@@ -186,17 +200,17 @@ pub fn run(
 /// Write one object's blocks to `DIR/objects/NNNNN.bin`.
 fn write_object(
     fs: &zfs_read::zpl::Filesystem<'_, '_>,
+    tree: &OutTree,
     object: u64,
     size: u64,
     output: &Path,
     strict: bool,
-) -> Result<(String, u64), String> {
-    let obj = fs.object(object).map_err(|e| e.to_string())?;
+) -> Result<(String, u64), OutError> {
+    let fail = OutError::Failed;
+    let obj = fs.object(object).map_err(|e| fail(e.to_string()))?;
     let bs = obj.dnode().datablksz().max(512);
-    let dir = output.join("objects");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let path = dir.join(format!("{object:06}.bin"));
-    let mut file = std::fs::File::create(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let path = output.join("objects").join(format!("{object:06}.bin"));
+    let mut file = tree.create(&path)?;
     let mut hasher = Sha256::new();
     let mut errors = 0u64;
     let zeros = vec![0u8; bs as usize];
@@ -205,7 +219,7 @@ fn write_object(
             Ok(b) => b,
             Err(e) => {
                 if strict {
-                    return Err(format!("block {blkid}: {e}"));
+                    return Err(fail(format!("block {blkid}: {e}")));
                 }
                 errors += 1;
                 zeros.clone()
@@ -213,7 +227,7 @@ fn write_object(
         };
         hasher.update(&chunk);
         file.write_all(&chunk)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
+            .map_err(|e| fail(format!("{}: {e}", path.display())))?;
     }
     let hex = hasher
         .finalize()

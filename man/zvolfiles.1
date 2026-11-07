@@ -100,6 +100,18 @@ Write the tree out as files.
 .Bl -tag -width Ds
 .It Fl o , Fl -output Ar dir
 Write the tree here.
+Nothing already in
+.Ar dir
+is written through: a symbolic link in the way of a file or a
+directory is removed and the entry made in its place, and a file in
+the way of a file is replaced, as
+.Xr tar 1
+does.
+The directory itself, and every path made in it, is refused with exit
+5 if it is anything the run reads or shares bytes with it: a member
+under any name, a map, the hints, a key file, a device a member is on.
+An entry so refused is left as it is and named in the manifest; the
+rest of the tree is still written.
 .It Fl -path Ar path
 Path inside the dataset, repeatable; everything when absent.
 .It Fl -strict
@@ -120,7 +132,8 @@ comma-separated; default both.
 One file per object, for when the POSIX metadata is gone.
 .Bl -tag -width Ds
 .It Fl o , Fl -output Ar dir
-Write the objects here.
+Write the objects here, by the same rules as
+.Cm extract .
 .It Fl -strict
 Stop at the first block that cannot be read.
 .El

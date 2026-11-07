@@ -13,6 +13,7 @@ mod common;
 mod extract;
 mod list;
 mod objects;
+mod out;
 
 use std::path::PathBuf;
 use std::process::ExitCode;

@@ -16,9 +16,9 @@ use zfs_ondisk::zpl::FileType;
 use zfs_read::zpl::{walk_from, Filesystem};
 use zvol_common::evidence::FileRef;
 use zvol_common::{exit, Format, Global, PoolSpec};
-use zvolrescue_io::refuse_if_evidence;
 
 use crate::common::{with_dataset, AtArgs};
+use crate::out::{OutError, OutTree};
 
 /// Options of an `extract` run.
 pub struct Options {
@@ -62,6 +62,10 @@ pub struct Extracted {
     pub errors: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The error was a refusal: writing it would have reached what the
+    /// run reads (exit 5).
+    #[serde(skip)]
+    pub refused: bool,
 }
 
 /// One extended attribute, as the manifest records it.
@@ -172,24 +176,27 @@ fn safe_join(root: &Path, path: &[u8]) -> Option<PathBuf> {
 }
 
 /// Copy one file's blocks out, zeroing what cannot be read (Z-06).
+#[allow(clippy::too_many_arguments)]
 fn copy_file(
     fs: &Filesystem<'_, '_>,
+    tree: &OutTree,
     object: u64,
     size: u64,
     to: &Path,
     strict: bool,
     stop: &AtomicBool,
-) -> Result<(String, u64), String> {
-    let obj = fs.object(object).map_err(|e| e.to_string())?;
+) -> Result<(String, u64), OutError> {
+    let fail = |e: String| OutError::Failed(e);
+    let obj = fs.object(object).map_err(|e| fail(e.to_string()))?;
     let bs = obj.dnode().datablksz().max(512);
-    let mut file = std::fs::File::create(to).map_err(|e| format!("{}: {e}", to.display()))?;
+    let mut file = tree.create(to)?;
     let mut hasher = Sha256::new();
     let mut written = 0u64;
     let mut errors = 0u64;
     let zeros = vec![0u8; bs as usize];
     while written < size {
         if stop.load(Ordering::Relaxed) {
-            return Err(format!("interrupted after {written} of {size} bytes"));
+            return Err(fail(format!("interrupted after {written} of {size} bytes")));
         }
         let want = (size - written).min(bs) as usize;
         let blkid = written / bs;
@@ -197,7 +204,7 @@ fn copy_file(
             Ok(b) => b,
             Err(e) => {
                 if strict {
-                    return Err(format!("block {blkid}: {e}"));
+                    return Err(fail(format!("block {blkid}: {e}")));
                 }
                 errors += 1;
                 zeros.clone()
@@ -206,7 +213,7 @@ fn copy_file(
         let piece = &chunk[..want.min(chunk.len())];
         hasher.update(piece);
         file.write_all(piece)
-            .map_err(|e| format!("{}: {e}", to.display()))?;
+            .map_err(|e| fail(format!("{}: {e}", to.display())))?;
         written += piece.len() as u64;
         if piece.is_empty() {
             break;
@@ -227,14 +234,7 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
     let interrupt = zvol_common::interrupt_flag();
     let preserve: Vec<&str> = opts.preserve.split(',').map(str::trim).collect();
     let result = with_dataset(spec, dataset, at, |fs, opened| {
-        if let Err(e) = refuse_if_evidence(&opts.output, &opened.members.paths) {
-            eprintln!("zvolfiles: {e}");
-            return Err(exit::REFUSED);
-        }
-        std::fs::create_dir_all(&opts.output).map_err(|e| {
-            eprintln!("zvolfiles: {}: {e}", opts.output.display());
-            exit::USAGE
-        })?;
+        let tree = OutTree::open(g, spec, at, opened, &opts.output)?;
 
         // Nothing given means the whole dataset.
         let roots: Vec<(u64, Vec<u8>)> = if opts.paths.is_empty() {
@@ -277,6 +277,7 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
                     }
                     extract_entry(
                         fs,
+                        &tree,
                         &e,
                         opts,
                         &preserve,
@@ -296,6 +297,7 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
                 };
                 extract_entry(
                     fs,
+                    &tree,
                     &e,
                     opts,
                     &preserve,
@@ -314,6 +316,12 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
         }
         let incomplete = files.iter().filter(|f| f.errors > 0).count();
         let failed = files.iter().filter(|f| f.error.is_some()).count();
+        let refused = files.iter().filter(|f| f.refused).count();
+        if refused > 0 {
+            eprintln!(
+                "zvolfiles: {refused} entr(y|ies) refused: the path holds something this run reads (exit 5)"
+            );
+        }
         let hardlinks = files.iter().filter(|f| f.hardlink_to.is_some()).count();
         Ok((
             ManifestOut {
@@ -329,9 +337,11 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
             },
             opened.members.paths.clone(),
             opened.members.ledger.clone(),
+            tree,
+            refused,
         ))
     });
-    let (out, paths, ledger) = match result {
+    let (out, paths, ledger, tree, refused) = match result {
         Ok(v) => v,
         // Nothing was produced — the members did not open, or the
         // dataset was not reached — but a device may have refused a
@@ -342,12 +352,17 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
 
     let json = serde_json::to_value(&out).expect("serialisable");
     let manifest = opts.output.join("manifest.json");
-    if let Err(e) = std::fs::write(
-        &manifest,
-        serde_json::to_string_pretty(&json).expect("serialisable") + "\n",
-    ) {
+    let wrote = tree.create(&manifest).and_then(|mut f| {
+        f.write_all((serde_json::to_string_pretty(&json).expect("serialisable") + "\n").as_bytes())
+            .map_err(|e| OutError::Failed(format!("{}: {e}", manifest.display())))
+    });
+    if let Err(e) = wrote {
         eprintln!("zvolfiles: {}: {e}", manifest.display());
-        return exit::USAGE;
+        return if matches!(e, OutError::Refused(_)) {
+            exit::REFUSED
+        } else {
+            exit::USAGE
+        };
     }
     match g.format {
         Format::Json => println!(
@@ -381,6 +396,8 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
     }
     let code = if out.interrupted {
         exit::INTERRUPTED
+    } else if refused > 0 {
+        exit::REFUSED
     } else if out.failed > 0 || out.incomplete > 0 {
         exit::PARTIAL
     } else {
@@ -406,6 +423,7 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
 #[allow(clippy::too_many_arguments)]
 fn extract_entry(
     fs: &Filesystem<'_, '_>,
+    tree: &OutTree,
     e: &zfs_read::zpl::Entry,
     opts: &Options,
     preserve: &[&str],
@@ -439,12 +457,17 @@ fn extract_entry(
         xattrs: xattrs_of(fs, z),
         errors: 0,
         error: None,
+        refused: false,
+    };
+    let fail = |record: &mut Extracted, err: OutError| {
+        record.refused = matches!(err, OutError::Refused(_));
+        record.error = Some(err.to_string());
     };
     match z.file_type() {
         FileType::Dir => {
             *directories += 1;
-            if let Err(err) = std::fs::create_dir_all(&to) {
-                record.error = Some(err.to_string());
+            if let Err(err) = tree.dir(&to) {
+                fail(&mut record, err);
             }
         }
         FileType::Symlink => match fs.symlink_target(e.object, z) {
@@ -454,33 +477,36 @@ fn extract_entry(
                 // Written as a file holding the target rather than as a
                 // symbolic link: a link out of a recovered tree would
                 // point at whatever happens to be there now.
-                if let Err(err) = std::fs::write(&to, &t) {
-                    record.error = Some(err.to_string());
+                let wrote = tree.create(&to).and_then(|mut f| {
+                    f.write_all(&t)
+                        .map_err(|err| OutError::Failed(format!("{}: {err}", to.display())))
+                });
+                if let Err(err) = wrote {
+                    fail(&mut record, err);
                 }
             }
             Err(err) => record.error = Some(err.to_string()),
         },
         FileType::Regular => {
-            if let Some(parent) = to.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
             // The same object under a second name is a hard link, and
             // reading its blocks again would only prove that twice.
             if let Some(first) = written_objects.get(&e.object).cloned() {
                 match safe_join(&opts.output, &first.raw_path)
-                    .ok_or_else(|| "the first name is not one this platform can write".to_string())
-                    .and_then(|from| std::fs::hard_link(&from, &to).map_err(|err| err.to_string()))
+                    .ok_or_else(|| {
+                        OutError::Failed("the first name is not one this platform can write".into())
+                    })
+                    .and_then(|from| tree.hard_link(&from, &to))
                 {
                     Ok(()) => {
                         record.hardlink_to = Some(first.path.clone());
                         record.sha256 = first.sha256.clone();
                     }
-                    Err(err) => record.error = Some(err),
+                    Err(err) => fail(&mut record, err),
                 }
                 files.push(record);
                 return;
             }
-            match copy_file(fs, e.object, z.size, &to, opts.strict, stop) {
+            match copy_file(fs, tree, e.object, z.size, &to, opts.strict, stop) {
                 Ok((hash, errors)) => {
                     record.sha256 = Some(hash.clone());
                     record.errors = errors;
@@ -499,7 +525,7 @@ fn extract_entry(
                         );
                     }
                 }
-                Err(err) => record.error = Some(err),
+                Err(err) => fail(&mut record, err),
             }
         }
         other => {
@@ -537,6 +563,7 @@ fn failed(e: &zfs_read::zpl::Entry, why: &str) -> Extracted {
         xattrs: Vec::new(),
         errors: 0,
         error: Some(why.to_string()),
+        refused: false,
     }
 }
 
