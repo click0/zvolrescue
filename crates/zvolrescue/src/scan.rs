@@ -22,7 +22,7 @@ use zfs_read::zeropoint::{
 use zvolrescue_io::{BlockSource, FileSource};
 
 use zvol_common::timefmt::iso8601;
-use zvol_common::{evidence, exit, Format, Global, OpenOpts};
+use zvol_common::{evidence, exit, Format, Global, OpenOpts, WriteGuard};
 
 #[derive(Debug, Serialize)]
 struct UberblockOut {
@@ -1075,22 +1075,15 @@ fn emit_label(
         ));
     }
     let index = opts.emit_label_index.unwrap_or(0);
-    // The label is for a *copy* of the disk, and so is its geometry: a
-    // path among the members, the hints, or a device under them is
-    // refused before either file is written — and so is a FILE that ends
-    // in .json, whose geometry would land on the label just written.
+    // A FILE that ends in .json would have its geometry land on the
+    // label just written. (Both files were checked against what the run
+    // reads before this was called.)
     let meta = out.with_extension("json");
     if meta == *out {
         return Err(format!(
             "--emit-label {}: the geometry goes to FILE.json beside the label; name the label something else",
             out.display()
         ));
-    }
-    let mut inputs = devices.to_vec();
-    inputs.push(file.clone());
-    for path in [out, &meta] {
-        zvolrescue_io::refuse_if_evidence(path, &inputs)
-            .map_err(|e| format!("refusing --emit-label: {e}"))?;
     }
     let nv = zfs_read::hints::label_nvlist(&hints.layout, top, leaf, txg.unwrap_or(0), None);
     let img = zfs_read::hints::label_image(&nv, index, psize)?;
@@ -1287,7 +1280,22 @@ pub fn run(
         Format::Text => print_text(&out, g.verbose),
     }
     let mut written: Vec<evidence::FileRef> = Vec::new();
-    if emit.emit_label.is_some() {
+    if let Some(label) = &emit.emit_label {
+        // The label is for a *copy* of the disk, and so is its geometry:
+        // a member, the hints, a map, a device under any of them or a log
+        // is refused before either file is written (exit 5).
+        let mut reads = devices.to_vec();
+        reads.extend(emit.hints.iter().cloned());
+        for (member, map) in &open.maps {
+            reads.push(member.clone());
+            reads.push(map.clone());
+        }
+        let guard = WriteGuard::new(g, &reads);
+        for path in [label.clone(), label.with_extension("json")] {
+            if let Err(code) = guard.refuse("zvolrescue", "--emit-label", &path) {
+                return code;
+            }
+        }
         // Seal it for a vdev the size of the smallest member scanned: the
         // rear labels' position depends on it, and a label sealed for the
         // wrong size verifies nowhere.

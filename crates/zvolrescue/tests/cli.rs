@@ -88,6 +88,68 @@ fn json(stdout: &str) -> serde_json::Value {
     serde_json::from_str(stdout).unwrap_or_else(|e| panic!("not JSON ({e}): {stdout}"))
 }
 
+/// `dump` writes nothing over anything the run reads: not an image of
+/// `-r` named like a member beside it (one called `tank_vm_disk0.img`
+/// was truncated to the volume), not a mapfile or a key file given as
+/// `-o`, and not the evidence log, which does not exist until the run
+/// ends and then was appended to the image.
+#[test]
+fn dump_never_writes_over_what_it_reads() {
+    let dir = scratch("dump-over-inputs");
+    let paths = write_members(&dir, &plain_members());
+    let named = dir.join("tank_vm_disk0.img");
+    std::fs::rename(&paths[0], &named).unwrap();
+    let named = named.to_string_lossy().into_owned();
+    let before = std::fs::read(&named).unwrap();
+    let d = dir.to_string_lossy().into_owned();
+    let (code, _, err) = run(&["-q", "dump", "-r", "tank", &named, &paths[1], "-o", &d]);
+    assert_eq!(code, 5, "{err}");
+    assert!(err.contains("same file as input"), "{err}");
+    assert_eq!(
+        std::fs::read(&named).unwrap(),
+        before,
+        "-r wrote the member"
+    );
+
+    let map = dir.join("m0.map").to_string_lossy().into_owned();
+    std::fs::write(&map, "0x0 +\n").unwrap();
+    let key = dir.join("raw.key").to_string_lossy().into_owned();
+    std::fs::write(&key, [7u8; 32]).unwrap();
+    for (extra, out) in [
+        (
+            vec!["--map".to_string(), format!("{named}={map}")],
+            map.clone(),
+        ),
+        (vec!["--key".to_string(), format!("raw:{key}")], key.clone()),
+    ] {
+        let mut args = vec!["-q", "dump", "tank/vm/disk0", &named, &paths[1], "-o", &out];
+        args.extend(extra.iter().map(String::as_str));
+        let (code, _, err) = run(&args);
+        assert_eq!(code, 5, "{out}: {err}");
+    }
+    assert_eq!(std::fs::read_to_string(&map).unwrap(), "0x0 +\n");
+    assert_eq!(std::fs::read(&key).unwrap(), [7u8; 32]);
+
+    let both = dir.join("both.img").to_string_lossy().into_owned();
+    let (code, _, err) = run(&[
+        "--evidence-log",
+        &both,
+        "-q",
+        "dump",
+        "tank/vm/disk0",
+        &named,
+        &paths[1],
+        "-o",
+        &both,
+    ]);
+    assert_eq!(code, 5, "{err}");
+    assert!(err.contains("--evidence-log"), "{err}");
+    // What is there is the log of the refused run, not an image with a
+    // record on its end.
+    let text = std::fs::read_to_string(&both).unwrap();
+    assert!(text.starts_with('{'), "{text}");
+}
+
 /// Neither log may be written over a member: `--debug-log` truncated
 /// it before the run began, `--evidence-log` appended JSON to it and
 /// exited 0. Both are refused now, with the member untouched, and a log
@@ -156,8 +218,10 @@ fn emit_label_is_never_written_over_the_evidence() {
     )
     .unwrap();
     let hints = hints.to_string_lossy().into_owned();
+    let map = dir.join("m0.map").to_string_lossy().into_owned();
+    std::fs::write(&map, "0x0 +\n").unwrap();
     let before = std::fs::read(&paths[0]).unwrap();
-    for target in [paths[0].clone(), hints.clone()] {
+    for target in [paths[0].clone(), hints.clone(), map.clone()] {
         let (code, _, err) = run(&[
             "-q",
             "scan",
@@ -165,13 +229,16 @@ fn emit_label_is_never_written_over_the_evidence() {
             &paths[1],
             "--hints",
             &hints,
+            "--map",
+            &format!("{}={map}", paths[0]),
             "--emit-label",
             &target,
         ]);
-        assert_eq!(code, 1, "{target}: {err}");
+        assert_eq!(code, 5, "{target}: {err}");
         assert!(err.contains("refusing --emit-label"), "{err}");
     }
     assert_eq!(std::fs::read(&paths[0]).unwrap(), before);
+    assert_eq!(std::fs::read_to_string(&map).unwrap(), "0x0 +\n");
     let json_name = dir.join("label.json").to_string_lossy().into_owned();
     let (code, _, err) = run(&[
         "-q",

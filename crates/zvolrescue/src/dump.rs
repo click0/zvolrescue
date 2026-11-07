@@ -12,11 +12,10 @@ use zfs_read::hash::Extra;
 use zfs_read::pool::{select_uberblock, uberblock_candidates, Candidate, TxgSelect};
 use zfs_read::zio::{PoolReader, ReadError};
 use zfs_read::zvol::{extract_from, open_volume, volume_facts, OnError, Report};
-use zvolrescue_io::refuse_if_evidence;
 
 use zvol_common::members::{choose_pool, open_members};
 use zvol_common::timefmt::iso8601;
-use zvol_common::{evidence, exit, resume, Format, Global, PoolSpec};
+use zvol_common::{evidence, exit, resume, Format, Global, PoolSpec, WriteGuard};
 
 /// Options of the `dump` command.
 pub struct Options {
@@ -637,9 +636,13 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         Ok(m) => m,
         Err(code) => return zvol_common::end_early(g, "zvolrescue", spec, code),
     };
-    if let Err(e) = refuse_if_evidence(&opts.output, &members.paths) {
-        eprintln!("zvolrescue: refusing to write: {e}");
-        return zvol_common::end_early(g, "zvolrescue", spec, exit::REFUSED);
+    // Everything the run reads, for every file it writes.
+    let mut reads = spec.reads();
+    reads.extend(members.paths.iter().cloned());
+    reads.extend(opts.key.as_deref().and_then(KeyMaterial::spec_file));
+    let guard = WriteGuard::new(g, &reads);
+    if let Err(code) = guard.refuse("zvolrescue", "-o", &opts.output) {
+        return zvol_common::end_early(g, "zvolrescue", spec, code);
     }
     let pool = match choose_pool(members.pools.clone(), spec.pool_guid.as_deref()) {
         Ok(p) => p,
@@ -723,6 +726,27 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             opts.output.clone(),
         )]
     };
+    // Every file this run will write, before the first is: the images
+    // `-r` names inside the directory — one called like a member beside
+    // them was written over — their resume states and the manifest.
+    let mut writes: Vec<PathBuf> = Vec::new();
+    for (ds, output) in &targets {
+        if opts.recursive && ds.kind != Some(zfs_ondisk::dmu::ObjsetType::Zvol) {
+            continue;
+        }
+        if opts.recursive {
+            writes.push(output.clone());
+        }
+        writes.push(resume::path(output));
+    }
+    if opts.recursive {
+        writes.push(opts.output.join("manifest.json"));
+    }
+    for w in &writes {
+        if let Err(code) = guard.refuse("zvolrescue", "to write", w) {
+            return zvol_common::end_early(g, "zvolrescue", spec, code);
+        }
+    }
 
     let mut out = RunOut {
         pool: pool.name.clone(),

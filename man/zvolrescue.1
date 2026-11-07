@@ -182,8 +182,8 @@ ending in
 is refused.
 Nothing is ever written to the evidence: a
 .Ar file
-that is a member, the hints file, or on a device among the members is
-refused before either file is written.
+that is a member, the hints file, a map, a log, or on a device among
+the members is refused, with exit 5, before either file is written.
 .It Fl -emit-for Ar top : Ns Ar leaf
 Which member of the layout the emitted label belongs to; default
 .Ql 0:0 .
@@ -245,7 +245,15 @@ destroy is passed over for an older one, and the record says so.
 .It Fl o , Fl -output Ar out.img
 The output image; a directory with
 .Fl r .
-Refused if it resolves onto an input device.
+Refused, with exit 5, if it is anything the run reads or shares bytes
+with it: a member under any name, a map, the hints, a key file, a
+device a member is on or a loop device over one, or the path a log
+goes to.
+With
+.Fl r
+every image, its resume state and
+.Pa manifest.json
+are checked the same way before the first is written.
 .It Fl -txg Ar n
 Transaction group to read.
 .It Fl -strict

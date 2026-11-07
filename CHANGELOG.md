@@ -60,8 +60,8 @@ tagged. `v0.7.1` is the release that carries those six.
   given as the label's path got 256 KiB of label over its start, the
   hints file got replaced, and a label named `*.json` was overwritten at
   once by its own geometry file. Both files are checked against the
-  members and the hints before either is written, and a `.json` name is
-  refused (exit 1).
+  members, the hints, the maps and the logs before either is written
+  (exit 5), and a `.json` name is refused (exit 1).
 * **`dump -r` could write two volumes to one file.** An image is named
   after its volume with `/` as `_`, so `tank/vm/web_1` and
   `tank/vm_web/1` were both `tank_vm_web_1.img`, and the second
@@ -69,6 +69,16 @@ tagged. `v0.7.1` is the release that carries those six.
   both. Names that come out alike now both carry the dataset's GUID
   (`tank_vm_web_1.000000000000000a.img`); every other name stays as it
   was.
+* **`dump` wrote over inputs that were not members, and `-r` over
+  members.** `-o` was checked against the members alone: a mapfile, the
+  hints or a key file given as `-o` was replaced by the image. With `-r`
+  only the directory was checked, so a member that sat in it under a
+  volume's image name — `tank_vm_disk0.img` — was truncated to the
+  volume, and the manifest was written unchecked. Every file a dump
+  writes — each image, its resume state, the manifest — is now checked
+  against everything the run reads and against both logs before the
+  first is written (exit 5): `--evidence-log out.img dump … -o out.img`
+  appended the run's record to the image after its hash was taken.
 * **`zvolreport` wrote over its own inputs and over keys.** `build
   case.jsonl -o case.jsonl` replaced the evidence log with the report
   about it and exited 0, and `--md` or the signature could land on the
