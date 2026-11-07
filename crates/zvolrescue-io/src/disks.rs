@@ -9,6 +9,8 @@
 //! image to the root filesystem beside the damaged pool's partition, and
 //! that touches no byte of the evidence.
 //!
+//! A loop device is made of the file it reads ([`backing_file`]).
+//!
 //! What the kernel says is read from where it says it — sysfs on Linux,
 //! the device nodes under `/dev` on FreeBSD — and anything that cannot be
 //! read is no relation rather than an error: the check this serves is a
@@ -32,6 +34,32 @@ pub(crate) fn is_device(meta: &std::fs::Metadata) -> bool {
 /// the other way round: the same device, or one built on the other.
 pub(crate) fn overlap(a: u64, b: u64) -> bool {
     a == b || under(a).contains(&b) || under(b).contains(&a)
+}
+
+/// `dev` and every device it is built on, `dev` first.
+pub(crate) fn stack(dev: u64) -> Vec<u64> {
+    let mut out = vec![dev];
+    out.extend(under(dev));
+    out
+}
+
+/// The file a loop device reads, when `dev` is one: writing the device
+/// writes the file, and the other way round. Linux says so in sysfs; a
+/// file deleted since it was attached is no file to compare with.
+/// FreeBSD's md(4) keeps its backing file behind an ioctl, and is not
+/// traced.
+#[cfg(target_os = "linux")]
+pub(crate) fn backing_file(dev: u64) -> Option<std::path::PathBuf> {
+    let (maj, min) = (linux_major(dev), linux_minor(dev));
+    let s =
+        std::fs::read_to_string(format!("/sys/dev/block/{maj}:{min}/loop/backing_file")).ok()?;
+    let s = s.strip_suffix('\n').unwrap_or(&s);
+    (!s.is_empty() && !s.ends_with(" (deleted)")).then(|| std::path::PathBuf::from(s))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn backing_file(_dev: u64) -> Option<std::path::PathBuf> {
+    None
 }
 
 /// Every device `dev` is built on, nearest first: the disk of a

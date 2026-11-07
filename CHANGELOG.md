@@ -34,9 +34,15 @@ tagged. `v0.7.1` is the release that carries those six.
   an existing file or directory by its own filesystem, a new path by its
   nearest existing ancestor. Two partitions of one disk do not overlap:
   an image written to the root filesystem beside the damaged pool's
-  partition touches nothing of the evidence. A GEOM label (`/dev/gpt/…`,
-  `/dev/diskid/…`) is a provider of its own and is not traced to the
-  disk under it.
+  partition touches nothing of the evidence. A loop device is made of
+  the file it reads: the backing file of an input loop is refused as an
+  output, and so is a loop over an input image (sysfs on Linux; FreeBSD's
+  md(4) is not traced). A raw device under the filesystem an input image
+  lives on is refused too, where before only device inputs were looked
+  at. A symbolic link at the end of an output path is followed to where
+  it points, a dangling one included, instead of the link's own
+  directory being judged. A GEOM label (`/dev/gpt/…`, `/dev/diskid/…`)
+  is a provider of its own and is not traced to the disk under it.
 * **`--debug-log` and `--evidence-log` could be written over the
   evidence.** `-o` has been checked against the inputs from the start;
   the two logs never were, and they are opened before anything else:

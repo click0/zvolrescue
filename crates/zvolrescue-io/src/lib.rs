@@ -10,6 +10,7 @@
 //! if raw `libc` calls become necessary (e.g. `O_EXCL` on block devices).
 
 mod disks;
+mod guard;
 pub mod medium;
 pub mod trace;
 
@@ -19,6 +20,7 @@ use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+pub use guard::{refuse_if_evidence, Evidence};
 use medium::{Kind, Ledger};
 
 /// A read-only, random-access source of bytes: a device, a partition, an
@@ -975,7 +977,7 @@ mod tests {
 // ---------------------------------------------------------------------------
 
 use std::io::Write;
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
+use std::os::unix::fs::FileTypeExt;
 
 /// Where extracted bytes go. Implementations must tolerate writes in any
 /// order and leave unwritten ranges as zeros.
@@ -1060,97 +1062,6 @@ impl BlockSink for MemSink {
         self.data.resize(len as usize, 0);
         Ok(())
     }
-}
-
-/// Refuse an output path that is one of the inputs, or the device an
-/// input lives on (SPEC §8.3, invariant 2).
-///
-/// Three ways a write reaches the evidence, each refused:
-///
-/// * the output *is* an input: the same file (`st_dev`/`st_ino`), or the
-///   same device under another node;
-/// * the output is a device that shares bytes with an input device — a
-///   partition of an input disk, the disk an input partition is on, a
-///   volume built on either (`disks::overlap`);
-/// * the output is a file on a filesystem that lives on such a device.
-///   Where that is is the output's own filesystem when it exists — an
-///   image being resumed, or the directory `-r` and `zvolfiles extract`
-///   write into, which may be a mount point — and otherwise that of its
-///   nearest existing ancestor.
-///
-/// A disk is a block device on Linux and a character device on FreeBSD,
-/// which has no block devices; both are inputs to compare against.
-pub fn refuse_if_evidence(output: &Path, inputs: &[PathBuf]) -> io::Result<()> {
-    let out_meta = match std::fs::metadata(output) {
-        Ok(m) => Some(m),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
-        Err(e) => return Err(e),
-    };
-    let out_device = out_meta
-        .as_ref()
-        .filter(|m| disks::is_device(m))
-        .map(|m| m.rdev());
-    let (landing_dev, landing_path) = match &out_meta {
-        Some(m) if disks::is_device(m) => (None, output.to_path_buf()),
-        Some(m) => (Some(m.dev()), output.to_path_buf()),
-        None => {
-            let (path, m) = nearest_existing(output)?;
-            (Some(m.dev()), path)
-        }
-    };
-    for input in inputs {
-        let Ok(in_meta) = std::fs::metadata(input) else {
-            continue;
-        };
-        if let Some(o) = &out_meta {
-            if o.dev() == in_meta.dev() && o.ino() == in_meta.ino() {
-                return Err(io::Error::other(format!(
-                    "output {} is the same file as input {}",
-                    output.display(),
-                    input.display()
-                )));
-            }
-        }
-        if !disks::is_device(&in_meta) {
-            continue;
-        }
-        let evidence = in_meta.rdev();
-        if out_device.is_some_and(|d| disks::overlap(d, evidence)) {
-            return Err(io::Error::other(format!(
-                "output {} shares its bytes with input device {} (the same device, a partition of it, or the disk it is on)",
-                output.display(),
-                input.display()
-            )));
-        }
-        // Writing a file onto a filesystem that lives on an input device
-        // would overwrite evidence through the filesystem.
-        if landing_dev.is_some_and(|d| disks::overlap(d, evidence)) {
-            return Err(io::Error::other(format!(
-                "output directory {} is on input device {}",
-                landing_path.display(),
-                input.display()
-            )));
-        }
-    }
-    Ok(())
-}
-
-/// The nearest ancestor of `path` that exists, and what it is.
-fn nearest_existing(path: &Path) -> io::Result<(PathBuf, std::fs::Metadata)> {
-    for a in path.ancestors().skip(1) {
-        let a = if a.as_os_str().is_empty() {
-            Path::new(".")
-        } else {
-            a
-        };
-        match std::fs::metadata(a) {
-            Ok(m) => return Ok((a.to_path_buf(), m)),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(e),
-        }
-    }
-    let here = Path::new(".");
-    Ok((here.to_path_buf(), std::fs::metadata(here)?))
 }
 
 #[cfg(test)]
