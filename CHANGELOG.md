@@ -235,6 +235,16 @@ tagged. `v0.7.1` is the release that carries those six.
   two leaves is one candidate, and `candidates.json` counts the copies
   (`mirror_duplicates`). `--max-hits` is documented as what it is, a
   bound on each member's hits.
+* **Smaller things `dump` got wrong.** Its help promised "an object
+  dump of a filesystem", and a filesystem gave "not a volume", exit 3;
+  the help says what it does, and the error names `zvolfiles`. `-o` into
+  a pipe failed on the first seek as exit 3, "unrecoverable", as if the
+  pool were at fault; a pipe is now refused up front as a usage error,
+  since an image is written at offsets. With `-r`, names were worked out
+  for filesystems too, and a filesystem flattening to a volume's name
+  gave the volume a GUID suffix for a clash with nothing. And a resume
+  state written with a relative `-o` did not have its directory flushed
+  after the rename.
 * **`zvolreport` wrote over its own inputs and over keys.** `build
   case.jsonl -o case.jsonl` replaced the evidence log with the report
   about it and exited 0, and `--md` or the signature could land on the

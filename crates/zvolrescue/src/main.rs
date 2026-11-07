@@ -106,7 +106,7 @@ enum Cmd {
         #[arg(short, long)]
         properties: bool,
     },
-    /// Extract a zvol (or an object dump of a filesystem) to a raw sparse image.
+    /// Extract a zvol to a raw sparse image (a filesystem's files: zvolfiles).
     ///
     /// The dataset comes first so that the variable-length list of pool
     /// members can follow it: `dump DATASET DEV... [--image FILE]...`.

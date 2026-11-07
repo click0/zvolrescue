@@ -150,6 +150,27 @@ fn hints_with_an_impossible_geometry_are_refused() {
     }
 }
 
+/// An image is written at offsets with its holes left out, which a pipe
+/// cannot take: `-o /dev/stdout` into a pipe is a usage error up front,
+/// where it failed on the first seek as exit 3, "unrecoverable".
+#[cfg(target_os = "linux")]
+#[test]
+fn an_image_is_not_written_into_a_pipe() {
+    let dir = scratch("pipe");
+    let paths = write_members(&dir, &plain_members());
+    let (code, _, err) = run(&[
+        "-q",
+        "dump",
+        "tank/vm/disk0",
+        &paths[0],
+        &paths[1],
+        "-o",
+        "/dev/stdout",
+    ]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("a pipe cannot take an image"), "{err}");
+}
+
 /// `dump` writes nothing over anything the run reads: not an image of
 /// `-r` named like a member beside it (one called `tank_vm_disk0.img`
 /// was truncated to the volume), not a mapfile or a key file given as

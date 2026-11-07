@@ -93,10 +93,13 @@ pub fn write(image: &Path, state_path: &Path, expected: &State, blocks_done: u64
         let _ = std::fs::remove_file(&tmp);
         return;
     }
-    // The rename is an entry in the directory; flush that too.
-    if let Some(dir) = state_path.parent().filter(|d| !d.as_os_str().is_empty()) {
-        let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
-    }
+    // The rename is an entry in the directory; flush that too — the
+    // current one when the path is relative and has no directory part.
+    let dir = match state_path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    };
+    let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
 }
 
 /// The image is whole: nothing to resume.
@@ -121,6 +124,22 @@ pub fn open(
     resume: bool,
     quiet: bool,
 ) -> Result<(u64, Digests, SparseFile), String> {
+    // An image is written at offsets, holes skipped: a pipe cannot take
+    // that, and `-o /dev/stdout | …` failed on the first seek as exit 3,
+    // "unrecoverable", as if the pool were at fault.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        if let Ok(m) = std::fs::metadata(output) {
+            let ft = m.file_type();
+            if ft.is_fifo() || ft.is_socket() {
+                return Err(format!(
+                    "{}: a pipe cannot take an image, which is written at offsets with its holes left out; give a file or a disk",
+                    output.display()
+                ));
+            }
+        }
+    }
     let state_path = path(output);
     let mut start_block = 0u64;
     let mut digests = Digests::new(extra);

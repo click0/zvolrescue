@@ -90,9 +90,14 @@ pub fn open_volume<'r, 'a>(
     let os = ObjsetPhys::parse(&block.data, ds.phys.bp.endian)?;
     if os.os_type != ObjsetType::Zvol {
         return Err(ReadError::Io(format!(
-            "{} is a {}, not a volume",
+            "{} is a {}, not a volume{}",
             ds.name,
-            os.os_type.name()
+            os.os_type.name(),
+            if os.os_type == ObjsetType::Zfs {
+                "; its files come out with zvolfiles extract, its objects with zvolfiles objects"
+            } else {
+                ""
+            }
         )));
     }
     let objs = DnodeArray::new(reader, os.meta_dnode, ds.phys.bp.endian);

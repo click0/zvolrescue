@@ -709,16 +709,32 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             .iter()
             .filter(|d| !d.snapshot && (d.name == opts.dataset || d.name.starts_with(&prefix)))
             .collect();
+        // Names only for what will be written: a filesystem flattening
+        // to a volume's name gave the volume a GUID suffix for a clash
+        // with nothing.
+        let volumes: Vec<&Dataset> = chosen
+            .iter()
+            .copied()
+            .filter(|d| d.kind == Some(zfs_ondisk::dmu::ObjsetType::Zvol))
+            .collect();
         let names = image_file_names(
-            &chosen
+            &volumes
                 .iter()
                 .map(|d| (d.name.as_str(), d.guid))
                 .collect::<Vec<_>>(),
         );
+        let mut named = volumes.into_iter().zip(names);
         chosen
             .into_iter()
-            .zip(names)
-            .map(|(d, name)| (d, opts.output.join(name)))
+            .map(|d| {
+                if d.kind == Some(zfs_ondisk::dmu::ObjsetType::Zvol) {
+                    let (v, name) = named.next().expect("one name per volume");
+                    (v, opts.output.join(name))
+                } else {
+                    // Skipped below as not a volume; never written.
+                    (d, opts.output.clone())
+                }
+            })
             .collect()
     } else {
         vec![(
