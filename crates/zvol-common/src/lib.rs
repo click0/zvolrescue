@@ -395,7 +395,15 @@ impl Global {
     /// [`WriteGuard`] refuses it when it is one of the logs. A refusal is
     /// exit 5, as a refused `-o` is.
     pub fn refuse_logs_over_inputs(&self, tool: &str) -> Result<(), u8> {
-        let named = paths_on_command_line(std::env::args_os().skip(1));
+        self.refuse_logs_over(tool, &[])
+    }
+
+    /// [`refuse_logs_over_inputs`](Self::refuse_logs_over_inputs), with
+    /// `more` read besides what the command line names: the files a
+    /// report names, which `zvolreport verify` reads and hashes.
+    pub fn refuse_logs_over(&self, tool: &str, more: &[PathBuf]) -> Result<(), u8> {
+        let mut named = paths_on_command_line(std::env::args_os().skip(1));
+        named.extend(more.iter().cloned());
         for (flag, log) in [
             ("--debug-log", &self.debug_log),
             ("--evidence-log", &self.evidence_log),

@@ -346,10 +346,10 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
     .into_iter()
     .filter_map(|(flag, p)| p.map(|p| (flag, p)))
     .collect();
+    let guard = zvol_common::WriteGuard::new(g, &reads);
     for (i, (flag, path)) in writes.iter().enumerate() {
-        if let Err(e) = zvol_common::refuse_if_evidence(path, &reads) {
-            eprintln!("zvolreport: refusing {flag} {}: {e}", path.display());
-            return exit::USAGE;
+        if let Err(code) = guard.refuse("zvolreport", flag, path) {
+            return code;
         }
         if let Some((other, _)) = writes[..i]
             .iter()
@@ -727,7 +727,7 @@ mod tests {
             output: log.clone(),
             ..opts()
         };
-        assert_eq!(run(&g, &over_log), exit::USAGE);
+        assert_eq!(run(&g, &over_log), exit::REFUSED);
         assert_eq!(std::fs::read(&log).unwrap(), b"");
         let md_over_json = Options {
             logs: vec![log.clone()],

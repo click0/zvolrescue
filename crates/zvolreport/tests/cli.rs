@@ -123,3 +123,38 @@ fn the_legacy_digests_reach_the_report_and_are_checked_back() {
     assert_eq!(v["failed"], 3, "{v}");
     assert_eq!(v["passed"], 0);
 }
+
+/// `verify` reads and hashes every file the report names, and a log may
+/// not be written over one: `--debug-log member.img verify report.json`
+/// truncated the member to a trace, and then reported it tampered with.
+#[test]
+fn a_log_is_never_written_over_a_file_the_report_names() {
+    let dir = scratch("verify-log");
+    let img = dir.join("vol.img");
+    std::fs::write(&img, b"the bytes of a volume, such as they are").expect("write");
+    let log = evidence_log(&dir, &img);
+    let report = dir.join("report.json").to_string_lossy().into_owned();
+    let (code, _, err) = run(&["-q", "build", &log.to_string_lossy(), "-o", &report]);
+    assert_eq!(code, 0, "{err}");
+    for named in [dir.join("evidence.img"), img.clone(), log.clone()] {
+        let before = std::fs::read(&named).unwrap();
+        let (code, _, err) = run(&[
+            "--debug-log",
+            &named.to_string_lossy(),
+            "-q",
+            "verify",
+            &report,
+        ]);
+        assert_eq!(code, 5, "{}: {err}", named.display());
+        assert!(err.contains("refusing --debug-log"), "{err}");
+        assert_eq!(
+            std::fs::read(&named).unwrap(),
+            before,
+            "{}",
+            named.display()
+        );
+    }
+    let trace = dir.join("trace.log").to_string_lossy().into_owned();
+    let (code, _, err) = run(&["--debug-log", &trace, "-q", "verify", &report]);
+    assert_eq!(code, 0, "{err}");
+}

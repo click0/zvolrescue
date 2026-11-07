@@ -108,8 +108,12 @@ tagged. `v0.7.1` is the release that carries those six.
   case.jsonl -o case.jsonl` replaced the evidence log with the report
   about it and exited 0, and `--md` or the signature could land on the
   report or on each other. A build now refuses, before writing anything,
-  an output that is one of its logs, the signing key, or another of its
-  outputs. `keygen` refuses a key or `.pub` that already exists unless
+  an output that is one of its logs, the signing key or a log of its own
+  (exit 5), or another of its outputs (exit 1). `verify` reads and
+  hashes every file the report names, and `--debug-log member.img verify
+  report.json` truncated the member to a trace and then reported it as
+  tampered with: a log is now refused over the report's logs, evidence
+  and outputs too (exit 5). `keygen` refuses a key or `.pub` that already exists unless
   given the new `--force`, and a public key on the private key's path.
   And a replaced private key is owner-only again: the 0600 mode applied
   only to a file the call created, so a key written into an existing

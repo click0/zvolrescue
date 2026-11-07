@@ -68,7 +68,9 @@ Consolidate evidence logs into one report.
 .It Fl o , Fl -output Ar report.json
 Write the report here.
 Neither it, the Markdown nor the signature may be one of the logs, the
-signing key, or each other.
+signing key or the run's own
+.Fl -debug-log
+(exit 5), or each other (exit 1).
 .It Fl -md Ar report.md
 Also render the report as Markdown.
 .It Fl -case Ar id
@@ -91,6 +93,11 @@ Write the signature here instead of next to the report.
 .Ar report.json
 .Pp
 Recompute the hashes a report recorded and say what still matches.
+A
+.Fl -debug-log
+on any file the report names, as
+.Nm
+will look for it, is refused with exit 5 before anything is opened.
 .Bl -tag -width Ds
 .It Fl -evidence-root Ar dir
 Look for the evidence under this directory instead of the path

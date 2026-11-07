@@ -102,6 +102,20 @@ enum Command {
 fn main() -> ExitCode {
     zvol_common::quiet_broken_pipe();
     let cli = Cli::parse();
+    // `verify` reads and hashes every file the report names; a log
+    // written over one destroyed it and was then reported as tampering.
+    let named = match &cli.command {
+        Command::Verify {
+            report,
+            evidence_root,
+            outputs_root,
+            ..
+        } => verify::named_files(report, evidence_root.as_ref(), outputs_root.as_ref()),
+        _ => Vec::new(),
+    };
+    if let Err(code) = cli.global.refuse_logs_over("zvolreport", &named) {
+        return ExitCode::from(code);
+    }
     if let Err(code) = cli.global.enable_tracing("zvolreport") {
         return ExitCode::from(code);
     }

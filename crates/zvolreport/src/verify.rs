@@ -97,6 +97,32 @@ struct VerifyOut {
 /// taken, so a root re-bases the recorded path onto it: the file name
 /// under the root, and — when the recorded path was absolute — the whole
 /// path joined under it, whichever exists.
+/// Every file a report names, where `verify` will look for it: the logs
+/// it was built from, the evidence and the outputs. They are read and
+/// hashed, so a log may not be written over one; read before the logs
+/// are opened. A report that cannot be read names nothing, and the run
+/// says why later.
+pub fn named_files(
+    report: &Path,
+    evidence_root: Option<&PathBuf>,
+    outputs_root: Option<&PathBuf>,
+) -> Vec<PathBuf> {
+    let Some(r) = std::fs::read_to_string(report)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Report>(&t).ok())
+    else {
+        return Vec::new();
+    };
+    let mut v: Vec<PathBuf> = r.logs.iter().map(|l| l.path.clone()).collect();
+    v.extend(
+        r.evidence
+            .iter()
+            .map(|e| locate(&e.file.path, evidence_root)),
+    );
+    v.extend(r.outputs.iter().map(|o| locate(&o.path, outputs_root)));
+    v
+}
+
 fn locate(recorded: &Path, root: Option<&PathBuf>) -> PathBuf {
     let Some(root) = root else {
         return recorded.to_path_buf();
