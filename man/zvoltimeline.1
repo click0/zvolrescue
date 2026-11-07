@@ -45,6 +45,9 @@ reallocated.
 Write the report to
 .Ar file
 instead of standard output.
+Refused, with exit 5, if it is anything the run reads or shares bytes
+with it: a member under any name, a map, the hints, a device a member
+is on, or the path a log goes to.
 .It Fl f , Fl -format Ar text | json
 Output format; text is the default.
 .It Fl v , Fl -verbose

@@ -10,7 +10,7 @@ use zfs_read::pool::{uberblock_candidates, Candidate};
 use zfs_read::zio::PoolReader;
 use zvol_common::members::{choose_pool, open_members};
 use zvol_common::timefmt::iso8601;
-use zvol_common::{evidence, exit, shell_quote, Format, Global, PoolSpec};
+use zvol_common::{evidence, exit, shell_quote, Format, Global, PoolSpec, WriteGuard};
 
 use crate::events::{sort, Event, Kind};
 
@@ -146,6 +146,15 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         Ok(x) => x,
         Err(code) => return zvol_common::end_early(g, "zvoltimeline", spec, code),
     };
+    // The report is written where it is told to be, and nowhere the run
+    // reads: `-o` naming a member replaced it with the report.
+    if let Some(path) = &opts.output {
+        let mut reads = spec.reads();
+        reads.extend(members.paths.iter().cloned());
+        if let Err(code) = WriteGuard::new(g, &reads).refuse("zvoltimeline", "-o", path) {
+            return zvol_common::end_early(g, "zvoltimeline", spec, code);
+        }
+    }
     let pool = match choose_pool(members.pools.clone(), spec.pool_guid.as_deref()) {
         Ok(p) => p,
         Err(code) => return zvol_common::end_early(g, "zvoltimeline", spec, code),

@@ -79,6 +79,10 @@ tagged. `v0.7.1` is the release that carries those six.
   against everything the run reads and against both logs before the
   first is written (exit 5): `--evidence-log out.img dump … -o out.img`
   appended the run's record to the image after its hash was taken.
+* **`zvoltimeline -o` wrote over a member.** Nothing checked its
+  output: `zvoltimeline -o member1.img member0.img member1.img` replaced
+  the 64 MiB member with a 1.3 KB report and exited 0. It is checked
+  like every other output now (exit 5).
 * **`zvolreport` wrote over its own inputs and over keys.** `build
   case.jsonl -o case.jsonl` replaced the evidence log with the report
   about it and exited 0, and `--md` or the signature could land on the
