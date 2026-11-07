@@ -148,6 +148,7 @@ enum Cmd {
 }
 
 fn main() -> ExitCode {
+    zvol_common::set_tool("zvolrescue");
     zvol_common::quiet_broken_pipe();
     let cli = Cli::parse();
     if let Err(code) = cli.global.refuse_logs_over_inputs("zvolrescue") {

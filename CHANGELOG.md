@@ -260,6 +260,11 @@ tagged. `v0.7.1` is the release that carries those six.
   know, exit 3 — so a stripe of single disks could not be laid out by
   hand at all. A disk top is now the leaf itself, as a label has it, and
   one with other than one member is refused (exit 1).
+* **The companions spoke in `zvolrescue`'s name.** Forty messages in
+  the code all five tools share — members that did not open, no pool
+  found, `--map` and `--assume-member` errors, refused features, medium
+  incidents — began `zvolrescue:` whichever tool printed them. Each tool
+  now names itself.
 * **`zvolreport` wrote over its own inputs and over keys.** `build
   case.jsonl -o case.jsonl` replaced the evidence log with the report
   about it and exited 0, and `--md` or the signature could land on the

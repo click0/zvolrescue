@@ -100,6 +100,7 @@ enum Command {
 }
 
 fn main() -> ExitCode {
+    zvol_common::set_tool("zvolreport");
     zvol_common::quiet_broken_pipe();
     let cli = Cli::parse();
     // `verify` reads and hashes every file the report names; a log

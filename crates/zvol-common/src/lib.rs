@@ -6,6 +6,16 @@
 //! same evidence records. That contract lives here so there is one copy
 //! of it, and so a companion cannot drift from it by accident.
 
+/// Print a message on standard error under the running program's name
+/// ([`tool`]): the messages this crate prints on a tool's behalf used to
+/// say `zvolrescue:` whichever of the five had printed them.
+#[macro_export]
+macro_rules! say {
+    ($($arg:tt)*) => {
+        eprintln!("{}: {}", $crate::tool(), format_args!($($arg)*))
+    };
+}
+
 pub mod evidence;
 pub mod hints;
 pub mod members;
@@ -555,6 +565,19 @@ fn resolved(path: &Path) -> Option<PathBuf> {
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     Some(std::fs::canonicalize(dir).ok()?.join(name))
+}
+
+static TOOL: OnceLock<&'static str> = OnceLock::new();
+
+/// Name the running program, once, first thing in `main`.
+pub fn set_tool(name: &'static str) {
+    let _ = TOOL.set(name);
+}
+
+/// The running program's name, for the messages printed on its behalf:
+/// what [`set_tool`] said, else `zvolrescue`.
+pub fn tool() -> &'static str {
+    TOOL.get().copied().unwrap_or("zvolrescue")
 }
 
 /// Every path a command line names, for [`Global::refuse_logs_over_inputs`].
@@ -1156,8 +1179,8 @@ pub fn report_medium(ledger: &Ledger) -> Option<u8> {
         return None;
     }
     for i in &incidents {
-        eprintln!(
-            "zvolrescue: MEDIUM INCIDENT: {i}{}",
+        say!(
+            "MEDIUM INCIDENT: {i}{}",
             if i.stopped {
                 " — stopped here"
             } else {
@@ -1166,8 +1189,8 @@ pub fn report_medium(ledger: &Ledger) -> Option<u8> {
         );
     }
     let stopped = ledger.stopped()?;
-    eprintln!(
-        "zvolrescue: {} refused a read and the run stopped there (SPEC F-33, N-10). \
+    say!(
+        "{} refused a read and the run stopped there (SPEC F-33, N-10). \
          Nothing on it was read twice. This tool reads healthy media; a disk with \
          defects is for an imager: image it with a tool made for failing media, \
          with a map (ddrescue -d -r0 with a mapfile for the simple case; PC-3000 \

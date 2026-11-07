@@ -78,6 +78,11 @@ fn a_history_with_nothing_readable_or_a_member_missing_says_so() {
     let missing = dir.join("gone.img").to_string_lossy().into_owned();
     let (code, err) = run(&["-q", &missing, &m[0], &m[1]]);
     assert_eq!(code, 2, "{err}");
+    // Said in this program's name, not in zvolrescue's.
+    assert!(
+        err.contains("zvoltimeline: ") && !err.contains("zvolrescue: "),
+        "{err}"
+    );
     // Every block of the MOS gone, the labels and their uberblocks kept.
     for p in &m {
         let mut b = std::fs::read(p).unwrap();

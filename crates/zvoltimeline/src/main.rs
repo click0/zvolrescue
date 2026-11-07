@@ -46,6 +46,7 @@ struct Cli {
 }
 
 fn main() -> ExitCode {
+    zvol_common::set_tool("zvoltimeline");
     zvol_common::quiet_broken_pipe();
     let cli = Cli::parse();
     if let Err(code) = cli.global.enable_tracing("zvoltimeline") {

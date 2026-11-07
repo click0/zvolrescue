@@ -84,13 +84,13 @@ fn search_layout(
             continue;
         }
         let trials = search_order(&out, top, scans, devices, bases).map_err(|e| {
-            eprintln!("zvolrescue: --search-order: {e}");
+            say!("--search-order: {e}");
             exit::USAGE
         })?;
         match trials.split_first() {
             None => {
-                eprintln!(
-                    "zvolrescue: --search-order: no order of {} members reads this pool at all",
+                say!(
+                    "--search-order: no order of {} members reads this pool at all",
                     hint.members.len()
                 );
                 return Err(exit::UNRECOVERABLE);
@@ -100,8 +100,8 @@ fn search_layout(
                     .iter()
                     .filter(|t| t.mismatches == best.mismatches)
                     .count();
-                eprintln!(
-                    "zvolrescue: --search-order: {} order(s) read, best has {} checksum mismatch(es){}",
+                say!(
+                    "--search-order: {} order(s) read, best has {} checksum mismatch(es){}",
                     trials.len(),
                     best.mismatches,
                     if ties > 0 {
@@ -128,13 +128,13 @@ fn bind_assumed(
     bases: &mut [u64],
 ) -> Result<(), u8> {
     let assumed = spec.assumed().map_err(|e| {
-        eprintln!("zvolrescue: {e}");
+        say!("{e}");
         exit::USAGE
     })?;
     for (path, guid) in assumed {
         let Some(device) = paths.iter().position(|p| *p == path) else {
-            eprintln!(
-                "zvolrescue: --assume-member {}: not among the members given",
+            say!(
+                "--assume-member {}: not among the members given",
                 path.display()
             );
             return Err(exit::USAGE);
@@ -153,8 +153,8 @@ fn bind_assumed(
                 // Nothing at all could be assembled: the assertion has no
                 // configuration to attach to, which is unreadable
                 // evidence rather than a mistake by the operator.
-                eprintln!(
-                    "zvolrescue: --assume-member {}: no ZFS pool found on the given members — at least one member whose labels survive is needed to say what the pool looks like",
+                say!(
+                    "--assume-member {}: no ZFS pool found on the given members — at least one member whose labels survive is needed to say what the pool looks like",
                     path.display()
                 );
                 return Err(exit::EVIDENCE);
@@ -173,12 +173,12 @@ fn bind_assumed(
                         .map(|id| format!("#{id}"))
                         .collect::<Vec<_>>()
                         .join(", ");
-                    eprintln!(
-                        "zvolrescue: --assume-member {}: pool \"{name}\" is missing top-level vdev {which} entirely, not a member of one",
+                    say!(
+                        "--assume-member {}: pool \"{name}\" is missing top-level vdev {which} entirely, not a member of one",
                         path.display()
                     );
-                    eprintln!(
-                        "zvolrescue: nothing present describes that vdev, so there is no leaf to place this member in. Give a member whose labels survive from it, or describe it with --hints (SPEC F-65)."
+                    say!(
+                        "nothing present describes that vdev, so there is no leaf to place this member in. Give a member whose labels survive from it, or describe it with --hints (SPEC F-65)."
                     );
                     // The same reasoning as the branch above: the
                     // operator's assertion is sound and the command line
@@ -186,15 +186,15 @@ fn bind_assumed(
                     // this is exit 2 and not a usage error.
                     return Err(exit::EVIDENCE);
                 }
-                eprintln!(
-                    "zvolrescue: --assume-member {}: no scanned pool is missing a member",
+                say!(
+                    "--assume-member {}: no scanned pool is missing a member",
                     path.display()
                 );
                 return Err(exit::USAGE);
             }
             n => {
-                eprintln!(
-                    "zvolrescue: --assume-member {}: {n} pools are missing members; scan them separately",
+                say!(
+                    "--assume-member {}: {n} pools are missing members; scan them separately",
                     path.display()
                 );
                 return Err(exit::USAGE);
@@ -209,8 +209,8 @@ fn bind_assumed(
         if guid.is_none() {
             match bind_by_reading(&mut pools[pool], scans, devices, bases, device) {
                 Verdict::Bound(b, fitting) => {
-                    eprintln!(
-                        "zvolrescue: {}: read as leaf {:#018x} of {} — the metadata walk verifies through it{}{}",
+                    say!(
+                        "{}: read as leaf {:#018x} of {} — the metadata walk verifies through it{}{}",
                         path.display(),
                         b.guid,
                         pools[pool].tops[b.top].name,
@@ -238,8 +238,8 @@ fn bind_assumed(
                     // that the evidence did not choose — if this member
                     // is later needed in its true slot, =GUID pins it.
                     let first = fits[0].guid;
-                    eprintln!(
-                        "zvolrescue: {}: {} leaves of {} read equally well; taking {:#018x}. Name one with =GUID to pin it. Candidates:",
+                    say!(
+                        "{}: {} leaves of {} read equally well; taking {:#018x}. Name one with =GUID to pin it. Candidates:",
                         path.display(),
                         fits.len(),
                         pools[pool].tops[fits[0].top].name,
@@ -255,8 +255,8 @@ fn bind_assumed(
                     continue;
                 }
                 Verdict::Nothing => {
-                    eprintln!(
-                        "zvolrescue: --assume-member {}: nothing reads through this member — it is not one of the {} leaves pool {:?} is missing. Name one with =GUID to assert it anyway.",
+                    say!(
+                        "--assume-member {}: nothing reads through this member — it is not one of the {} leaves pool {:?} is missing. Name one with =GUID to assert it anyway.",
                         path.display(),
                         pools[pool].vacant_leaves().len(),
                         pools[pool].name
@@ -266,13 +266,13 @@ fn bind_assumed(
             }
         }
         match pools[pool].bind_member(device, guid) {
-            Ok(g) => eprintln!(
-                "zvolrescue: {}: assumed to be leaf {g:#018x} of pool {:?}; its blocks are still verified by checksum",
+            Ok(g) => say!(
+                "{}: assumed to be leaf {g:#018x} of pool {:?}; its blocks are still verified by checksum",
                 path.display(),
                 pools[pool].name
             ),
             Err(e) => {
-                eprintln!("zvolrescue: --assume-member {}: {e}", path.display());
+                say!("--assume-member {}: {e}", path.display());
                 return Err(exit::USAGE);
             }
         }
@@ -328,33 +328,31 @@ fn refuse_unaccounted_features(
     for (name, s) in &unaccounted {
         match s {
             zfs_ondisk::features::Support::No(why) => {
-                eprintln!("zvolrescue: {name}: not implemented.");
-                eprintln!("zvolrescue:   {why}.");
+                say!("{name}: not implemented.");
+                say!("  {why}.");
             }
-            _ => eprintln!(
-                "zvolrescue: {name}: unknown to this build, and the pool says it is in use."
-            ),
+            _ => say!("{name}: unknown to this build, and the pool says it is in use."),
         }
     }
     if ignore {
-        eprintln!("zvolrescue: reading anyway (--ignore-unknown-features).");
-        eprintln!("zvolrescue:   what comes out may be wrong in a way no checksum catches.");
+        say!("reading anyway (--ignore-unknown-features).");
+        say!("  what comes out may be wrong in a way no checksum catches.");
         return Ok(());
     }
-    eprintln!(
-        "zvolrescue: refusing this pool: {} active feature(s) above are unaccounted for.",
+    say!(
+        "refusing this pool: {} active feature(s) above are unaccounted for.",
         unaccounted.len()
     );
-    eprintln!("zvolrescue:   reading past them would answer confidently and perhaps wrongly.");
-    eprintln!("zvolrescue:   `scan` still reports what is on the disk.");
-    eprintln!("zvolrescue:   --ignore-unknown-features reads anyway.");
+    say!("  reading past them would answer confidently and perhaps wrongly.");
+    say!("  `scan` still reports what is on the disk.");
+    say!("  --ignore-unknown-features reads anyway.");
     Err(exit::UNRECOVERABLE)
 }
 
 /// Open every member named in `spec`, scan it, and assemble pools.
 pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
     let paths = spec.members().map_err(|e| {
-        eprintln!("zvolrescue: {e}");
+        say!("{e}");
         exit::USAGE
     })?;
     // F-68: this tool reads a device and a copy of one the same way,
@@ -366,20 +364,20 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
         .filter(|p| evidence::Kind::of(p).is_device())
         .count();
     if devices > 0 {
-        eprintln!(
-            "zvolrescue: {devices} of {} input(s) are devices, not images. \
+        say!(
+            "{devices} of {} input(s) are devices, not images. \
              Nothing here writes to them; the next tool might.",
             paths.len()
         );
     }
     let open = spec.open_opts().map_err(|e| {
-        eprintln!("zvolrescue: {e}");
+        say!("{e}");
         exit::USAGE
     })?;
     for (member, file) in &open.maps {
         if !paths.contains(member) {
-            eprintln!(
-                "zvolrescue: --map {}={}: {} is not among the members given",
+            say!(
+                "--map {}={}: {} is not among the members given",
                 member.display(),
                 file.display(),
                 member.display()
@@ -392,8 +390,8 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
     for p in &paths {
         let opened = open.open(p).and_then(|src| {
             if let Some(m) = src.map() {
-                eprintln!(
-                    "zvolrescue: {}: the imager's map says {} byte(s) in {} range(s) were never read; they are refused, not trusted (SPEC F-72)",
+                say!(
+                    "{}: the imager's map says {} byte(s) in {} range(s) were never read; they are refused, not trusted (SPEC F-72)",
                     p.display(),
                     m.unreadable_bytes(),
                     m.unreadable().len()
@@ -401,15 +399,15 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
             }
             let scan = scan_with_recovered_base_opts(&src, open.surface_scan_on_device)?;
             if scan.surface_scan_refused {
-                eprintln!(
-                    "zvolrescue: {}: labels do not verify, and a block device is not searched for anchors (SPEC N-10) — \
+                say!(
+                    "{}: labels do not verify, and a block device is not searched for anchors (SPEC N-10) — \
                      image it and scan the image, or --surface-scan-on-device",
                     p.display()
                 );
             }
             if scan.base != 0 {
-                eprintln!(
-                    "zvolrescue: {}: vdev starts at byte {} ({})",
+                say!(
+                    "{}: vdev starts at byte {} ({})",
                     p.display(),
                     scan.base,
                     scan.base_source.unwrap_or("confirmed by checksum")
@@ -423,7 +421,7 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
                 sources.push(Some(src));
             }
             Err(e) => {
-                eprintln!("zvolrescue: {}: {e}", p.display());
+                say!("{}: {e}", p.display());
                 scans.push(None);
                 sources.push(None);
             }
@@ -452,7 +450,7 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
     let mut pools = match &spec.hints {
         Some(file) => {
             let hints = hints::load(file, &paths).map_err(|e| {
-                eprintln!("zvolrescue: {e}");
+                say!("{e}");
                 exit::USAGE
             })?;
             for (i, b) in hints.bases.iter().enumerate() {
@@ -469,8 +467,8 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
                 layout = search_layout(&layout, &scans, &devices, &bases)?;
             }
             let pool = layout.assemble();
-            eprintln!(
-                "zvolrescue: reading through the layout in {}: {}",
+            say!(
+                "reading through the layout in {}: {}",
                 file.display(),
                 pool.tops
                     .iter()
@@ -521,22 +519,22 @@ pub fn choose_pool(pools: Vec<PoolAssembly>, guid: Option<&str>) -> Result<PoolA
         Some(g) => {
             let g = g.trim_start_matches("0x");
             let want = u64::from_str_radix(g, 16).map_err(|_| {
-                eprintln!("zvolrescue: --pool-guid must be hexadecimal");
+                say!("--pool-guid must be hexadecimal");
                 exit::USAGE
             })?;
             pools.into_iter().find(|p| p.guid == want).ok_or_else(|| {
-                eprintln!("zvolrescue: no scanned member belongs to pool guid {want:#x}");
+                say!("no scanned member belongs to pool guid {want:#x}");
                 exit::EVIDENCE
             })
         }
         None => match pools.len() {
             0 => {
-                eprintln!("zvolrescue: no ZFS pool found on the given members");
+                say!("no ZFS pool found on the given members");
                 Err(exit::EVIDENCE)
             }
             1 => Ok(pools.into_iter().next().expect("one")),
             n => {
-                eprintln!("zvolrescue: {n} pools found; choose one with --pool-guid:");
+                say!("{n} pools found; choose one with --pool-guid:");
                 for p in &pools {
                     eprintln!("  {:#018x}  {:?}", p.guid, p.name);
                 }
