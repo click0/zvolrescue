@@ -123,6 +123,16 @@ tagged. `v0.7.1` is the release that carries those six.
   small wrong size instead. Sizes from a dnode now saturate, and a read
   of more than 1 GiB in one piece is an error the caller already
   handles: the configuration is "unreadable", the run goes on.
+* **A file named in bytes that are not UTF-8 made every tool panic.**
+  JSON holds text, and every file a run reads or writes is named in its
+  JSON and its evidence record: a member called `m\xff.img` failed the
+  serialiser, and `list`, `zvoltimeline` and `dump` panicked (exit 101)
+  — `dump` after writing the whole image, with no hash printed and no
+  record kept. Such a name is now refused before anything is opened
+  (exit 1), with the way round it: a link whose name is text. A name
+  changed to fit would have been worse, a record naming a file that is
+  not the evidence. Paths inside a dataset given to `zvolfiles --path`
+  are bytes as before.
 * **`zvolreport` wrote over its own inputs and over keys.** `build
   case.jsonl -o case.jsonl` replaced the evidence log with the report
   about it and exited 0, and `--md` or the signature could land on the

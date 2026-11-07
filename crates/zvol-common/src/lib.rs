@@ -232,6 +232,36 @@ mod command_line_paths_tests {
         }
     }
 
+    /// A file named in bytes that are not text is found; a path inside a
+    /// dataset given with `--path` is not a file, and may be any bytes.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_name_that_is_not_text_is_found_and_a_dataset_path_is_not() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        let bad = OsString::from_vec(b"m\xff.img".to_vec());
+        let word = |s: &str| OsString::from(s);
+        assert_eq!(
+            super::file_name_not_text([word("list"), bad.clone()]),
+            Some(bad.clone())
+        );
+        assert_eq!(
+            super::file_name_not_text([
+                word("extract"),
+                word("--path"),
+                bad.clone(),
+                word("m0.img")
+            ]),
+            None
+        );
+        let mut eq = b"--path=".to_vec();
+        eq.extend(b"caf\xe9.txt");
+        assert_eq!(
+            super::file_name_not_text([word("list"), OsString::from_vec(eq)]),
+            None
+        );
+    }
+
     /// A value given as `--long=VALUE` is read like the same word on its
     /// own: `--map=M=F` names the mapfile and `--key=passphrase:FILE` the
     /// key file. Read whole, the first wrote a trace over the mapfile.
@@ -402,6 +432,13 @@ impl Global {
     /// `more` read besides what the command line names: the files a
     /// report names, which `zvolreport verify` reads and hashes.
     pub fn refuse_logs_over(&self, tool: &str, more: &[PathBuf]) -> Result<(), u8> {
+        if let Some(word) = file_name_not_text(std::env::args_os().skip(1)) {
+            eprintln!(
+                "{tool}: {:?} is not valid UTF-8. The JSON output and the evidence record name every file as text, and this name cannot be written as one without changing it; reach the file through a link whose name is (ln -s)",
+                word.to_string_lossy()
+            );
+            return Err(exit::USAGE);
+        }
         let mut named = paths_on_command_line(std::env::args_os().skip(1));
         named.extend(more.iter().cloned());
         for (flag, log) in [
@@ -561,6 +598,39 @@ where
         push_parts(&mut out, &s);
     }
     out
+}
+
+/// The first word of a command line that is not UTF-8, if any — other
+/// than the value of `--path`, which names a file *inside* a dataset as
+/// the bytes it has on disk (`zvolfiles`), and is recorded as those.
+///
+/// Every file a run reads or writes is named in its JSON and in its
+/// evidence record, and JSON holds text: a member called `m\xff.img`
+/// made the serialiser fail and every tool panicked at the end of the
+/// run — after `dump` had written the whole image, with no hash printed
+/// and no record kept. A name changed to fit would be worse: the record
+/// would name a file that is not the evidence.
+pub fn file_name_not_text<I>(args: I) -> Option<std::ffi::OsString>
+where
+    I: IntoIterator<Item = std::ffi::OsString>,
+{
+    let mut inside_dataset = false;
+    for arg in args {
+        if std::mem::take(&mut inside_dataset) {
+            continue;
+        }
+        if arg == "--path" {
+            inside_dataset = true;
+            continue;
+        }
+        if arg.to_str().is_none() {
+            let lossy = arg.to_string_lossy();
+            if !lossy.starts_with("--path=") {
+                return Some(arg);
+            }
+        }
+    }
+    None
 }
 
 /// A word, and the paths inside it.

@@ -88,6 +88,32 @@ fn json(stdout: &str) -> serde_json::Value {
     serde_json::from_str(stdout).unwrap_or_else(|e| panic!("not JSON ({e}): {stdout}"))
 }
 
+/// A member whose name is not UTF-8 cannot be named in the JSON or in
+/// the evidence record; it is refused up front (exit 1) rather than
+/// panicking when the run serialises its result — for `dump`, after the
+/// image was written and before its hash or record.
+#[cfg(unix)]
+#[test]
+fn a_member_named_in_bytes_that_are_not_text_is_refused() {
+    use std::os::unix::ffi::OsStrExt;
+    let dir = scratch("not-utf8");
+    let paths = write_members(&dir, &plain_members());
+    let odd = dir.join(std::ffi::OsStr::from_bytes(b"m\xff.img"));
+    std::fs::rename(&paths[0], &odd).unwrap();
+    for args in [vec!["list"], vec!["-f", "json", "scan"]] {
+        let out = Command::new(env!("CARGO_BIN_EXE_zvolrescue"))
+            .args(&args)
+            .arg(&odd)
+            .arg(&paths[1])
+            .output()
+            .expect("run");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {err}");
+        assert!(err.contains("not valid UTF-8"), "{err}");
+        assert!(!err.contains("panicked"), "{err}");
+    }
+}
+
 /// A layout no pool could have is refused when the hints are read (exit
 /// 1), with what is wrong with it: raidz parity of 4 over 4 members, or
 /// an ashift of 63, reached a division by zero or a shift out of the
