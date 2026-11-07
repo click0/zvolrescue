@@ -112,6 +112,19 @@ The directory itself, and every path made in it, is refused with exit
 under any name, a map, the hints, a key file, a device a member is on.
 An entry so refused is left as it is and named in the manifest; the
 rest of the tree is still written.
+An entry whose name no file can have (empty,
+.Ql \&. ,
+.Ql \&.. ,
+or holding
+.Ql /
+or NUL), or whose path another entry already took, is not written and
+is named in the manifest with the reason; its object is still there for
+.Cm objects .
+The manifest is
+.Pa manifest.json ,
+or
+.Pa manifest.1.json
+and so on when the dataset has a file of that name at its root.
 .It Fl -path Ar path
 Path inside the dataset, repeatable; everything when absent.
 .It Fl -strict
@@ -130,6 +143,12 @@ comma-separated; default both.
 .Op Ar options
 .Pp
 One file per object, for when the POSIX metadata is gone.
+Only the object set has to be readable: a master node or system
+attribute table that is not is said on standard error and in
+.Pa objects.json ,
+and the objects are written all the same.
+A transaction group at which the dataset does not open is passed over
+for an older one, by every subcommand.
 .Bl -tag -width Ds
 .It Fl o , Fl -output Ar dir
 Write the objects here, by the same rules as

@@ -154,25 +154,18 @@ fn os_component(part: &[u8]) -> Option<std::ffi::OsString> {
 ///
 /// The path arrives as bytes rather than as text, because that is what
 /// it is on disk (Z-09).
+/// Every component must be one a file can have: an empty one or a `.`
+/// is refused rather than skipped, because skipping it made two
+/// different paths of the dataset one path of the output.
 fn safe_join(root: &Path, path: &[u8]) -> Option<PathBuf> {
-    if path.first() == Some(&b'/') {
-        return None;
-    }
     let mut out = root.to_path_buf();
     for part in path.split(|&b| b == b'/') {
-        match part {
-            b"" | b"." => continue,
-            b".." => return None,
-            _ => {}
-        }
-        if part.contains(&0) {
+        if !zfs_read::zpl::is_component(part) {
             return None;
         }
         out.push(os_component(part)?);
     }
-    // A component the platform refuses, or a path of nothing but "."
-    // separators, leaves the root unchanged; neither is a file.
-    (out != root).then_some(out)
+    Some(out)
 }
 
 /// Copy one file's blocks out, zeroing what cannot be read (Z-06).
@@ -233,7 +226,7 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
     // block of the file being written, with the manifest saying which.
     let interrupt = zvol_common::interrupt_flag();
     let preserve: Vec<&str> = opts.preserve.split(',').map(str::trim).collect();
-    let result = with_dataset(spec, dataset, at, |fs, opened| {
+    let result = with_dataset(spec, dataset, at, false, |fs, opened| {
         let tree = OutTree::open(g, spec, at, opened, &opts.output)?;
 
         // Nothing given means the whole dataset.
@@ -259,6 +252,10 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
 
         let mut files = Vec::new();
         let mut directories = 0usize;
+        // Every output path written so far: two entries of a damaged
+        // dataset can still come to one path, and the second would be
+        // written over the first while the manifest listed both.
+        let mut taken = std::collections::BTreeSet::new();
         // Z-07: an object already written under another name is linked
         // to rather than copied, so the tree keeps the shape it had.
         let mut written_objects: WrittenObjects = std::collections::BTreeMap::new();
@@ -284,6 +281,7 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
                         &mut files,
                         &mut directories,
                         &mut written_objects,
+                        &mut taken,
                         &interrupt,
                     );
                 }
@@ -304,6 +302,7 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
                     &mut files,
                     &mut directories,
                     &mut written_objects,
+                    &mut taken,
                     &interrupt,
                 );
             }
@@ -339,9 +338,10 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
             opened.members.ledger.clone(),
             tree,
             refused,
+            taken,
         ))
     });
-    let (out, paths, ledger, tree, refused) = match result {
+    let (out, paths, ledger, tree, refused, taken) = match result {
         Ok(v) => v,
         // Nothing was produced — the members did not open, or the
         // dataset was not reached — but a device may have refused a
@@ -351,7 +351,14 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
     };
 
     let json = serde_json::to_value(&out).expect("serialisable");
-    let manifest = opts.output.join("manifest.json");
+    // The manifest goes beside the tree under a name the tree did not
+    // take: a dataset with a `manifest.json` of its own had that file
+    // replaced by the manifest, which then vouched for its hash.
+    let manifest = std::iter::once("manifest.json".to_string())
+        .chain((1..).map(|n| format!("manifest.{n}.json")))
+        .map(|name| opts.output.join(name))
+        .find(|p| !taken.contains(p))
+        .expect("an unbounded supply of names");
     let wrote = tree.create(&manifest).and_then(|mut f| {
         f.write_all((serde_json::to_string_pretty(&json).expect("serialisable") + "\n").as_bytes())
             .map_err(|e| OutError::Failed(format!("{}: {e}", manifest.display())))
@@ -430,16 +437,30 @@ fn extract_entry(
     files: &mut Vec<Extracted>,
     directories: &mut usize,
     written_objects: &mut WrittenObjects,
+    taken: &mut std::collections::BTreeSet<PathBuf>,
     stop: &AtomicBool,
 ) {
     let Some(z) = &e.znode else {
-        files.push(failed(e, "metadata unreadable"));
+        files.push(failed(
+            e,
+            e.error.as_deref().unwrap_or("metadata unreadable"),
+        ));
         return;
     };
     let Some(to) = safe_join(&opts.output, &e.raw_path) else {
-        files.push(failed(e, "name would climb out of the output directory"));
+        files.push(failed(
+            e,
+            "the path is not one a file can have here; the object is under `objects`",
+        ));
         return;
     };
+    if !taken.insert(to.clone()) {
+        files.push(failed(
+            e,
+            "another entry of the dataset was already written at this path; the object is under `objects`",
+        ));
+        return;
+    }
     let mut record = Extracted {
         path: e.path.clone(),
         path_hex: path_hex(e),
@@ -602,4 +623,39 @@ fn xattrs_of(fs: &Filesystem<'_, '_>, z: &zfs_ondisk::zpl::Znode) -> Vec<Xattr> 
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::safe_join;
+    use std::path::Path;
+
+    /// A path whose components could not all be names of files is not
+    /// joined at all: an empty or `.` component used to be skipped, so
+    /// `a//b` and `a/./b` became `a/b`, written over the real one.
+    #[test]
+    fn a_path_joins_only_when_every_component_is_a_name() {
+        let root = Path::new("/out");
+        assert_eq!(
+            safe_join(root, b"sub/deep.txt").as_deref(),
+            Some(Path::new("/out/sub/deep.txt"))
+        );
+        for bad in [
+            &b""[..],
+            b"/etc/passwd",
+            b"a//b",
+            b"a/./b",
+            b"a/../b",
+            b"..",
+            b"a/b\0c",
+            b"a/",
+        ] {
+            assert_eq!(
+                safe_join(root, bad),
+                None,
+                "{:?}",
+                String::from_utf8_lossy(bad)
+            );
+        }
+    }
 }

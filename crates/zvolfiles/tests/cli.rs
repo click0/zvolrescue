@@ -105,3 +105,39 @@ fn objects_never_writes_through_what_is_in_its_way() {
         .is_symlink());
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// `objects` is for a dataset whose POSIX metadata is gone, and it used
+/// to need that metadata: a master node that no longer verified made
+/// `objects` exit 3 with every file object intact. It now writes them,
+/// says what was lost, and `list` — which does need the tree — still
+/// says it cannot.
+#[test]
+fn objects_does_not_need_the_master_node() {
+    let dir = scratch("no-master");
+    let m = members(&dir, ["member0.img", "member1.img"]);
+    // The fixture's master-node ZAP block, on both members.
+    for p in &m {
+        let mut b = std::fs::read(p).unwrap();
+        b[0x60_0040..0x60_0048].copy_from_slice(b"JUNKJUNK");
+        std::fs::write(p, b).unwrap();
+    }
+    let (code, err) = run(&["-q", "list", "tank/fs", &m[0], &m[1]]);
+    assert_eq!(code, 3, "{err}");
+    let out = dir.join("objs");
+    let o = out.to_string_lossy().into_owned();
+    let (code, err) = run(&["-q", "objects", "tank/fs", &m[0], &m[1], "-o", &o]);
+    assert_eq!(code, 4, "{err}");
+    assert!(err.contains("master node"), "{err}");
+    let index: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(out.join("objects.json")).unwrap()).unwrap();
+    assert_eq!(
+        index["written"],
+        index["objects"].as_array().unwrap().len(),
+        "{index}"
+    );
+    assert!(index["damaged"][0]
+        .as_str()
+        .unwrap()
+        .contains("master node"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}

@@ -47,6 +47,14 @@ struct ObjectsOut {
     written: usize,
     /// Objects with at least one block written as zeros.
     incomplete: usize,
+    /// What of the dataset's own metadata could not be read: the reason
+    /// to be here rather than in `extract` (Z-08).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    damaged: Vec<String>,
+    /// A signal ended the run (exit 6); objects after the last listed
+    /// were not looked at.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    interrupted: bool,
 }
 
 /// Run `objects`.
@@ -58,12 +66,18 @@ pub fn run(
     output: &Path,
     strict: bool,
 ) -> u8 {
-    let result = with_dataset(spec, dataset, at, |fs, opened| {
+    // A dataset that claims a great many objects takes long; a signal
+    // ends the run at the next object, with the index of what was done.
+    let interrupt = zvol_common::interrupt_flag();
+    let result = with_dataset(spec, dataset, at, true, |fs, opened| {
         let tree = OutTree::open(g, spec, at, opened, output)?;
         let max = fs.objects.max_object();
         let mut objects = Vec::new();
         let mut obj = 0;
         while obj <= max {
+            if interrupt.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
             let Ok(d) = fs.objects.get(obj) else {
                 obj += 1;
                 continue;
@@ -90,7 +104,7 @@ pub fn run(
                 error: None,
                 refused: false,
             };
-            match write_object(fs, &tree, obj, record.size, output, strict) {
+            match write_object(fs, &tree, obj, record.size, output, strict, &interrupt) {
                 Ok((hash, errors)) => {
                     record.sha256 = Some(hash);
                     record.errors = errors;
@@ -113,6 +127,8 @@ pub fn run(
                 objects,
                 written,
                 incomplete,
+                damaged: fs.damaged.clone(),
+                interrupted: interrupt.load(std::sync::atomic::Ordering::Relaxed),
             },
             opened.members.paths.clone(),
             opened.members.ledger.clone(),
@@ -176,7 +192,12 @@ pub fn run(
             "zvolfiles: {refused} object(s) refused: the path holds something this run reads (exit 5)"
         );
     }
-    let code = if refused > 0 {
+    if out.interrupted {
+        eprintln!("zvolfiles: interrupted; the index lists the objects written (exit 6)");
+    }
+    let code = if out.interrupted {
+        exit::INTERRUPTED
+    } else if refused > 0 {
         exit::REFUSED
     } else if out.incomplete > 0 || out.written < out.objects.len() {
         exit::PARTIAL
@@ -205,6 +226,7 @@ fn write_object(
     size: u64,
     output: &Path,
     strict: bool,
+    stop: &std::sync::atomic::AtomicBool,
 ) -> Result<(String, u64), OutError> {
     let fail = OutError::Failed;
     let obj = fs.object(object).map_err(|e| fail(e.to_string()))?;
@@ -215,6 +237,9 @@ fn write_object(
     let mut errors = 0u64;
     let zeros = vec![0u8; bs as usize];
     for blkid in 0..size.div_ceil(bs) {
+        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(fail(format!("interrupted at block {blkid}")));
+        }
         let chunk = match obj.read_blkid(blkid) {
             Ok(b) => b,
             Err(e) => {

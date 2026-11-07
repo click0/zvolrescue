@@ -6,7 +6,7 @@ use zfs_read::crypt::{unwrap_keys, wrapping_key, DatasetKeys, KeyMaterial};
 use zfs_read::dsl::{open_mos, walk};
 use zfs_read::pool::uberblock_candidates;
 use zfs_read::zio::PoolReader;
-use zfs_read::zpl::{open_filesystem, Filesystem};
+use zfs_read::zpl::{open_filesystem, open_objects, Filesystem};
 use zvol_common::members::{choose_pool, open_members, Members};
 use zvol_common::{exit, PoolSpec};
 
@@ -52,10 +52,17 @@ pub struct Opened<'a> {
 /// borrows the members: none of them outlives the pool they came from,
 /// and threading that through three subcommands would be worse than one
 /// closure.
+///
+/// `objects_only` opens the dataset for its objects alone, without the
+/// POSIX metadata `list` and `extract` need (Z-08). A transaction group
+/// at which the dataset does not open is said and passed over for an
+/// older one, as `zvolrescue dump` passes over an object set reused
+/// since; `--txg` asks for exactly one.
 pub fn with_dataset<T>(
     spec: &PoolSpec,
     name: &str,
     at: &AtArgs,
+    objects_only: bool,
     f: impl FnOnce(&Filesystem<'_, '_>, &Opened<'_>) -> Result<T, u8>,
 ) -> Result<T, u8> {
     let members = open_members(spec)?;
@@ -94,13 +101,22 @@ pub fn with_dataset<T>(
             let keys = unlock(name, enc, at.key.as_deref())?;
             reader.set_keys(Some(keys));
         }
-        let fs = match open_filesystem(&reader, ds) {
+        let opened = if objects_only {
+            open_objects(&reader, ds)
+        } else {
+            open_filesystem(&reader, ds)
+        };
+        let fs = match opened {
             Ok(fs) => fs,
             Err(e) => {
                 eprintln!("zvolfiles: {name} at txg {}: {e}", c.ub.txg);
-                return Err(exit::UNRECOVERABLE);
+                last = Some(format!("txg {}: {e}", c.ub.txg));
+                continue;
             }
         };
+        for d in &fs.damaged {
+            eprintln!("zvolfiles: {name} at txg {}: {d}", c.ub.txg);
+        }
         let opened = Opened {
             txg: c.ub.txg,
             members: &members,

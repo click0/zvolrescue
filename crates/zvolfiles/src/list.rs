@@ -88,7 +88,7 @@ pub fn run(
     recursive: bool,
 ) -> u8 {
     let asked = path.map(os_bytes).unwrap_or_default();
-    let result = with_dataset(spec, dataset, at, |fs, opened| {
+    let result = with_dataset(spec, dataset, at, false, |fs, opened| {
         let from = match path {
             None => fs.root,
             Some(p) => fs.lookup_bytes(&asked).map_err(|e| {

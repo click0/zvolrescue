@@ -28,9 +28,11 @@ use crate::dsl::Dataset;
 use crate::zap::read_zap;
 use crate::zio::{PoolReader, ReadError};
 
-/// How deep a directory walk will go before it decides the tree is not
-/// one. ZFS allows far more; a carve of damaged metadata does not.
-const MAX_DEPTH: usize = 64;
+/// How deep a directory walk goes. Cycles are caught by the set of
+/// directories already walked; this bounds the recursion, deeper than
+/// any real tree whose paths still fit `PATH_MAX`, and what lies below it
+/// is reported as not walked rather than left out.
+const MAX_DEPTH: usize = 512;
 
 /// A dataset opened as a filesystem.
 pub struct Filesystem<'r, 'a> {
@@ -49,6 +51,10 @@ pub struct Filesystem<'r, 'a> {
     attr_num: BTreeMap<String, u16>,
     /// Ordered attribute numbers of each layout.
     layouts: BTreeMap<u16, Vec<u16>>,
+    /// What of the dataset's own metadata could not be read, when it was
+    /// opened for its objects alone ([`open_objects`]): the master node,
+    /// the system attribute tables. Empty when everything was read.
+    pub damaged: Vec<String>,
 }
 
 /// One entry of a directory.
@@ -135,9 +141,35 @@ impl DirEntry {
 }
 
 /// Open a filesystem dataset.
+///
+/// The master node and its `ROOT` must be readable: without them there
+/// is no tree. The system attribute tables need not be — a file whose
+/// attributes cannot be decoded is an error of its own, not of the
+/// dataset — and what of them was lost is in [`Filesystem::damaged`].
 pub fn open_filesystem<'r, 'a>(
     reader: &'r PoolReader<'a>,
     ds: &Dataset,
+) -> Result<Filesystem<'r, 'a>, ReadError> {
+    open(reader, ds, false)
+}
+
+/// Open a filesystem dataset for its objects alone, when its POSIX
+/// metadata is what is damaged (Z-08): only the object set must be
+/// readable. A master node or attribute table that is not is recorded in
+/// [`Filesystem::damaged`], and the tree is not there to walk (`root` is
+/// 0). This is what `zvolfiles objects` exists for, and it used to need
+/// the very metadata whose loss sends anyone to it.
+pub fn open_objects<'r, 'a>(
+    reader: &'r PoolReader<'a>,
+    ds: &Dataset,
+) -> Result<Filesystem<'r, 'a>, ReadError> {
+    open(reader, ds, true)
+}
+
+fn open<'r, 'a>(
+    reader: &'r PoolReader<'a>,
+    ds: &Dataset,
+    lenient: bool,
 ) -> Result<Filesystem<'r, 'a>, ReadError> {
     if ds.phys.bp.is_hole() {
         return Err(ReadError::Hole);
@@ -154,16 +186,37 @@ pub fn open_filesystem<'r, 'a>(
     let endian = ds.phys.bp.endian;
     let objects = DnodeArray::new(reader, os.meta_dnode, endian);
 
+    let mut damaged = Vec::new();
     // The master node names everything else in the dataset.
-    let master = read_zap(&objects.object(MASTER_NODE_OBJ)?)?;
+    let master = match objects.object(MASTER_NODE_OBJ).and_then(|o| read_zap(&o)) {
+        Ok(m) => m,
+        Err(e) if lenient => {
+            damaged.push(format!("master node: {e}"));
+            Vec::new()
+        }
+        Err(e) => return Err(e),
+    };
     let named = |n: &str| {
         master
             .iter()
             .find(|e| e.name == n)
             .and_then(|e| e.value.as_u64())
     };
-    let root = named("ROOT")
-        .ok_or_else(|| ReadError::Io(format!("{}: master node has no ROOT directory", ds.name)))?;
+    let root = match named("ROOT") {
+        Some(r) => r,
+        None if lenient => {
+            if damaged.is_empty() {
+                damaged.push("master node: no ROOT directory".into());
+            }
+            0
+        }
+        None => {
+            return Err(ReadError::Io(format!(
+                "{}: master node has no ROOT directory",
+                ds.name
+            )))
+        }
+    };
     let mut properties = BTreeMap::new();
     for p in ["VERSION", "casesensitivity", "normalization", "utf8only"] {
         if let Some(v) = named(p) {
@@ -182,8 +235,12 @@ pub fn open_filesystem<'r, 'a>(
     let mut attr_length = BTreeMap::new();
     let mut attr_num = BTreeMap::new();
     let mut layouts = BTreeMap::new();
+    // A dataset whose SA metadata is gone can still be read through
+    // legacy znodes, and its objects whatever their attributes: none of
+    // these tables is fatal, each one lost is said.
+    let zap_of = |obj: u64| objects.object(obj).and_then(|o| read_zap(&o));
     if let Some(sa) = named("SA_ATTRS") {
-        match read_zap(&objects.object(sa)?) {
+        match zap_of(sa) {
             Ok(entries) => {
                 let sub = |n: &str| {
                     entries
@@ -192,28 +249,37 @@ pub fn open_filesystem<'r, 'a>(
                         .and_then(|e| e.value.as_u64())
                 };
                 if let Some(reg) = sub("REGISTRY") {
-                    for e in read_zap(&objects.object(reg)?)?.iter() {
-                        let Some(v) = e.value.as_u64() else { continue };
-                        let RegisteredAttr { num, length } = zpl::registered_attr(v);
-                        attr_length.insert(num, length);
-                        attr_num.insert(e.name.clone(), num);
+                    match zap_of(reg) {
+                        Ok(entries) => {
+                            for e in &entries {
+                                let Some(v) = e.value.as_u64() else { continue };
+                                let RegisteredAttr { num, length } = zpl::registered_attr(v);
+                                attr_length.insert(num, length);
+                                attr_num.insert(e.name.clone(), num);
+                            }
+                        }
+                        Err(e) => damaged.push(format!("SA registry: {e}")),
                     }
                 }
                 if let Some(lay) = sub("LAYOUTS") {
-                    for e in read_zap(&objects.object(lay)?)?.iter() {
-                        let Ok(n) = e.name.parse::<u16>() else {
-                            continue;
-                        };
-                        layouts.insert(n, layout_numbers(&e.value));
+                    match zap_of(lay) {
+                        Ok(entries) => {
+                            for e in &entries {
+                                let Ok(n) = e.name.parse::<u16>() else {
+                                    continue;
+                                };
+                                layouts.insert(n, layout_numbers(&e.value));
+                            }
+                        }
+                        Err(e) => damaged.push(format!("SA layouts: {e}")),
                     }
                 }
             }
-            Err(e) => {
-                // A dataset whose SA metadata is gone can still be read
-                // through legacy znodes, so this is not fatal.
-                trace!("zpl", "{}: SA_ATTRS unreadable: {e}", ds.name);
-            }
+            Err(e) => damaged.push(format!("SA attribute directory: {e}")),
         }
+    }
+    for d in &damaged {
+        trace!("zpl", "{}: {d}", ds.name);
     }
     trace!(
         "zpl",
@@ -231,6 +297,7 @@ pub fn open_filesystem<'r, 'a>(
         attr_length,
         attr_num,
         layouts,
+        damaged,
     })
 }
 
@@ -260,6 +327,13 @@ impl Filesystem<'_, '_> {
         }
         if d.bonus_type == OT_ZNODE {
             return Ok(parse_znode_phys(&d.bonus, self.endian)?);
+        }
+        // Without the registry no attribute has a name or a length, and
+        // every field would come out as zero: said instead.
+        if self.attr_num.is_empty() {
+            return Err(ReadError::Io(format!(
+                "object {object}: the dataset's system-attribute registry could not be read, so its attributes cannot be decoded"
+            )));
         }
         let header = parse_sa_header(&d.bonus, self.endian)?;
         let layout = self.layouts.get(&header.layout).cloned().ok_or_else(|| {
@@ -632,6 +706,11 @@ pub fn walk_from(
     out
 }
 
+/// Whether `name` can be one component of a path.
+pub fn is_component(name: &[u8]) -> bool {
+    !name.is_empty() && name != b"." && name != b".." && !name.contains(&b'/') && !name.contains(&0)
+}
+
 /// Join one name onto a byte path.
 fn join_raw(prefix: &[u8], name: &[u8]) -> Vec<u8> {
     if prefix.is_empty() {
@@ -655,7 +734,23 @@ fn walk_into(
     seen_dirs: &mut std::collections::BTreeSet<u64>,
     out: &mut Vec<Entry>,
 ) {
-    if depth > MAX_DEPTH || !seen_dirs.insert(object) {
+    if !seen_dirs.insert(object) {
+        // Walked already: a cycle in damaged metadata. The entry that led
+        // here is recorded; its contents are where they were first met.
+        return;
+    }
+    if depth > MAX_DEPTH {
+        // Said, not dropped: a file below here used to be missing from
+        // the walk with nothing to show it had been there.
+        out.push(Entry {
+            path: prefix.to_string(),
+            raw_path: raw_prefix.to_vec(),
+            object,
+            znode: None,
+            error: Some(format!(
+                "directory more than {MAX_DEPTH} levels deep; not walked (list --path {prefix} reaches it)"
+            )),
+        });
         return;
     }
     let entries = match fs.read_dir(object) {
@@ -678,6 +773,23 @@ fn walk_into(
             format!("{prefix}/{}", e.name)
         };
         let raw_path = join_raw(raw_prefix, &e.raw);
+        // A name is one path component: never empty, `.` or `..`, and
+        // without `/` or NUL. Damaged metadata can hold anything, and a
+        // name `sub/deep.txt` in the root joined into the same path as the
+        // real `sub/deep.txt` — one silently written over the other.
+        if !is_component(&e.raw) {
+            out.push(Entry {
+                path,
+                raw_path,
+                object: e.object,
+                znode: None,
+                error: Some(format!(
+                    "the name {:?} is not one a file can have; the object is under `objects`",
+                    e.name
+                )),
+            });
+            continue;
+        }
         let (znode, error) = match fs.znode(e.object) {
             Ok(z) => (Some(z), None),
             Err(err) => (None, Some(err.to_string())),

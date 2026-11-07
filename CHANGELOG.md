@@ -159,6 +159,26 @@ tagged. `v0.7.1` is the release that carries those six.
   state saying a resume starts at the tail (exit 6). An interrupted image
   is also left exactly as long as the blocks it holds, holes included,
   instead of being finished to the whole volume.
+* **`zvolfiles` lost files without saying so.** A name holding `/` — a
+  root entry called `sub/deep.txt` — and a path with an empty or `.`
+  component, which was skipped, joined into the path of another file,
+  and the later one was written over the earlier while the manifest
+  listed both hashes; a dataset file `manifest.json` at the root was
+  replaced by the manifest, which then vouched for its hash. A name no
+  file can have is now an entry with the reason, a path already taken
+  is not written twice, and the manifest takes `manifest.1.json` when
+  the tree has a `manifest.json`. Files below 64 directories were left
+  out of the walk with no entry and exit 0; cycles are caught by the
+  directories already walked, the bound is 512, and what lies past it
+  is an entry that says so. `objects`, the fallback for a dataset whose
+  POSIX metadata is damaged, needed that metadata — a master node or an
+  attribute table that failed its checksum made it exit 3 with every
+  file object intact; it now writes the objects and says what was lost.
+  An attribute table that is gone is no longer fatal to `list` and
+  `extract` either, and with no registry a file's attributes are an
+  error, not a row of zeros. A transaction group at which the dataset
+  does not open is passed over for an older one, as `zvolrescue dump`
+  does, and `objects` stops on a signal (exit 6).
 * **`zvolreport` wrote over its own inputs and over keys.** `build
   case.jsonl -o case.jsonl` replaced the evidence log with the report
   about it and exited 0, and `--md` or the signature could land on the
