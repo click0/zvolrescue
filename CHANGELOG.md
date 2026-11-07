@@ -265,6 +265,12 @@ tagged. `v0.7.1` is the release that carries those six.
   found, `--map` and `--assume-member` errors, refused features, medium
   incidents — began `zvolrescue:` whichever tool printed them. Each tool
   now names itself.
+* **A directory given as a member, and a mapfile past 64 bits.** A
+  directory opened like an image and was "a device of 4096 bytes,
+  smaller than 4 labels"; it is now said to be a directory. A ddrescue
+  map line whose position and size ran past `u64` wrapped: its range
+  merged with one at the start of the disk, whose sectors were then not
+  refused. Such a line is now an error in the map.
 * **`zvolreport` wrote over its own inputs and over keys.** `build
   case.jsonl -o case.jsonl` replaced the evidence log with the report
   about it and exited 0, and `--md` or the signature could land on the

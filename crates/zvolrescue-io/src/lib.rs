@@ -189,14 +189,21 @@ pub mod ddrescue {
                 if pos < last_end {
                     return Err(format!("line {}: blocks out of order at {pos:#x}", n + 1));
                 }
-                *map.by_status.entry(status).or_insert(0) += size;
+                // A block that runs past the end of a 64-bit offset is
+                // no block: wrapped, it merged with one at the start of
+                // the disk, and the sectors there were not refused.
+                let end = pos.checked_add(size).ok_or_else(|| {
+                    format!("line {}: {pos:#x} + {size:#x} runs past any offset", n + 1)
+                })?;
+                let total = map.by_status.entry(status).or_insert(0);
+                *total = total.saturating_add(size);
                 if status != '+' && size > 0 {
                     match map.unreadable.last_mut() {
                         Some((s, l)) if *s + *l == pos => *l += size,
                         _ => map.unreadable.push((pos, size)),
                     }
                 }
-                last_end = pos + size;
+                last_end = end;
                 map.extent = last_end;
             }
             if !seen_status_line {
@@ -282,6 +289,11 @@ impl FileSource {
         let file = OpenOptions::new().read(true).write(false).open(&path)?;
         let meta = file.metadata()?;
         let ft = meta.file_type();
+        // A directory opens for reading too, and was a "device of 4096
+        // bytes, smaller than 4 labels": say what it is.
+        if ft.is_dir() {
+            return Err(io::Error::other("a directory, not a device or an image"));
+        }
         let kind = if ft.is_block_device() || ft.is_char_device() {
             Kind::Device
         } else {
@@ -924,6 +936,9 @@ mod tests {
         assert!(ddrescue::Map::parse("# only comments\n").is_err());
         assert!(ddrescue::Map::parse("0x0 + 1\n0x0 0x100 x\n").is_err());
         assert!(ddrescue::Map::parse("0x0 + 1\n0x100 0x100 +\n0x0 0x100 +\n").is_err());
+        // A block past the end of a 64-bit offset is refused, not wrapped
+        // into one at the start of the disk.
+        assert!(ddrescue::Map::parse("0x0 +\n0xfffffffffffffff8 0x10 -\n0x8 0x10 -\n").is_err());
     }
 
     /// With a map, the sectors the imager could not read are refused
@@ -1106,5 +1121,18 @@ mod sink_tests {
         assert_eq!(m.data.len(), 16);
         assert_eq!(&m.data[10..12], &[7, 7]);
         assert_eq!(m.writes, vec![(10, 2)]);
+    }
+}
+
+#[cfg(test)]
+mod open_tests {
+    use super::FileSource;
+
+    /// A directory given as a member is said to be one, not read as a
+    /// device of 4096 bytes too small for its labels.
+    #[test]
+    fn a_directory_is_not_a_member() {
+        let err = FileSource::open(std::env::temp_dir()).unwrap_err();
+        assert!(err.to_string().contains("a directory"), "{err}");
     }
 }
