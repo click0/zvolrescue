@@ -231,6 +231,102 @@ mod command_line_paths_tests {
             assert!(!got.contains(&PathBuf::from(not)), "{not} named: {got:?}");
         }
     }
+
+    /// A value given as `--long=VALUE` is read like the same word on its
+    /// own: `--map=M=F` names the mapfile and `--key=passphrase:FILE` the
+    /// key file. Read whole, the first wrote a trace over the mapfile.
+    #[test]
+    fn a_value_after_an_equals_sign_is_read_like_a_word() {
+        let got = paths(&[
+            "--debug-log",
+            "trace.txt",
+            "scan",
+            "--map=member0.img=m0.map",
+            "--key=passphrase:pw.txt",
+            "--key=hex:@hex.txt",
+        ]);
+        for want in ["member0.img", "m0.map", "pw.txt", "hex.txt"] {
+            assert!(
+                got.contains(&PathBuf::from(want)),
+                "{want} missing: {got:?}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod write_guard_tests {
+    use super::*;
+
+    fn global(debug_log: Option<&Path>, evidence_log: Option<&Path>) -> Global {
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(flatten)]
+            global: Global,
+        }
+        let mut args = vec!["t".to_string()];
+        if let Some(p) = debug_log {
+            args.extend(["--debug-log".into(), p.display().to_string()]);
+        }
+        if let Some(p) = evidence_log {
+            args.extend(["--evidence-log".into(), p.display().to_string()]);
+        }
+        <Cli as clap::Parser>::parse_from(args).global
+    }
+
+    /// An output that is an input, a map, the hints or a key file is
+    /// refused, and so is one that is where a log goes, though neither
+    /// exists yet: the evidence log is written at the end, after the
+    /// image, and appended to it.
+    #[test]
+    fn an_output_is_refused_over_any_input_and_over_either_log() {
+        let dir = std::env::temp_dir().join(format!("zvol-common-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let member = dir.join("member0.img");
+        let map = dir.join("m0.map");
+        std::fs::write(&member, [1u8; 4096]).unwrap();
+        std::fs::write(&map, "0x0 +\n").unwrap();
+        let g = global(None, Some(&dir.join("case.jsonl")));
+        let guard = WriteGuard::new(&g, &[member.clone(), map.clone()]);
+        assert!(guard.check(&member).is_err());
+        assert!(guard.check(&map).is_err());
+        let why = guard.check(&dir.join("case.jsonl")).unwrap_err();
+        assert!(why.contains("--evidence-log"), "{why}");
+        // Spelled another way, still the same place.
+        let why = guard.check(&dir.join(".").join("case.jsonl")).unwrap_err();
+        assert!(why.contains("--evidence-log"), "{why}");
+        assert!(guard.check(&dir.join("out.img")).is_ok());
+        assert_eq!(guard.refuse("t", "-o", &member), Err(exit::REFUSED));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The spec names its maps, hints and assumed members as reads.
+    #[test]
+    fn a_pool_spec_names_everything_it_reads() {
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(flatten)]
+            pool: PoolSpec,
+        }
+        let spec = <Cli as clap::Parser>::parse_from([
+            "t",
+            "/dev/ada0p3",
+            "--image",
+            "m1.img",
+            "--hints",
+            "layout.hints",
+            "--map",
+            "m1.img=m1.map",
+            "--assume-member",
+            "m2.img=0x1234",
+        ])
+        .pool;
+        let reads = spec.reads();
+        for want in ["/dev/ada0p3", "m1.img", "layout.hints", "m1.map", "m2.img"] {
+            assert!(reads.contains(&PathBuf::from(want)), "{want}: {reads:?}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -295,6 +391,9 @@ impl Global {
     /// to it and exited 0. A log may not be any path the command line
     /// names — members, images, maps, hints, key files, an `-o` that
     /// exists — nor live on a device among them, nor be the other log.
+    /// An output that does not exist yet is the other side's business:
+    /// [`WriteGuard`] refuses it when it is one of the logs. A refusal is
+    /// exit 5, as a refused `-o` is.
     pub fn refuse_logs_over_inputs(&self, tool: &str) -> Result<(), u8> {
         let named = paths_on_command_line(std::env::args_os().skip(1));
         for (flag, log) in [
@@ -304,7 +403,7 @@ impl Global {
             let Some(log) = log else { continue };
             if let Err(e) = zvolrescue_io::refuse_if_evidence(log, &named) {
                 eprintln!("{tool}: refusing {flag} {}: {e}", log.display());
-                return Err(exit::USAGE);
+                return Err(exit::REFUSED);
             }
         }
         if let (Some(d), Some(e)) = (&self.debug_log, &self.evidence_log) {
@@ -315,7 +414,7 @@ impl Global {
                     "{tool}: refusing --debug-log {}: it is the evidence log, which the trace would overwrite",
                     d.display()
                 );
-                return Err(exit::USAGE);
+                return Err(exit::REFUSED);
             }
         }
         Ok(())
@@ -438,9 +537,11 @@ where
             continue;
         }
         if let Some(long) = s.strip_prefix("--") {
+            // `--map=M=F`, `--key=passphrase:FILE`: the value is read the
+            // way the same word is read on its own.
             if let Some((name, value)) = long.split_once('=') {
                 if !LOGS.contains(&format!("--{name}").as_str()) {
-                    out.push(PathBuf::from(value));
+                    push_word(&mut out, value);
                 }
             }
             continue;
@@ -449,15 +550,82 @@ where
             continue;
         }
         out.push(PathBuf::from(&arg));
-        if let Some((a, b)) = s.split_once('=') {
-            out.push(PathBuf::from(a));
-            out.push(PathBuf::from(b));
-        }
-        if let Some((_, rest)) = s.split_once(':') {
-            out.push(PathBuf::from(rest.strip_prefix('@').unwrap_or(rest)));
-        }
+        push_parts(&mut out, &s);
     }
     out
+}
+
+/// A word, and the paths inside it.
+fn push_word(out: &mut Vec<PathBuf>, word: &str) {
+    out.push(PathBuf::from(word));
+    push_parts(out, word);
+}
+
+/// Both sides of `MEMBER=MAPFILE`, and the file after a key spec's format.
+fn push_parts(out: &mut Vec<PathBuf>, word: &str) {
+    if let Some((a, b)) = word.split_once('=') {
+        out.push(PathBuf::from(a));
+        out.push(PathBuf::from(b));
+    }
+    if let Some((_, rest)) = word.split_once(':') {
+        out.push(PathBuf::from(rest.strip_prefix('@').unwrap_or(rest)));
+    }
+}
+
+/// Every write a run makes, asked about against everything the run reads
+/// and against its own logs (SPEC §8.3, invariant 2).
+///
+/// Made once the inputs are known, and asked before each file is opened
+/// for writing: an image and its resume state, every image and the
+/// manifest of `dump -r`, every file `zvolfiles extract` makes, every
+/// report. A check made once for an output directory left the files
+/// inside it free to land on a member that happened to share a name with
+/// one of them; a check against the members alone left the maps, the
+/// hints and the key files free; and a log that did not exist yet was no
+/// file to compare an output with.
+#[derive(Debug, Clone)]
+pub struct WriteGuard {
+    evidence: zvolrescue_io::Evidence,
+    logs: Vec<(&'static str, PathBuf)>,
+}
+
+impl WriteGuard {
+    /// `reads` is whatever the run reads: [`PoolSpec::reads`], the
+    /// members as opened, key files, anything else a tool takes in.
+    pub fn new(global: &Global, reads: &[PathBuf]) -> WriteGuard {
+        let logs = [
+            ("--debug-log", &global.debug_log),
+            ("--evidence-log", &global.evidence_log),
+        ]
+        .into_iter()
+        .filter_map(|(flag, p)| p.clone().map(|p| (flag, p)))
+        .collect();
+        WriteGuard {
+            evidence: zvolrescue_io::Evidence::new(reads),
+            logs,
+        }
+    }
+
+    /// Why writing `path` would be wrong, if it would: it is an input or
+    /// shares bytes with one, or it is where one of the run's logs goes.
+    pub fn check(&self, path: &Path) -> Result<(), String> {
+        self.evidence.check(path).map_err(|e| e.to_string())?;
+        for (flag, log) in &self.logs {
+            if same_file(path, log) {
+                return Err(format!("{} is where {flag} goes", path.display()));
+            }
+        }
+        Ok(())
+    }
+
+    /// [`check`](Self::check), said on stderr as `TOOL: refusing WHAT
+    /// PATH: why`, with the exit code to return.
+    pub fn refuse(&self, tool: &str, what: &str, path: &Path) -> Result<(), u8> {
+        self.check(path).map_err(|why| {
+            eprintln!("{tool}: refusing {what} {}: {why}", path.display());
+            exit::REFUSED
+        })
+    }
 }
 
 /// Quote one argument for a POSIX shell.
@@ -655,6 +823,25 @@ impl PoolSpec {
                 .iter()
                 .filter_map(|m| m.split_once('=').map(|(_, f)| PathBuf::from(f))),
         );
+        v
+    }
+
+    /// Every file this spec names for reading, wider than
+    /// [`inputs`](Self::inputs): the members, the hints, both sides of
+    /// each `--map`, the paths `--assume-member` names. A run's outputs
+    /// stay off all of them ([`WriteGuard`]).
+    pub fn reads(&self) -> Vec<PathBuf> {
+        let mut v: Vec<PathBuf> = self.devices.iter().chain(&self.image).cloned().collect();
+        v.extend(self.hints.iter().cloned());
+        for m in &self.map {
+            if let Some((member, file)) = m.split_once('=') {
+                v.push(member.into());
+                v.push(file.into());
+            }
+        }
+        for a in &self.assume_member {
+            v.push(a.split_once('=').map_or(a.as_str(), |(p, _)| p).into());
+        }
         v
     }
 

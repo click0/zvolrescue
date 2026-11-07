@@ -51,7 +51,10 @@ tagged. `v0.7.1` is the release that carries those six.
   it and exited 0. Every tool now refuses, before opening either, a log
   that is a path the command line names — a member, an image, a map, the
   hints, a key file, an existing `-o` — or that lives on one of the input
-  devices, and a debug log that is the evidence log (exit 1).
+  devices, and a debug log that is the evidence log (exit 5, as a refused
+  `-o` is). A value given in one word, `--map=MEMBER=MAPFILE` or
+  `--key=passphrase:FILE`, is read like the same value on its own: read
+  whole, it let a trace replace the mapfile or the key file.
 * **`scan --emit-label` wrote wherever it was pointed.** Its help says
   nothing is ever written to the evidence, and nothing checked: a member
   given as the label's path got 256 KiB of label over its start, the

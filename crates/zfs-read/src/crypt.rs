@@ -111,6 +111,18 @@ impl KeyMaterial {
         }
     }
 
+    /// The file a `--key` spec reads, when it reads one: `raw:FILE`,
+    /// `hex:@FILE` and `passphrase:FILE` do, `hex:HEX` and `prompt` do
+    /// not. A run that writes keeps its outputs off it like any input.
+    pub fn spec_file(spec: &str) -> Option<std::path::PathBuf> {
+        let (kind, rest) = spec.split_once(':')?;
+        match kind {
+            "raw" | "passphrase" => Some(rest.into()),
+            "hex" => rest.strip_prefix('@').map(Into::into),
+            _ => None,
+        }
+    }
+
     /// Read the key from standard input in the dataset's format: 32 raw
     /// bytes, or one line of hex digits or passphrase. The terminal echo
     /// is not disabled; prefer a file spec when others can see the screen.
@@ -732,5 +744,16 @@ mod tests {
         assert!(KeyMaterial::from_spec("pem:x").is_err());
         assert!(KeyMaterial::from_spec("nocolon").is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The specs that read a file name it; the others name none.
+    #[test]
+    fn a_key_spec_names_the_file_it_reads() {
+        let f = |s: &str| KeyMaterial::spec_file(s).map(|p| p.display().to_string());
+        assert_eq!(f("raw:k/raw.key").as_deref(), Some("k/raw.key"));
+        assert_eq!(f("passphrase:pw.txt").as_deref(), Some("pw.txt"));
+        assert_eq!(f("hex:@hex.txt").as_deref(), Some("hex.txt"));
+        assert_eq!(f("hex:0a0b"), None);
+        assert_eq!(f("prompt"), None);
     }
 }

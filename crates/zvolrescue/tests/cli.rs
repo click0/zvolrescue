@@ -99,7 +99,7 @@ fn a_log_is_never_written_over_a_member() {
     let before = std::fs::read(&paths[0]).unwrap();
     for flag in ["--debug-log", "--evidence-log"] {
         let (code, _, err) = run(&[flag, &paths[0], "-q", "scan", &paths[0], &paths[1]]);
-        assert_eq!(code, 1, "{flag}: {err}");
+        assert_eq!(code, 5, "{flag}: {err}");
         assert!(err.contains(&format!("refusing {flag}")), "{flag}: {err}");
         assert_eq!(
             std::fs::read(&paths[0]).unwrap(),
@@ -117,7 +117,21 @@ fn a_log_is_never_written_over_a_member() {
         "scan",
         &paths[0],
     ]);
-    assert_eq!(code, 1, "{err}");
+    assert_eq!(code, 5, "{err}");
+    // A mapfile named as `--map=MEMBER=MAPFILE`, in one word, is still a
+    // file the run reads.
+    let map = dir.join("m0.map").to_string_lossy().into_owned();
+    std::fs::write(&map, "0x0 +\n").unwrap();
+    let (code, _, err) = run(&[
+        "--debug-log",
+        &map,
+        "-q",
+        "scan",
+        &paths[0],
+        &format!("--map={}={map}", paths[0]),
+    ]);
+    assert_eq!(code, 5, "{err}");
+    assert_eq!(std::fs::read_to_string(&map).unwrap(), "0x0 +\n");
     let log = dir.join("case.jsonl").to_string_lossy().into_owned();
     let (code, _, err) = run(&["--evidence-log", &log, "-q", "scan", &paths[0], &paths[1]]);
     assert_eq!(code, 0, "{err}");
