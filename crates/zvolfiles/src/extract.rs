@@ -5,7 +5,8 @@
 //! in the manifest, never a silent short file. `--strict` stops at the
 //! first one instead.
 
-use std::io::Write;
+use std::collections::BTreeSet;
+use std::io::{Seek, SeekFrom, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use sha2::{Digest, Sha256};
@@ -127,6 +128,125 @@ struct ManifestOut {
     /// rest.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     interrupted: bool,
+    /// What `--preserve` asked for and the platform would not do, each
+    /// reason once: ownership as anyone but root, a time past what the
+    /// clock can hold.
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    not_restored: BTreeSet<String>,
+}
+
+/// What `--preserve` asked to put back (Z-03).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Preserve {
+    times: bool,
+    mode: bool,
+    owner: bool,
+}
+
+impl Preserve {
+    /// `times`, `mode` and `owner`, comma-separated; `none` for nothing.
+    /// Anything else is a usage error: `--preserve bogus,owner` used to
+    /// be taken, and turned off the mode it did not name.
+    pub fn parse(list: &str) -> Result<Preserve, String> {
+        let mut p = Preserve::default();
+        for item in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            match item {
+                "times" => p.times = true,
+                "mode" => p.mode = true,
+                "owner" => p.owner = true,
+                "none" => {}
+                other => {
+                    return Err(format!(
+                        "--preserve {list}: {other:?} is not one of times, mode, owner, none"
+                    ))
+                }
+            }
+        }
+        Ok(p)
+    }
+}
+
+/// The metadata of one written path, put back after its contents — and
+/// for a directory after everything in it, deepest first, so that
+/// writing a child neither bumps a restored time nor meets a directory
+/// already made read-only.
+#[derive(Debug, Clone)]
+struct Meta {
+    path: PathBuf,
+    mode: u32,
+    mtime: u64,
+    atime: u64,
+    uid: u64,
+    gid: u64,
+    /// Written as a file holding a link's target.
+    link_target: bool,
+}
+
+impl Meta {
+    fn of(path: &Path, z: &zfs_ondisk::zpl::Znode) -> Meta {
+        Meta {
+            path: path.to_path_buf(),
+            mode: z.permissions(),
+            mtime: z.mtime,
+            atime: z.atime,
+            uid: z.uid,
+            gid: z.gid,
+            link_target: z.file_type() == FileType::Symlink,
+        }
+    }
+
+    /// Times first, then the owner, then the mode: `chown` clears the
+    /// set-id bits, and a mode can take away the access a time needs.
+    ///
+    /// The set-user-ID and set-group-ID bits are kept only on a file
+    /// whose owner was put back too: on a file the extraction owns —
+    /// root's, most often — they would make a program of the dataset
+    /// run as root. A file holding a link's target is not a program at
+    /// all and is never executable, whatever mode the link had.
+    fn restore(&self, p: Preserve, notes: &mut BTreeSet<String>) {
+        use std::time::{Duration, UNIX_EPOCH};
+        if p.times {
+            let at = |s: u64| UNIX_EPOCH.checked_add(Duration::from_secs(s));
+            match (at(self.mtime), at(self.atime)) {
+                (Some(m), Some(a)) => {
+                    let t = std::fs::FileTimes::new().set_modified(m).set_accessed(a);
+                    if let Err(e) = std::fs::File::open(&self.path).and_then(|f| f.set_times(t)) {
+                        notes.insert(format!("times: {e}"));
+                    }
+                }
+                _ => {
+                    notes.insert("times: a time past what this platform's clock holds".into());
+                }
+            }
+        }
+        let mut owned = false;
+        #[cfg(unix)]
+        if p.owner {
+            match (u32::try_from(self.uid), u32::try_from(self.gid)) {
+                (Ok(u), Ok(g)) => match std::os::unix::fs::chown(&self.path, Some(u), Some(g)) {
+                    Ok(()) => owned = true,
+                    Err(e) => {
+                        notes.insert(format!("owner: {e}"));
+                    }
+                },
+                _ => {
+                    notes.insert("owner: an id wider than 32 bits".into());
+                }
+            }
+        }
+        if p.mode {
+            let mode = if self.link_target {
+                0o644
+            } else if owned {
+                self.mode
+            } else {
+                self.mode & !0o6000
+            };
+            if let Err(e) = set_mode(&self.path, mode) {
+                notes.insert(format!("mode: {e}"));
+            }
+        }
+    }
 }
 
 /// One path component, as the operating system spells names.
@@ -205,13 +325,21 @@ fn copy_file(
         };
         let piece = &chunk[..want.min(chunk.len())];
         hasher.update(piece);
-        file.write_all(piece)
-            .map_err(|e| fail(format!("{}: {e}", to.display())))?;
+        // Holes stay holes: a block of zeros is left unwritten and the
+        // length set at the end. A file of 256 MiB with one block used
+        // to take 256 MiB of the disk it was extracted to.
+        if piece.iter().any(|&b| b != 0) {
+            file.seek(SeekFrom::Start(written))
+                .and_then(|_| file.write_all(piece))
+                .map_err(|e| fail(format!("{}: {e}", to.display())))?;
+        }
         written += piece.len() as u64;
         if piece.is_empty() {
             break;
         }
     }
+    file.set_len(written)
+        .map_err(|e| fail(format!("{}: {e}", to.display())))?;
     let hex = hasher
         .finalize()
         .iter()
@@ -225,7 +353,13 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
     // From here a SIGINT ends the run at the next entry, or the next
     // block of the file being written, with the manifest saying which.
     let interrupt = zvol_common::interrupt_flag();
-    let preserve: Vec<&str> = opts.preserve.split(',').map(str::trim).collect();
+    let preserve = match Preserve::parse(&opts.preserve) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("zvolfiles: {e}");
+            return exit::USAGE;
+        }
+    };
     let result = with_dataset(spec, dataset, at, false, |fs, opened| {
         let tree = OutTree::open(g, spec, at, opened, &opts.output)?;
 
@@ -256,6 +390,8 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
         // dataset can still come to one path, and the second would be
         // written over the first while the manifest listed both.
         let mut taken = std::collections::BTreeSet::new();
+        let mut dirs: Vec<Meta> = Vec::new();
+        let mut not_restored = BTreeSet::new();
         // Z-07: an object already written under another name is linked
         // to rather than copied, so the tree keeps the shape it had.
         let mut written_objects: WrittenObjects = std::collections::BTreeMap::new();
@@ -277,11 +413,13 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
                         &tree,
                         &e,
                         opts,
-                        &preserve,
+                        preserve,
                         &mut files,
                         &mut directories,
                         &mut written_objects,
                         &mut taken,
+                        &mut dirs,
+                        &mut not_restored,
                         &interrupt,
                     );
                 }
@@ -298,14 +436,23 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
                     &tree,
                     &e,
                     opts,
-                    &preserve,
+                    preserve,
                     &mut files,
                     &mut directories,
                     &mut written_objects,
                     &mut taken,
+                    &mut dirs,
+                    &mut not_restored,
                     &interrupt,
                 );
             }
+        }
+        // Directories last, deepest first: their contents are written.
+        for m in dirs.iter().rev() {
+            m.restore(preserve, &mut not_restored);
+        }
+        for n in &not_restored {
+            eprintln!("zvolfiles: --preserve: {n} (the manifest records what each file had)");
         }
         let interrupted = interrupt.load(Ordering::Relaxed);
         if interrupted {
@@ -333,6 +480,7 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
                 failed,
                 hardlinks,
                 interrupted,
+                not_restored,
             },
             opened.members.paths.clone(),
             opened.members.ledger.clone(),
@@ -433,11 +581,13 @@ fn extract_entry(
     tree: &OutTree,
     e: &zfs_read::zpl::Entry,
     opts: &Options,
-    preserve: &[&str],
+    preserve: Preserve,
     files: &mut Vec<Extracted>,
     directories: &mut usize,
     written_objects: &mut WrittenObjects,
     taken: &mut std::collections::BTreeSet<PathBuf>,
+    dirs: &mut Vec<Meta>,
+    not_restored: &mut BTreeSet<String>,
     stop: &AtomicBool,
 ) {
     let Some(z) = &e.znode else {
@@ -553,8 +703,12 @@ fn extract_entry(
             record.error = Some(format!("not written: {other:?}"));
         }
     }
-    if record.error.is_none() && preserve.contains(&"mode") {
-        set_mode(&to, z.permissions());
+    if record.error.is_none() {
+        if z.file_type() == FileType::Dir {
+            dirs.push(Meta::of(&to, z));
+        } else {
+            Meta::of(&to, z).restore(preserve, not_restored);
+        }
     }
     files.push(record);
 }
@@ -590,13 +744,15 @@ fn failed(e: &zfs_read::zpl::Entry, why: &str) -> Extracted {
 
 /// Restore the permission bits, where the platform has them.
 #[cfg(unix)]
-fn set_mode(path: &Path, mode: u32) {
+fn set_mode(path: &Path, mode: u32) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
 }
 
 #[cfg(not(unix))]
-fn set_mode(_path: &Path, _mode: u32) {}
+fn set_mode(_path: &Path, _mode: u32) -> std::io::Result<()> {
+    Ok(())
+}
 
 /// Extended attributes as the manifest records them (Z-04).
 ///
@@ -627,8 +783,61 @@ fn xattrs_of(fs: &Filesystem<'_, '_>, z: &zfs_ondisk::zpl::Znode) -> Vec<Xattr> 
 
 #[cfg(test)]
 mod tests {
-    use super::safe_join;
+    use super::{safe_join, Meta, Preserve};
+    use std::collections::BTreeSet;
     use std::path::Path;
+
+    /// The set-id bits go only with the owner, a link's target is never
+    /// executable, and a time is put back as the dataset had it; an item
+    /// `--preserve` does not know is refused.
+    #[cfg(unix)]
+    #[test]
+    fn what_preserve_puts_back() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = std::env::temp_dir().join(format!("zvolfiles-meta-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("prog");
+        std::fs::write(&f, b"#!/bin/sh\n").unwrap();
+        let meta = |link_target| Meta {
+            path: f.clone(),
+            mode: 0o4755,
+            mtime: 1_757_100_001,
+            atime: 1_757_100_002,
+            uid: u64::MAX,
+            gid: 0,
+            link_target,
+        };
+        let p = Preserve::parse("times,mode").unwrap();
+        let mut notes = BTreeSet::new();
+        meta(false).restore(p, &mut notes);
+        let m = std::fs::metadata(&f).unwrap();
+        assert_eq!(m.permissions().mode() & 0o7777, 0o755);
+        assert_eq!(m.mtime(), 1_757_100_001);
+        meta(true).restore(p, &mut notes);
+        assert_eq!(
+            std::fs::metadata(&f).unwrap().permissions().mode() & 0o7777,
+            0o644
+        );
+        assert!(notes.is_empty(), "{notes:?}");
+        // An owner that cannot be set is said once, and set-id stays off.
+        let mut notes = BTreeSet::new();
+        meta(false).restore(Preserve::parse("mode,owner").unwrap(), &mut notes);
+        assert_eq!(
+            std::fs::metadata(&f).unwrap().permissions().mode() & 0o7777,
+            0o755
+        );
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        // A time no clock holds is a note, not a panic.
+        let mut far = meta(false);
+        far.mtime = u64::MAX;
+        let mut notes = BTreeSet::new();
+        far.restore(p, &mut notes);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(Preserve::parse("bogus,owner").is_err());
+        assert!(Preserve::parse("none").is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     /// A path whose components could not all be names of files is not
     /// joined at all: an empty or `.` component used to be skipped, so

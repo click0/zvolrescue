@@ -30,8 +30,9 @@
 .Sh DESCRIPTION
 .Nm
 reads a filesystem dataset of a ZFS pool at any transaction group that
-still verifies and writes its files out: directories, symbolic links,
-ownership and times, each file's blocks verified by their checksums.
+still verifies and writes its files out: directories, files, and
+symbolic links as files holding their targets, with their times, modes
+and, as root, owners, each file's blocks verified by their checksums.
 When the POSIX metadata is too damaged for a tree,
 .Cm objects
 writes one file per object instead.
@@ -130,10 +131,27 @@ Path inside the dataset, repeatable; everything when absent.
 .It Fl -strict
 Stop at the first block that cannot be read.
 .It Fl -preserve Ar list
-Metadata to restore: any of
-.Ql times ,
-.Ql mode ,
-comma-separated; default both.
+Metadata to put back, comma-separated:
+.Ql times
+(modification and access times),
+.Ql mode
+(permission bits),
+.Ql owner
+(user and group, which needs root), or
+.Ql none ;
+default
+.Ql times,mode .
+Anything else is a usage error.
+The set-user-ID and set-group-ID bits are restored only with the owner,
+so that a program of the dataset does not become one that runs as
+whoever extracted it.
+A symbolic link is written as a file holding its target, mode 0644.
+A directory gets its metadata after everything in it is written.
+What the platform would not put back is said once and listed in the
+manifest as
+.Li not_restored ;
+the manifest records what every file had either way.
+Holes in a file stay holes.
 .El
 .Ss objects
 .Nm Cm objects

@@ -2,7 +2,7 @@
 //!
 //! The main binary treats a filesystem dataset as an object dump at
 //! most. This one understands the ZFS POSIX layer: directories, files,
-//! symlinks, ownership and timestamps — and, when the POSIX metadata is
+//! symlinks, modes, ownership and timestamps — and, when the POSIX metadata is
 //! too damaged to walk, falls back to one file per object so the
 //! contents are still recoverable (COMPANIONS §5).
 //!
@@ -75,7 +75,9 @@ enum Command {
         /// Stop at the first block that cannot be read.
         #[arg(long)]
         strict: bool,
-        /// Metadata to restore: any of `times`, `mode` (comma-separated).
+        /// Metadata to restore: any of `times`, `mode`, `owner` (root
+        /// only), or `none`, comma-separated. Set-id bits only with the
+        /// owner.
         #[arg(long, value_name = "LIST", default_value = "times,mode")]
         preserve: String,
     },

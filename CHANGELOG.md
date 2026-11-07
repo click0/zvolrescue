@@ -179,6 +179,22 @@ tagged. `v0.7.1` is the release that carries those six.
   error, not a row of zeros. A transaction group at which the dataset
   does not open is passed over for an older one, as `zvolrescue dump`
   does, and `objects` stops on a signal (exit 6).
+* **`zvolfiles extract` put back the wrong metadata, and not the right
+  one.** The set-user-ID bit of a file owned by uid 1000 was restored
+  while the owner was not, so `extract` as root made `-rwsr-xr-x root`
+  out of it; every symbolic link, written as a file holding its target,
+  got the link's 0777 and became a world-writable executable; and a
+  directory's mode was set before its contents were written, so a
+  read-only directory failed its own children as anyone but root.
+  `--preserve times`, the default, did nothing at all, `owner` was in
+  the description and nowhere else, and `--preserve bogus,owner` was
+  taken and turned the mode off. Times are put back now, `owner` exists
+  (it needs root), the set-id bits go only with the owner, a link's
+  target is mode 0644, directories get their metadata last and deepest
+  first, an unknown item is refused (exit 1), and what the platform will
+  not do is said once and listed in the manifest. Holes stay holes: a
+  file of 256 MiB with one block took 256 MiB on disk, and a size no
+  file has could fill it; `objects` writes sparse too.
 * **`zvolreport` wrote over its own inputs and over keys.** `build
   case.jsonl -o case.jsonl` replaced the evidence log with the report
   about it and exited 0, and `--md` or the signature could land on the

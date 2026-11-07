@@ -6,7 +6,7 @@
 //! are what someone came for; the names can be worked out afterwards
 //! from what is inside them.
 
-use std::io::Write;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 
 use serde::Serialize;
@@ -251,9 +251,15 @@ fn write_object(
             }
         };
         hasher.update(&chunk);
-        file.write_all(&chunk)
-            .map_err(|e| fail(format!("{}: {e}", path.display())))?;
+        // A hole, or a block of zeros, is left a hole.
+        if chunk.iter().any(|&b| b != 0) {
+            file.seek(SeekFrom::Start(blkid * bs))
+                .and_then(|_| file.write_all(&chunk))
+                .map_err(|e| fail(format!("{}: {e}", path.display())))?;
+        }
     }
+    file.set_len(size.div_ceil(bs) * bs)
+        .map_err(|e| fail(format!("{}: {e}", path.display())))?;
     let hex = hasher
         .finalize()
         .iter()

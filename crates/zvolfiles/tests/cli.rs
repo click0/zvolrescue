@@ -141,3 +141,43 @@ fn objects_does_not_need_the_master_node() {
         .contains("master node"));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// Times come back as the dataset had them, a file of mostly holes takes
+/// the space of its blocks only, and `--preserve` refuses what it does
+/// not know rather than quietly turning the mode off.
+#[test]
+fn extract_puts_back_times_and_keeps_holes() {
+    use std::os::unix::fs::MetadataExt;
+    let dir = scratch("times-holes");
+    let m = members(&dir, ["member0.img", "member1.img"]);
+    let out = dir.join("out");
+    let o = out.to_string_lossy().into_owned();
+    let (code, err) = run(&["-q", "extract", "tank/fs", &m[0], &m[1], "-o", &o]);
+    assert_eq!(code, 0, "{err}");
+    let hello = std::fs::metadata(out.join("hello.txt")).unwrap();
+    // The fixture's files were written at 2025-09-05T19:20:01Z.
+    assert_eq!(hello.mtime(), 1_757_100_001);
+    for e in std::fs::read_dir(&out).unwrap().flatten() {
+        let md = e.metadata().unwrap();
+        if md.is_file() {
+            assert!(
+                md.blocks() * 512 <= md.len().max(4096) + 4096,
+                "{:?}",
+                e.path()
+            );
+        }
+    }
+    let (code, err) = run(&[
+        "-q",
+        "extract",
+        "tank/fs",
+        &m[0],
+        &m[1],
+        "-o",
+        &o,
+        "--preserve",
+        "bogus,owner",
+    ]);
+    assert_eq!(code, 1, "{err}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
