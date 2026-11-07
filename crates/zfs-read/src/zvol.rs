@@ -196,7 +196,7 @@ pub fn extract_from(
     }
     // Blocks that lie inside volsize; the tree may extend past it.
     let blocks_in_volume = volsize.div_ceil(bs);
-    let blocks_total = (obj.dnode().maxblkid + 1).min(blocks_in_volume);
+    let blocks_total = obj.dnode().maxblkid.saturating_add(1).min(blocks_in_volume);
     let mut report = Report {
         volsize,
         blocksize: bs,

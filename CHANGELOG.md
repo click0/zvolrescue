@@ -114,6 +114,15 @@ tagged. `v0.7.1` is the release that carries those six.
   Such a vdev is now one that cannot be read, named with what is wrong
   with it; the dRAID checks are made without overflow; and `--hints`
   refuses an ashift outside 9 to 16 or a parity of no pool (exit 1).
+* **One dnode field could abort every tool.** An object read whole — the
+  pool's configuration, a space map, a link target — was read at the
+  size its dnode gave, `(maxblkid + 1) × block size`, allocated up front.
+  A dnode claiming 2^40 blocks asked for 4 PiB, the allocation failed,
+  and `list`, `dump` and `zvoltimeline` died with SIGABRT (exit 134) on
+  a pool that was otherwise readable; at `u64::MAX` the sum wrapped to a
+  small wrong size instead. Sizes from a dnode now saturate, and a read
+  of more than 1 GiB in one piece is an error the caller already
+  handles: the configuration is "unreadable", the run goes on.
 * **`zvolreport` wrote over its own inputs and over keys.** `build
   case.jsonl -o case.jsonl` replaced the evidence log with the report
   about it and exited 0, and `--md` or the signature could land on the

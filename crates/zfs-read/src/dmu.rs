@@ -119,14 +119,27 @@ impl<'r, 'a> ObjectReader<'r, 'a> {
 
     /// Read `len` bytes starting at byte `offset` of the object, crossing
     /// block boundaries as needed.
+    ///
+    /// Every caller reads an object meant to be small — a packed nvlist,
+    /// a space map, a link target, an attribute — whole, at a length the
+    /// object's own dnode gave. A length past [`MAX_RANGE`] is refused as
+    /// no such object: one dnode claiming 2^40 blocks asked for 4 PiB up
+    /// front, and the allocation's failure aborted the process.
     pub fn read_range(&self, offset: u64, len: usize) -> Result<Vec<u8>, ReadError> {
         let bs = self.dnode.datablksz();
         if bs == 0 {
             return Err(ReadError::Io("dnode has zero data block size".into()));
         }
-        let mut out = Vec::with_capacity(len);
+        let end = offset
+            .checked_add(len as u64)
+            .filter(|_| len as u64 <= MAX_RANGE)
+            .ok_or_else(|| {
+                ReadError::Io(format!(
+                    "{len} bytes at {offset} is past what an object read whole can be ({MAX_RANGE} bytes)"
+                ))
+            })?;
+        let mut out = Vec::with_capacity(len.min(1 << 24));
         let mut pos = offset;
-        let end = offset + len as u64;
         while pos < end {
             let blkid = pos / bs;
             let within = (pos % bs) as usize;
@@ -139,10 +152,22 @@ impl<'r, 'a> ObjectReader<'r, 'a> {
     }
 
     /// Bytes this object logically spans (`(maxblkid + 1) * datablksz`).
+    ///
+    /// `dn_maxblkid` is whatever the dnode says, and a hostile one makes
+    /// a size no object has: the product saturates rather than wraps, so
+    /// a caller sees an absurd size — which [`read_range`](Self::read_range)
+    /// refuses — instead of a small wrong one.
     pub fn logical_size(&self) -> u64 {
-        (self.dnode.maxblkid + 1) * self.dnode.datablksz()
+        self.dnode
+            .maxblkid
+            .saturating_add(1)
+            .saturating_mul(self.dnode.datablksz())
     }
 }
+
+/// The most [`ObjectReader::read_range`] reads in one call: 1 GiB, far
+/// above any object read whole and far below what a hostile length asks.
+pub const MAX_RANGE: u64 = 1 << 30;
 
 /// The dnode array of an objset, addressed by object number.
 pub struct DnodeArray<'r, 'a> {
@@ -164,7 +189,11 @@ impl<'r, 'a> DnodeArray<'r, 'a> {
 
     /// Highest object number that can exist in this array.
     pub fn max_object(&self) -> u64 {
-        (self.meta.dnode.maxblkid + 1) * self.slots_per_block()
+        self.meta
+            .dnode
+            .maxblkid
+            .saturating_add(1)
+            .saturating_mul(self.slots_per_block())
     }
 
     /// Read and parse dnode `objnum`; a free slot parses as a free dnode.
@@ -338,6 +367,26 @@ mod tests {
         let r = obj.read_range(4000, 200).unwrap();
         assert_eq!(&r[..96], &pattern(0, 4096)[4000..]);
         assert_eq!(&r[96..], &pattern(1, 4096)[..104]);
+    }
+
+    /// A dnode that claims more blocks than any object has — `2^40`, or
+    /// `u64::MAX` — gives a size that saturates, and reading it whole is
+    /// refused: it used to ask for 4 PiB up front and abort.
+    #[test]
+    fn an_object_too_large_to_be_read_whole_is_refused() {
+        let (sources, assembly, mut dnode) = build(|a, m| object(a, m, 2, &[0, 1, 5]));
+        let dyns = dyn_sources(&sources);
+        let reader = PoolReader::new(&assembly, dyns);
+        for maxblkid in [1u64 << 40, u64::MAX] {
+            dnode.maxblkid = maxblkid;
+            let obj = ObjectReader::new(&reader, dnode.clone(), Endian::Little);
+            assert!(obj.logical_size() >= 1 << 52, "{maxblkid}");
+            let len = obj.logical_size().min(usize::MAX as u64) as usize;
+            assert!(obj.read_range(0, len).is_err(), "{maxblkid}");
+            assert!(obj.read_range(u64::MAX - 1, 16).is_err(), "{maxblkid}");
+            // A small read of the same object still works.
+            assert_eq!(obj.read_range(0, 16).unwrap(), pattern(0, 4096)[..16]);
+        }
     }
 
     #[test]

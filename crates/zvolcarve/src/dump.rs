@@ -122,7 +122,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         eprintln!(
             "zvolcarve: {}: {} block(s) of {} bytes, {size} bytes ({why})",
             c.id,
-            c.maxblkid + 1,
+            c.maxblkid.saturating_add(1),
             c.volblocksize,
         );
     }
