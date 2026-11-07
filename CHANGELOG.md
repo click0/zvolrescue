@@ -207,6 +207,14 @@ tagged. `v0.7.1` is the release that carries those six.
   `FAIL` when its size is not the one recorded. And the logs the report
   was built from — whose hashes it records — were never checked; an
   edited or deleted log is now a failure too (exit 4).
+* **`zvoltimeline` exited 0 on a history it could not read.** With every
+  transaction group's MOS unreadable it printed "32 transaction group(s)
+  still readable, 32 unreadable" and exited 0 — the exit-3 branch could
+  never run, since the list it tested held the unreadable groups too —
+  and a member that could not be opened was exit 0 where `list` says 2.
+  The header counts only the groups it walked, a history with none is
+  exit 3, and an unopened member exit 2. The JSON `txgs` is unchanged:
+  every TXG whose uberblock verified.
 * **`zvolreport` wrote over its own inputs and over keys.** `build
   case.jsonl -o case.jsonl` replaced the evidence log with the report
   about it and exited 0, and `--md` or the signature could land on the

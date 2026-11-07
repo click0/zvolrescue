@@ -85,12 +85,14 @@ fn recover_with(spec: &PoolSpec, object: &str, txg: u64) -> String {
 }
 
 fn print_text(out: &TimelineOut, w: &mut dyn Write) -> std::io::Result<()> {
+    // `txgs` is every TXG whose uberblock verified; the readable ones are
+    // those whose MOS could also be walked.
     writeln!(
         w,
         "pool {:?} guid {}: {} transaction group(s) still readable{}",
         out.pool,
         out.pool_guid,
-        out.txgs.len(),
+        out.txgs.len() - out.unreadable_txgs.len(),
         if out.unreadable_txgs.is_empty() {
             String::new()
         } else {
@@ -372,9 +374,15 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             &members.ledger,
         );
     }
-    let txgs: BTreeSet<u64> = out.txgs.iter().copied().collect();
-    let code = if txgs.is_empty() {
+    // Exit 3 when no transaction group could be walked: a history of
+    // nothing but "unreadable" is not one, though every uberblock
+    // verified. Exit 2 when a member given could not be opened, as
+    // `list` says it: the history is of the members that were.
+    let unreadable: BTreeSet<u64> = out.unreadable_txgs.iter().copied().collect();
+    let code = if out.txgs.iter().all(|t| unreadable.contains(t)) {
         exit::UNRECOVERABLE
+    } else if members.any_failed() {
+        exit::EVIDENCE
     } else {
         0
     };

@@ -66,3 +66,34 @@ fn the_report_is_never_written_over_a_member() {
     assert!(std::fs::metadata(&report).unwrap().len() > 0);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// A member that cannot be opened is exit 2, as `list` says it, and a
+/// pool none of whose transaction groups can be walked is exit 3 — a
+/// history of nothing but "unreadable" used to exit 0, its header
+/// counting the unreadable groups as readable.
+#[test]
+fn a_history_with_nothing_readable_or_a_member_missing_says_so() {
+    let dir = scratch("nothing-readable");
+    let m = members(&dir);
+    let missing = dir.join("gone.img").to_string_lossy().into_owned();
+    let (code, err) = run(&["-q", &missing, &m[0], &m[1]]);
+    assert_eq!(code, 2, "{err}");
+    // Every block of the MOS gone, the labels and their uberblocks kept.
+    for p in &m {
+        let mut b = std::fs::read(p).unwrap();
+        let end = b.len() - 0x10_0000;
+        b[0x40_0000..end].fill(0);
+        std::fs::write(p, b).unwrap();
+    }
+    let out = Command::new(env!("CARGO_BIN_EXE_zvoltimeline"))
+        .args([&m[0], &m[1]])
+        .output()
+        .expect("run");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(3), "{text}");
+    assert!(
+        text.contains("0 transaction group(s) still readable"),
+        "{text}"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
