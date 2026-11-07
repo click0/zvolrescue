@@ -245,6 +245,15 @@ tagged. `v0.7.1` is the release that carries those six.
   gave the volume a GUID suffix for a clash with nothing. And a resume
   state written with a relative `-o` did not have its directory flushed
   after the rename.
+* **The command `zvoltimeline` offers to recover a destroyed dataset
+  did not work.** `recover_with` was a `zvolrescue dump` for anything
+  destroyed — a filesystem or a ztest dataset too, which then failed as
+  "not a volume" — and it left out `--map`, `--ignore-unknown-features`
+  and the key, so on a pool that needed them the command printed was
+  refused. A volume gets `zvolrescue dump`, a filesystem `zvolfiles
+  extract`, anything else no command; the pool's own maps and feature
+  leave go with it, and an encrypted dataset `--key prompt`. The
+  evidence record of a timeline also names the maps it read.
 * **`zvolreport` wrote over its own inputs and over keys.** `build
   case.jsonl -o case.jsonl` replaced the evidence log with the report
   about it and exited 0, and `--md` or the signature could land on the

@@ -963,6 +963,13 @@ impl PoolSpec {
             args.push("--assume-member".into());
             args.push(shell_quote(a));
         }
+        for m in &self.map {
+            args.push("--map".into());
+            args.push(shell_quote(m));
+        }
+        if self.ignore_unknown_features {
+            args.push("--ignore-unknown-features".into());
+        }
         args
     }
 

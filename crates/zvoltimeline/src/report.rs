@@ -5,6 +5,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use serde::Serialize;
+use zfs_ondisk::dmu::ObjsetType;
 use zfs_read::dsl::{open_mos, walk, Dataset, Pending};
 use zfs_read::pool::{uberblock_candidates, Candidate};
 use zfs_read::zio::PoolReader;
@@ -63,25 +64,46 @@ struct TimelineOut {
     events: Vec<EventOut>,
 }
 
-/// The `zvolrescue dump` command that recovers a destroyed object (T-05).
+/// The command that recovers a destroyed object (T-05): `zvolrescue
+/// dump` for a volume, `zvolfiles extract` for a filesystem, nothing for
+/// anything else — a command printed for an object it cannot recover
+/// only fails when it is run.
 ///
 /// It repeats this run's own pool specification — the members as they
-/// were named, and any `--hints`, `--search-order` or `--assume-member`
-/// that made them readable — because a command that reached the pool by
-/// a different route would not reach the same dataset.
-fn recover_with(spec: &PoolSpec, object: &str, txg: u64) -> String {
-    let mut parts = vec![
-        "zvolrescue".to_string(),
-        "dump".to_string(),
-        shell_quote(object),
-    ];
+/// were named, and any `--hints`, `--search-order`, `--assume-member`,
+/// `--map` or `--ignore-unknown-features` that made them readable —
+/// because a command that reached the pool by a different route would
+/// not reach the same dataset; and an encrypted one asks for its key.
+fn recover_with(
+    spec: &PoolSpec,
+    object: &str,
+    txg: u64,
+    kind: Option<ObjsetType>,
+    encrypted: bool,
+) -> Option<String> {
+    let flat = object.replace('/', "_");
+    let (mut parts, output) = match kind? {
+        ObjsetType::Zvol => (
+            vec!["zvolrescue".to_string(), "dump".into(), shell_quote(object)],
+            format!("{flat}.img"),
+        ),
+        ObjsetType::Zfs => (
+            vec![
+                "zvolfiles".to_string(),
+                "extract".into(),
+                shell_quote(object),
+            ],
+            flat,
+        ),
+        _ => return None,
+    };
     parts.extend(spec.as_arguments());
     parts.push(format!("--txg {txg}"));
-    parts.push(format!(
-        "-o {}",
-        shell_quote(&format!("{}.img", object.replace('/', "_")))
-    ));
-    parts.join(" ")
+    if encrypted {
+        parts.push("--key prompt".into());
+    }
+    parts.push(format!("-o {}", shell_quote(&output)));
+    Some(parts.join(" "))
 }
 
 fn print_text(out: &TimelineOut, w: &mut dyn Write) -> std::io::Result<()> {
@@ -175,6 +197,10 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
 
     let mut events: Vec<Event> = Vec::new();
     let mut unreadable = Vec::new();
+    // What each dataset was, the last time it was seen: a destroyed one
+    // is recovered by the tool for its type, with a key if it had one.
+    let mut what: std::collections::BTreeMap<u64, (Option<ObjsetType>, bool)> =
+        std::collections::BTreeMap::new();
     let mut previous: Option<(u64, Vec<Dataset>)> = None;
     // Only two dataset lists are ever held at once (T-11).
     for c in &candidates {
@@ -274,6 +300,9 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 events.extend(diffed);
             }
         }
+        for d in &now {
+            what.insert(d.guid, (d.kind, d.encryption.is_some()));
+        }
         previous = Some((c.ub.txg, now));
     }
 
@@ -321,7 +350,10 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 details: e.details.clone(),
                 last_seen_txg: e.last_seen_txg,
                 recover_with: match (e.kind, &e.object, e.last_seen_txg) {
-                    (Kind::Destroyed, Some(o), Some(t)) => Some(recover_with(spec, o, t)),
+                    (Kind::Destroyed, Some(o), Some(t)) => {
+                        let (kind, encrypted) = what.get(&e.guid).copied().unwrap_or((None, false));
+                        recover_with(spec, o, t, kind, encrypted)
+                    }
                     _ => None,
                 },
             })
@@ -339,7 +371,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                     "zvoltimeline",
                     &json,
                     exit::USAGE,
-                    &members.paths,
+                    &members.inputs(),
                     Vec::new(),
                     &members.ledger,
                 );
@@ -369,7 +401,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             "zvoltimeline",
             &json,
             exit::USAGE,
-            &members.paths,
+            &members.inputs(),
             Vec::new(),
             &members.ledger,
         );
@@ -401,8 +433,56 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         "zvoltimeline",
         &json,
         code,
-        &members.paths,
+        &members.inputs(),
         written,
         &members.ledger.incidents(),
     )
+}
+
+#[cfg(test)]
+mod recover_tests {
+    use super::*;
+
+    fn spec(args: &[&str]) -> PoolSpec {
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(flatten)]
+            pool: PoolSpec,
+        }
+        let mut argv = vec!["t"];
+        argv.extend(args);
+        <Cli as clap::Parser>::parse_from(argv).pool
+    }
+
+    /// A volume is recovered by `zvolrescue dump`, a filesystem by
+    /// `zvolfiles extract`, anything else by nothing; the command keeps
+    /// the maps and the leave to read unknown features that made the
+    /// pool readable, and asks for the key of an encrypted dataset.
+    #[test]
+    fn the_command_fits_the_object() {
+        let s = spec(&[
+            "m0.img",
+            "--map",
+            "m0.img=m0.map",
+            "--ignore-unknown-features",
+        ]);
+        let vol = recover_with(&s, "tank/vm/disk0", 7, Some(ObjsetType::Zvol), false).unwrap();
+        assert!(
+            vol.starts_with("zvolrescue dump tank/vm/disk0 m0.img"),
+            "{vol}"
+        );
+        assert!(
+            vol.contains("--map m0.img=m0.map --ignore-unknown-features --txg 7"),
+            "{vol}"
+        );
+        assert!(vol.ends_with("-o tank_vm_disk0.img"), "{vol}");
+        let fs = recover_with(&s, "tank/home", 7, Some(ObjsetType::Zfs), true).unwrap();
+        assert!(fs.starts_with("zvolfiles extract tank/home"), "{fs}");
+        assert!(fs.contains("--key prompt -o tank_home"), "{fs}");
+        assert_eq!(
+            recover_with(&s, "ztest/ds_0", 7, Some(ObjsetType::Other), false),
+            None
+        );
+        assert_eq!(recover_with(&s, "gone", 7, None, false), None);
+    }
 }
