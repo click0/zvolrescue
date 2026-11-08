@@ -623,6 +623,17 @@ fn resolved(path: &Path) -> Option<PathBuf> {
     }
 }
 
+/// `path` with the directory above it resolved and its own last
+/// component kept as it is — a link there is not followed.
+fn name_resolved(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?;
+    let dir = match path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    };
+    Some(resolved(dir)?.join(name))
+}
+
 static TOOL: OnceLock<&'static str> = OnceLock::new();
 
 /// Name the running program, once, first thing in `main`.
@@ -744,6 +755,8 @@ fn push_parts(out: &mut Vec<PathBuf>, word: &str) {
 pub struct WriteGuard {
     evidence: zvolrescue_io::Evidence,
     logs: Vec<(&'static str, PathBuf)>,
+    /// What the run reads, as it was named.
+    reads: Vec<PathBuf>,
 }
 
 impl WriteGuard {
@@ -760,7 +773,34 @@ impl WriteGuard {
         WriteGuard {
             evidence: zvolrescue_io::Evidence::new(reads),
             logs,
+            reads: reads.to_vec(),
         }
+    }
+
+    /// Why `path` itself — the name, not what a link there leads to — may
+    /// not be removed: it is the name the run reads an input by, or where
+    /// a log goes. A link that merely points at an input can go; one that
+    /// is how the run was told to reach it cannot.
+    pub fn check_name(&self, path: &Path) -> Result<(), String> {
+        let here = name_resolved(path);
+        if here.is_none() {
+            return Ok(());
+        }
+        for r in &self.reads {
+            if name_resolved(r) == here {
+                return Err(format!(
+                    "{} is the name this run reads {} by",
+                    path.display(),
+                    r.display()
+                ));
+            }
+        }
+        for (flag, log) in &self.logs {
+            if name_resolved(log) == here {
+                return Err(format!("{} is where {flag} goes", path.display()));
+            }
+        }
+        Ok(())
     }
 
     /// Why writing `path` would be wrong, if it would: it is an input or

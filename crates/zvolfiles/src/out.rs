@@ -87,7 +87,10 @@ impl OutTree {
             cur.push(c);
             match std::fs::symlink_metadata(&cur) {
                 Ok(m) if m.is_dir() => continue,
-                Ok(m) if m.file_type().is_symlink() => remove(&cur)?,
+                Ok(m) if m.file_type().is_symlink() => {
+                    self.guard.check_name(&cur).map_err(OutError::Refused)?;
+                    remove(&cur)?
+                }
                 Ok(_) => {
                     return Err(OutError::Failed(format!(
                         "{}: a file is in the way of a directory",
@@ -130,7 +133,14 @@ impl OutTree {
             self.dir(parent)?;
         }
         match std::fs::symlink_metadata(path) {
-            Ok(m) if m.file_type().is_symlink() => remove(path)?,
+            // A link in the way is replaced, not followed — unless the
+            // link is itself how the run names an input or a log: a member
+            // given as `-o/hello.txt`, a link to it, lost its name to the
+            // extracted file, and the record then described that file.
+            Ok(m) if m.file_type().is_symlink() => {
+                self.guard.check_name(path).map_err(OutError::Refused)?;
+                remove(path)?
+            }
             Ok(m) if m.is_dir() => {
                 return Err(OutError::Failed(format!(
                     "{}: a directory is in the way",
@@ -215,6 +225,31 @@ mod tests {
             .file_type()
             .is_symlink());
         assert_eq!(std::fs::read(out.join("sub/deep.txt")).unwrap(), b"y");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A link that is the very name the run reads a member by stays: it
+    /// was removed first and asked about after, so the member lost the
+    /// name the run had for it and the record described the extracted
+    /// file instead. A link that only points at a member is replaced.
+    #[test]
+    fn a_link_that_names_an_input_is_kept() {
+        let dir = scratch("names-input");
+        let member = dir.join("member1.img");
+        std::fs::write(&member, b"evidence").unwrap();
+        let out = dir.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let named = out.join("hello.txt");
+        std::os::unix::fs::symlink(&member, &named).unwrap();
+        let t = tree(&out, std::slice::from_ref(&named));
+        assert!(matches!(t.create(&named), Err(OutError::Refused(_))));
+        assert!(std::fs::symlink_metadata(&named)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        std::os::unix::fs::symlink(&member, out.join("other.txt")).unwrap();
+        t.create(&out.join("other.txt")).unwrap();
+        assert_eq!(std::fs::read(&member).unwrap(), b"evidence");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

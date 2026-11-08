@@ -88,6 +88,17 @@ tagged. `v0.7.1` is the release that carries those six.
   filesystem as the members, like one written beside them on a disk,
   touches none of them and is not refused.
 
+* **`zvolfiles` removed a link before asking whether it could.** A link
+  in the output directory is replaced, not followed — but it was removed
+  first and checked after. A member given to the run through such a link
+  (`--image out/hello.txt`) lost the name the run read it by to the
+  extracted file, and the evidence record then gave that file's size and
+  hash as the member's; a link that was the evidence log was gone before
+  the run refused it, and the record went to a stray new file. A link
+  that is itself how the run names an input or a log is now left in
+  place and the entry refused (exit 5); one that merely points at a
+  member is still replaced.
+
 ## v0.9.12 — 2026-11-07
 
 **Nothing written over the evidence, and no crash on a forged pool.**
