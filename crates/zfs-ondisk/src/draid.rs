@@ -548,10 +548,17 @@ impl Config {
     }
 
     /// `vdev_draid_spare_get_child`: the child that distributed spare
-    /// `spare_id` stands for at child-relative `physical_offset`.
-    pub fn spare_child(&self, spare_id: u64, physical_offset: u64) -> u64 {
+    /// `spare_id` stands for at child-relative `physical_offset`, or
+    /// `None` for a spare this dRAID does not have. The id comes from the
+    /// spare's name in a label (`draid1-0-7`), and one past the children
+    /// wrapped `(children - 1) - spare_id` and indexed past the
+    /// permutation: a panic in every build.
+    pub fn spare_child(&self, spare_id: u64, physical_offset: u64) -> Option<u64> {
+        if spare_id >= self.nspares {
+            return None;
+        }
         let perm = physical_offset / self.devslicesz;
-        self.permute(perm, (self.children - 1) - spare_id)
+        Some(self.permute(perm, (self.children - 1) - spare_id))
     }
 }
 
@@ -601,6 +608,18 @@ mod tests {
         assert!(Config::new(4, 1, 1, 6, u64::MAX).is_err());
         assert!(Config::new(4, 1, 1, 6, u64::MAX / 5).is_err());
         assert!(Config::new(4, 1, 1, 6, 1).is_ok());
+    }
+
+    /// A distributed spare this dRAID does not have is no child at all:
+    /// spare 7 of six children wrapped the subtraction and indexed past
+    /// the permutation, a panic in release builds as well.
+    #[test]
+    fn a_spare_past_the_spares_is_none() {
+        let cfg = Config::new(4, 1, 1, 6, 1).unwrap();
+        assert!(cfg.spare_child(0, 0).is_some());
+        for id in [1, 5, 6, 7, u64::MAX] {
+            assert_eq!(cfg.spare_child(id, 0), None, "spare {id}");
+        }
     }
 
     #[test]

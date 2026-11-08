@@ -127,6 +127,23 @@ tagged. `v0.7.1` is the release that carries those six.
   long as what was hashed — `zvolrescue dump` and `zvolcarve dump`
   alike.
 
+* **A label's vdev count, a spare's name and an ashift could still take
+  a reader down.** `vdev_children` was taken as it came: 2^40 of them in
+  a label whose checksum a forger got right made the list of missing
+  top-level vdevs 8 TiB, and `scan` and `list` aborted (exit 134). A
+  count above what a DVA can name (2^24) is now no count, and the
+  missing vdevs are named up to 1024 and counted past that. A dRAID
+  distributed spare named past the spares the vdev has (`draid1-0-7` of
+  six children) wrapped a subtraction and indexed past the permutation,
+  a panic in release builds too; it is a spare that cannot be read now.
+  The ashift check of 0.9.12 covered raidz and dRAID only: a mirror or a
+  single disk with an ashift of 50 made a dynamic gang header a
+  petabyte, allocated at once. Every top-level vdev is held to 9…16.
+  And combinatorial raidz repair collected every subset of the columns
+  before trying the first — a forged width of 2000 is a billion vectors:
+  a raidz or dRAID is now at most 255 wide, the subsets come one at a
+  time, and a block gives up after 10 000 tries.
+
 ## v0.9.12 — 2026-11-07
 
 **Nothing written over the evidence, and no crash on a forged pool.**

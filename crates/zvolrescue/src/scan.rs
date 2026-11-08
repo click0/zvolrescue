@@ -320,6 +320,9 @@ struct PoolOut {
     txg: Option<u64>,
     vdev_children: Option<u64>,
     missing_tops: Vec<u64>,
+    /// How many are missing: more than `missing_tops` lists when a label
+    /// claims more top-level vdevs than it is worth naming one by one.
+    missing_top_count: u64,
     /// Top-level vdevs the pool's own configuration says were removed
     /// (SPEC F-69): counted, described by no label, and not missing.
     /// Their blocks live on the vdevs that remain and are read through
@@ -605,6 +608,7 @@ fn pool_out(p: &PoolAssembly, paths: &[PathBuf], names: &[Vec<String>]) -> PoolO
         txg: p.txg,
         vdev_children: p.vdev_children,
         missing_tops: p.missing_tops(),
+        missing_top_count: p.missing_top_count(),
         removed_tops: p.removed_tops.clone(),
         device_removal: p
             .features_for_read
@@ -928,6 +932,12 @@ fn print_text(out: &ScanOut, verbose: u8) {
         }
         for id in &p.missing_tops {
             println!("  top-level vdev #{id}: no scanned member describes it  MISSING");
+        }
+        let unlisted = p
+            .missing_top_count
+            .saturating_sub(p.missing_tops.len() as u64);
+        if unlisted > 0 {
+            println!("  … and {unlisted} more top-level vdev(s) MISSING");
         }
         // A removed vdev is counted by `vdev_children` like any other and
         // has no member to find. The pool's configuration object is what

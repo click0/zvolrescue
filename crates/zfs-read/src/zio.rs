@@ -96,6 +96,17 @@ impl Node {
         // no data column, and an ashift of 63 shifts a sector out of the
         // word: both reached a division or a shift that does not exist.
         let width = tree.children.len() as u64;
+        // Wider than any raidz or dRAID can be made: the label says how
+        // many children, and combinatorial reconstruction would try every
+        // subset of them.
+        if matches!(tree.kind.as_str(), "raidz" | "draid") && width > MAX_PARITY_WIDTH {
+            return Node::Unsupported {
+                kind: format!(
+                    "{} of {width} children (at most {MAX_PARITY_WIDTH})",
+                    tree.kind
+                ),
+            };
+        }
         if matches!(tree.kind.as_str(), "raidz" | "draid")
             && !(ASHIFT_MIN..=ASHIFT_MAX).contains(&ashift)
         {
@@ -191,6 +202,15 @@ impl Node {
 
 /// The sector sizes a vdev can have: `ASHIFT_MIN` and `ASHIFT_MAX` of
 /// OpenZFS's `vdev_impl.h`.
+/// The most children a raidz or dRAID vdev has: dRAID's permutation maps
+/// stop at 255, and so does what `zpool create` makes of a raidz.
+const MAX_PARITY_WIDTH: u64 = 255;
+
+/// Reconstructions combinatorial repair tries for one block before it
+/// gives up: every subset of up to three columns of a 40-wide raidz, and
+/// a bound on what a forged block can cost.
+const MAX_COMBREC_TRIES: usize = 10_000;
+
 const ASHIFT_MIN: u32 = 9;
 const ASHIFT_MAX: u32 = 16;
 
@@ -419,6 +439,20 @@ impl<'a> PoolReader<'a> {
             .iter()
             .map(|t| {
                 let ashift = t.ashift.and_then(|a| u32::try_from(a).ok()).unwrap_or(9);
+                // Every top-level vdev, not only raidz and dRAID: a mirror
+                // or a single disk with an ashift of 50 made the size of a
+                // dynamic gang header a petabyte, allocated at once.
+                if !(ASHIFT_MIN..=ASHIFT_MAX).contains(&ashift) {
+                    top_ashift.insert(t.id as u32, ASHIFT_MIN);
+                    let node = Node::Unsupported {
+                        kind: format!(
+                            "{} with ashift {ashift} (ZFS uses {ASHIFT_MIN}..={ASHIFT_MAX})",
+                            t.kind
+                        ),
+                    };
+                    trace!("zio", "top-level vdev {}: {}", t.id, node.describe());
+                    return (t.id as u32, node);
+                }
                 top_ashift.insert(t.id as u32, ashift);
                 let node = Node::from_tree(&t.tree, &t.members, ashift);
                 trace!("zio", "top-level vdev {}: {}", t.id, node.describe());
@@ -911,7 +945,12 @@ impl<'a> PoolReader<'a> {
                 .ok_or(ReadError::UnknownVdev(devidx as u32))?;
             match (child, cfg) {
                 (Node::Dspare { spare_id }, Some(cfg)) => {
-                    let target = cfg.spare_child(*spare_id, c.offset);
+                    let Some(target) = cfg.spare_child(*spare_id, c.offset) else {
+                        return Err(ReadError::Unsupported(format!(
+                            "distributed spare {spare_id} of a dRAID with {} spare(s)",
+                            cfg.nspares
+                        )));
+                    };
                     trace!(
                         "draid",
                         "    dspare#{spare_id} at {:#x} -> child {target}",
@@ -1081,8 +1120,17 @@ impl<'a> PoolReader<'a> {
                 .map(|&i| (true, i))
                 .chain(readable_data.iter().map(|&i| (false, i)))
                 .collect();
+            let mut tries = 0usize;
             for k in 1..=budget.min(columns.len()) {
-                for combo in combinations(columns.len(), k) {
+                for combo in Combinations::new(columns.len(), k) {
+                    tries += 1;
+                    if tries > MAX_COMBREC_TRIES {
+                        trace!(
+                            "raidz",
+                            "    combinatorial reconstruction gave up after {MAX_COMBREC_TRIES} tries"
+                        );
+                        return Err(ReadError::AllCopiesBad);
+                    }
                     let mut bad_parity: Vec<usize> = Vec::new();
                     let mut missing = lost.clone();
                     for &j in &combo {
@@ -1587,23 +1635,47 @@ impl<'a> PoolReader<'a> {
     }
 }
 
-/// All `k`-element index subsets of `0..n`, in lexicographic order.
-fn combinations(n: usize, k: usize) -> Vec<Vec<usize>> {
-    let mut out = Vec::new();
-    let mut cur: Vec<usize> = Vec::with_capacity(k);
-    fn go(start: usize, n: usize, k: usize, cur: &mut Vec<usize>, out: &mut Vec<Vec<usize>>) {
-        if cur.len() == k {
-            out.push(cur.clone());
-            return;
-        }
-        for i in start..n {
-            cur.push(i);
-            go(i + 1, n, k, cur, out);
-            cur.pop();
+/// The `k`-element index subsets of `0..n`, in lexicographic order, one
+/// at a time. Collected up front they were C(n, k) vectors before the
+/// first was tried — billions for a forged width.
+struct Combinations {
+    n: usize,
+    cur: Vec<usize>,
+    done: bool,
+}
+
+impl Combinations {
+    fn new(n: usize, k: usize) -> Combinations {
+        Combinations {
+            n,
+            cur: (0..k).collect(),
+            done: k > n,
         }
     }
-    go(0, n, k, &mut cur, &mut out);
-    out
+}
+
+impl Iterator for Combinations {
+    type Item = Vec<usize>;
+
+    fn next(&mut self) -> Option<Vec<usize>> {
+        if self.done {
+            return None;
+        }
+        let out = self.cur.clone();
+        let k = self.cur.len();
+        // The rightmost index that can still move right, moved, and the
+        // ones after it set just past it.
+        match (0..k).rev().find(|&i| self.cur[i] < self.n - k + i) {
+            Some(i) => {
+                self.cur[i] += 1;
+                for j in i + 1..k {
+                    self.cur[j] = self.cur[j - 1] + 1;
+                }
+            }
+            None => self.done = true,
+        }
+        Some(out)
+    }
 }
 
 #[cfg(test)]
@@ -1830,6 +1902,71 @@ mod tests {
         assert!(matches!(
             Node::from_tree(&top("raidz", 2, 12, 4), &[], 12),
             Node::Raidz { nparity: 2, .. }
+        ));
+        // Wider than any raidz is made: combinatorial repair would try
+        // every subset of the columns.
+        assert!(matches!(
+            Node::from_tree(&top("raidz", 3, 12, 256), &[], 12),
+            Node::Unsupported { .. }
+        ));
+    }
+
+    /// The subsets are what they were when collected up front — the same
+    /// ones, in the same order — but made one at a time.
+    #[test]
+    fn combinations_come_one_at_a_time_in_order() {
+        let all: Vec<Vec<usize>> = Combinations::new(5, 2).collect();
+        assert_eq!(all.len(), 10);
+        assert_eq!(all[0], [0, 1]);
+        assert_eq!(all[4], [1, 2]);
+        assert_eq!(all[9], [3, 4]);
+        assert_eq!(
+            Combinations::new(4, 4).collect::<Vec<_>>(),
+            [vec![0, 1, 2, 3]]
+        );
+        assert_eq!(Combinations::new(3, 4).count(), 0);
+        // Taking the first few of a vast number costs the first few.
+        assert_eq!(Combinations::new(2000, 3).take(5).count(), 5);
+    }
+
+    /// A top-level vdev of any kind with an ashift ZFS does not use is a
+    /// vdev that cannot be read: a mirror's of 50 made a dynamic gang
+    /// header a petabyte.
+    #[test]
+    fn a_top_level_ashift_no_pool_has_is_not_read() {
+        let mut a = crate::pool::PoolAssembly {
+            name: "tank".into(),
+            guid: 1,
+            state: None,
+            txg: None,
+            vdev_children: Some(1),
+            features_for_read: vec!["com.klarasystems:dynamic_gang_header".into()],
+            tops: vec![crate::pool::TopVdev {
+                id: 0,
+                guid: 2,
+                name: "mirror-0".into(),
+                kind: "mirror".into(),
+                nparity: None,
+                ashift: Some(50),
+                members: Vec::new(),
+                tree: Default::default(),
+            }],
+            removed_tops: Vec::new(),
+            hosts: Vec::new(),
+            devices: Vec::new(),
+            stale: Vec::new(),
+        };
+        let reader = PoolReader::new(&a, Vec::new());
+        assert!(matches!(
+            reader.tops.get(&0),
+            Some(Node::Unsupported { .. })
+        ));
+        assert_eq!(reader.min_alloc(0), 1 << ASHIFT_MIN);
+        a.tops[0].ashift = Some(12);
+        let reader = PoolReader::new(&a, Vec::new());
+        assert!(!matches!(
+            reader.tops.get(&0),
+            Some(Node::Unsupported { .. })
         ));
     }
 

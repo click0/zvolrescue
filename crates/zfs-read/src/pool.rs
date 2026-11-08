@@ -117,9 +117,18 @@ pub struct StaleMember {
     pub reason: String,
 }
 
+/// Top-level vdev ids a DVA can name: its vdev field is 24 bits wide
+/// (`SPA_VDEVBITS`).
+pub const MAX_TOP_VDEVS: u64 = 1 << 24;
+
+/// How many missing top-level vdevs [`PoolAssembly::missing_tops`] names
+/// one by one; [`PoolAssembly::missing_top_count`] has the rest.
+pub const MISSING_TOPS_LISTED: usize = 1024;
+
 impl PoolAssembly {
     /// Top-level vdev ids that no scanned device described and the pool
-    /// does not say were removed.
+    /// does not say were removed — the first [`MISSING_TOPS_LISTED`] of
+    /// them. A pool that is missing more is told by its count.
     pub fn missing_tops(&self) -> Vec<u64> {
         let Some(n) = self.vdev_children else {
             return Vec::new();
@@ -127,7 +136,26 @@ impl PoolAssembly {
         (0..n)
             .filter(|id| !self.tops.iter().any(|t| t.id == *id))
             .filter(|id| !self.removed_tops.contains(id))
+            .take(MISSING_TOPS_LISTED)
             .collect()
+    }
+
+    /// How many top-level vdevs [`missing_tops`](Self::missing_tops)
+    /// would name without its bound.
+    pub fn missing_top_count(&self) -> u64 {
+        let Some(n) = self.vdev_children else {
+            return 0;
+        };
+        let mut known: Vec<u64> = self
+            .tops
+            .iter()
+            .map(|t| t.id)
+            .chain(self.removed_tops.iter().copied())
+            .filter(|&id| id < n)
+            .collect();
+        known.sort_unstable();
+        known.dedup();
+        n - known.len() as u64
     }
 
     /// Record which of the undescribed top-level vdevs were removed.
@@ -406,7 +434,10 @@ pub fn assemble(scans: &[Option<DeviceScan>]) -> Vec<PoolAssembly> {
             guid,
             state: newest.state,
             txg: entries.iter().filter_map(|(_, c)| c.txg).max(),
-            vdev_children: newest.vdev_children,
+            // More top-level vdevs than a DVA can name is a label no pool
+            // wrote: 2^40 of them made `missing_tops` a list of 8 TiB, and
+            // `scan` and `list` aborted. Such a count is no count.
+            vdev_children: newest.vdev_children.filter(|&n| n <= MAX_TOP_VDEVS),
             features_for_read: newest.features_for_read.clone(),
             tops,
             removed_tops: Vec::new(),
@@ -644,6 +675,19 @@ mod removed_tops_tests {
         p.note_removed_tops([3, 0, 3]);
         assert_eq!(p.removed_tops, vec![3]);
         assert_eq!(p.missing_tops(), vec![1]);
+        assert_eq!(p.missing_top_count(), 1);
+    }
+
+    /// A label may claim any number of top-level vdevs. The missing ones
+    /// are named up to a bound and counted past it, without a list of
+    /// them all: 2^40 of them was an allocation of 8 TiB, and an abort.
+    #[test]
+    fn a_vast_vdev_count_is_counted_not_listed() {
+        let p = pool(MAX_TOP_VDEVS, &[0, 2]);
+        assert_eq!(p.missing_tops().len(), MISSING_TOPS_LISTED);
+        assert_eq!(p.missing_tops()[..2], [1, 3]);
+        assert_eq!(p.missing_top_count(), MAX_TOP_VDEVS - 2);
+        assert!(!p.readable());
     }
 }
 
