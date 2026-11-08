@@ -89,8 +89,9 @@ fn the_legacy_digests_reach_the_report_and_are_checked_back() {
     let (code, out, err) = run(&["-q", "-f", "json", "verify", &report.to_string_lossy()]);
     assert_eq!(code, 0, "{err}\n{out}");
     let v: serde_json::Value = serde_json::from_str(&out).expect("json");
-    // Three digests of the image, and the log the report was built from.
-    assert_eq!(v["passed"], 4, "{v}");
+    // Three digests of the image, the log the report was built from,
+    // and the report against that log.
+    assert_eq!(v["passed"], 5, "{v}");
     assert_eq!(v["failed"], 0);
     let rows: Vec<(String, String)> = v["checked"]
         .as_array()
@@ -122,8 +123,41 @@ fn the_legacy_digests_reach_the_report_and_are_checked_back() {
     assert_eq!(code, 4, "{out}");
     let v: serde_json::Value = serde_json::from_str(&out).expect("json");
     assert_eq!(v["failed"], 3, "{v}");
-    // The log is as it was.
-    assert_eq!(v["passed"], 1);
+    // The log is as it was, and so is what the report says of it.
+    assert_eq!(v["passed"], 2);
+
+    // An unsigned report edited to match: the image's new hash written
+    // over the recorded one. Every file hashes to what the report says
+    // now, and the log still holds the old hash — which is what says so.
+    let found = v["checked"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["kind"] == "output" && c["algorithm"] == "sha256")
+        .unwrap()["found"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let text = std::fs::read_to_string(&report).unwrap();
+    let mut edited: serde_json::Value = serde_json::from_str(&text).unwrap();
+    for section in ["outputs", "extractions"] {
+        for o in edited[section].as_array_mut().unwrap() {
+            o["sha256"] = serde_json::Value::from(found.clone());
+            o.as_object_mut().unwrap().remove("sha1");
+            o.as_object_mut().unwrap().remove("md5");
+        }
+    }
+    std::fs::write(&report, serde_json::to_string_pretty(&edited).unwrap()).unwrap();
+    let (code, out, _) = run(&["-q", "-f", "json", "verify", &report.to_string_lossy()]);
+    assert_eq!(code, 4, "{out}");
+    let v: serde_json::Value = serde_json::from_str(&out).expect("json");
+    let row = v["checked"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["kind"] == "report")
+        .expect("a row for the report against its logs");
+    assert_eq!(row["status"], "fail", "{v}");
 }
 
 /// `verify` reads and hashes every file the report names, and a log may

@@ -257,6 +257,97 @@ fn check(kind: &'static str, path: &Path, recorded: &Recorded<'_>) -> Vec<Checke
         .collect()
 }
 
+/// Build the report again from its logs, as `build` would (R-03), and
+/// compare what a verdict rests on: the logs and their record counts,
+/// the commands, the evidence, the outputs and the extractions. The
+/// warnings are left out, since their wording belongs to the build that
+/// wrote them; a report built by another version of zvolreport can
+/// differ in the rest too, and the detail says so.
+fn against_logs(at: &Path, report: &Report, logs: &[(&crate::model::LogRef, PathBuf)]) -> Checked {
+    let mut read = Vec::new();
+    for (recorded, path) in logs {
+        match crate::build::read_log(path) {
+            Ok(r) => read.push((
+                crate::model::LogRef {
+                    path: recorded.path.clone(),
+                    records: r.records.len(),
+                    sha256: recorded.sha256.clone(),
+                    left_out: r.left_out.iter().map(|(n, _)| *n).collect(),
+                },
+                r.records,
+            )),
+            Err(e) => {
+                return Checked {
+                    kind: "report",
+                    algorithm: "logs",
+                    path: at.to_path_buf(),
+                    status: Status::Fail,
+                    recorded: None,
+                    found: None,
+                    detail: Some(format!("a log it was built from cannot be read: {e}")),
+                }
+            }
+        }
+    }
+    let opts = crate::build::Options {
+        logs: Vec::new(),
+        output: PathBuf::new(),
+        md: None,
+        case: report.case.clone(),
+        examiner: report.examiner.clone(),
+        notes: report.notes.clone(),
+        sign: None,
+        signature: None,
+    };
+    let again = crate::build::assemble(&read, &opts);
+    let value = |r: &Report| serde_json::to_value(r).expect("serialisable");
+    let (said, built) = (value(report), value(&again));
+    let differs = ["logs", "commands", "evidence", "outputs", "extractions"]
+        .into_iter()
+        .find_map(|section| {
+            let (a, b) = (&said[section], &built[section]);
+            if a == b {
+                return None;
+            }
+            let (xs, ys) = (a.as_array(), b.as_array());
+            let (xs, ys) = (
+                xs.map(Vec::as_slice).unwrap_or(&[]),
+                ys.map(Vec::as_slice).unwrap_or(&[]),
+            );
+            let i = (0..xs.len().max(ys.len()))
+                .find(|&i| xs.get(i) != ys.get(i))
+                .unwrap_or(0);
+            let show = |v: Option<&serde_json::Value>| {
+                let t = v.map_or_else(|| "nothing".to_string(), serde_json::Value::to_string);
+                if t.chars().count() > 160 {
+                    format!("{}…", t.chars().take(160).collect::<String>())
+                } else {
+                    t
+                }
+            };
+            Some(format!(
+                "{section}[{i}]: the report says {}, its logs say {}",
+                show(xs.get(i)),
+                show(ys.get(i))
+            ))
+        });
+    Checked {
+        kind: "report",
+        algorithm: "logs",
+        path: at.to_path_buf(),
+        status: if differs.is_some() {
+            Status::Fail
+        } else {
+            Status::Pass
+        },
+        recorded: None,
+        found: None,
+        detail: differs.map(|d| {
+            format!("{d} (edited since it was built, or built by another version of zvolreport)")
+        }),
+    }
+}
+
 /// Run `verify`.
 pub fn run(g: &Global, opts: &Options) -> u8 {
     let text = match std::fs::read_to_string(&opts.report) {
@@ -343,9 +434,26 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
     }
 
     let mut checked = Vec::new();
+    // Unsigned, a report is checked against its logs and nothing else: a
+    // signature lying beside it and not asked about is said to be there.
+    if signature.is_none() {
+        let sig = crate::sign::beside(&opts.report);
+        if sig.exists() {
+            checked.push(Checked {
+                kind: "signature",
+                algorithm: "ed25519",
+                path: sig,
+                status: Status::Unhashed,
+                recorded: None,
+                found: None,
+                detail: Some("not checked: give --key with the public key to check it".into()),
+            });
+        }
+    }
     // The logs the report was built from carry its chain (R-01): one
     // deleted or edited since is a break in it. A log not where it was
     // recorded is looked for beside the report.
+    let mut found_logs = Vec::new();
     for l in &report.logs {
         let path = if l.path.exists() {
             l.path.clone()
@@ -355,7 +463,7 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
                 _ => l.path.clone(),
             }
         };
-        checked.extend(check(
+        let rows = check(
             "log",
             &path,
             &Recorded {
@@ -364,7 +472,32 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
                 md5: None,
                 size: None,
             },
-        ));
+        );
+        if rows.iter().all(|c| c.status == Status::Pass) {
+            found_logs.push((l, path.clone()));
+        }
+        checked.extend(rows);
+    }
+    // And the report is checked against the logs: a log that hashes to
+    // what the report recorded proves nothing about the rest of the
+    // report unless the rest is what that log says. An unsigned report
+    // with an image's hash edited to match a changed image passed, its
+    // log untouched and still holding the old hash.
+    if found_logs.len() == report.logs.len() {
+        checked.push(against_logs(&opts.report, &report, &found_logs));
+    } else {
+        checked.push(Checked {
+            kind: "report",
+            algorithm: "logs",
+            path: opts.report.clone(),
+            status: Status::Unhashed,
+            recorded: None,
+            found: None,
+            detail: Some(
+                "not checked against its logs: a log it was built from is missing or changed"
+                    .into(),
+            ),
+        });
     }
     for e in &report.evidence {
         let path = locate(&e.file.path, opts.evidence_root.as_ref());

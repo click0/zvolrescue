@@ -11,9 +11,59 @@ use zvol_common::timefmt::iso8601;
 
 use crate::model::Report;
 
-/// A cell that cannot break the table it is in.
+/// `s` with every control character — a newline above all — shown as
+/// its code, `\u{a}`, instead of being one. A dataset name is whatever
+/// the pool says, and the pool may be forged: a name with a newline in
+/// it ended the table row and began whatever Markdown came next.
+fn visible(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
+            let _ = write!(out, "\\u{{{:x}}}", u32::from(c));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Text from the logs or the pool, as text: nothing in it can open a
+/// heading, a link, emphasis, an HTML comment or a new table cell. A
+/// forged dataset name (`…\n\n## Notes\n\nAll extractions complete and
+/// verified.\n\n<!--`) rendered as a section of its own and hid every
+/// warning, the Extractions table and the Provenance behind a comment.
 fn cell(s: &str) -> String {
-    s.replace('|', "\\|")
+    let mut out = String::new();
+    for c in visible(s).chars() {
+        if matches!(
+            c,
+            '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '&' | '|' | '~' | '#' | '!'
+        ) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Text from the logs or the pool, as code: a fence longer than any run
+/// of backticks inside, so that none can close it, and the table's pipe
+/// escaped, which a code span in a table still splits on.
+fn code(s: &str) -> String {
+    let v = visible(s).replace('|', "\\|");
+    let mut longest = 0;
+    let mut run = 0;
+    for c in v.chars() {
+        run = if c == '`' { run + 1 } else { 0 };
+        longest = longest.max(run);
+    }
+    let fence = "`".repeat(longest + 1);
+    let pad = if v.starts_with('`') || v.ends_with('`') {
+        " "
+    } else {
+        ""
+    };
+    format!("{fence}{pad}{v}{pad}{fence}")
 }
 
 fn size(bytes: u64) -> String {
@@ -50,13 +100,13 @@ pub fn render(r: &Report) -> String {
         "**Tools:** {}",
         r.tools
             .iter()
-            .map(|t| format!("`{} {}`", t.tool, t.version))
+            .map(|t| code(&format!("{} {}", t.tool, t.version)))
             .collect::<Vec<_>>()
             .join(", ")
     );
     let _ = writeln!(s);
     for n in &r.notes {
-        let _ = writeln!(s, "> {n}");
+        let _ = writeln!(s, "> {}", cell(n));
         let _ = writeln!(s);
     }
 
@@ -64,7 +114,7 @@ pub fn render(r: &Report) -> String {
         let _ = writeln!(s, "## Read this first");
         let _ = writeln!(s);
         for w in &r.warnings {
-            let _ = writeln!(s, "* {w}");
+            let _ = writeln!(s, "* {}", cell(w));
         }
         let _ = writeln!(s);
     }
@@ -76,13 +126,13 @@ pub fn render(r: &Report) -> String {
     for e in &r.evidence {
         let _ = writeln!(
             s,
-            "| `{}` | {} | {} | {} |",
-            cell(&e.file.path.display().to_string()),
+            "| {} | {} | {} | {} |",
+            code(&e.file.path.display().to_string()),
             size(e.file.size),
             e.file
                 .sha256
                 .as_deref()
-                .map_or("not hashed".to_string(), |h| format!("`{h}`")),
+                .map_or("not hashed".to_string(), code),
             cell(&e.read_by.join(", "))
         );
     }
@@ -96,9 +146,9 @@ pub fn render(r: &Report) -> String {
         for p in &r.pools {
             let _ = writeln!(
                 s,
-                "| {} | `{}` | {} | {} | {} |",
+                "| {} | {} | {} | {} | {} |",
                 cell(&p.name),
-                cell(&p.guid),
+                code(&p.guid),
                 cell(p.state.as_deref().unwrap_or("—")),
                 p.txg_window
                     .map_or("—".to_string(), |w| format!("{}–{}", w[0], w[1])),
@@ -115,12 +165,12 @@ pub fn render(r: &Report) -> String {
     for c in &r.commands {
         let _ = writeln!(
             s,
-            "| {} | {} {} | {} | `{}` |",
+            "| {} | {} {} | {} | {} |",
             iso8601(c.ts),
             cell(&c.tool),
             cell(&c.version),
             c.status,
-            cell(&c.argv.join(" "))
+            code(&c.argv.join(" "))
         );
     }
     let _ = writeln!(s);
@@ -136,14 +186,12 @@ pub fn render(r: &Report) -> String {
         for e in &r.extractions {
             let _ = writeln!(
                 s,
-                "| {} | {} | `{}` | {} | {} | {} | {} |",
+                "| {} | {} | {} | {} | {} | {} | {} |",
                 cell(&e.dataset),
                 e.txg,
-                cell(&e.output.display().to_string()),
+                code(&e.output.display().to_string()),
                 size(e.size),
-                e.sha256
-                    .as_deref()
-                    .map_or("—".to_string(), |h| format!("`{h}`")),
+                e.sha256.as_deref().map_or("—".to_string(), code),
                 e.errors,
                 if e.complete() { "yes" } else { "no" }
             );
@@ -158,12 +206,10 @@ pub fn render(r: &Report) -> String {
     for o in &r.outputs {
         let _ = writeln!(
             s,
-            "| `{}` | {} | {} |",
-            cell(&o.path.display().to_string()),
+            "| {} | {} | {} |",
+            code(&o.path.display().to_string()),
             size(o.size),
-            o.sha256
-                .as_deref()
-                .map_or("—".to_string(), |h| format!("`{h}`"))
+            o.sha256.as_deref().map_or("—".to_string(), code)
         );
     }
     let _ = writeln!(s);
@@ -175,10 +221,10 @@ pub fn render(r: &Report) -> String {
     for l in &r.logs {
         let _ = writeln!(
             s,
-            "| `{}` | {} | `{}` |",
-            cell(&l.path.display().to_string()),
+            "| {} | {} | {} |",
+            code(&l.path.display().to_string()),
             l.records,
-            l.sha256
+            code(&l.sha256)
         );
     }
     let _ = writeln!(s);
@@ -187,4 +233,26 @@ pub fn render(r: &Report) -> String {
         "Check this report against the files it names with `zvolreport verify`."
     );
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Nothing the pool or a log says can make Markdown of its own.
+    #[test]
+    fn text_from_the_evidence_stays_text() {
+        let forged = "tank/vm | 1 |\n\n## Notes\n\nAll extractions complete and verified.\n\n<!--";
+        let c = cell(forged);
+        assert!(!c.contains('\n'), "{c}");
+        assert!(c.contains("\\#\\# Notes"), "{c}");
+        assert!(c.contains("\\<\\!--"), "{c}");
+        assert!(c.contains("\\|"), "{c}");
+        assert_eq!(cell("tank/vm/disk0"), "tank/vm/disk0");
+        let k = code("a`b``c|d\re");
+        assert!(k.starts_with("```") && k.ends_with("```"), "{k}");
+        assert!(k.contains("\\|") && k.contains("\\u{d}"), "{k}");
+        assert_eq!(code("disk0.img"), "`disk0.img`");
+        assert_eq!(code("`x"), "`` `x ``");
+    }
 }

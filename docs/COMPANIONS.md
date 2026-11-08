@@ -389,7 +389,13 @@ build rather than being skipped (R-01). A line that is not JSON at all
 number, named in the warnings and in the report's `logs[].left_out`,
 and the build exits 4; refusing the whole log for it lost every record
 around it. The log's hash is taken of the bytes the records were read
-from, in the same read.
+from, in the same read. `verify` does not stop at the logs' hashes: when
+every log is as recorded it builds the report from them again (R-03) and
+compares the logs, commands, evidence, outputs and extractions with the
+report it was given, so an unsigned report edited to match a changed
+image fails on the row `report`; the Markdown escapes everything that
+comes from a log or a pool, so a forged dataset name cannot write a
+section of its own into it.
 
 R-07 is implemented, and the point of it is that the signature outlives
 this tool. `build --sign KEY` signs the exact bytes of `report.json` with

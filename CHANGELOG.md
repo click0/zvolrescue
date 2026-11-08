@@ -99,6 +99,25 @@ tagged. `v0.7.1` is the release that carries those six.
   place and the entry refused (exit 5); one that merely points at a
   member is still replaced.
 
+* **`zvolreport verify` passed a report edited to match.** It checked
+  that each log still hashed as recorded and each file as the report
+  said — and never that the report said what its logs say. An unsigned
+  report with an image's hash replaced by the hash of a changed image
+  passed with exit 0 while its log still held the old hash. `verify` now
+  builds the report again from its logs once they check out and compares
+  the logs, commands, evidence, outputs and extractions with the report
+  given; a difference fails the row `report` (exit 4). A signature lying
+  beside the report that `--key` was not given to check is listed as
+  not checked, rather than left unsaid.
+* **A dataset name could rewrite the Markdown report.** Only `|` was
+  escaped, and the warnings not at all. A name forged in the pool as
+  `…\n\n## Notes\n\nAll extractions complete and verified.\n\n<!--`
+  rendered as a section of its own and hid every warning, the
+  Extractions table and the Provenance behind an HTML comment. Text that
+  comes from a log or a pool is now escaped wherever it is put: control
+  characters are shown as their code (`\u{a}`), Markdown punctuation is
+  escaped, and code spans are fenced longer than any backticks in them.
+
 ## v0.9.12 — 2026-11-07
 
 **Nothing written over the evidence, and no crash on a forged pool.**

@@ -97,11 +97,21 @@ of the logs it was built from, of the evidence, and of the outputs.
 A file read without a hash is still looked for, and its size compared
 with the one recorded.
 A log not where it was recorded is looked for beside the report.
+When every log still hashes as recorded, the report is built from them
+again and compared with the one given: its logs, commands, evidence,
+outputs and extractions must be what the logs say, or the row
+.Ql report
+fails \(em a report edited to match a changed file is caught here even
+when it is not signed.
+A signature beside the report that
+.Fl -key
+was not given to check is listed as not checked.
 A
 .Fl -debug-log
 on any file the report names, as
 .Nm
-will look for it, is refused with exit 5 before anything is opened.
+will look for it, or on its signature, is refused with exit 5 before
+anything is opened.
 .Bl -tag -width Ds
 .It Fl -evidence-root Ar dir
 Look for the evidence under this directory instead of the path
