@@ -157,6 +157,51 @@ fn a_carve_writes_nothing_over_what_it_reads() {
         index,
         "the index was written"
     );
+
+    // Nor do the logs, which no word of the command line ties to the
+    // index: a debug log there was created over it at the start — then
+    // the run refused — and an evidence log was appended to it.
+    let out = dir.join("c.img").to_string_lossy().into_owned();
+    for (log, cmd) in [
+        (
+            "--debug-log",
+            vec!["dump", &ws, &id, &members[0], &members[1], "-o", &out],
+        ),
+        (
+            "--evidence-log",
+            vec!["dump", &ws, &id, &members[0], &members[1], "-o", &out],
+        ),
+        (
+            "--debug-log",
+            vec!["scan", "--resume", &members[0], &members[1], "-o", &ws],
+        ),
+        ("--evidence-log", vec!["list", &ws]),
+    ] {
+        let mut args = vec!["-q", log, &index_s];
+        args.extend(cmd.iter().copied());
+        let (code, _, err) = run(&args);
+        assert_eq!(code, 5, "{log} {cmd:?}: {err}");
+        assert_eq!(
+            std::fs::read(&index_path).unwrap(),
+            index,
+            "{log} {cmd:?} wrote the index"
+        );
+    }
+    // A workspace that does not exist yet is no exception.
+    let fresh = dir.join("fresh");
+    let fresh_s = fresh.to_string_lossy().into_owned();
+    let fresh_index = fresh.join("candidates.json").to_string_lossy().into_owned();
+    let (code, _, err) = run(&[
+        "-q",
+        "--evidence-log",
+        &fresh_index,
+        "scan",
+        &members[0],
+        &members[1],
+        "-o",
+        &fresh_s,
+    ]);
+    assert_eq!(code, 5, "{err}");
 }
 
 #[test]

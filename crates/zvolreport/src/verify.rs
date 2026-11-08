@@ -98,22 +98,32 @@ struct VerifyOut {
 /// under the root, and — when the recorded path was absolute — the whole
 /// path joined under it, whichever exists.
 /// Every file a report names, where `verify` will look for it: the logs
-/// it was built from, the evidence and the outputs. They are read and
-/// hashed, so a log may not be written over one; read before the logs
-/// are opened. A report that cannot be read names nothing, and the run
-/// says why later.
+/// it was built from — where they were recorded and beside the report,
+/// where verify looks when they are not — the evidence, the outputs, and
+/// the signature. They are read and hashed, so a log may not be written
+/// over one; read before the logs are opened. A report that cannot be
+/// read names nothing but its signature, and the run says why later.
 pub fn named_files(
     report: &Path,
     evidence_root: Option<&PathBuf>,
     outputs_root: Option<&PathBuf>,
+    signature: Option<&PathBuf>,
 ) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = vec![signature
+        .cloned()
+        .unwrap_or_else(|| crate::sign::beside(report))];
     let Some(r) = std::fs::read_to_string(report)
         .ok()
         .and_then(|t| serde_json::from_str::<Report>(&t).ok())
     else {
-        return Vec::new();
+        return v;
     };
-    let mut v: Vec<PathBuf> = r.logs.iter().map(|l| l.path.clone()).collect();
+    for l in &r.logs {
+        v.push(l.path.clone());
+        if let (Some(dir), Some(name)) = (report.parent(), l.path.file_name()) {
+            v.push(dir.join(name));
+        }
+    }
     v.extend(
         r.evidence
             .iter()

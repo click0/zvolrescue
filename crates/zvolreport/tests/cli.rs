@@ -159,6 +159,44 @@ fn a_log_is_never_written_over_a_file_the_report_names() {
     let trace = dir.join("trace.log").to_string_lossy().into_owned();
     let (code, _, err) = run(&["--debug-log", &trace, "-q", "verify", &report]);
     assert_eq!(code, 0, "{err}");
+
+    // Nor over what verify reads without the report naming it there: a
+    // log recorded under a path that is not where it is now is looked for
+    // beside the report, and the signature lies beside it too.
+    let moved = scratch("verify-log-moved");
+    let rel = PathBuf::from("case.jsonl");
+    let rec = std::fs::read_to_string(&log).unwrap();
+    std::fs::write(moved.join(&rel), &rec).unwrap();
+    let elsewhere = scratch("verify-log-cwd");
+    let run_in = |cwd: &Path, args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_zvolreport"))
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .expect("run zvolreport");
+        (
+            out.status.code().expect("exit code"),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+    let (code, err) = run_in(&moved, &["-q", "build", "case.jsonl", "-o", "report.json"]);
+    assert_eq!(code, 0, "{err}");
+    let moved_report = moved.join("report.json").to_string_lossy().into_owned();
+    for target in [moved.join("case.jsonl"), moved.join("report.json.sig")] {
+        let before = std::fs::read(&target).ok();
+        let (code, err) = run_in(
+            &elsewhere,
+            &[
+                "--debug-log",
+                &target.to_string_lossy(),
+                "-q",
+                "verify",
+                &moved_report,
+            ],
+        );
+        assert_eq!(code, 5, "{}: {err}", target.display());
+        assert_eq!(std::fs::read(&target).ok(), before, "{}", target.display());
+    }
 }
 
 /// The report's own logs are checked back: one edited since the report

@@ -147,11 +147,39 @@ enum Cmd {
     },
 }
 
+/// What a dump reads and writes beside its image, named by no word of
+/// the command line: the resume state, and the name it is written under
+/// first; with `-r`, the states and the manifest already in the
+/// directory. A debug log given as one of them was created over it at
+/// the start, before the run refused it.
+fn dump_sidecars(cmd: &Cmd) -> Vec<PathBuf> {
+    let Cmd::Dump {
+        output, recursive, ..
+    } = cmd
+    else {
+        return Vec::new();
+    };
+    if !recursive {
+        return zvol_common::resume::sidecars(output).into();
+    }
+    let mut v = vec![output.join("manifest.json")];
+    if let Ok(dir) = std::fs::read_dir(output) {
+        v.extend(dir.flatten().map(|e| e.path()).filter(|p| {
+            let name = p.file_name().unwrap_or_default().to_string_lossy();
+            name.ends_with(".resume.json") || name.ends_with(".resume.json.tmp")
+        }));
+    }
+    v
+}
+
 fn main() -> ExitCode {
     zvol_common::set_tool("zvolrescue");
     zvol_common::quiet_broken_pipe();
     let cli = Cli::parse();
-    if let Err(code) = cli.global.refuse_logs_over_inputs("zvolrescue") {
+    if let Err(code) = cli
+        .global
+        .refuse_logs_over("zvolrescue", &dump_sidecars(&cli.cmd))
+    {
         return ExitCode::from(code);
     }
     if cli.global.debug || cli.global.debug_log.is_some() {

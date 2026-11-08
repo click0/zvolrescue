@@ -103,7 +103,27 @@ fn main() -> ExitCode {
     zvol_common::set_tool("zvolfiles");
     zvol_common::quiet_broken_pipe();
     let cli = Cli::parse();
-    if let Err(code) = cli.global.enable_tracing("zvolfiles") {
+    // The records an earlier run left in -o — its manifest, the index of
+    // `objects` — are what says what that run wrote; a debug log given as
+    // one was created over it before anything checked it.
+    let more: Vec<std::path::PathBuf> = match &cli.command {
+        Command::Extract { output, .. } | Command::Objects { output, .. } => {
+            std::fs::read_dir(output)
+                .map(|d| {
+                    d.flatten()
+                        .map(|e| e.path())
+                        .filter(|p| {
+                            let name = p.file_name().unwrap_or_default().to_string_lossy();
+                            (name.starts_with("manifest") && name.ends_with(".json"))
+                                || name == "objects.json"
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+        _ => Vec::new(),
+    };
+    if let Err(code) = cli.global.enable_tracing_over("zvolfiles", &more) {
         return ExitCode::from(code);
     }
     let code = match cli.command {

@@ -181,7 +181,7 @@ pub fn refuse_if_evidence(output: &Path, inputs: &[PathBuf]) -> io::Result<()> {
 /// Where `path` ends up once every symbolic link at its end is followed,
 /// a link to something that does not exist yet included. A relative
 /// target is read from the link's own directory, as the kernel reads it.
-fn final_target(path: &Path) -> PathBuf {
+pub fn final_target(path: &Path) -> PathBuf {
     let mut p = path.to_path_buf();
     // The kernel's own bound on a chain of links.
     for _ in 0..40 {

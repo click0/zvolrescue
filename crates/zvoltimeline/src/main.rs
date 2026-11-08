@@ -49,7 +49,8 @@ fn main() -> ExitCode {
     zvol_common::set_tool("zvoltimeline");
     zvol_common::quiet_broken_pipe();
     let cli = Cli::parse();
-    if let Err(code) = cli.global.enable_tracing("zvoltimeline") {
+    let more: Vec<_> = cli.output.iter().cloned().collect();
+    if let Err(code) = cli.global.enable_tracing_over("zvoltimeline", &more) {
         return ExitCode::from(code);
     }
     ExitCode::from(report::run(

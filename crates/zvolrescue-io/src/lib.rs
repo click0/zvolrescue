@@ -20,7 +20,7 @@ use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-pub use guard::{refuse_if_evidence, Evidence};
+pub use guard::{final_target, refuse_if_evidence, Evidence};
 use medium::{Kind, Ledger};
 
 /// A read-only, random-access source of bytes: a device, a partition, an

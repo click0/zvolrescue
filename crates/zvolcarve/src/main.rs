@@ -150,7 +150,29 @@ fn main() -> ExitCode {
     zvol_common::set_tool("zvolcarve");
     zvol_common::quiet_broken_pipe();
     let cli = Cli::parse();
-    if let Err(code) = cli.global.enable_tracing("zvolcarve") {
+    // The files a carve reads and writes in its workspace are named by no
+    // word of the command line: a debug log given as one of them was
+    // created over it at the start — the index of an earlier scan
+    // truncated to a trace, then the run refused — and an evidence log
+    // was appended to the index `list` and `dump` read next.
+    let more: Vec<PathBuf> = match &cli.command {
+        Command::Scan {
+            output, profile, ..
+        } => [output.join(model::INDEX), output.join(model::STATE)]
+            .into_iter()
+            .chain(profile.profile.clone())
+            .collect(),
+        Command::Roots { output, .. } => vec![output.join(roots::ROOTS)],
+        Command::Zeropoint { output, .. } => output
+            .iter()
+            .map(|d| d.join(zeropoint::ZEROPOINT))
+            .collect(),
+        Command::List { dir } => vec![dir.join(model::INDEX)],
+        Command::Dump { dir, output, .. } => std::iter::once(dir.join(model::INDEX))
+            .chain(zvol_common::resume::sidecars(output))
+            .collect(),
+    };
+    if let Err(code) = cli.global.enable_tracing_over("zvolcarve", &more) {
         return ExitCode::from(code);
     }
     let code = match cli.command {

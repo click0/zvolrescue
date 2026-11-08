@@ -110,8 +110,14 @@ fn main() -> ExitCode {
             report,
             evidence_root,
             outputs_root,
+            signature,
             ..
-        } => verify::named_files(report, evidence_root.as_ref(), outputs_root.as_ref()),
+        } => verify::named_files(
+            report,
+            evidence_root.as_ref(),
+            outputs_root.as_ref(),
+            signature.as_ref(),
+        ),
         _ => Vec::new(),
     };
     if let Err(code) = cli.global.refuse_logs_over("zvolreport", &named) {

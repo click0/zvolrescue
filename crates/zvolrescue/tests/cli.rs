@@ -338,6 +338,26 @@ fn a_log_is_never_written_over_a_member() {
     let (code, _, err) = run(&["--evidence-log", &log, "-q", "scan", &paths[0], &paths[1]]);
     assert_eq!(code, 0, "{err}");
     assert!(std::fs::metadata(&log).unwrap().len() > 0);
+    // The resume state is read by `--resume` and named by no word of the
+    // command line: a debug log there was created over it, and only then
+    // did the run refuse.
+    let img = dir.join("o.img").to_string_lossy().into_owned();
+    let state = format!("{img}.resume.json");
+    std::fs::write(&state, "{\"version\":1}").unwrap();
+    let (code, _, err) = run(&[
+        "--debug-log",
+        &state,
+        "-q",
+        "dump",
+        "tank/vm/disk0",
+        &paths[0],
+        &paths[1],
+        "-o",
+        &img,
+        "--resume",
+    ]);
+    assert_eq!(code, 5, "{err}");
+    assert_eq!(std::fs::read_to_string(&state).unwrap(), "{\"version\":1}");
 }
 
 /// `--emit-label` writes a label and its geometry for a *copy* of a

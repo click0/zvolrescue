@@ -47,6 +47,31 @@ tagged. `v0.7.1` is the release that carries those six.
   covered by the hash and missing from the report, and `verify` passed
   the log. The hash is now of the bytes the records were read from.
 
+* **A log could still land on a file the run reads but does not name.**
+  The two logs were checked against the words of the command line, and
+  the debug log was created first thing. A resume state, a carve's
+  index, a log `verify` finds beside the report and the signature beside
+  it are named by no word: `--debug-log o.img.resume.json dump --resume`
+  replaced the state with a trace and only then refused (exit 5);
+  `zvolcarve --debug-log ws/candidates.json dump` truncated the scan
+  index; `--evidence-log ws/candidates.json` appended to it, and `list`
+  could no longer read it; `zvolreport --debug-log` on the log beside
+  the report destroyed the evidence log, and `verify` then said it had
+  been tampered with. Every tool now names these files before either
+  log is opened — a dump's state and its temporary name, with `-r` the
+  states and manifest in the directory; a carve's index, state, profile,
+  `roots.json` and `zeropoint.json`; the logs where `verify` looks for
+  them and the signature; the manifests `zvolfiles` left in `-o`;
+  `zvoltimeline -o` — and refuses a log that is one of them (exit 5).
+* **Two names for one file were not seen as one when it did not exist
+  yet.** The check resolved only the directory above a path: a log in a
+  workspace not made yet — `zvolcarve --evidence-log ws/candidates.json
+  scan -o ws` — was appended to the index made there, and a log that was
+  a dangling link to the image got the run's record on the end of the
+  image after its hash was taken. A path is now resolved as the write
+  would resolve it: a link at its end followed, the deepest directory
+  above it that exists resolved.
+
 ## v0.9.12 — 2026-11-07
 
 **Nothing written over the evidence, and no crash on a forged pool.**

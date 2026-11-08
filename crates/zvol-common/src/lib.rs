@@ -341,6 +341,28 @@ mod write_guard_tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// Two names for a file that does not exist yet are one file: under
+    /// a directory not made yet, and through a link that dangles.
+    #[test]
+    fn same_file_sees_through_links_and_missing_directories() {
+        let dir = std::env::temp_dir().join(format!("zvol-common-same-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ws = dir.join("ws");
+        assert!(same_file(
+            &ws.join("candidates.json"),
+            &dir.join("ws/./candidates.json")
+        ));
+        assert!(!same_file(
+            &ws.join("candidates.json"),
+            &ws.join("state.json")
+        ));
+        std::os::unix::fs::symlink("out.img", dir.join("case.jsonl")).unwrap();
+        assert!(same_file(&dir.join("case.jsonl"), &dir.join("out.img")));
+        assert!(!same_file(&dir.join("case.jsonl"), &dir.join("other.img")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// The spec names its maps, hints and assumed members as reads.
     #[test]
     fn a_pool_spec_names_everything_it_reads() {
@@ -439,8 +461,13 @@ impl Global {
     }
 
     /// [`refuse_logs_over_inputs`](Self::refuse_logs_over_inputs), with
-    /// `more` read besides what the command line names: the files a
-    /// report names, which `zvolreport verify` reads and hashes.
+    /// `more` besides what the command line names: files the run reads or
+    /// writes that no word names — the files a report names, which
+    /// `zvolreport verify` reads and hashes; a dump's resume state; a
+    /// carve's index. These are found by name as well as by file, since
+    /// some of them do not exist yet: a debug log opened at the start was
+    /// a resume state or an index truncated to a trace before anything
+    /// checked it.
     pub fn refuse_logs_over(&self, tool: &str, more: &[PathBuf]) -> Result<(), u8> {
         if let Some(word) = file_name_not_text(std::env::args_os().skip(1)) {
             eprintln!(
@@ -458,6 +485,14 @@ impl Global {
             let Some(log) = log else { continue };
             if let Err(e) = zvolrescue_io::refuse_if_evidence(log, &named) {
                 eprintln!("{tool}: refusing {flag} {}: {e}", log.display());
+                return Err(exit::REFUSED);
+            }
+            if let Some(file) = more.iter().find(|m| same_file(log, m)) {
+                eprintln!(
+                    "{tool}: refusing {flag} {}: it is {}, which this run reads or writes",
+                    log.display(),
+                    file.display()
+                );
                 return Err(exit::REFUSED);
             }
         }
@@ -482,7 +517,14 @@ impl Global {
     /// so a caller can `return` it: a run that was asked to record what
     /// it did must not silently do it without recording.
     pub fn enable_tracing(&self, tool: &str) -> Result<(), u8> {
-        self.refuse_logs_over_inputs(tool)?;
+        self.enable_tracing_over(tool, &[])
+    }
+
+    /// [`enable_tracing`](Self::enable_tracing), with the logs checked
+    /// against `more` as [`refuse_logs_over`](Self::refuse_logs_over)
+    /// checks them, before the debug log is created.
+    pub fn enable_tracing_over(&self, tool: &str, more: &[PathBuf]) -> Result<(), u8> {
+        self.refuse_logs_over(tool, more)?;
         if !self.debug && self.debug_log.is_none() {
             return Ok(());
         }
@@ -546,8 +588,8 @@ impl Global {
 }
 
 /// Whether `a` and `b` are one file: the same inode when both exist, the
-/// same path once their directories are resolved when either does not
-/// yet — two outputs a run is about to create can collide too.
+/// same place once resolved when either does not yet — two outputs a
+/// run is about to create can collide too.
 pub fn same_file(a: &Path, b: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     if let (Ok(x), Ok(y)) = (std::fs::metadata(a), std::fs::metadata(b)) {
@@ -556,15 +598,29 @@ pub fn same_file(a: &Path, b: &Path) -> bool {
     resolved(a).is_some() && resolved(a) == resolved(b)
 }
 
-/// `path` with its directory resolved, so that two spellings of a file
-/// that does not exist yet compare equal.
+/// Where `path` will be once it is made: a link at its end followed,
+/// dangling or not, and the deepest directory above it that exists
+/// resolved, the rest of the path kept as it is spelled. Resolving only
+/// the parent missed a log in a workspace not made yet — it was then
+/// appended to the scan index made there — and a log that was a link
+/// to the image, whose record went onto the end of the image after its
+/// hash was taken.
 fn resolved(path: &Path) -> Option<PathBuf> {
-    let name = path.file_name()?;
-    let dir = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    Some(std::fs::canonicalize(dir).ok()?.join(name))
+    let target = zvolrescue_io::final_target(path);
+    let absolute = if target.is_absolute() {
+        target
+    } else {
+        std::env::current_dir().ok()?.join(target)
+    };
+    let mut rest = Vec::new();
+    let mut at = absolute.as_path();
+    loop {
+        if let Ok(found) = std::fs::canonicalize(at) {
+            return Some(rest.iter().rev().fold(found, |p, c| p.join(c)));
+        }
+        rest.push(at.file_name()?.to_owned());
+        at = at.parent()?;
+    }
 }
 
 static TOOL: OnceLock<&'static str> = OnceLock::new();
