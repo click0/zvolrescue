@@ -141,8 +141,11 @@ is refused.
 0 when the report was built, or when everything it names still
 verifies; 1 for a usage error; 2 when a log, or the report, cannot be
 read; 4 when something the report names no longer matches, is not where
-it is looked for, or the signature does not verify; 5 when an output
-would land on something the run reads.
+it is looked for, or the signature does not verify, and for
+.Cm build
+when a line of a log is not a record \(em what a run killed while it
+wrote leaves behind \(em and was left out of the report; 5 when an
+output would land on something the run reads.
 .Sh EXAMPLES
 A signed report of one case, and its check on another machine:
 .Bd -literal -offset indent

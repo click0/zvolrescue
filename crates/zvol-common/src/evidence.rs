@@ -151,6 +151,14 @@ pub fn digests_of(path: &Path, extra: Extra) -> io::Result<DigestSet> {
     Ok(digests.finish())
 }
 
+/// Hex SHA-256 of bytes already in memory.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 /// Hex SHA-256 of a file, read through once.
 pub fn sha256_of(path: &Path) -> io::Result<String> {
     let mut f = std::fs::File::open(path)?;
@@ -280,10 +288,50 @@ pub fn host() -> Option<String> {
 }
 
 /// Append one record to `path`, creating the file if needed.
+///
+/// The record goes out in one `write` of the whole line. Serialised
+/// straight into the file it was some 800 writes of a few bytes each,
+/// and two runs sharing one case log — two dumps started side by side —
+/// interleaved them: half the lines of eight such runs were no longer
+/// JSON, and `zvolreport build` refused the log. One write of a line to
+/// a file opened for appending lands whole and after whatever is there.
+///
+/// A log whose last line was cut short — a run killed while it wrote —
+/// gets a newline first, so that what is torn stays on a line of its
+/// own: appended straight on, the next record was glued to the
+/// fragment and lost with it. (A record another run is writing at that
+/// very moment can look torn too; then the newline makes an empty line,
+/// which a reader passes over.)
 pub fn append(path: &Path, rec: &Record) -> io::Result<()> {
-    let mut f = OpenOptions::new().create(true).append(true).open(path)?;
-    serde_json::to_writer(&mut f, rec)?;
-    f.write_all(b"\n")
+    use std::io::{Seek, SeekFrom};
+    let mut line = serde_json::to_vec(rec)?;
+    line.push(b'\n');
+    let mut f = match OpenOptions::new()
+        .create(true)
+        .read(true)
+        .append(true)
+        .open(path)
+    {
+        Ok(f) => f,
+        // A log this run may add to but not read: append without looking.
+        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+            return OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)?
+                .write_all(&line);
+        }
+        Err(e) => return Err(e),
+    };
+    let len = f.metadata()?.len();
+    if len > 0 {
+        let mut last = [0u8; 1];
+        f.seek(SeekFrom::Start(len - 1))?;
+        if f.read_exact(&mut last).is_ok() && last[0] != b'\n' {
+            line.insert(0, b'\n');
+        }
+    }
+    f.write_all(&line)
 }
 
 #[cfg(test)]
@@ -305,6 +353,67 @@ mod tests {
         // An input with no hash leaves the field out rather than writing
         // a null a reader would have to special-case.
         assert!(!line.contains("\"sha256\":null"));
+    }
+
+    fn record(n: u64) -> Record {
+        let result = serde_json::json!({"n": n, "pad": "x".repeat(2000)});
+        Record::new("zvolrescue", &result, 0)
+            .with_outputs(vec![FileRef::known(Path::new("/tmp/disk0.img"), "ab")])
+    }
+
+    /// Runs that share a log keep their records whole: serialised into
+    /// the file a few bytes at a time, eight runs side by side left half
+    /// the lines unreadable.
+    #[test]
+    fn records_from_runs_side_by_side_stay_whole() {
+        let dir =
+            std::env::temp_dir().join(format!("zvol-common-evidence-{}-side", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("case.jsonl");
+        std::thread::scope(|s| {
+            for t in 0..8u64 {
+                let log = &log;
+                s.spawn(move || {
+                    for i in 0..25 {
+                        append(log, &record(t * 100 + i)).unwrap();
+                    }
+                });
+            }
+        });
+        let text = std::fs::read_to_string(&log).unwrap();
+        let lines: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines.len(), 200);
+        for line in lines {
+            serde_json::from_str::<Record>(line).expect("a whole record");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A line cut short by a run that died stays a line of its own: the
+    /// next record used to be glued onto it and lost with it.
+    #[test]
+    fn a_torn_last_line_does_not_take_the_next_record_with_it() {
+        let dir =
+            std::env::temp_dir().join(format!("zvol-common-evidence-{}-torn", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("case.jsonl");
+        append(&log, &record(1)).unwrap();
+        let mut torn = serde_json::to_vec(&record(2)).unwrap();
+        torn.truncate(300);
+        let mut f = OpenOptions::new().append(true).open(&log).unwrap();
+        f.write_all(&torn).unwrap();
+        drop(f);
+        append(&log, &record(3)).unwrap();
+        let text = std::fs::read_to_string(&log).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 3, "{text}");
+        assert!(serde_json::from_str::<Record>(lines[0]).is_ok());
+        assert!(serde_json::from_str::<Record>(lines[1]).is_err());
+        let last: Record = serde_json::from_str(lines[2]).expect("the next record is whole");
+        assert_eq!(last.result["n"], 3);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -20,6 +20,11 @@ pub struct LogRef {
     pub records: usize,
     /// Hash of the log itself, so a report can be tied to the log.
     pub sha256: String,
+    /// Lines of it that are not records and were left out, by number:
+    /// a run killed while it wrote leaves part of a line behind. Absent
+    /// when every line was read.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub left_out: Vec<usize>,
 }
 
 /// A tool that appears in the logs.

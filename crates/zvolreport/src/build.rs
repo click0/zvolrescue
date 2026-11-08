@@ -21,21 +21,51 @@ pub struct Options {
     pub signature: Option<PathBuf>,
 }
 
+/// One evidence log, as `build` and `verify` read it.
+pub(crate) struct ReadLog {
+    pub records: Vec<Record>,
+    /// Lines that are not records, by number, with what is wrong with
+    /// each.
+    pub left_out: Vec<(usize, String)>,
+    /// SHA-256 of the very bytes the records were read from.
+    pub sha256: String,
+}
+
 /// Read one evidence log.
 ///
 /// A record whose format version is not the one this build understands
 /// is refused by name and line, not skipped: a report that quietly left
 /// out what it could not read would be worse than no report (R-01).
-fn read_log(path: &Path) -> Result<Vec<Record>, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let mut out = Vec::new();
-    for (i, line) in text.lines().enumerate() {
+///
+/// A line that is not JSON at all is what a run killed while it wrote
+/// leaves behind, and refusing the whole log for it lost every record
+/// around it. Such a line is left out by number, and the report says so
+/// (exit 4); a file of which no line is a record is not an evidence log.
+///
+/// The hash is of the bytes read, once: hashed by a second read, a
+/// record appended in between was covered by the hash but missing from
+/// the report, and `verify` passed the log.
+pub(crate) fn read_log(path: &Path) -> Result<ReadLog, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let sha256 = evidence::sha256_hex(&bytes);
+    let mut records = Vec::new();
+    let mut left_out = Vec::new();
+    for (i, raw) in bytes.split(|&b| b == b'\n').enumerate() {
         let n = i + 1;
+        let Ok(line) = std::str::from_utf8(raw) else {
+            left_out.push((n, "not text: cut short inside a character".to_string()));
+            continue;
+        };
         if line.trim().is_empty() {
             continue;
         }
-        let value: serde_json::Value = serde_json::from_str(line)
-            .map_err(|e| format!("{}:{n}: not a JSON object: {e}", path.display()))?;
+        let value: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(e) => {
+                left_out.push((n, format!("not a JSON object: {e}")));
+                continue;
+            }
+        };
         match value.get("v").and_then(serde_json::Value::as_u64) {
             Some(v) if v == u64::from(FORMAT_VERSION) => {}
             Some(v) => {
@@ -51,11 +81,23 @@ fn read_log(path: &Path) -> Result<Vec<Record>, String> {
                 ))
             }
         }
-        out.push(
+        records.push(
             serde_json::from_value(value).map_err(|e| format!("{}:{n}: {e}", path.display()))?,
         );
     }
-    Ok(out)
+    if records.is_empty() {
+        if let Some((n, why)) = left_out.first() {
+            return Err(format!(
+                "{}:{n}: {why}; no line of it is an evidence record",
+                path.display()
+            ));
+        }
+    }
+    Ok(ReadLog {
+        records,
+        left_out,
+        sha256,
+    })
 }
 
 /// Read a `u64` out of a tool's own JSON document without trusting it to
@@ -149,6 +191,14 @@ pub fn assemble(records: &[(LogRef, Vec<Record>)], opts: &Options) -> Report {
     // A file written more than once (a `--resume`d dump) keeps the last
     // hash: that is what is on disk now.
     let mut outputs: BTreeMap<PathBuf, FileRef> = BTreeMap::new();
+    for (log, _) in records {
+        for n in &log.left_out {
+            warnings.push(format!(
+                "{}:{n} is not a record (a run that ended while it wrote leaves part of a line) and is left out",
+                log.path.display()
+            ));
+        }
+    }
 
     // Chronological, and deterministic when two records share a second:
     // a log is appended to, so its own order is the order things ran,
@@ -384,29 +434,34 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
     }
     let mut logs = Vec::new();
     for path in &opts.logs {
-        let records = match read_log(path) {
+        let read = match read_log(path) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("zvolreport: {e}");
                 return exit::EVIDENCE;
             }
         };
-        let sha256 = match evidence::sha256_of(path) {
-            Ok(h) => h,
-            Err(e) => {
-                eprintln!("zvolreport: {}: {e}", path.display());
-                return exit::EVIDENCE;
-            }
-        };
+        for (n, why) in &read.left_out {
+            eprintln!(
+                "zvolreport: {}:{n}: {why}; left out of the report",
+                path.display()
+            );
+        }
         logs.push((
             LogRef {
                 path: path.clone(),
-                records: records.len(),
-                sha256,
+                records: read.records.len(),
+                sha256: read.sha256,
+                left_out: read.left_out.iter().map(|(n, _)| *n).collect(),
             },
-            records,
+            read.records,
         ));
     }
+    let status = if logs.iter().any(|(l, _)| !l.left_out.is_empty()) {
+        exit::PARTIAL
+    } else {
+        0
+    };
     let report = assemble(&logs, opts);
 
     let json = serde_json::to_string_pretty(&report).expect("serialisable") + "\n";
@@ -482,7 +537,7 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
         "commands": report.commands.len(),
         "warnings": report.warnings.len(),
     });
-    g.log_evidence("zvolreport", &summary, 0, &reads, written)
+    g.log_evidence("zvolreport", &summary, status, &reads, written)
 }
 
 #[cfg(test)]
@@ -535,6 +590,7 @@ mod tests {
                 path: PathBuf::from("case.jsonl"),
                 records: records.len(),
                 sha256: "00".into(),
+                left_out: Vec::new(),
             },
             records,
         )]
@@ -554,6 +610,35 @@ mod tests {
                 "volsize": 1024, "sha256": "ab", "blocks_zeroed": zeroed, "aborted": aborted,
             }]
         })
+    }
+
+    /// A line a killed run left half-written is left out by number, with
+    /// the records around it kept; the hash is of the bytes read. A file
+    /// with no record in it is still no evidence log.
+    #[test]
+    fn a_torn_line_is_left_out_and_the_rest_read() {
+        let dir = std::env::temp_dir().join(format!("zvolreport-torn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let line = |r: &Record| serde_json::to_string(r).unwrap();
+        let a = line(&record("zvolrescue", 1, 0, scan((1, 2))));
+        let b = line(&record("zvolrescue", 2, 0, scan((1, 2))));
+        let mut text = format!("{a}\n{}\n{b}\n", &a[..a.len() / 2]).into_bytes();
+        // Cut inside a character: not even text.
+        text.extend_from_slice("{\"note\":\"é".as_bytes().split_last().unwrap().1);
+        text.push(b'\n');
+        let log = dir.join("case.jsonl");
+        std::fs::write(&log, &text).unwrap();
+        let read = read_log(&log).unwrap();
+        assert_eq!(read.records.len(), 2);
+        assert_eq!(
+            read.left_out.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+            [2, 4]
+        );
+        assert_eq!(read.sha256, evidence::sha256_hex(&text));
+        std::fs::write(&log, "not a log\nat all\n").unwrap();
+        assert!(read_log(&log).is_err());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

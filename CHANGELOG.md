@@ -27,6 +27,25 @@ tagged. `v0.7.1` is the release that carries those six.
   temporary name against everything the run reads with the image and
   its state (exit 5), and write it as a new file after removing what was
   there — a link is replaced, never followed.
+* **Two runs sharing one evidence log broke it.** A record was
+  serialised straight into the file, some 800 writes of a few bytes
+  each, and runs appending at the same time interleaved them: of eight
+  scans started side by side with one `--evidence-log`, 19 of 40 lines
+  were no longer JSON, and `zvolreport build` refused the whole log
+  (exit 2). A record is now written as one line in one write.
+* **A record cut short took the next one with it, and the whole log.**
+  A run killed while it wrote leaves part of a line without its newline;
+  the next record was appended onto it and was lost too, and `build`
+  refused the log for that one line. The next record now starts on a
+  line of its own, and `build` leaves a line that is not JSON out by
+  number — in its warnings and in the report's `logs[].left_out` — reads
+  the records around it, and exits 4. A record of another format version
+  still fails the build, and a file with no record in it is still no
+  evidence log.
+* **`build` hashed a log apart from what it read.** It read the log,
+  then read it again to hash it: a record appended in between was
+  covered by the hash and missing from the report, and `verify` passed
+  the log. The hash is now of the bytes the records were read from.
 
 ## v0.9.12 — 2026-11-07
 

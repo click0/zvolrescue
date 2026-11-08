@@ -384,7 +384,12 @@ on the mirror fixture — `scan`, `zvoltimeline` and `dump` into one log,
 then `build`, then `verify` before and after a byte is changed, and
 again with the image removed. `build` is checked to be byte-identical on
 a second run (R-03); a record whose format version is not 1 fails the
-build rather than being skipped (R-01).
+build rather than being skipped (R-01). A line that is not JSON at all
+— what a run killed while it wrote leaves behind — is left out by
+number, named in the warnings and in the report's `logs[].left_out`,
+and the build exits 4; refusing the whole log for it lost every record
+around it. The log's hash is taken of the bytes the records were read
+from, in the same read.
 
 R-07 is implemented, and the point of it is that the signature outlives
 this tool. `build --sign KEY` signs the exact bytes of `report.json` with
