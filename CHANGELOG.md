@@ -144,6 +144,21 @@ tagged. `v0.7.1` is the release that carries those six.
   a raidz or dRAID is now at most 255 wide, the subsets come one at a
   time, and a block gives up after 10 000 tries.
 
+* **One forged ZAP header hung every reader of it.** A fat ZAP's
+  pointer table was read for as many blocks as its header said. Blocks
+  past the object's last are holes, read as zeros without touching a
+  disk, so a length of 2^40 was a loop of 2^40 steps that named no leaf
+  and never reached the bound on leaves: `zvolfiles list -R` and
+  `extract` hung on one subdirectory (SIGINT unheard), and so would the
+  MOS's own directories. A table that does not fit the object's blocks,
+  or is longer than 2^20 blocks, is now an unreadable ZAP, named with
+  its numbers, and the rest of the walk goes on.
+* **A gang header could make one block cost 31^8 reads.** Every child of
+  every header was read whole, eight levels deep, and only then was the
+  result cut to the block's size; with `dynamic_gang_header` a header
+  holds 31 children at ashift 12. Children are now read only until the
+  block's bytes are in hand.
+
 ## v0.9.12 — 2026-11-07
 
 **Nothing written over the evidence, and no crash on a forged pool.**

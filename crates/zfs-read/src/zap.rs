@@ -17,6 +17,10 @@ use zvolrescue_io::trace::hexdump;
 /// tables (a real MOS ZAP has at most thousands).
 pub const MAX_LEAVES: usize = 1 << 20;
 
+/// The most blocks a fat ZAP's pointer table is read from: 2^20 blocks
+/// of pointers name far more leaves than [`MAX_LEAVES`].
+pub const MAX_PTRTBL_BLOCKS: u64 = 1 << 20;
+
 /// Read every entry of the ZAP object `obj`, in on-disk order.
 pub fn read_zap(obj: &ObjectReader<'_, '_>) -> Result<Vec<Entry>, ReadError> {
     let (block0, endian) = obj.read_blkid_ext(0)?;
@@ -50,6 +54,20 @@ pub fn read_zap(obj: &ObjectReader<'_, '_>) -> Result<Vec<Entry>, ReadError> {
                 hdr.flags
             );
             let mut leaves: BTreeSet<u64> = BTreeSet::new();
+            // The table is blocks of this object, so it ends where the
+            // object does. Taken as the header gave it, a length of 2^40
+            // ran past every block the object has into holes, which read
+            // as zeros without touching a disk: a loop of 2^40 steps that
+            // named no leaf and never tripped the bound on leaves.
+            let blocks = obj.dnode().maxblkid.saturating_add(1);
+            if hdr.ptrtbl_numblks > MAX_PTRTBL_BLOCKS
+                || hdr.ptrtbl_blk.saturating_add(hdr.ptrtbl_numblks) > blocks
+            {
+                return Err(ReadError::Io(format!(
+                    "ZAP pointer table of {} block(s) from block {} does not fit the object's {blocks} block(s)",
+                    hdr.ptrtbl_numblks, hdr.ptrtbl_blk
+                )));
+            }
             if hdr.ptrtbl_numblks == 0 {
                 leaves.extend(embedded_ptrtbl(&block0, endian));
             } else {
@@ -260,6 +278,32 @@ mod tests {
         let names: Vec<&str> = e.iter().map(|x| x.name.as_str()).collect();
         assert_eq!(names, vec!["a", "b", "c"]);
         assert_eq!(e[2].value.as_str().as_deref(), Some("str"));
+    }
+
+    /// A pointer table longer than the object it is in is refused at
+    /// once: one of 2^40 blocks read 2^40 holes, which cost no I/O and
+    /// named no leaf, and the walk never ended.
+    #[test]
+    fn a_pointer_table_past_the_object_is_refused() {
+        let (s, a, d) = setup(|al, m| {
+            let mut hdr = fat_header(4096, 0, 3);
+            hdr[16..24].copy_from_slice(&1u64.to_le_bytes());
+            hdr[24..32].copy_from_slice(&(1u64 << 40).to_le_bytes());
+            let mut table = vec![0u8; 4096];
+            for i in 0..512usize {
+                table[i * 8..i * 8 + 8].copy_from_slice(&2u64.to_le_bytes());
+            }
+            let l2 = leaf(4096, &[("a", 8, 1u64.to_be_bytes().to_vec())]);
+            dnode_with_blocks(al, m, &[hdr, table, l2], 4096)
+        });
+        let dyns: Vec<Option<&dyn BlockSource>> =
+            s.iter().map(|x| Some(x as &dyn BlockSource)).collect();
+        let reader = PoolReader::new(&a, dyns);
+        let obj = ObjectReader::new(&reader, d, Endian::Little);
+        let t = std::time::Instant::now();
+        let e = read_zap(&obj).unwrap_err().to_string();
+        assert!(e.contains("does not fit"), "{e}");
+        assert!(t.elapsed().as_secs() < 5);
     }
 
     #[test]

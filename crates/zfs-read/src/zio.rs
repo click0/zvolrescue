@@ -1433,6 +1433,19 @@ impl<'a> PoolReader<'a> {
         let children = blkptr::parse_gang_header(&header, bp.endian)?;
         let mut out = Vec::with_capacity(bp.psize as usize);
         for (i, child) in children.iter().enumerate() {
+            // The children together are the block, no more: once its
+            // psize is in hand the rest would be cut off anyway. Read on
+            // regardless, a header of 31 children, each a gang of 31
+            // more, eight deep, was 31^8 reads of one block.
+            if out.len() >= bp.psize as usize {
+                trace!(
+                    "gang",
+                    "  {} more child(ren) past the block's {} bytes, not read",
+                    children.len() - i,
+                    bp.psize
+                );
+                break;
+            }
             if child.is_hole() {
                 continue;
             }
