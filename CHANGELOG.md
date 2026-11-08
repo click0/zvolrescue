@@ -118,6 +118,15 @@ tagged. `v0.7.1` is the release that carries those six.
   characters are shown as their code (`\u{a}`), Markdown punctuation is
   escaped, and code spans are fenced longer than any backticks in them.
 
+* **An image stopped at a bad block was recorded with another file's
+  hash.** When `--strict` or a device that refused a read ended a dump,
+  the hash had taken every block before the bad one, holes included, but
+  the image ended at the last block written: a hole just before the bad
+  block was in the hash and not in the file. `zvolreport verify` then
+  failed an image nobody had touched. The image is now made exactly as
+  long as what was hashed — `zvolrescue dump` and `zvolcarve dump`
+  alike.
+
 ## v0.9.12 — 2026-11-07
 
 **Nothing written over the evidence, and no crash on a forged pool.**

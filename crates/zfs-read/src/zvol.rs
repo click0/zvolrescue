@@ -372,6 +372,16 @@ pub fn extract_from(
                 .map_err(|e| ReadError::Io(e.to_string()))?;
         }
     }
+    if report.aborted {
+        // Stopped by `--strict` or by the medium at block `hashed_to /
+        // bs`: the digests have taken every block before it, holes
+        // included, so the image is made exactly that long. Left as it
+        // was, it ended at the last block written — short of a trailing
+        // hole the hash had counted — and its recorded hash was that of
+        // no file there is, a `verify` FAIL on an image nobody touched.
+        sink.finish(hashed_to)
+            .map_err(|e| ReadError::Io(e.to_string()))?;
+    }
     if let Some(at) = report.interrupted_at {
         // The image holds the blocks before `at` and is exactly that
         // long, holes included, so a resume can read them back to hash
@@ -577,6 +587,46 @@ mod tests {
         assert!(r.aborted);
         assert_eq!(r.blocks_read, 0);
         assert!(sink.data.is_empty());
+    }
+
+    /// An extraction stopped at a bad block leaves an image whose hash is
+    /// the one recorded: the hole before the bad block is in both. It
+    /// used to end at the last block written, short of the hole the
+    /// digest had taken.
+    #[test]
+    fn an_aborted_image_is_what_its_hash_says() {
+        use sha2::{Digest, Sha256};
+        let (s, a, ub, _) = build();
+        let reader = PoolReader::new(&a, vec![Some(&s[0] as &dyn BlockSource)]);
+        let mos = open_mos(&reader, &ub).unwrap();
+        let tree = walk(&mos, "tank").unwrap();
+        let ds = tree.get("tank/vm/disk0").unwrap();
+        let (obj, _) = open_volume(&reader, ds).unwrap();
+        let at = obj.locate(2).unwrap().expect("block 2 is written").dva[0].offset;
+        let mut img = s[0].clone();
+        img.bytes_mut()[(LABEL_START_SIZE + at) as usize + 5] ^= 0xff;
+        let reader = PoolReader::new(&a, vec![Some(&img as &dyn BlockSource)]);
+        let mos = open_mos(&reader, &ub).unwrap();
+        let tree = walk(&mos, "tank").unwrap();
+        let ds = tree.get("tank/vm/disk0").unwrap();
+        let (obj, _) = open_volume(&reader, ds).unwrap();
+        let mut sink = MemSink::default();
+        let r = extract(
+            &obj,
+            ds.volsize.unwrap(),
+            &mut sink,
+            OnError::Abort,
+            |_, _| {},
+        )
+        .unwrap();
+        assert!(r.aborted);
+        assert_eq!((r.blocks_read, r.blocks_holes), (1, 1));
+        assert_eq!(sink.data.len(), 16384, "block 0 and the hole after it");
+        let hex: String = Sha256::digest(&sink.data)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(r.sha256, hex);
     }
 
     /// `extract_hashing` is `extract` with the legacy digests taken in
