@@ -494,7 +494,8 @@ mod tests {
             x ^= x << 17;
             x % n
         };
-        for _ in 0..200 {
+        // A fiftieth of the rounds under Miri, which interprets every step.
+        for _ in 0..(if cfg!(miri) { 4 } else { 200 }) {
             let mut r = Ranges::new();
             let mut bits = [false; 272];
             for _ in 0..40 {
@@ -532,8 +533,11 @@ mod tests {
     }
 
     /// A long log replays in time proportional to it: 80 000 disjoint
-    /// allocations took 18 s when every step rebuilt the set.
+    /// allocations took 18 s when every step rebuilt the set. A time is
+    /// what this checks, so not under Miri, where every step is
+    /// interpreted and 200 000 of them would take the job's hour.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn a_long_space_map_replays_quickly() {
         let es: Vec<Entry> = (0..200_000u64)
             .map(|i| Entry {
