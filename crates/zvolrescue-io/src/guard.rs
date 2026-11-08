@@ -8,7 +8,9 @@
 //! disk an input partition is on, a loop device over an input image, or
 //! the disk under the filesystem an input image lives on. And it can be a
 //! file on a filesystem that is itself on an input device, or the file a
-//! loop device among the inputs reads.
+//! loop device among the inputs reads — or, when the evidence is kept on
+//! a loop-mounted image, that image file, a second loop over it, or a
+//! filesystem inside an image that lies on an input device.
 //!
 //! [`Evidence`] works the inputs out once — what each one is, and every
 //! device and file its bytes are held by — and is then asked about each
@@ -34,8 +36,15 @@ struct Input {
     path: PathBuf,
     /// The input itself: `(st_dev, st_ino)` of the file or device node.
     node: (u64, u64),
-    /// Files a loop device in the input's stack reads, by the same pair.
+    /// The files an input device is made of: what a loop device in its
+    /// stack reads, at any depth, by the same pair. Writing one, or
+    /// writing into a filesystem inside one, writes the input.
     backing: Vec<(u64, u64)>,
+    /// The image files that hold the filesystem an input file is on, when
+    /// that filesystem is loop-mounted: the file itself and a loop device
+    /// over it write the input; a file made inside the same filesystem
+    /// does not, as one made beside an image on a disk does not.
+    holders: Vec<(u64, u64)>,
     /// Devices whose raw bytes hold the input: the input device itself,
     /// or the device under the filesystem an input file (or a loop's
     /// backing file) is on. A write to one of these, or to a device
@@ -59,23 +68,31 @@ impl Evidence {
                 path: path.clone(),
                 node: (m.dev(), m.ino()),
                 backing: Vec::new(),
+                holders: Vec::new(),
                 raw: Vec::new(),
                 device: None,
             };
-            if disks::is_device(&m) {
-                let dev = m.rdev();
-                input.device = Some(dev);
-                input.raw.push(dev);
-                for d in disks::stack(dev) {
-                    let Some(b) = disks::backing_file(d).and_then(|p| std::fs::metadata(p).ok())
-                    else {
-                        continue;
-                    };
-                    input.backing.push((b.dev(), b.ino()));
-                    input.raw.push(b.dev());
-                }
+            // Where the bytes are: the device itself, or the device
+            // under the filesystem the file is on — and when either is a
+            // loop device, the file it reads and the device that file is
+            // on, as far down as loops go. An image kept on a filesystem
+            // that is itself a loop-mounted image lives inside that image
+            // file: writing the file, or another loop over it, rewrites
+            // the evidence.
+            let dev = if disks::is_device(&m) {
+                input.device = Some(m.rdev());
+                m.rdev()
             } else {
-                input.raw.push(m.dev());
+                m.dev()
+            };
+            input.raw.push(dev);
+            for f in loop_files(dev) {
+                if input.device.is_some() {
+                    input.backing.push(f.node);
+                } else {
+                    input.holders.push(f.node);
+                }
+                input.raw.push(f.on);
             }
             out.push(input);
         }
@@ -113,6 +130,12 @@ impl Evidence {
                         i.path.display()
                     )));
                 }
+                if i.holders.contains(&node) {
+                    return Err(io::Error::other(format!(
+                        "output {shown} is the image holding the filesystem input {} is on",
+                        i.path.display()
+                    )));
+                }
             }
         }
         if let Some(o) = out_meta.as_ref().filter(|m| disks::is_device(m)) {
@@ -126,32 +149,11 @@ impl Evidence {
                 }
             }
             // A loop device writes the file it reads.
-            for d in disks::stack(dev) {
-                let Some(file) = disks::backing_file(d) else {
-                    continue;
-                };
-                let Ok(b) = std::fs::metadata(&file) else {
-                    continue;
-                };
-                for i in &self.inputs {
-                    if i.node == (b.dev(), b.ino()) {
-                        return Err(io::Error::other(format!(
-                            "output {shown} is a loop device over input {}",
-                            i.path.display()
-                        )));
-                    }
-                    if i.device.is_some_and(|e| disks::overlap(b.dev(), e)) {
-                        return Err(io::Error::other(format!(
-                            "output {shown} is a loop device over {}, which is on input device {}",
-                            file.display(),
-                            i.path.display()
-                        )));
-                    }
-                }
-            }
-            return Ok(());
+            return self.over_loops(&format!("output {shown} is a loop device"), dev, true);
         }
-        // A file: on whichever filesystem it is, or would be, made on.
+        // A file: on whichever filesystem it is, or would be, made on —
+        // and when that filesystem is a loop-mounted image, inside the
+        // image file.
         let (landing, m) = match out_meta {
             Some(m) => (target, m),
             None => nearest_existing(&target)?,
@@ -165,8 +167,90 @@ impl Evidence {
                 )));
             }
         }
+        self.over_loops(
+            &format!(
+                "output directory {} is on a filesystem in a loop device",
+                landing.display()
+            ),
+            m.dev(),
+            false,
+        )
+    }
+
+    /// Refuse when a loop device in `dev`'s stack, at any depth, reads a
+    /// file that is an input, that an input device is made of, or that
+    /// lives on an input device — and, for a write to the device itself
+    /// (`raw`), a file holding the filesystem an input is on. `what`
+    /// begins the message.
+    fn over_loops(&self, what: &str, dev: u64, raw: bool) -> io::Result<()> {
+        for f in loop_files(dev) {
+            let file = f.path.display();
+            for i in &self.inputs {
+                let input = i.path.display();
+                if i.node == f.node {
+                    return Err(io::Error::other(format!("{what} over input {input}")));
+                }
+                if i.backing.contains(&f.node) || (raw && i.holders.contains(&f.node)) {
+                    return Err(io::Error::other(format!(
+                        "{what} over {file}, which holds input {input}"
+                    )));
+                }
+                if i.device.is_some_and(|e| disks::overlap(f.on, e)) {
+                    return Err(io::Error::other(format!(
+                        "{what} over {file}, which is on input device {input}"
+                    )));
+                }
+            }
+        }
         Ok(())
     }
+}
+
+/// A file a loop device reads.
+struct LoopFile {
+    path: PathBuf,
+    /// `(st_dev, st_ino)` of the file.
+    node: (u64, u64),
+    /// The device the file is on.
+    on: u64,
+}
+
+/// The files whose bytes hold device `dev`: what a loop device in its
+/// stack reads, then — when that file is on a loop-mounted filesystem —
+/// what that loop reads, and so on down. A loop's file is kept apart from
+/// the device stack on purpose: a loop over a file is no write to the raw
+/// disk under it, and an image written beside the evidence on the same
+/// disk touches nothing of it.
+fn loop_files(dev: u64) -> Vec<LoopFile> {
+    let mut out: Vec<LoopFile> = Vec::new();
+    let mut todo = vec![dev];
+    let mut seen = Vec::new();
+    while let Some(d) = todo.pop() {
+        // A stack of loops is a few deep; the bound is against a cycle.
+        if seen.contains(&d) || seen.len() > 16 {
+            continue;
+        }
+        seen.push(d);
+        for x in disks::stack(d) {
+            let Some(path) = disks::backing_file(x) else {
+                continue;
+            };
+            let Ok(m) = std::fs::metadata(&path) else {
+                continue;
+            };
+            let node = (m.dev(), m.ino());
+            if out.iter().any(|f| f.node == node) {
+                continue;
+            }
+            todo.push(m.dev());
+            out.push(LoopFile {
+                path,
+                node,
+                on: m.dev(),
+            });
+        }
+    }
+    out
 }
 
 /// Refuse an output path that is one of the inputs, or whose bytes an
@@ -277,6 +361,46 @@ mod tests {
         let (landing, _) = nearest_existing(&dir.join("dirlink/sub/x.log")).unwrap();
         assert_eq!(landing, dir.join("far"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Loops are traced both ways: a second loop over the file an input
+    /// loop reads is the input, and a loop over an unrelated file beside
+    /// it is not. Needs `losetup` and the right to use it; skipped
+    /// without.
+    #[test]
+    fn a_loop_over_the_file_an_input_loop_reads_is_the_input() {
+        use std::process::Command;
+        let dir = scratch("loops");
+        let member = dir.join("member1.img");
+        let other = dir.join("other.img");
+        std::fs::write(&member, vec![1u8; 1 << 20]).unwrap();
+        std::fs::write(&other, vec![2u8; 1 << 20]).unwrap();
+        let attach = |file: &Path, ro: bool| -> Option<PathBuf> {
+            let mut c = Command::new("losetup");
+            c.args(["-f", "--show"]);
+            if ro {
+                c.arg("-r");
+            }
+            let out = c.arg(file).output().ok()?;
+            let dev = String::from_utf8(out.stdout).ok()?;
+            (out.status.success() && !dev.trim().is_empty()).then(|| PathBuf::from(dev.trim()))
+        };
+        let Some(input) = attach(&member, true) else {
+            eprintln!("skipped: no loop device to be had here");
+            std::fs::remove_dir_all(&dir).unwrap();
+            return;
+        };
+        let second = attach(&member, false);
+        let unrelated = attach(&other, false);
+        let ev = Evidence::new(std::slice::from_ref(&input));
+        let refused = second.as_ref().map(|d| ev.check(d).is_err());
+        let allowed = unrelated.as_ref().map(|d| ev.check(d).is_ok());
+        for d in [Some(input), second, unrelated].into_iter().flatten() {
+            let _ = Command::new("losetup").arg("-d").arg(&d).status();
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(refused, Some(true), "a second loop over the input's file");
+        assert_eq!(allowed, Some(true), "a loop over another file");
     }
 
     /// Outputs that are already there — an image being resumed, a

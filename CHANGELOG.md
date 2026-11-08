@@ -72,6 +72,22 @@ tagged. `v0.7.1` is the release that carries those six.
   would resolve it: a link at its end followed, the deepest directory
   above it that exists resolved.
 
+* **Loop devices let a write through to the evidence.** An output loop
+  device over the very file an input loop device reads was not refused:
+  `dump … /dev/loop0 -o /dev/loop1`, both over `member1.img`, rewrote the
+  member. And a filesystem on a loop device was not traced at all: with
+  the members kept in a loop-mounted `case.ext4`, `-o case.ext4`
+  truncated the image the evidence lived in (exit 0), `-o` a second loop
+  over it was written through, and an image written into a filesystem
+  inside an image file that lies on an input device went through too.
+  The files a loop device reads are now followed down from an input —
+  the files an input device is made of, and the image holding the
+  filesystem an input file is on — and from an output: a loop over any
+  of them, the image itself, and a filesystem in an image on an input
+  device are refused (exit 5). An image written inside the same mounted
+  filesystem as the members, like one written beside them on a disk,
+  touches none of them and is not refused.
+
 ## v0.9.12 — 2026-11-07
 
 **Nothing written over the evidence, and no crash on a forged pool.**
