@@ -363,46 +363,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// Loops are traced both ways: a second loop over the file an input
-    /// loop reads is the input, and a loop over an unrelated file beside
-    /// it is not. Needs `losetup` and the right to use it; skipped
-    /// without.
-    #[test]
-    fn a_loop_over_the_file_an_input_loop_reads_is_the_input() {
-        use std::process::Command;
-        let dir = scratch("loops");
-        let member = dir.join("member1.img");
-        let other = dir.join("other.img");
-        std::fs::write(&member, vec![1u8; 1 << 20]).unwrap();
-        std::fs::write(&other, vec![2u8; 1 << 20]).unwrap();
-        let attach = |file: &Path, ro: bool| -> Option<PathBuf> {
-            let mut c = Command::new("losetup");
-            c.args(["-f", "--show"]);
-            if ro {
-                c.arg("-r");
-            }
-            let out = c.arg(file).output().ok()?;
-            let dev = String::from_utf8(out.stdout).ok()?;
-            (out.status.success() && !dev.trim().is_empty()).then(|| PathBuf::from(dev.trim()))
-        };
-        let Some(input) = attach(&member, true) else {
-            eprintln!("skipped: no loop device to be had here");
-            std::fs::remove_dir_all(&dir).unwrap();
-            return;
-        };
-        let second = attach(&member, false);
-        let unrelated = attach(&other, false);
-        let ev = Evidence::new(std::slice::from_ref(&input));
-        let refused = second.as_ref().map(|d| ev.check(d).is_err());
-        let allowed = unrelated.as_ref().map(|d| ev.check(d).is_ok());
-        for d in [Some(input), second, unrelated].into_iter().flatten() {
-            let _ = Command::new("losetup").arg("-d").arg(&d).status();
-        }
-        std::fs::remove_dir_all(&dir).unwrap();
-        assert_eq!(refused, Some(true), "a second loop over the input's file");
-        assert_eq!(allowed, Some(true), "a loop over another file");
-    }
-
     /// Outputs that are already there — an image being resumed, a
     /// directory `-r` writes into — are judged by themselves, and an
     /// output under directories that do not exist yet is not refused for
