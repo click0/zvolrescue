@@ -159,6 +159,16 @@ tagged. `v0.7.1` is the release that carries those six.
   holds 31 children at ashift 12. Children are now read only until the
   block's bytes are in hand.
 
+* **A long space map took hours to replay.** Every allocation or free
+  rebuilt the whole sorted list of ranges, so replaying was quadratic:
+  10 000, 20 000, 40 000 and 80 000 entries took 0.24, 0.9, 4.1 and
+  18.3 s, and a space map of a million entries — a real pool's, or a
+  forged one's — an afternoon. Asking whether a block was in use walked
+  the whole list too. The ranges are now kept in an ordered map: a step
+  touches only the ranges it meets, and 200 000 entries replay in a
+  fraction of a second. The ztest pools' space maps replay to exactly
+  the ranges and bytes they did.
+
 ## v0.9.12 — 2026-11-07
 
 **Nothing written over the evidence, and no crash on a forged pool.**

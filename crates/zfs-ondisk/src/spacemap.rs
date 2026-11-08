@@ -197,19 +197,22 @@ pub fn entries(bytes: &[u8], shift: u32, endian: Endian) -> Vec<Entry> {
 ///
 /// Space maps are replayed into one of these: an allocation adds a
 /// range, a free takes one away. A metaslab's log can be long, so the
-/// set is built once and asked many times.
+/// set is built once and asked many times — and each step touches only
+/// the ranges it meets. Kept as one sorted vector rebuilt on every
+/// step, the replay was quadratic: 80 000 entries took 18 s, and a
+/// space map of a million was an afternoon.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Ranges(Vec<(u64, u64)>);
+pub struct Ranges(std::collections::BTreeMap<u64, u64>);
 
 impl Ranges {
     /// An empty set.
     pub fn new() -> Ranges {
-        Ranges(Vec::new())
+        Ranges(std::collections::BTreeMap::new())
     }
 
-    /// The ranges, sorted by start.
-    pub fn as_slice(&self) -> &[(u64, u64)] {
-        &self.0
+    /// The ranges `[start, end)`, sorted by start.
+    pub fn to_vec(&self) -> Vec<(u64, u64)> {
+        self.0.iter().map(|(&a, &b)| (a, b)).collect()
     }
 
     /// Total bytes covered.
@@ -227,12 +230,27 @@ impl Ranges {
         self.0.is_empty()
     }
 
-    /// Add `[start, start + len)`.
+    /// Add `[start, start + len)`; ranges it overlaps or touches become
+    /// one with it.
     pub fn add(&mut self, start: u64, len: u64) {
         if len == 0 {
             return;
         }
-        self.apply(start, start.saturating_add(len), true);
+        let (mut lo, mut hi) = (start, start.saturating_add(len));
+        // One that begins at or before `lo` and reaches it.
+        if let Some((&a, &b)) = self.0.range(..=lo).next_back() {
+            if b >= lo {
+                lo = a;
+                hi = hi.max(b);
+                self.0.remove(&a);
+            }
+        }
+        // Every one that begins inside, or right at the end.
+        while let Some((&a, &b)) = self.0.range(lo..=hi).next() {
+            hi = hi.max(b);
+            self.0.remove(&a);
+        }
+        self.0.insert(lo, hi);
     }
 
     /// Take `[start, start + len)` out.
@@ -240,67 +258,36 @@ impl Ranges {
         if len == 0 {
             return;
         }
-        self.apply(start, start.saturating_add(len), false);
-    }
-
-    fn apply(&mut self, from: u64, to: u64, add: bool) {
-        let mut out: Vec<(u64, u64)> = Vec::with_capacity(self.0.len() + 2);
-        let mut inserted = false;
-        for &(a, b) in &self.0 {
-            if b < from || a > to {
-                // Untouched, but keep the order: anything entirely below
-                // goes first.
-                if b < from {
-                    out.push((a, b));
-                } else {
-                    if add && !inserted {
-                        out.push((from, to));
-                        inserted = true;
-                    }
-                    out.push((a, b));
+        let (from, to) = (start, start.saturating_add(len));
+        // One that begins before the hole and runs into it: keep its
+        // head, and its tail when it runs past.
+        if let Some((&a, &b)) = self.0.range(..from).next_back() {
+            if b > from {
+                self.0.insert(a, from);
+                if b > to {
+                    self.0.insert(to, b);
                 }
-                continue;
             }
-            if add {
-                // Overlapping or touching: widen what is being added.
-                let (lo, hi) = (a.min(from), b.max(to));
-                if let Some(last) = out.last_mut() {
-                    if last.1 >= lo {
-                        last.1 = last.1.max(hi);
-                        continue;
-                    }
-                }
-                out.push((lo, hi));
-                inserted = true;
-                continue;
-            }
-            // Removing: keep whatever lies outside the hole.
-            if a < from {
-                out.push((a, from));
-            }
+        }
+        // Every one that begins inside the hole.
+        while let Some((&a, &b)) = self.0.range(from..to).next() {
+            self.0.remove(&a);
             if b > to {
-                out.push((to, b));
+                self.0.insert(to, b);
             }
         }
-        if add && !inserted {
-            out.push((from, to));
-        }
-        out.sort_unstable();
-        // One pass to merge anything the insert left adjacent.
-        let mut merged: Vec<(u64, u64)> = Vec::with_capacity(out.len());
-        for (a, b) in out {
-            match merged.last_mut() {
-                Some(last) if last.1 >= a => last.1 = last.1.max(b),
-                _ => merged.push((a, b)),
-            }
-        }
-        self.0 = merged;
     }
 
     /// Whether any part of `[start, start + len)` is in the set.
     pub fn intersects(&self, start: u64, len: u64) -> bool {
+        if len == 0 {
+            return false;
+        }
         let end = start.saturating_add(len);
-        self.0.iter().any(|&(a, b)| a < end && start < b)
+        self.0
+            .range(..end)
+            .next_back()
+            .is_some_and(|(_, &b)| b > start)
     }
 
     /// Replay a space map's entries into the set.
@@ -429,7 +416,7 @@ mod tests {
             ),
             0,
         );
-        assert_eq!(r.as_slice(), [(0, 2 * 4096), (4 * 4096, 8 * 4096)]);
+        assert_eq!(r.to_vec(), [(0, 2 * 4096), (4 * 4096, 8 * 4096)]);
         assert_eq!(r.bytes(), 6 * 4096);
         assert!(r.intersects(0, 4096));
         assert!(!r.intersects(2 * 4096, 2 * 4096));
@@ -444,9 +431,9 @@ mod tests {
         r.add(0, 100);
         r.add(100, 100);
         r.add(300, 100);
-        assert_eq!(r.as_slice(), [(0, 200), (300, 400)]);
+        assert_eq!(r.to_vec(), [(0, 200), (300, 400)]);
         r.add(200, 100);
-        assert_eq!(r.as_slice(), [(0, 400)]);
+        assert_eq!(r.to_vec(), [(0, 400)]);
         assert_eq!(r.len(), 1);
     }
 
@@ -455,7 +442,7 @@ mod tests {
         let mut r = Ranges::new();
         r.add(0, 1000);
         r.remove(400, 200);
-        assert_eq!(r.as_slice(), [(0, 400), (600, 1000)]);
+        assert_eq!(r.to_vec(), [(0, 400), (600, 1000)]);
         r.remove(0, 1000);
         assert!(r.is_empty());
         assert_eq!(r.bytes(), 0);
@@ -493,5 +480,78 @@ mod tests {
         for b in 0..4096u64 {
             assert_eq!(r.intersects(b, 1), expected.contains(&b), "byte {b}");
         }
+    }
+
+    /// Against a plain model — one bit per byte — over random steps: the
+    /// set holds exactly the bytes the steps leave, merged into as few
+    /// ranges as there are runs, and answers `intersects` the same.
+    #[test]
+    fn ranges_agree_with_a_byte_by_byte_model() {
+        let mut x = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |n: u64| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x % n
+        };
+        for _ in 0..200 {
+            let mut r = Ranges::new();
+            let mut bits = [false; 272];
+            for _ in 0..40 {
+                let (start, len) = (next(240), next(24));
+                let add = next(3) != 0;
+                if add {
+                    r.add(start, len);
+                } else {
+                    r.remove(start, len);
+                }
+                for b in &mut bits[start as usize..(start + len) as usize] {
+                    *b = add;
+                }
+                let runs: Vec<(u64, u64)> = {
+                    let mut v = Vec::new();
+                    let mut i = 0;
+                    while i < bits.len() {
+                        if bits[i] {
+                            let a = i;
+                            while i < bits.len() && bits[i] {
+                                i += 1;
+                            }
+                            v.push((a as u64, i as u64));
+                        }
+                        i += 1;
+                    }
+                    v
+                };
+                assert_eq!(r.to_vec(), runs);
+                let (qs, ql) = (next(250), next(10));
+                let want = bits[qs as usize..(qs + ql) as usize].contains(&true);
+                assert_eq!(r.intersects(qs, ql), want, "{qs}+{ql} in {runs:?}");
+            }
+        }
+    }
+
+    /// A long log replays in time proportional to it: 80 000 disjoint
+    /// allocations took 18 s when every step rebuilt the set.
+    #[test]
+    fn a_long_space_map_replays_quickly() {
+        let es: Vec<Entry> = (0..200_000u64)
+            .map(|i| Entry {
+                kind: if i % 7 == 6 {
+                    MapType::Free
+                } else {
+                    MapType::Alloc
+                },
+                offset: (i * 7919 % 200_000) * 8192,
+                run: 4096,
+                vdev: None,
+            })
+            .collect();
+        let t = std::time::Instant::now();
+        let mut r = Ranges::new();
+        r.replay(&es, 0);
+        assert!(t.elapsed().as_secs() < 5, "{:?}", t.elapsed());
+        assert!(r.len() > 100_000);
+        assert!(r.intersects(0, 1));
     }
 }
