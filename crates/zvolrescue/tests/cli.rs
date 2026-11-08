@@ -248,6 +248,28 @@ fn dump_never_writes_over_what_it_reads() {
     assert_eq!(std::fs::read_to_string(&map).unwrap(), "0x0 +\n");
     assert_eq!(std::fs::read(&key).unwrap(), [7u8; 32]);
 
+    // The name the resume state is written under before its rename is
+    // a file the run writes: a link there to the mapfile is refused.
+    let img = dir.join("tmp.img").to_string_lossy().into_owned();
+    let tmp = format!("{img}.resume.json.tmp");
+    std::fs::hard_link(&map, &tmp).unwrap();
+    let mapped = format!("{named}={map}");
+    let (code, _, err) = run(&[
+        "-q",
+        "dump",
+        "tank/vm/disk0",
+        &named,
+        &paths[1],
+        "--map",
+        &mapped,
+        "-o",
+        &img,
+    ]);
+    assert_eq!(code, 5, "{err}");
+    assert!(err.contains(".resume.json.tmp"), "{err}");
+    assert_eq!(std::fs::read_to_string(&map).unwrap(), "0x0 +\n");
+    std::fs::remove_file(&tmp).unwrap();
+
     let both = dir.join("both.img").to_string_lossy().into_owned();
     let (code, _, err) = run(&[
         "--evidence-log",

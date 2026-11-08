@@ -13,6 +13,21 @@ development milestone that names what changed when — the sections below
 are their record — and ships inside the next version that does get
 tagged. `v0.7.1` is the release that carries those six.
 
+## Unreleased
+
+### Fixed
+
+* **The resume state's temporary name was written through.** A dump
+  writes its state as `OUT.img.resume.json.tmp` and renames it into
+  place; the temporary name was opened by following whatever was there
+  and was checked against nothing. A link at that name to a ddrescue
+  mapfile got the state over the mapfile while the run went on and
+  exited 6 as usual; the rename then left the state's name pointing at
+  the mapfile. `zvolrescue dump` and `zvolcarve dump` now check the
+  temporary name against everything the run reads with the image and
+  its state (exit 5), and write it as a new file after removing what was
+  there — a link is replaced, never followed.
+
 ## v0.9.12 — 2026-11-07
 
 **Nothing written over the evidence, and no crash on a forged pool.**

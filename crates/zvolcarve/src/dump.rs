@@ -81,9 +81,11 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     reads.extend(members.paths.iter().cloned());
     reads.push(opts.dir.join(crate::model::INDEX));
     let guard = WriteGuard::new(g, &reads);
+    let [state, tmp] = resume::sidecars(&opts.output);
     for (what, path) in [
         ("-o", opts.output.clone()),
-        ("to write", resume::path(&opts.output)),
+        ("to write", state),
+        ("to write", tmp),
     ] {
         if let Err(code) = guard.refuse("zvolcarve", what, &path) {
             return zvol_common::end_early(g, "zvolcarve", spec, code);

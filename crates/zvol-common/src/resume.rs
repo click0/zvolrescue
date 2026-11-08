@@ -54,6 +54,24 @@ pub fn path(output: &Path) -> PathBuf {
     PathBuf::from(p)
 }
 
+/// The name a state is written under before it is renamed into place:
+/// `OUT.img.resume.json.tmp`. A run writes this file too, so it is one
+/// of the paths a caller puts to its `WriteGuard` before the first
+/// write.
+pub fn tmp_path(state_path: &Path) -> PathBuf {
+    let mut p = state_path.as_os_str().to_owned();
+    p.push(".tmp");
+    PathBuf::from(p)
+}
+
+/// Every file an extraction to `output` writes besides the image: the
+/// state and the name it is written under first.
+pub fn sidecars(output: &Path) -> [PathBuf; 2] {
+    let state = path(output);
+    let tmp = tmp_path(&state);
+    [state, tmp]
+}
+
 /// Record that blocks `0..blocks_done` of `image` are complete — once
 /// they are on stable storage.
 ///
@@ -82,13 +100,24 @@ pub fn write(image: &Path, state_path: &Path, expected: &State, blocks_done: u64
     let Ok(json) = serde_json::to_vec(&s) else {
         return;
     };
-    let mut tmp = state_path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let tmp = PathBuf::from(tmp);
-    let written = std::fs::File::create(&tmp).and_then(|mut f| {
-        f.write_all(&json)?;
-        f.sync_all()
-    });
+    // Whatever is at the temporary name goes first — a stale one from a
+    // run that died, or a link — and the file is made new: `create`
+    // would follow a link there, and a link to a mapfile, a key or a
+    // member got the state written over it.
+    let tmp = tmp_path(state_path);
+    if let Err(e) = std::fs::remove_file(&tmp) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return;
+        }
+    }
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .and_then(|mut f| {
+            f.write_all(&json)?;
+            f.sync_all()
+        });
     if written.is_err() || std::fs::rename(&tmp, state_path).is_err() {
         let _ = std::fs::remove_file(&tmp);
         return;
@@ -329,6 +358,31 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Whatever is at the temporary name is not written through: a link
+    /// there to a mapfile got the state over the mapfile, and the rename
+    /// then left the state's name pointing at it.
+    #[test]
+    fn the_temporary_name_is_never_written_through() {
+        let dir = scratch("tmp-link");
+        let out = dir.join("out.img");
+        std::fs::write(&out, [9u8; 4096]).unwrap();
+        let victim = dir.join("member0.map");
+        std::fs::write(&victim, b"# Mapfile\n0x0 0x1000 +\n").unwrap();
+        let state = path(&out);
+        std::os::unix::fs::symlink(&victim, tmp_path(&state)).unwrap();
+        write(&out, &state, &expected(), 1);
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            b"# Mapfile\n0x0 0x1000 +\n"
+        );
+        let meta = std::fs::symlink_metadata(&state).unwrap();
+        assert!(meta.is_file(), "the state is a file of its own");
+        let back: State = serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+        assert_eq!(back.blocks_done, 1);
+        assert!(!tmp_path(&state).exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

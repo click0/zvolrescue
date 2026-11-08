@@ -753,7 +753,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         if opts.recursive {
             writes.push(output.clone());
         }
-        writes.push(resume::path(output));
+        writes.extend(resume::sidecars(output));
     }
     if opts.recursive {
         writes.push(opts.output.join("manifest.json"));
