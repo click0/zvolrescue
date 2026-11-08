@@ -169,6 +169,17 @@ tagged. `v0.7.1` is the release that carries those six.
   fraction of a second. The ztest pools' space maps replay to exactly
   the ranges and bytes they did.
 
+* **`zvolcarve scan` spent minutes asking each candidate the same
+  question, and did not hear a signal while it did.** To say which
+  dataset a candidate belonged to, it read every dataset's object set
+  again for every candidate: on a ztest pool of two 96 MiB members,
+  thousands of candidates by hundreds of datasets took over ten minutes
+  of lz4, and SIGTERM went unheard until a second one killed the run.
+  The datasets' data objects are now worked out once per member, and
+  after a signal the remaining candidates are recorded without the
+  reads: the same scan takes a minute and a half, and stops (exit 6,
+  its state written) within seconds of being asked.
+
 ## v0.9.12 — 2026-11-07
 
 **Nothing written over the evidence, and no crash on a forged pool.**

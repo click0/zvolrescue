@@ -460,6 +460,15 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         let reader = pool
             .as_ref()
             .map(|p| PoolReader::new(p, members.devices()).with_base_offsets(&members.bases()));
+        // Which dataset each data object belonged to, worked out once per
+        // member: asked of every candidate in turn, it read every dataset's
+        // object set again for each — thousands of candidates by hundreds
+        // of datasets on a ztest pool of 192 MiB, ten minutes of lz4, and
+        // no signal heard.
+        let owners = reader
+            .as_ref()
+            .map(|r| dataset_owners(r, &scan.datasets, &interrupt))
+            .unwrap_or_default();
         for hit in &scan.hits {
             if let Some(g) = groups[i] {
                 let base = members.base_offsets.get(i).copied().unwrap_or(0);
@@ -483,13 +492,13 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                     Some(interrupt.as_ref()),
                 )
             });
-            let named = reader
-                .as_ref()
-                .and_then(|r| name_from_datasets(r, &scan.datasets, hit));
+            let named = name_from_datasets(&owners, hit);
             // C-12: what is inside usually says how large the volume was
-            // made, which the dnode cannot.
+            // made, which the dnode cannot. Once a signal has come the
+            // rest of the candidates are recorded as they are, at once.
             let contents = reader
                 .as_ref()
+                .filter(|_| !interrupt.load(Ordering::Relaxed))
                 .map(|r| {
                     let obj = ObjectReader::new(r, hit.dnode.clone(), Endian::Little);
                     contents_of(&obj)
@@ -753,24 +762,21 @@ fn histograms_of(candidates: &[Candidate]) -> Histograms {
     }
 }
 
-/// The dataset whose objset still points at this candidate (C-11).
-///
-/// A carved dnode carries no name: names live in the DSL directory
-/// chain in the MOS, which is what a carve cannot reach. What can be
-/// reached is a dataset dnode the scan happened to meet — its bonus
-/// points at an objset, and if that objset's data object is this one,
-/// the candidate belonged to that dataset. The GUID and creation
-/// transaction group are enough to match it against a timeline.
-fn name_from_datasets(
+/// The data object of each dataset dnode the scan met, by the first DVA
+/// of its first block, with the dataset's GUID and creation TXG: what
+/// [`name_from_datasets`] matches a candidate against. A dataset's bonus
+/// points at its object set, and the object set's `ZVOL_OBJ` is the data
+/// of a volume. Read once per member, and not past a signal.
+fn dataset_owners(
     reader: &PoolReader<'_>,
     datasets: &[zfs_read::carve::Hit],
-    candidate: &zfs_read::carve::Hit,
-) -> Option<(u64, u64)> {
-    let want = candidate.dnode.blkptr.iter().find(|b| !b.is_hole())?;
-    // A head dataset and its snapshots can all point at the same objset
-    // on a pool this small; the newest is the one worth reporting.
-    let mut found: Vec<(u64, u64)> = Vec::new();
+    interrupt: &std::sync::atomic::AtomicBool,
+) -> Vec<(zfs_ondisk::blkptr::Dva, u64, u64)> {
+    let mut out = Vec::new();
     for ds in datasets {
+        if interrupt.load(Ordering::Relaxed) {
+            break;
+        }
         let Ok(phys) = zfs_ondisk::dsl::DslDatasetPhys::parse(&ds.dnode.bonus, Endian::Little)
         else {
             continue;
@@ -791,12 +797,37 @@ fn name_from_datasets(
         let Some(theirs) = data.blkptr.iter().find(|b| !b.is_hole()) else {
             continue;
         };
-        if theirs.dva[0] == want.dva[0] {
-            found.push((phys.guid, phys.creation_txg));
-        }
+        out.push((theirs.dva[0], phys.guid, phys.creation_txg));
     }
-    found.sort_by_key(|(_, txg)| std::cmp::Reverse(*txg));
-    found.first().copied()
+    out
+}
+
+/// The dataset whose objset still points at this candidate (C-11).
+///
+/// A carved dnode carries no name: names live in the DSL directory
+/// chain in the MOS, which is what a carve cannot reach. What can be
+/// reached is a dataset dnode the scan happened to meet — its bonus
+/// points at an objset, and if that objset's data object is this one,
+/// the candidate belonged to that dataset. The GUID and creation
+/// transaction group are enough to match it against a timeline. A head
+/// dataset and its snapshots can all point at the same objset on a pool
+/// this small; the newest is the one worth reporting, the first met of
+/// those as new.
+fn name_from_datasets(
+    owners: &[(zfs_ondisk::blkptr::Dva, u64, u64)],
+    candidate: &zfs_read::carve::Hit,
+) -> Option<(u64, u64)> {
+    let want = candidate.dnode.blkptr.iter().find(|b| !b.is_hole())?;
+    owners
+        .iter()
+        .filter(|(dva, _, _)| *dva == want.dva[0])
+        .fold(
+            None,
+            |best: Option<(u64, u64)>, &(_, guid, txg)| match best {
+                Some((_, t)) if t >= txg => best,
+                _ => Some((guid, txg)),
+            },
+        )
 }
 
 /// What a candidate's own bytes say it holds (C-12).
