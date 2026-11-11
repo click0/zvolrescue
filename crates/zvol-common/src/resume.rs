@@ -211,7 +211,7 @@ pub fn open(
                     eprintln!("  resuming {name} at block {start_block}");
                 }
                 if start_block > 0 {
-                    SparseFile::open_existing(output)
+                    SparseFile::open_existing(output, start_block * expected.blocksize)
                 } else {
                     SparseFile::create(output)
                 }

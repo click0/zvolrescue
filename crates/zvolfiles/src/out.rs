@@ -22,7 +22,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use zfs_read::crypt::KeyMaterial;
-use zvol_common::{exit, Global, PoolSpec, WriteGuard};
+use zvol_common::{exit, Blocked, Global, PoolSpec, WriteGuard};
 
 use crate::common::{AtArgs, Opened};
 
@@ -40,6 +40,19 @@ impl std::fmt::Display for OutError {
         match self {
             OutError::Refused(why) => write!(f, "refused: {why}"),
             OutError::Failed(why) => f.write_str(why),
+        }
+    }
+}
+
+impl From<Blocked> for OutError {
+    fn from(b: Blocked) -> OutError {
+        match b {
+            Blocked::Refused(why) => OutError::Refused(why),
+            // A name too long, a directory not to be entered: the entry
+            // cannot be written, which is a failure of that entry — said
+            // as a refusal it read "the path holds something this run
+            // reads", and the run exited 5.
+            Blocked::Unchecked(why) => OutError::Failed(why),
         }
     }
 }
@@ -100,7 +113,7 @@ impl OutTree {
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
                 Err(e) => return Err(OutError::Failed(format!("{}: {e}", cur.display()))),
             }
-            self.guard.check(&cur).map_err(OutError::Refused)?;
+            self.guard.check(&cur).map_err(OutError::from)?;
             match std::fs::create_dir(&cur) {
                 Ok(()) => {}
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists && cur.is_dir() => {}
@@ -151,7 +164,7 @@ impl OutTree {
         }
         // A file in the way is looked at before it is removed: removing a
         // member's only other name would lose it once this run ends.
-        self.guard.check(path).map_err(OutError::Refused)?;
+        self.guard.check(path).map_err(OutError::from)?;
         match std::fs::remove_file(path) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => {
                 Err(OutError::Failed(format!("{}: {e}", path.display())))

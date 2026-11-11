@@ -331,12 +331,25 @@ mod write_guard_tests {
         let guard = WriteGuard::new(&g, &[member.clone(), map.clone()]);
         assert!(guard.check(&member).is_err());
         assert!(guard.check(&map).is_err());
-        let why = guard.check(&dir.join("case.jsonl")).unwrap_err();
+        let why = guard
+            .check(&dir.join("case.jsonl"))
+            .unwrap_err()
+            .to_string();
         assert!(why.contains("--evidence-log"), "{why}");
         // Spelled another way, still the same place.
-        let why = guard.check(&dir.join(".").join("case.jsonl")).unwrap_err();
+        let why = guard
+            .check(&dir.join(".").join("case.jsonl"))
+            .unwrap_err()
+            .to_string();
         assert!(why.contains("--evidence-log"), "{why}");
         assert!(guard.check(&dir.join("out.img")).is_ok());
+        // A path that cannot be looked at is no refusal: the write fails
+        // on it, exit 1, not "holds something this run reads".
+        assert!(matches!(
+            guard.check(&member.join("out.img")),
+            Err(Blocked::Unchecked(_))
+        ));
+        assert_eq!(guard.refuse("t", "-o", &member.join("x")), Err(exit::USAGE));
         assert_eq!(guard.refuse("t", "-o", &member), Err(exit::REFUSED));
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -484,6 +497,10 @@ impl Global {
         ] {
             let Some(log) = log else { continue };
             if let Err(e) = zvolrescue_io::refuse_if_evidence(log, &named) {
+                if !zvolrescue_io::is_refusal(&e) {
+                    eprintln!("{tool}: {flag} {}: {e}", log.display());
+                    return Err(exit::USAGE);
+                }
                 eprintln!("{tool}: refusing {flag} {}: {e}", log.display());
                 return Err(exit::REFUSED);
             }
@@ -804,24 +821,60 @@ impl WriteGuard {
     }
 
     /// Why writing `path` would be wrong, if it would: it is an input or
-    /// shares bytes with one, or it is where one of the run's logs goes.
-    pub fn check(&self, path: &Path) -> Result<(), String> {
-        self.evidence.check(path).map_err(|e| e.to_string())?;
+    /// shares bytes with one, or it is where one of the run's logs goes —
+    /// or the path cannot be looked at, which is no refusal.
+    pub fn check(&self, path: &Path) -> Result<(), Blocked> {
+        self.evidence.check(path).map_err(|e| {
+            if zvolrescue_io::is_refusal(&e) {
+                Blocked::Refused(e.to_string())
+            } else {
+                Blocked::Unchecked(e.to_string())
+            }
+        })?;
         for (flag, log) in &self.logs {
             if same_file(path, log) {
-                return Err(format!("{} is where {flag} goes", path.display()));
+                return Err(Blocked::Refused(format!(
+                    "{} is where {flag} goes",
+                    path.display()
+                )));
             }
         }
         Ok(())
     }
 
-    /// [`check`](Self::check), said on stderr as `TOOL: refusing WHAT
-    /// PATH: why`, with the exit code to return.
+    /// [`check`](Self::check), said on stderr, with the exit code to
+    /// return: `TOOL: refusing WHAT PATH: why` and exit 5 for a write that
+    /// would land on what the run reads; `TOOL: WHAT PATH: why` and exit 1
+    /// for a path that cannot be written at all — not a directory where
+    /// one is needed, a loop of links, a name too long.
     pub fn refuse(&self, tool: &str, what: &str, path: &Path) -> Result<(), u8> {
-        self.check(path).map_err(|why| {
-            eprintln!("{tool}: refusing {what} {}: {why}", path.display());
-            exit::REFUSED
+        self.check(path).map_err(|b| match b {
+            Blocked::Refused(why) => {
+                eprintln!("{tool}: refusing {what} {}: {why}", path.display());
+                exit::REFUSED
+            }
+            Blocked::Unchecked(why) => {
+                eprintln!("{tool}: {what} {}: {why}", path.display());
+                exit::USAGE
+            }
         })
+    }
+}
+
+/// Why [`WriteGuard::check`] will not have a path written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Blocked {
+    /// Writing it would reach what the run reads.
+    Refused(String),
+    /// It could not be looked at: the write would fail on it too.
+    Unchecked(String),
+}
+
+impl std::fmt::Display for Blocked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Blocked::Refused(why) | Blocked::Unchecked(why) => f.write_str(why),
+        }
     }
 }
 

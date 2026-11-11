@@ -180,6 +180,24 @@ tagged. `v0.7.1` is the release that carries those six.
   reads: the same scan takes a minute and a half, and stops (exit 6,
   its state written) within seconds of being asked.
 
+* **A path that could not be looked at was called a refusal.** The
+  check that keeps output off the evidence turned every error it met into
+  "refusing … the path holds something this run reads", exit 5: `-o
+  file/report.txt` where `file` is a file, a loop of links, a name too
+  long for the filesystem, a directory this user may not enter. They are
+  what they are now — said as the system says them, exit 1 — and in
+  `zvolfiles`, an entry that cannot be written, counted with the others
+  (exit 4).
+* **An image could not go to a disk or to `/dev/null`.** The image was
+  written sparsely and then given its length with `set_len`, which a
+  device refuses: after every byte was written the run said "extraction
+  failed", exit 3. Worse, on a disk the holes of the volume kept whatever
+  the disk held before, so the image there was not the volume its hash
+  described. A device is now written densely — zeros where the volume
+  has holes, over whatever was there — and is not given a length;
+  `/dev/null` takes an image as a way of hashing a volume without
+  keeping it.
+
 ## v0.9.12 — 2026-11-07
 
 **Nothing written over the evidence, and no crash on a forged pool.**

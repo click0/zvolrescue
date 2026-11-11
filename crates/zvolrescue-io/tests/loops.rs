@@ -47,3 +47,53 @@ fn a_loop_over_the_file_an_input_loop_reads_is_the_input() {
     assert_eq!(refused, Some(true), "a second loop over the input's file");
     assert_eq!(allowed, Some(true), "a loop over another file");
 }
+
+/// A device is written densely: the holes of the volume come out as
+/// zeros over whatever the device held, and no length is set on it.
+#[test]
+fn a_device_gets_every_byte_holes_included() {
+    use std::process::Command;
+    use zvolrescue_io::{BlockSink, SparseFile};
+    let dir = std::env::temp_dir().join(format!("zvolrescue-io-dense-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let backing = dir.join("disk.img");
+    std::fs::write(&backing, vec![0xaau8; 1 << 20]).unwrap();
+    let out = Command::new("losetup")
+        .args(["-f", "--show"])
+        .arg(&backing)
+        .output();
+    let dev = match out {
+        Ok(o) if o.status.success() => PathBuf::from(String::from_utf8(o.stdout).unwrap().trim()),
+        _ => {
+            eprintln!("skipped: no loop device to be had here");
+            std::fs::remove_dir_all(&dir).unwrap();
+            return;
+        }
+    };
+    let result = (|| {
+        let mut sink = SparseFile::create(&dev)?;
+        sink.write_at(8192, &[7u8; 4096])?;
+        sink.finish(65536)?;
+        std::fs::read(&dev)
+    })();
+    let _ = Command::new("losetup").arg("-d").arg(&dev).status();
+    std::fs::remove_dir_all(&dir).unwrap();
+    let bytes = result.expect("written");
+    assert!(bytes[..8192].iter().all(|&b| b == 0), "the hole before");
+    assert!(bytes[8192..12288].iter().all(|&b| b == 7));
+    assert!(
+        bytes[12288..65536].iter().all(|&b| b == 0),
+        "the hole after"
+    );
+    assert!(bytes[65536..].iter().all(|&b| b == 0xaa), "past the volume");
+}
+
+/// `/dev/null` takes an image and its finish, which has nothing to flush.
+#[test]
+fn dev_null_takes_an_image() {
+    use zvolrescue_io::{BlockSink, SparseFile};
+    let mut sink = SparseFile::create(Path::new("/dev/null")).unwrap();
+    sink.write_at(0, &[1u8; 512]).unwrap();
+    sink.finish(1 << 20).unwrap();
+}

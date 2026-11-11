@@ -20,7 +20,7 @@ use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-pub use guard::{final_target, refuse_if_evidence, Evidence};
+pub use guard::{final_target, is_refusal, refuse_if_evidence, Evidence};
 use medium::{Kind, Ledger};
 
 /// A read-only, random-access source of bytes: a device, a partition, an
@@ -1007,10 +1007,23 @@ pub trait BlockSink {
 
 /// A file written sparsely: zero-filled blocks are skipped, so holes in
 /// the source stay holes on disk.
+///
+/// A disk, or `/dev/null`, is written densely instead. Nothing on a device
+/// reads back as zeros by itself — a hole skipped there kept whatever the
+/// disk held before, and the image was not the volume its hash described
+/// — and a device has no length to set: `set_len` failed on it with
+/// EINVAL after every byte was written, and the run said "extraction
+/// failed", exit 3.
 #[derive(Debug)]
 pub struct SparseFile {
     file: File,
     written: u64,
+    /// Not a regular file: every byte goes out, zeros included.
+    dense: bool,
+    /// For a dense sink, the ranges `[start, end)` written so far — and,
+    /// when resumed, the prefix that was there already. `finish` writes
+    /// zeros over the rest.
+    covered: std::collections::BTreeMap<u64, u64>,
 }
 
 impl SparseFile {
@@ -1021,35 +1034,99 @@ impl SparseFile {
             .create(true)
             .truncate(true)
             .open(path)?;
-        Ok(SparseFile { file, written: 0 })
+        SparseFile::with(file, 0)
     }
 
-    /// Open `path` for resuming: existing contents are kept.
-    pub fn open_existing(path: impl AsRef<Path>) -> io::Result<SparseFile> {
+    /// Open `path` for resuming: existing contents are kept, and its first
+    /// `prefix` bytes are what an earlier run wrote.
+    pub fn open_existing(path: impl AsRef<Path>, prefix: u64) -> io::Result<SparseFile> {
         let file = OpenOptions::new().write(true).open(path)?;
-        Ok(SparseFile { file, written: 0 })
+        SparseFile::with(file, prefix)
+    }
+
+    fn with(file: File, prefix: u64) -> io::Result<SparseFile> {
+        let dense = !file.metadata()?.is_file();
+        let mut covered = std::collections::BTreeMap::new();
+        if prefix > 0 {
+            covered.insert(0, prefix);
+        }
+        Ok(SparseFile {
+            file,
+            written: 0,
+            dense,
+            covered,
+        })
     }
 
     /// Bytes actually written (holes excluded).
     pub fn bytes_written(&self) -> u64 {
         self.written
     }
+
+    /// Note `[start, end)` as written, merged with what it touches.
+    fn cover(&mut self, start: u64, end: u64) {
+        let (mut lo, mut hi) = (start, end);
+        if let Some((&a, &b)) = self.covered.range(..=lo).next_back() {
+            if b >= lo {
+                lo = a;
+                hi = hi.max(b);
+                self.covered.remove(&a);
+            }
+        }
+        while let Some((&a, &b)) = self.covered.range(lo..=hi).next() {
+            hi = hi.max(b);
+            self.covered.remove(&a);
+        }
+        self.covered.insert(lo, hi);
+    }
 }
 
 impl BlockSink for SparseFile {
     fn write_at(&mut self, offset: u64, buf: &[u8]) -> io::Result<()> {
-        if buf.iter().all(|&b| b == 0) {
+        if !self.dense && buf.iter().all(|&b| b == 0) {
             return Ok(());
         }
         self.file.write_all_at(buf, offset)?;
         self.written += buf.len() as u64;
+        if self.dense {
+            self.cover(offset, offset + buf.len() as u64);
+        }
         Ok(())
     }
 
     fn finish(&mut self, len: u64) -> io::Result<()> {
-        self.file.set_len(len)?;
+        if self.dense {
+            // Zeros wherever nothing was written: the holes of the volume,
+            // and its tail past the last block.
+            let zeros = vec![0u8; 1 << 20];
+            let mut at = 0u64;
+            let gaps: Vec<(u64, u64)> = self
+                .covered
+                .iter()
+                .map(|(&a, &b)| (a, b))
+                .chain(std::iter::once((len, len)))
+                .filter_map(|(a, b)| {
+                    let gap = (at, a.min(len));
+                    at = at.max(b);
+                    (gap.0 < gap.1).then_some(gap)
+                })
+                .collect();
+            for (mut from, to) in gaps {
+                while from < to {
+                    let n = (to - from).min(zeros.len() as u64) as usize;
+                    self.file.write_all_at(&zeros[..n], from)?;
+                    from += n as u64;
+                }
+            }
+        } else {
+            self.file.set_len(len)?;
+        }
         self.file.flush()?;
-        self.file.sync_all()
+        match self.file.sync_all() {
+            // A character device such as /dev/null has nothing to flush.
+            Err(e) if self.dense && e.kind() == io::ErrorKind::InvalidInput => Ok(()),
+            other => other,
+        }
     }
 }
 

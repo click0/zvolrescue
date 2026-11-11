@@ -24,6 +24,34 @@ use std::path::{Path, PathBuf};
 
 use crate::disks;
 
+/// Why an output was refused: it would write an input. Carried inside
+/// the `io::Error` [`Evidence::check`] returns, so that a refusal can be
+/// told from a check that could not be made at all.
+#[derive(Debug)]
+struct Refusal(String);
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Refusal {}
+
+fn refusal(why: String) -> io::Error {
+    io::Error::other(Refusal(why))
+}
+
+/// Whether `e`, from [`Evidence::check`], says the output would write an
+/// input — as opposed to the path not being one that can be looked at:
+/// a file where a directory should be, a loop of links, a name too long,
+/// a directory this user may not enter. Those are no refusal; the write
+/// would fail on them anyway, and said as a refusal they read "the path
+/// holds something this run reads", which was false.
+pub fn is_refusal(e: &io::Error) -> bool {
+    e.get_ref().is_some_and(|inner| inner.is::<Refusal>())
+}
+
 /// What a run reads, reduced to what a write could reach.
 #[derive(Debug, Clone, Default)]
 pub struct Evidence {
@@ -119,19 +147,19 @@ impl Evidence {
             let node = (o.dev(), o.ino());
             for i in &self.inputs {
                 if i.node == node {
-                    return Err(io::Error::other(format!(
+                    return Err(refusal(format!(
                         "output {shown} is the same file as input {}",
                         i.path.display()
                     )));
                 }
                 if i.backing.contains(&node) {
-                    return Err(io::Error::other(format!(
+                    return Err(refusal(format!(
                         "output {shown} is the file loop device {} reads",
                         i.path.display()
                     )));
                 }
                 if i.holders.contains(&node) {
-                    return Err(io::Error::other(format!(
+                    return Err(refusal(format!(
                         "output {shown} is the image holding the filesystem input {} is on",
                         i.path.display()
                     )));
@@ -142,7 +170,7 @@ impl Evidence {
             let dev = o.rdev();
             for i in &self.inputs {
                 if i.raw.iter().any(|&r| disks::overlap(dev, r)) {
-                    return Err(io::Error::other(format!(
+                    return Err(refusal(format!(
                         "output {shown} shares its bytes with input {} (the same device, a partition of it, the disk it is on, or the disk under its filesystem)",
                         i.path.display()
                     )));
@@ -160,7 +188,7 @@ impl Evidence {
         };
         for i in &self.inputs {
             if i.device.is_some_and(|e| disks::overlap(m.dev(), e)) {
-                return Err(io::Error::other(format!(
+                return Err(refusal(format!(
                     "output directory {} is on input device {}",
                     landing.display(),
                     i.path.display()
@@ -188,15 +216,15 @@ impl Evidence {
             for i in &self.inputs {
                 let input = i.path.display();
                 if i.node == f.node {
-                    return Err(io::Error::other(format!("{what} over input {input}")));
+                    return Err(refusal(format!("{what} over input {input}")));
                 }
                 if i.backing.contains(&f.node) || (raw && i.holders.contains(&f.node)) {
-                    return Err(io::Error::other(format!(
+                    return Err(refusal(format!(
                         "{what} over {file}, which holds input {input}"
                     )));
                 }
                 if i.device.is_some_and(|e| disks::overlap(f.on, e)) {
-                    return Err(io::Error::other(format!(
+                    return Err(refusal(format!(
                         "{what} over {file}, which is on input device {input}"
                     )));
                 }
