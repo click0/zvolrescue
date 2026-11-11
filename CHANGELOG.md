@@ -380,6 +380,17 @@ tagged. `v0.7.1` is the release that carries those six.
   is a usage error (exit 1), not "0 bytes, nothing found" (exit 3), and
   a member it starts past the end of is said to be skipped. The manual's
   example dumped candidate `3`; candidates are `c0003`.
+* **`zvoltimeline --dataset` lost what it was asked about.** The filter
+  compared names, so a dataset renamed and then destroyed lost its
+  rename and its destruction to a `--dataset` of the name it was made
+  with (T-08: a name at any TXG); `--pending` with `--dataset`, the
+  manual's own example, showed nothing pending; and a name that was
+  never there printed "no change between them" and exited 0. The name
+  is followed by GUID through its renames, what is pending stays, and a
+  name in none of the TXGs read is said, exit 3. A destroyed snapshot
+  says, in the text as in the JSON, the TXG it was last seen at, and
+  both give the command that reads it back (T-05) — `zvolrescue dump
+  tank/vm/disk0@before … --txg N` gives the image it had.
 
 ## v0.9.12 — 2026-11-07
 

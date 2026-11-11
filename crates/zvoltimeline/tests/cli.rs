@@ -102,3 +102,62 @@ fn a_history_with_nothing_readable_or_a_member_missing_says_so() {
     );
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// T-05: a destroyed snapshot says when it was last there and how to
+/// read it back, in the text as in the JSON — the text had neither, and
+/// the JSON no command. `--pending` with `--dataset` shows what is
+/// pending, which the manual's own example asks for and the filter took
+/// away; and a `--dataset` that names nothing is not "no change", exit
+/// 0, but nothing found (exit 3).
+#[test]
+fn a_destroyed_snapshot_says_how_to_get_it_back() {
+    use zfs_read::fixture::destroyed_zvol_members;
+    let dir = scratch("snapshot");
+    let mut pool = Pool::mirror("tank", 0x5eed_0000_0000_0001, 12).txgs(&[
+        (4816228, 1757100000),
+        (4816229, 1757100005),
+        (4816230, 1757100010),
+    ]);
+    let (images, _, last_with) = destroyed_zvol_members(&mut pool, 64 * 1024 * 1024);
+    let m: Vec<String> = images
+        .iter()
+        .enumerate()
+        .map(|(i, img)| {
+            let p = dir.join(format!("member{i}.img"));
+            std::fs::write(&p, img).expect("write member");
+            p.to_string_lossy().into_owned()
+        })
+        .collect();
+    let out = Command::new(env!("CARGO_BIN_EXE_zvoltimeline"))
+        .args([
+            "--dataset",
+            "tank/vm/disk0@before",
+            "--pending",
+            &m[0],
+            &m[1],
+        ])
+        .output()
+        .expect("run");
+    assert_eq!(out.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = text
+        .lines()
+        .find(|l| l.contains("snapshot-destroyed"))
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(
+        line.contains(&format!("last seen at txg {last_with}")),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "-> zvolrescue dump tank/vm/disk0@before {} {} --txg {last_with} -o",
+            m[0], m[1]
+        )),
+        "{text}"
+    );
+    assert!(text.lines().any(|l| l.contains(" pending ")), "{text}");
+
+    let (code, err) = run(&["--dataset", "tank/nosuch", &m[0], &m[1]]);
+    assert_eq!(code, 3, "{err}");
+    assert!(err.contains("no dataset or snapshot of that name"), "{err}");
+}

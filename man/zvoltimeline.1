@@ -35,7 +35,14 @@ Oldest transaction group to read; default the oldest that verifies.
 .It Fl -to Ar txg
 Newest transaction group to read; default the newest that verifies.
 .It Fl -dataset Ar name | guid
-Only events about this object: a dataset name at any TXG, or a GUID.
+Only events about this object: a dataset or snapshot name it had at
+any TXG, or its GUID.
+It is followed through its renames by GUID.
+What is about the pool rather than one object stays: what
+.Fl -pending
+reports, and a TXG whose MOS could not be walked.
+A name or GUID that is in none of the transaction groups read is said,
+and the exit status is 3.
 .It Fl -pending
 Also report how much space is held by things ZFS has finished with
 but has not freed.
@@ -89,8 +96,10 @@ and
 .Sh EXIT STATUS
 As in
 .Xr zvolrescue 1 :
-0 success, 1 usage, 2 evidence unreadable, 3 nothing readable, 5
-refused, 7 the medium refused a read.
+0 success, 1 usage, 2 evidence unreadable, 3 nothing readable, or
+nothing about the
+.Fl -dataset
+asked for, 5 refused, 7 the medium refused a read.
 .Sh EXAMPLES
 Everything the ring of two mirror members still tells, as JSON:
 .Dl zvoltimeline -f json /dev/ada0p3 /dev/ada1p3

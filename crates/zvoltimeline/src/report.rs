@@ -61,6 +61,9 @@ struct TimelineOut {
     txgs: Vec<u64>,
     /// TXGs that were read but whose MOS could not be walked.
     unreadable_txgs: Vec<u64>,
+    /// The object `--dataset` asked about.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dataset: Option<String>,
     events: Vec<EventOut>,
 }
 
@@ -121,10 +124,26 @@ fn print_text(out: &TimelineOut, w: &mut dyn Write) -> std::io::Result<()> {
             format!(", {} unreadable", out.unreadable_txgs.len())
         }
     )?;
-    if out.events.is_empty() {
+    if let Some(d) = out
+        .dataset
+        .as_ref()
+        .filter(|_| out.events.iter().all(|e| e.object.is_none()))
+    {
+        writeln!(w, "nothing in them about {d}")?;
+        if out.events.is_empty() {
+            return Ok(());
+        }
+    } else if out.events.is_empty() {
         writeln!(w, "no change between them")?;
         return Ok(());
     }
+    // What was destroyed says when it was last there: the TXG to read it
+    // back at, which the JSON had and the text did not (T-05).
+    let details = |e: &EventOut| match e.last_seen_txg {
+        Some(t) if e.details.is_empty() => format!("last seen at txg {t}"),
+        Some(t) => format!("{}; last seen at txg {t}", e.details),
+        None => e.details.clone(),
+    };
     writeln!(
         w,
         "{:<12} {:<22} {:<18} {:<28} DETAILS",
@@ -138,13 +157,44 @@ fn print_text(out: &TimelineOut, w: &mut dyn Write) -> std::io::Result<()> {
             e.time.as_deref().unwrap_or("—"),
             e.event,
             e.object.as_deref().unwrap_or("—"),
-            e.details
+            details(e)
         )?;
         if let Some(cmd) = &e.recover_with {
             writeln!(w, "{:<12} {:<22} {:<18} -> {cmd}", "", "", "")?;
         }
     }
     Ok(())
+}
+
+/// The events about one object, `--dataset` (T-08): a name it had at
+/// any TXG read, or its GUID.
+///
+/// By GUID once the name is known: a dataset renamed and then destroyed
+/// lost both events to a filter on the name asked for, which it no
+/// longer had. What is about the pool and not any object — what is
+/// pending, a TXG that could not be walked — stays: `--pending` asked
+/// for it, and the manual's own example showed none of it; and a gap in
+/// the history is a gap in this object's.
+fn about(events: Vec<Event>, want: &str) -> Vec<Event> {
+    let mut guids: BTreeSet<u64> = events
+        .iter()
+        .filter(|e| e.object.as_deref() == Some(want))
+        .map(|e| e.guid)
+        .collect();
+    if let Some(g) = want
+        .strip_prefix("0x")
+        .and_then(|h| u64::from_str_radix(h, 16).ok())
+    {
+        guids.insert(g);
+    }
+    events
+        .into_iter()
+        .filter(|e| {
+            matches!(e.kind, Kind::Pending | Kind::Unreadable)
+                || e.object.as_deref() == Some(want)
+                || (e.guid != 0 && guids.contains(&e.guid))
+        })
+        .collect()
 }
 
 /// Datasets at one TXG, or `None` when its MOS cannot be walked.
@@ -323,13 +373,13 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         });
     }
 
+    // Nothing about the object asked for, when one was asked for.
+    let mut none_about: Option<String> = None;
     if let Some(want) = &opts.dataset {
-        let guid = want
-            .strip_prefix("0x")
-            .and_then(|h| u64::from_str_radix(h, 16).ok());
-        events.retain(|e| {
-            e.object.as_deref() == Some(want.as_str()) || guid.is_some_and(|g| e.guid == g)
-        });
+        events = about(events, want);
+        if !events.iter().any(|e| e.object.is_some()) {
+            none_about = Some(want.clone());
+        }
     }
     sort(&mut events);
 
@@ -339,6 +389,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         members: members.paths.clone(),
         txgs: candidates.iter().map(|c| c.ub.txg).collect(),
         unreadable_txgs: unreadable,
+        dataset: opts.dataset.clone(),
         events: events
             .iter()
             .map(|e| EventOut {
@@ -349,8 +400,10 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 guid: format!("{:#018x}", e.guid),
                 details: e.details.clone(),
                 last_seen_txg: e.last_seen_txg,
+                // A snapshot is read back by the same commands as the
+                // dataset it was of, at the TXG it was last seen at (T-05).
                 recover_with: match (e.kind, &e.object, e.last_seen_txg) {
-                    (Kind::Destroyed, Some(o), Some(t)) => {
+                    (Kind::Destroyed | Kind::SnapshotDestroyed, Some(o), Some(t)) => {
                         let (kind, encrypted) = what.get(&e.guid).copied().unwrap_or((None, false));
                         recover_with(spec, o, t, kind, encrypted)
                     }
@@ -411,7 +464,17 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     // verified. Exit 2 when a member given could not be opened, as
     // `list` says it: the history is of the members that were.
     let unreadable: BTreeSet<u64> = out.unreadable_txgs.iter().copied().collect();
-    let code = if out.txgs.iter().all(|t| unreadable.contains(t)) {
+    // And exit 3 when `--dataset` named nothing that was there: "no
+    // change between them", exit 0, said that it had been there all
+    // along and stayed as it was.
+    if let Some(want) = &none_about {
+        eprintln!(
+            "zvoltimeline: --dataset {want}: no dataset or snapshot of that name or GUID in transaction groups {}–{}",
+            out.txgs.first().copied().unwrap_or(0),
+            out.txgs.last().copied().unwrap_or(0)
+        );
+    }
+    let code = if out.txgs.iter().all(|t| unreadable.contains(t)) || none_about.is_some() {
         exit::UNRECOVERABLE
     } else if members.any_failed() {
         exit::EVIDENCE
@@ -437,6 +500,53 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         written,
         &members.ledger.incidents(),
     )
+}
+
+#[cfg(test)]
+mod about_tests {
+    use super::*;
+
+    fn event(txg: u64, kind: Kind, object: Option<&str>, guid: u64) -> Event {
+        Event {
+            txg,
+            time: None,
+            kind,
+            object: object.map(str::to_string),
+            guid,
+            details: String::new(),
+            last_seen_txg: None,
+        }
+    }
+
+    /// T-08: a name at any TXG. A dataset made as `a`, renamed `b` and
+    /// destroyed as `b` is all one history; its snapshot and another
+    /// dataset are objects of their own, and what is pending stays.
+    #[test]
+    fn a_name_is_followed_through_its_renames_by_guid() {
+        let events = vec![
+            event(10, Kind::Created, Some("tank/a"), 7),
+            event(11, Kind::Snapshot, Some("tank/a@s1"), 8),
+            event(20, Kind::Renamed, Some("tank/b"), 7),
+            event(20, Kind::Renamed, Some("tank/b@s1"), 8),
+            event(25, Kind::Pending, None, 0),
+            event(30, Kind::Destroyed, Some("tank/b"), 7),
+            event(30, Kind::Created, Some("tank/other"), 9),
+            event(31, Kind::Host, None, 0),
+        ];
+        let kept = |want| {
+            about(events.clone(), want)
+                .iter()
+                .map(|e| e.txg)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(kept("tank/a"), [10, 20, 25, 30]);
+        assert_eq!(kept("tank/b"), [10, 20, 25, 30]);
+        assert_eq!(kept("tank/a@s1"), [11, 20, 25]);
+        assert_eq!(kept("0x0000000000000009"), [25, 30]);
+        assert!(about(events.clone(), "tank/none")
+            .iter()
+            .all(|e| e.object.is_none()));
+    }
 }
 
 #[cfg(test)]
