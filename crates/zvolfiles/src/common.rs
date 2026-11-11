@@ -26,6 +26,48 @@ pub fn os_bytes(s: &std::ffi::OsStr) -> Vec<u8> {
     s.to_string_lossy().as_bytes().to_vec()
 }
 
+/// Bytes of a file or object written as zeros because the block that
+/// held them could not be read whole (Z-06, SPEC F-33): which block,
+/// where in the file, how much, and why. A count alone said that
+/// something was missing and not what.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Zeroed {
+    pub block: u64,
+    pub offset: u64,
+    pub length: u64,
+    pub reason: String,
+}
+
+/// Resolve a `--path` to its object and to its path as the dataset
+/// spells it (Z-09), or say why not.
+///
+/// A path that is not there at this transaction group is not damage:
+/// a file removed since is still at an older one, and the message says
+/// so rather than calling the dataset unreadable.
+pub fn resolve_path(
+    fs: &Filesystem<'_, '_>,
+    asked: &std::ffi::OsStr,
+    txg: u64,
+) -> Result<(u64, Vec<u8>), u8> {
+    fs.resolve(&os_bytes(asked)).map_err(|e| {
+        let e = match e {
+            zfs_read::zio::ReadError::Io(m) => m,
+            other => other.to_string(),
+        };
+        let shown = asked.to_string_lossy();
+        // The reader's message starts with the path; the flag and the
+        // txg say the rest.
+        let why = e
+            .strip_prefix(&format!("{shown}: "))
+            .unwrap_or(&e)
+            .to_string();
+        eprintln!(
+            "zvolfiles: --path {shown}: {why} at txg {txg}; a file removed since may still be at an older --txg"
+        );
+        exit::UNRECOVERABLE
+    })
+}
+
 /// Which transaction group to read, and the key if the dataset needs one.
 #[derive(Debug, Args)]
 pub struct AtArgs {

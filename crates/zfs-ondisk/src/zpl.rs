@@ -118,14 +118,14 @@ pub struct Znode {
     pub uid: u64,
     /// Group.
     pub gid: u64,
-    /// Access, modification, change and creation times, seconds only.
-    pub atime: u64,
+    /// Access time.
+    pub atime: Time,
     /// Modification time.
-    pub mtime: u64,
+    pub mtime: Time,
     /// Change time.
-    pub ctime: u64,
+    pub ctime: Time,
     /// Creation time.
-    pub crtime: u64,
+    pub crtime: Time,
     /// Object holding the extended attributes, when there is one.
     pub xattr: u64,
     /// Device number for a device node.
@@ -145,6 +145,42 @@ pub struct Znode {
     /// project 0 unless told otherwise. Reporting the first as zero
     /// would invent a project that was never set.
     pub projid: Option<u64>,
+}
+
+/// One timestamp of a file: seconds either side of the epoch and the
+/// nanoseconds into that second, as OpenZFS keeps them — two 64-bit
+/// words, the first a `time_t` (`ZFS_TIME_DECODE`).
+///
+/// Read as one unsigned count of seconds, a time before 1970 came out
+/// in the year 584 554 051 223 and the nanoseconds were dropped.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Time {
+    /// Seconds since the epoch; negative before it.
+    pub secs: i64,
+    /// Nanoseconds into the second, below 10^9.
+    pub nanos: u32,
+}
+
+impl Time {
+    /// From the two words on disk. A nanosecond count of a second or
+    /// more is not one, and is read as none rather than carried.
+    pub fn from_words(secs: u64, nanos: u64) -> Time {
+        Time {
+            secs: secs as i64,
+            nanos: u32::try_from(nanos)
+                .ok()
+                .filter(|n| *n < 1_000_000_000)
+                .unwrap_or(0),
+        }
+    }
+
+    /// From a 16-byte attribute; `None` when it is shorter.
+    pub fn from_attr(bytes: &[u8], endian: Endian) -> Option<Time> {
+        Some(Time::from_words(
+            endian.u64_at(bytes, 0)?,
+            endian.u64_at(bytes, 8)?,
+        ))
+    }
 }
 
 impl Znode {
@@ -172,11 +208,12 @@ pub fn parse_znode_phys(bonus: &[u8], endian: Endian) -> Result<Znode, ParseErro
         });
     }
     let at = |o: usize| endian.u64_at(bonus, o).expect("length checked");
+    let time = |o: usize| Time::from_words(at(o), at(o + 8));
     Ok(Znode {
-        atime: at(0),
-        mtime: at(16),
-        ctime: at(32),
-        crtime: at(48),
+        atime: time(0),
+        mtime: time(16),
+        ctime: time(32),
+        crtime: time(48),
         size: at(72),
         parent: at(80),
         links: at(88),

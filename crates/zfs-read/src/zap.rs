@@ -22,7 +22,38 @@ pub const MAX_LEAVES: usize = 1 << 20;
 pub const MAX_PTRTBL_BLOCKS: u64 = 1 << 20;
 
 /// Read every entry of the ZAP object `obj`, in on-disk order.
+///
+/// All or nothing: a leaf that cannot be read fails the whole object.
+/// That is right for the pool's own metadata, where half a directory of
+/// datasets is a wrong answer; a file system's directory wants
+/// [`read_zap_partial`].
 pub fn read_zap(obj: &ObjectReader<'_, '_>) -> Result<Vec<Entry>, ReadError> {
+    let read = read_zap_partial(obj)?;
+    match read.lost.into_iter().next() {
+        Some((_, e)) => Err(e),
+        None => Ok(read.entries),
+    }
+}
+
+/// What a fat ZAP gave, and the leaves it could not.
+#[derive(Debug, Clone)]
+pub struct ZapRead {
+    /// Every entry of every leaf that could be read.
+    pub entries: Vec<Entry>,
+    /// Leaf blocks that could not be read, or were not leaves when read
+    /// whole, by block id: the entries hashed into them are missing.
+    pub lost: Vec<(u64, ReadError)>,
+}
+
+/// Read what can be read of the ZAP object `obj`.
+///
+/// One leaf of a fat ZAP that could not be read failed the whole object,
+/// and with it every entry in every other leaf: a directory of thousands
+/// of files lost to one bad block, and every subtree under it. The
+/// leaves that read are read; the ones that did not are named. Block 0
+/// and the pointer table are still all or nothing — without them no
+/// leaf can be found — and so is a device whose refusal stops the run.
+pub fn read_zap_partial(obj: &ObjectReader<'_, '_>) -> Result<ZapRead, ReadError> {
     let (block0, endian) = obj.read_blkid_ext(0)?;
     let kind = block_type(&block0, endian);
     trace!(
@@ -39,7 +70,10 @@ pub fn read_zap(obj: &ObjectReader<'_, '_>) -> Result<Vec<Entry>, ReadError> {
                 entries.len(),
                 names(&entries)
             );
-            Ok(entries)
+            Ok(ZapRead {
+                entries,
+                lost: Vec::new(),
+            })
         }
         Some(BlockType::Header) => {
             let hdr = parse_fat_header(&block0, endian)?;
@@ -89,11 +123,26 @@ pub fn read_zap(obj: &ObjectReader<'_, '_>) -> Result<Vec<Entry>, ReadError> {
                 ));
             }
             let mut out = Vec::new();
+            let mut lost = Vec::new();
             for blkid in leaves {
-                let (leaf, e) = obj.read_blkid_ext(blkid)?;
+                let (leaf, e) = match obj.read_blkid_ext(blkid) {
+                    Ok(v) => v,
+                    Err(e @ ReadError::Medium { stop: true, .. }) => return Err(e),
+                    Err(e) => {
+                        trace!("zap", "leaf {blkid}: {e}");
+                        lost.push((blkid, e));
+                        continue;
+                    }
+                };
                 match block_type(&leaf, e) {
                     Some(BlockType::Leaf) => {
-                        let entries = parse_leaf(&leaf, e)?;
+                        let entries = match parse_leaf(&leaf, e) {
+                            Ok(v) => v,
+                            Err(err) => {
+                                lost.push((blkid, ReadError::from(err)));
+                                continue;
+                            }
+                        };
                         trace!(
                             "zap",
                             "leaf {blkid}: {} entries: {}",
@@ -110,7 +159,7 @@ pub fn read_zap(obj: &ObjectReader<'_, '_>) -> Result<Vec<Entry>, ReadError> {
                     }
                 }
             }
-            Ok(out)
+            Ok(ZapRead { entries: out, lost })
         }
         Some(BlockType::Leaf) => Err(ReadError::Io("ZAP object starts with a leaf block".into())),
         None => {
@@ -304,6 +353,42 @@ mod tests {
         let e = read_zap(&obj).unwrap_err().to_string();
         assert!(e.contains("does not fit"), "{e}");
         assert!(t.elapsed().as_secs() < 5);
+    }
+
+    /// One leaf that does not verify loses the entries in it and no
+    /// other: the whole object failed, and with it every entry of every
+    /// leaf that read. The strict reader still refuses.
+    #[test]
+    fn a_bad_leaf_loses_only_its_own_entries() {
+        let (s, a, d) = setup(|al, m| {
+            let mut hdr = fat_header(4096, 0, 3);
+            hdr[16..24].copy_from_slice(&1u64.to_le_bytes());
+            hdr[24..32].copy_from_slice(&1u64.to_le_bytes());
+            let mut table = vec![0u8; 4096];
+            for i in 0..512usize {
+                let target: u64 = if i < 256 { 2 } else { 3 };
+                table[i * 8..i * 8 + 8].copy_from_slice(&target.to_le_bytes());
+            }
+            let l2 = leaf(4096, &[("kept", 8, 1u64.to_be_bytes().to_vec())]);
+            let l3 = leaf(4096, &[("lost", 8, 2u64.to_be_bytes().to_vec())]);
+            let d = dnode_with_blocks(al, m, &[hdr, table, l2, l3.clone()], 4096);
+            let at = m[0]
+                .windows(l3.len())
+                .position(|w| w == l3.as_slice())
+                .expect("the leaf is on the member");
+            m[0][at + 100] ^= 0xff;
+            d
+        });
+        let dyns: Vec<Option<&dyn BlockSource>> =
+            s.iter().map(|x| Some(x as &dyn BlockSource)).collect();
+        let reader = PoolReader::new(&a, dyns);
+        let obj = ObjectReader::new(&reader, d, Endian::Little);
+        let read = read_zap_partial(&obj).unwrap();
+        let names: Vec<&str> = read.entries.iter().map(|x| x.name.as_str()).collect();
+        assert_eq!(names, ["kept"]);
+        assert_eq!(read.lost.len(), 1);
+        assert_eq!(read.lost[0].0, 3);
+        assert!(read_zap(&obj).is_err());
     }
 
     #[test]

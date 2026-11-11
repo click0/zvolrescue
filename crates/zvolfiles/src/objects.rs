@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use zvol_common::evidence::FileRef;
 use zvol_common::{exit, Format, Global, PoolSpec};
 
-use crate::common::{with_dataset, AtArgs};
+use crate::common::{with_dataset, AtArgs, Zeroed};
 use crate::out::{OutError, OutTree};
 
 #[derive(Debug, Serialize)]
@@ -30,6 +30,9 @@ struct ObjectOut {
     sha256: Option<String>,
     /// Blocks that could not be read and were written as zeros.
     errors: u64,
+    /// Which, and why (Z-06).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    zeroed: Vec<Zeroed>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
     /// The error was a refusal (exit 5).
@@ -55,6 +58,23 @@ struct ObjectsOut {
     /// were not looked at.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     interrupted: bool,
+    /// `--strict` ended the run at this block (exit 4); objects after
+    /// the last listed were not looked at.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stopped: Option<String>,
+}
+
+/// How writing one object can end short of it.
+enum WriteError {
+    Out(OutError),
+    /// `--strict`, and a block that could not be read: the run ends.
+    Strict(String),
+}
+
+impl From<OutError> for WriteError {
+    fn from(e: OutError) -> WriteError {
+        WriteError::Out(e)
+    }
 }
 
 /// Run `objects`.
@@ -73,9 +93,10 @@ pub fn run(
         let tree = OutTree::open(g, spec, at, opened, output)?;
         let max = fs.objects.max_object();
         let mut objects = Vec::new();
+        let mut stopped = None;
         let mut obj = 0;
         while obj <= max {
-            if interrupt.load(std::sync::atomic::Ordering::Relaxed) {
+            if interrupt.load(std::sync::atomic::Ordering::Relaxed) || stopped.is_some() {
                 break;
             }
             let Ok(d) = fs.objects.get(obj) else {
@@ -101,17 +122,33 @@ pub fn run(
                 size: d.datablksz().saturating_mul(d.maxblkid.saturating_add(1)),
                 sha256: None,
                 errors: 0,
+                zeroed: Vec::new(),
                 error: None,
                 refused: false,
             };
             match write_object(fs, &tree, obj, record.size, output, strict, &interrupt) {
-                Ok((hash, errors)) => {
+                Ok((hash, zeroed)) => {
+                    if let Some(first) = zeroed.first() {
+                        eprintln!(
+                            "zvolfiles: object {obj}: {} block(s) written as zeros, the first {}: {} (the index lists each)",
+                            zeroed.len(),
+                            first.block,
+                            first.reason
+                        );
+                    }
                     record.sha256 = Some(hash);
-                    record.errors = errors;
+                    record.errors = zeroed.len() as u64;
+                    record.zeroed = zeroed;
                 }
-                Err(e) => {
+                Err(WriteError::Out(e)) => {
                     record.refused = matches!(e, OutError::Refused(_));
                     record.error = Some(e.to_string());
+                }
+                // It said "stop at the first block that cannot be read",
+                // and went on to the next object.
+                Err(WriteError::Strict(why)) => {
+                    record.error = Some(format!("{why}; --strict stops the run here"));
+                    stopped = Some(format!("object {obj}: {why}"));
                 }
             }
             objects.push(record);
@@ -129,6 +166,7 @@ pub fn run(
                 incomplete,
                 damaged: fs.damaged.clone(),
                 interrupted: interrupt.load(std::sync::atomic::Ordering::Relaxed),
+                stopped,
             },
             opened.members.paths.clone(),
             opened.members.ledger.clone(),
@@ -195,11 +233,14 @@ pub fn run(
     if out.interrupted {
         eprintln!("zvolfiles: interrupted; the index lists the objects written (exit 6)");
     }
+    if let Some(at) = &out.stopped {
+        eprintln!("zvolfiles: --strict: {at}; the run stops here, and the index lists the objects written (exit 4)");
+    }
     let code = if out.interrupted {
         exit::INTERRUPTED
     } else if refused > 0 {
         exit::REFUSED
-    } else if out.incomplete > 0 || out.written < out.objects.len() {
+    } else if out.incomplete > 0 || out.written < out.objects.len() || out.stopped.is_some() {
         exit::PARTIAL
     } else {
         0
@@ -227,26 +268,31 @@ fn write_object(
     output: &Path,
     strict: bool,
     stop: &std::sync::atomic::AtomicBool,
-) -> Result<(String, u64), OutError> {
+) -> Result<(String, Vec<Zeroed>), WriteError> {
     let fail = OutError::Failed;
     let obj = fs.object(object).map_err(|e| fail(e.to_string()))?;
     let bs = obj.dnode().datablksz().max(512);
     let path = output.join("objects").join(format!("{object:06}.bin"));
     let mut file = tree.create(&path)?;
     let mut hasher = Sha256::new();
-    let mut errors = 0u64;
+    let mut zeroed = Vec::new();
     let zeros = vec![0u8; bs as usize];
     for blkid in 0..size.div_ceil(bs) {
         if stop.load(std::sync::atomic::Ordering::Relaxed) {
-            return Err(fail(format!("interrupted at block {blkid}")));
+            return Err(fail(format!("interrupted at block {blkid}")).into());
         }
         let chunk = match obj.read_blkid(blkid) {
             Ok(b) => b,
             Err(e) => {
                 if strict {
-                    return Err(fail(format!("block {blkid}: {e}")));
+                    return Err(WriteError::Strict(format!("block {blkid}: {e}")));
                 }
-                errors += 1;
+                zeroed.push(Zeroed {
+                    block: blkid,
+                    offset: blkid * bs,
+                    length: bs,
+                    reason: e.to_string(),
+                });
                 zeros.clone()
             }
         };
@@ -265,5 +311,5 @@ fn write_object(
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
-    Ok((hex, errors))
+    Ok((hex, zeroed))
 }

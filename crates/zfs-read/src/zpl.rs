@@ -25,7 +25,7 @@ use zvolrescue_io::trace;
 use crate::dmu::{DnodeArray, ObjectReader};
 use crate::dsl::Dataset;
 
-use crate::zap::read_zap;
+use crate::zap::{read_zap, read_zap_partial};
 use crate::zio::{PoolReader, ReadError};
 
 /// How deep a directory walk goes. Cycles are caught by the set of
@@ -361,6 +361,13 @@ impl Filesystem<'_, '_> {
                 .and_then(|b| zpl::attr_u64(b, self.endian))
                 .unwrap_or(0)
         };
+        let time = |name: &str| -> zfs_ondisk::zpl::Time {
+            self.attr_num
+                .get(name)
+                .and_then(|n| by_num.get(n))
+                .and_then(|b| zfs_ondisk::zpl::Time::from_attr(b, self.endian))
+                .unwrap_or_default()
+        };
         let symlink = self
             .attr_num
             .get(attr::SYMLINK)
@@ -389,10 +396,10 @@ impl Filesystem<'_, '_> {
             links: word(attr::LINKS),
             uid: word(attr::UID),
             gid: word(attr::GID),
-            atime: word(attr::ATIME),
-            mtime: word(attr::MTIME),
-            ctime: word(attr::CTIME),
-            crtime: word(attr::CRTIME),
+            atime: time(attr::ATIME),
+            mtime: time(attr::MTIME),
+            ctime: time(attr::CTIME),
+            crtime: time(attr::CRTIME),
             xattr: word(attr::XATTR),
             rdev: word(attr::RDEV),
             parent: word(attr::PARENT),
@@ -447,10 +454,22 @@ impl Filesystem<'_, '_> {
         ))
     }
 
-    /// The entries of one directory (Z-01).
+    /// The entries of one directory (Z-01), all of them or an error.
     pub fn read_dir(&self, object: u64) -> Result<Vec<DirEntry>, ReadError> {
-        let entries = read_zap(&self.objects.object(object)?)?;
-        let mut out: Vec<DirEntry> = entries
+        let read = self.read_dir_partial(object)?;
+        match read.lost.into_iter().next() {
+            Some((_, e)) => Err(e),
+            None => Ok(read.entries),
+        }
+    }
+
+    /// The entries of one directory that can be read, and the leaves of
+    /// it that cannot: one bad leaf of a large directory lost every
+    /// entry in it, and every subtree under them.
+    pub fn read_dir_partial(&self, object: u64) -> Result<DirRead, ReadError> {
+        let read = read_zap_partial(&self.objects.object(object)?)?;
+        let mut out: Vec<DirEntry> = read
+            .entries
             .iter()
             .filter_map(|e| {
                 let v = e.value.as_u64()?;
@@ -468,7 +487,10 @@ impl Filesystem<'_, '_> {
         // rather than by the text, so two names that print alike still
         // come out in the same order every time.
         out.sort_by(|a, b| a.raw.cmp(&b.raw));
-        Ok(out)
+        Ok(DirRead {
+            entries: out,
+            lost: read.lost,
+        })
     }
 
     /// Resolve a slash-separated path from the root.
@@ -494,21 +516,43 @@ impl Filesystem<'_, '_> {
     /// disagreement between the two sets of tables can do is leave a
     /// file unfound, which is what would have happened anyway.
     pub fn lookup_bytes(&self, path: &[u8]) -> Result<u64, ReadError> {
+        self.resolve(path).map(|(object, _)| object)
+    }
+
+    /// Resolve a path, and say what it is called on disk.
+    ///
+    /// The second half is the path as the dataset spells it — each
+    /// component the bytes of the entry that matched, empty and `.`
+    /// components dropped. A path found by folding case or normalizing
+    /// was written under the spelling typed, a name that is nowhere on
+    /// disk (Z-09: a file comes out called what it was called), and
+    /// `./sub` was kept as typed and refused as a path no file can have.
+    pub fn resolve(&self, path: &[u8]) -> Result<(u64, Vec<u8>), ReadError> {
         let shown = String::from_utf8_lossy(path).into_owned();
         let mut at = self.root;
+        let mut on_disk: Vec<u8> = Vec::new();
         for part in path
             .split(|&b| b == b'/')
             .filter(|p| !p.is_empty() && *p != b".")
         {
-            let entries = self.read_dir(at)?;
+            let read = self.read_dir_partial(at)?;
+            let entries = &read.entries;
             let found = entries
                 .iter()
                 .find(|e| e.raw == part)
-                .or_else(|| self.matched_as_text(&entries, part))
-                .ok_or_else(|| ReadError::Io(format!("{shown}: no such file or directory")))?;
+                .or_else(|| self.matched_as_text(entries, part))
+                .ok_or_else(|| match read.lost.first() {
+                    // Not in what could be read: it may be in what could
+                    // not, and saying "no such file" would be a guess.
+                    Some((blkid, e)) => ReadError::Io(format!(
+                        "{shown}: not in the part of its directory that could be read (leaf block {blkid}: {e})"
+                    )),
+                    None => ReadError::Io(format!("{shown}: no such file or directory")),
+                })?;
+            on_disk = join_raw(&on_disk, &found.raw);
             at = found.object;
         }
-        Ok(at)
+        Ok((at, on_disk))
     }
 
     /// The fallbacks of [`Filesystem::lookup_bytes`]: a name read as
@@ -556,8 +600,14 @@ impl Filesystem<'_, '_> {
     /// its own hidden directory, whose entries are the attribute names
     /// and whose objects hold the values; that form survives attributes
     /// too large for a bonus buffer.
-    pub fn xattrs(&self, z: &Znode) -> Vec<(String, Vec<u8>)> {
-        let mut out: Vec<(String, Vec<u8>)> = Vec::new();
+    ///
+    /// What could not be read is said, never left out or made empty: an
+    /// unreadable value was recorded as an empty one, a value longer
+    /// than [`XATTR_READ_MAX`] was cut there without a word, and a
+    /// packed set or an attribute directory that could not be read was
+    /// no attributes at all.
+    pub fn xattrs(&self, z: &Znode) -> Xattrs {
+        let mut out = Xattrs::default();
         if let Some(packed) = &z.dxattr {
             match zfs_ondisk::nvlist::parse_packed(packed) {
                 Ok(nv) => {
@@ -566,35 +616,60 @@ impl Filesystem<'_, '_> {
                             zfs_ondisk::nvlist::Value::Bytes(b) => b.clone(),
                             other => format!("{other:?}").into_bytes(),
                         };
-                        out.push((name.to_string(), bytes));
+                        out.values.push(XattrValue {
+                            name: name.to_string(),
+                            size: bytes.len() as u64,
+                            value: bytes,
+                            error: None,
+                        });
                     }
                 }
-                Err(e) => trace!("zpl", "packed xattrs unreadable: {e}"),
+                Err(e) => out
+                    .errors
+                    .push(format!("extended attributes in the system attributes: {e}")),
             }
         }
         if z.xattr != 0 {
-            match self.read_dir(z.xattr) {
-                Ok(entries) => {
-                    for e in entries {
-                        // The value is the object's contents; a large one
-                        // is read whole because an attribute is small by
-                        // construction.
-                        let value = self
-                            .znode(e.object)
-                            .ok()
-                            .and_then(|vz| {
-                                let len = vz.size.min(64 * 1024) as usize;
-                                self.objects.object(e.object).ok()?.read_range(0, len).ok()
-                            })
-                            .unwrap_or_default();
-                        out.push((e.name, value));
+            match self.read_dir_partial(z.xattr) {
+                Ok(read) => {
+                    for (blkid, e) in &read.lost {
+                        out.errors.push(format!(
+                            "extended-attribute directory {}: leaf block {blkid}: {e}; the attributes in it are missing",
+                            z.xattr
+                        ));
+                    }
+                    for e in read.entries {
+                        // The value is the object's contents, read up to
+                        // a bound: an attribute is small by construction,
+                        // and one that is not is said to be cut.
+                        let read = self.znode(e.object).and_then(|vz| {
+                            let len = vz.size.min(XATTR_READ_MAX) as usize;
+                            let bytes = self.objects.object(e.object)?.read_range(0, len)?;
+                            Ok((vz.size, bytes))
+                        });
+                        out.values.push(match read {
+                            Ok((size, value)) => XattrValue {
+                                name: e.name,
+                                size,
+                                value,
+                                error: None,
+                            },
+                            Err(err) => XattrValue {
+                                name: e.name,
+                                size: 0,
+                                value: Vec::new(),
+                                error: Some(err.to_string()),
+                            },
+                        });
                     }
                 }
-                Err(e) => trace!("zpl", "xattr directory {} unreadable: {e}", z.xattr),
+                Err(e) => out
+                    .errors
+                    .push(format!("extended-attribute directory {}: {e}", z.xattr)),
             }
         }
-        out.sort_by(|a, b| a.0.cmp(&b.0));
-        out.dedup_by(|a, b| a.0 == b.0);
+        out.values.sort_by(|a, b| a.name.cmp(&b.name));
+        out.values.dedup_by(|a, b| a.name == b.name);
         out
     }
 
@@ -639,6 +714,50 @@ impl Filesystem<'_, '_> {
     }
 }
 
+/// A directory as far as it could be read.
+#[derive(Debug, Clone)]
+pub struct DirRead {
+    /// The entries of every leaf that could be read, in name order.
+    pub entries: Vec<DirEntry>,
+    /// The leaves that could not, by block id.
+    pub lost: Vec<(u64, ReadError)>,
+}
+
+/// The most of one extended attribute's value that is read: attributes
+/// are small by construction, and a value past this is said to be cut.
+pub const XATTR_READ_MAX: u64 = 64 * 1024;
+
+/// The extended attributes of one object, and what of them could not be
+/// read.
+#[derive(Debug, Clone, Default)]
+pub struct Xattrs {
+    /// Each attribute, in name order.
+    pub values: Vec<XattrValue>,
+    /// Sets of attributes that could not be read at all.
+    pub errors: Vec<String>,
+}
+
+impl Xattrs {
+    /// Whether there is nothing to say: no attribute and no error.
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty() && self.errors.is_empty()
+    }
+}
+
+/// One extended attribute.
+#[derive(Debug, Clone)]
+pub struct XattrValue {
+    /// Its name.
+    pub name: String,
+    /// The value's length on disk; more than `value` holds when it was
+    /// cut at [`XATTR_READ_MAX`].
+    pub size: u64,
+    /// The value, or as much of it as was read.
+    pub value: Vec<u8>,
+    /// Why the value could not be read; `value` is empty then.
+    pub error: Option<String>,
+}
+
 /// One file met while walking (Z-01, Z-03).
 #[derive(Debug, Clone)]
 pub struct Entry {
@@ -656,6 +775,10 @@ pub struct Entry {
     pub znode: Option<Znode>,
     /// Why the metadata could not be read.
     pub error: Option<String>,
+    /// A directory met a second time — damaged metadata, since ZFS has
+    /// no hard links to directories — and the path it was walked at the
+    /// first time. Its contents are listed there and not again.
+    pub walked_at: Option<String>,
 }
 
 impl Entry {
@@ -692,7 +815,8 @@ pub fn walk_from(
     recursive: bool,
 ) -> Vec<Entry> {
     let mut out = Vec::new();
-    let mut seen_dirs = std::collections::BTreeSet::new();
+    let mut seen_dirs = std::collections::BTreeMap::new();
+    seen_dirs.insert(from, shown_dir(prefix));
     walk_into(
         fs,
         from,
@@ -723,6 +847,15 @@ fn join_raw(prefix: &[u8], name: &[u8]) -> Vec<u8> {
     out
 }
 
+/// A directory's own path as a report shows it: the root is `.`.
+fn shown_dir(prefix: &str) -> String {
+    if prefix.is_empty() {
+        ".".to_string()
+    } else {
+        prefix.to_string()
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn walk_into(
     fs: &Filesystem<'_, '_>,
@@ -731,14 +864,9 @@ fn walk_into(
     raw_prefix: &[u8],
     recursive: bool,
     depth: usize,
-    seen_dirs: &mut std::collections::BTreeSet<u64>,
+    seen_dirs: &mut std::collections::BTreeMap<u64, String>,
     out: &mut Vec<Entry>,
 ) {
-    if !seen_dirs.insert(object) {
-        // Walked already: a cycle in damaged metadata. The entry that led
-        // here is recorded; its contents are where they were first met.
-        return;
-    }
     if depth > MAX_DEPTH {
         // Said, not dropped: a file below here used to be missing from
         // the walk with nothing to show it had been there.
@@ -750,23 +878,40 @@ fn walk_into(
             error: Some(format!(
                 "directory more than {MAX_DEPTH} levels deep; not walked (list --path {prefix} reaches it)"
             )),
+            walked_at: None,
         });
         return;
     }
-    let entries = match fs.read_dir(object) {
-        Ok(e) => e,
+    let read = match fs.read_dir_partial(object) {
+        Ok(r) => r,
         Err(e) => {
             out.push(Entry {
-                path: prefix.to_string(),
+                path: shown_dir(prefix),
                 raw_path: raw_prefix.to_vec(),
                 object,
                 znode: None,
                 error: Some(format!("directory: {e}")),
+                walked_at: None,
             });
             return;
         }
     };
-    for e in entries {
+    // A leaf of the directory that could not be read loses the entries
+    // hashed into it, and only those: each is said, and the rest of the
+    // directory is walked.
+    for (blkid, e) in &read.lost {
+        out.push(Entry {
+            path: shown_dir(prefix),
+            raw_path: raw_prefix.to_vec(),
+            object,
+            znode: None,
+            error: Some(format!(
+                "directory: leaf block {blkid} could not be read ({e}); the entries in it are missing"
+            )),
+            walked_at: None,
+        });
+    }
+    for e in read.entries {
         let path = if prefix.is_empty() {
             e.name.clone()
         } else {
@@ -787,6 +932,7 @@ fn walk_into(
                     "the name {:?} is not one a file can have; the object is under `objects`",
                     e.name
                 )),
+                walked_at: None,
             });
             continue;
         }
@@ -798,14 +944,24 @@ fn walk_into(
             .as_ref()
             .map(|z| z.file_type() == FileType::Dir)
             .unwrap_or(e.file_type == FileType::Dir);
+        // Met before: a cycle, or two names for one directory, both of
+        // them damage. Its contents were walked where it was first met
+        // and are not walked again — and that is said: such a directory
+        // came out empty, and what was in it was missing without a word.
+        let walked_at = is_dir.then(|| seen_dirs.get(&e.object).cloned()).flatten();
+        let walk = is_dir && recursive && walked_at.is_none();
+        if walk {
+            seen_dirs.insert(e.object, path.clone());
+        }
         out.push(Entry {
             path: path.clone(),
             raw_path: raw_path.clone(),
             object: e.object,
             znode,
             error,
+            walked_at,
         });
-        if is_dir && recursive {
+        if walk {
             walk_into(
                 fs,
                 e.object,
@@ -924,7 +1080,7 @@ mod tests {
             assert_eq!(z.permissions(), 0o644);
             assert_eq!(z.size, zpl_hello().len() as u64);
             assert_eq!(z.links, 2);
-            assert_eq!(z.mtime, 1_757_100_001);
+            assert_eq!(z.mtime.secs, 1_757_100_001);
             assert_eq!(z.parent, 3);
 
             let dir = at(b"sub").znode.as_ref().expect("znode");
@@ -997,6 +1153,14 @@ mod tests {
             );
             // A name that is neither is still not there.
             assert!(fs.lookup("resume.txt").is_err());
+            // And what it is called is what the dataset calls it, not
+            // what was typed: written under the typed spelling, the file
+            // came out with a name it never had (Z-09).
+            let mut typed = b"./".to_vec();
+            typed.extend_from_slice(ZPL_DECOMPOSED_NAME);
+            let (found, on_disk) = fs.resolve(&typed).expect("decomposed");
+            assert_eq!(found, object);
+            assert_eq!(on_disk, ZPL_COMPOSED_NAME);
         });
     }
 
@@ -1043,9 +1207,9 @@ mod tests {
             let obj = fs.lookup("hello.txt").expect("lookup");
             let z = fs.znode(obj).expect("znode");
             let xattrs = fs.xattrs(&z);
-            let names: Vec<&str> = xattrs.iter().map(|(n, _)| n.as_str()).collect();
+            let names: Vec<&str> = xattrs.values.iter().map(|x| x.name.as_str()).collect();
             assert_eq!(names, ["user.case", "user.note"]);
-            assert_eq!(xattrs[1].1, b"kept in the attributes");
+            assert_eq!(xattrs.values[1].value, b"kept in the attributes");
             // A file without any says so by having none, not by failing.
             let plain = fs
                 .znode(fs.lookup("sub/deep.txt").expect("lookup"))
@@ -1072,11 +1236,11 @@ mod tests {
             assert_eq!(z.permissions(), 0o644);
             // The spill half.
             let xattrs = fs.xattrs(&z);
-            let names: Vec<&str> = xattrs.iter().map(|(n, _)| n.as_str()).collect();
+            let names: Vec<&str> = xattrs.values.iter().map(|x| x.name.as_str()).collect();
             assert_eq!(names, [ZPL_SPILLED_XATTR]);
-            assert_eq!(xattrs[0].1, zpl_spilled_value());
+            assert_eq!(xattrs.values[0].value, zpl_spilled_value());
             assert!(
-                xattrs[0].1.len() > 512,
+                xattrs.values[0].value.len() > 512,
                 "the value has to be one no bonus buffer could hold"
             );
         });
@@ -1139,13 +1303,17 @@ mod tests {
             assert_eq!(z.size, zpl_big_dnode().len() as u64);
             let xattrs = fs.xattrs(&z);
             assert_eq!(
-                xattrs.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+                xattrs
+                    .values
+                    .iter()
+                    .map(|x| x.name.as_str())
+                    .collect::<Vec<_>>(),
                 [ZPL_BIG_DNODE_XATTR]
             );
-            assert_eq!(xattrs[0].1.len(), zpl_big_dnode_value().len());
+            assert_eq!(xattrs.values[0].value.len(), zpl_big_dnode_value().len());
             assert!(
-                xattrs[0]
-                    .1
+                xattrs.values[0]
+                    .value
                     .windows(ZPL_BIG_DNODE_TRAP.len())
                     .any(|w| w == ZPL_BIG_DNODE_TRAP),
                 "the attribute carries the bytes planted in the second slot"

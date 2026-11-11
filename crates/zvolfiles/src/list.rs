@@ -3,10 +3,10 @@
 use serde::Serialize;
 use zfs_ondisk::zpl::{FileType, Znode};
 use zfs_read::zpl::{walk_from, Entry};
-use zvol_common::timefmt::iso8601;
+use zvol_common::timefmt::iso8601_ns;
 use zvol_common::{exit, Format, Global, PoolSpec};
 
-use crate::common::{os_bytes, with_dataset, AtArgs};
+use crate::common::{resolve_path, with_dataset, AtArgs};
 
 #[derive(Debug, Serialize)]
 struct FileOut {
@@ -32,13 +32,20 @@ struct FileOut {
     /// Absent is not the same as project zero, so absent is absent.
     #[serde(skip_serializing_if = "Option::is_none")]
     projid: Option<u64>,
+    /// Modification time, to the nanosecond, either side of the epoch.
     #[serde(skip_serializing_if = "Option::is_none")]
     mtime: Option<String>,
+    /// A device's number as `major,minor`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rdev: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     target: Option<String>,
     /// Extended attributes, in name order (Z-04).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     xattrs: Vec<String>,
+    /// Extended attributes, or sets of them, that could not be read.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    xattr_errors: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
@@ -55,7 +62,12 @@ struct ListOut {
 }
 
 /// Turn one walked entry into the report's shape.
-fn describe(e: &Entry, target: Option<String>, xattrs: Vec<String>) -> FileOut {
+fn describe(
+    e: &Entry,
+    target: Option<String>,
+    xattrs: Vec<String>,
+    xattr_errors: Vec<String>,
+) -> FileOut {
     let z = e.znode.as_ref();
     FileOut {
         path: e.path.clone(),
@@ -71,10 +83,20 @@ fn describe(e: &Entry, target: Option<String>, xattrs: Vec<String>) -> FileOut {
         uid: z.map(|z| z.uid),
         gid: z.map(|z| z.gid),
         projid: z.and_then(|z| z.projid),
-        mtime: z.map(|z| iso8601(z.mtime)),
+        mtime: z.map(|z| iso8601_ns(z.mtime.secs, z.mtime.nanos)),
+        rdev: z
+            .filter(|z| matches!(z.file_type(), FileType::CharDevice | FileType::BlockDevice))
+            .map(|z| format!("{},{}", z.rdev >> 32, z.rdev & 0xffff_ffff)),
         target,
         xattrs,
-        error: e.error.clone(),
+        xattr_errors,
+        // Met a second time, a directory is listed where it was met
+        // first: said, where it used to be an empty directory.
+        error: e.error.clone().or_else(|| {
+            e.walked_at
+                .as_ref()
+                .map(|first| format!("the same directory as {first}, listed there (a directory has one name: this is damage)"))
+        }),
     }
 }
 
@@ -87,20 +109,13 @@ pub fn run(
     path: Option<&std::ffi::OsStr>,
     recursive: bool,
 ) -> u8 {
-    let asked = path.map(os_bytes).unwrap_or_default();
     let result = with_dataset(spec, dataset, at, false, |fs, opened| {
-        let from = match path {
-            None => fs.root,
-            Some(p) => fs.lookup_bytes(&asked).map_err(|e| {
-                eprintln!("zvolfiles: {}: {e}", p.to_string_lossy());
-                exit::UNRECOVERABLE
-            })?,
+        // As the dataset spells it (Z-09): `./sub` lists as `sub/…`, and
+        // a name found by folding case as the name on disk.
+        let (from, raw_prefix) = match path {
+            None => (fs.root, Vec::new()),
+            Some(p) => resolve_path(fs, p, opened.txg)?,
         };
-        let raw_prefix: Vec<u8> = asked
-            .split(|&b| b == b'/')
-            .filter(|p| !p.is_empty())
-            .collect::<Vec<_>>()
-            .join(&b'/');
         let prefix = String::from_utf8_lossy(&raw_prefix).into_owned();
         // A path that names a file is that one entry, as `extract` takes
         // it: walking it as a directory said "object is not a ZAP", with
@@ -114,6 +129,7 @@ pub fn run(
                     object: from,
                     znode: z,
                     error: None,
+                    walked_at: None,
                 }]
             } else {
                 walk_from(fs, from, &prefix, &raw_prefix, recursive)
@@ -130,15 +146,21 @@ pub fn run(
                             .ok()
                             .map(|t| String::from_utf8_lossy(&t).into_owned())
                     });
-                let xattrs = e
-                    .znode
-                    .as_ref()
-                    .map(|z| fs.xattrs(z).into_iter().map(|(n, _)| n).collect())
-                    .unwrap_or_default();
-                describe(e, target, xattrs)
+                let read = e.znode.as_ref().map(|z| fs.xattrs(z)).unwrap_or_default();
+                let mut xattr_errors = read.errors;
+                xattr_errors.extend(
+                    read.values
+                        .iter()
+                        .filter_map(|x| x.error.as_ref().map(|err| format!("{}: {err}", x.name))),
+                );
+                let xattrs = read.values.into_iter().map(|x| x.name).collect();
+                describe(e, target, xattrs, xattr_errors)
             })
             .collect();
-        let unreadable = files.iter().filter(|f| f.error.is_some()).count();
+        let unreadable = files
+            .iter()
+            .filter(|f| f.error.is_some() || !f.xattr_errors.is_empty())
+            .count();
         Ok((
             ListOut {
                 dataset: dataset.to_string(),
@@ -192,6 +214,12 @@ pub fn run(
                 );
                 if !f.xattrs.is_empty() {
                     println!("       xattrs: {}", f.xattrs.join(", "));
+                }
+                if let Some(r) = &f.rdev {
+                    println!("       device {r}");
+                }
+                for x in &f.xattr_errors {
+                    println!("       xattrs: {x}");
                 }
                 if let Some(e) = &f.error {
                     println!("       {e}");

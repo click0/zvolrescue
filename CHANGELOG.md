@@ -274,6 +274,71 @@ tagged. `v0.7.1` is the release that carries those six.
   pointed. A pair is now written whole or not at all, a link at either
   name counts as something there, and `--force` replaces the link
   instead of writing through it.
+* **One unreadable leaf of a directory lost the whole directory.** A
+  fat ZAP's leaf that did not verify failed the read of the whole
+  directory: `list` gave one line, "directory: every copy failed its
+  checksum", and `extract` wrote nothing of it, the files in the leaves
+  that read and every subtree under them included. The leaves that read
+  are read now, and the one that did not is named (exit 4).
+* **A second `extract` into the same directory wrote over the first
+  run's manifest.** The manifest's name was chosen against what the run
+  itself wrote, so `--path` for what an interrupted run did not finish
+  replaced the one record of what that run wrote — or a `manifest.json`
+  the first run extracted from the dataset, which its manifest then no
+  longer matched. A name already there is passed over too.
+* **A block written as zeros was only a count, and `--strict` did not
+  stop.** The manifest said `"errors": 1` and nothing on standard error
+  said which bytes or why (Z-06, F-33); with `--strict` the run went on
+  to the next file and exited 4. Each run of zeros is in the manifest as
+  `zeroed` — block, offset, length, reason — and said once per file on
+  standard error, and `--strict` ends the run at that block, the
+  manifest saying where (`stopped`). The same for `objects`.
+* **The files of a directory refused for a taken path went into the
+  other one.** Two entries of damaged metadata with one name: the second
+  directory was refused, and its files written into the first — a 0700
+  directory's into a 0755 one. Nothing under a directory that was not
+  written is written; each entry is named with the reason.
+* **A file whose block size was zero came out empty, exit 0.** The copy
+  stopped at the first block shorter than the file needed there, and
+  the manifest recorded the hash of nothing and no error. The missing
+  bytes are zeros now, named as such (exit 4).
+* **`--path` was written as typed, not as the dataset spells it.** A
+  name found by folding case or normalizing came out under the spelling
+  typed, a name that is nowhere on disk (Z-09); `--path ./sub` resolved
+  and then wrote nothing, exit 4; `--path sub --path sub/deep.txt` and
+  `--path hello.txt --path /hello.txt` refused their second half as a
+  path already taken, exit 4; and the directory a `--path` named was
+  made with the extraction's time and mode and recorded nowhere. A path
+  is resolved to its on-disk spelling, one inside another given is
+  written once, and the directory gets its own metadata.
+* **File times were read as unsigned whole seconds.** A time before 1970
+  was listed in the year 584 554 051 223 and not put back ("a time past
+  what this platform's clock holds"), nanoseconds were dropped, and the
+  manifest had the modification time alone. Times are signed and to the
+  nanosecond, put back as such, and the manifest records all four.
+* **A fifo, a device or a socket failed the extraction.** Each counted
+  as an entry that could not be written, so a whole dataset holding one
+  exited 4, and a device's number was recorded nowhere. They are
+  recorded with the number, and not made, and are no failure. A
+  directory met a second time — a cycle, or two names for one — came
+  out as an empty directory without a word; it is named now, in `list`
+  and in the manifest.
+* **A `--path` that is not there was "the dataset unreadable".** The
+  message now says that the path is not at that TXG and that a file
+  removed since may be at an older one; the exit status stays 3, and
+  the manual says what it covers.
+* **Extended attributes that could not be read were recorded empty.** A
+  value whose object did not read was an empty value, one over 64 KiB
+  was cut there without a word, and a set of attributes that could not
+  be read was no attributes. Each is said, in `list` and in the manifest
+  (`error`, `recorded`, `xattr_errors`), and a file whose attributes
+  could not be read is not whole (exit 4).
+* **A file whose size runs far past its blocks hashed without a word.**
+  A forged size of a petabyte hashes its zeros for days. A file whose
+  size runs more than 1 GiB past its last block is now said on standard
+  error, with how far, and that SIGINT stops the run; the zeros past the
+  last block are no longer read block by block. `zvolfiles` also no
+  longer prints `entr(y|ies)`.
 
 ## v0.9.12 — 2026-11-07
 

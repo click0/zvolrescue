@@ -72,7 +72,7 @@ enum Command {
         /// Write the tree here.
         #[arg(short, long, value_name = "DIR")]
         output: PathBuf,
-        /// Stop at the first block that cannot be read.
+        /// End the run at the first block that cannot be read (exit 4).
         #[arg(long)]
         strict: bool,
         /// Metadata to restore: any of `times`, `mode`, `owner` (root
@@ -93,7 +93,7 @@ enum Command {
         /// Write the objects here.
         #[arg(short, long, value_name = "DIR")]
         output: PathBuf,
-        /// Stop at the first block that cannot be read.
+        /// End the run at the first block that cannot be read (exit 4).
         #[arg(long)]
         strict: bool,
     },

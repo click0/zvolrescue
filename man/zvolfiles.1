@@ -121,15 +121,37 @@ or holding
 or NUL), or whose path another entry already took, is not written and
 is named in the manifest with the reason; its object is still there for
 .Cm objects .
+When that entry is a directory, nothing under it is written either,
+and each entry under it is named.
+A directory met a second time \(em damaged metadata, since a directory
+has one name \(em is named in the manifest and not walked again.
+A fifo, a device or a socket is recorded in the manifest, with a
+device's major and minor number, and not made; it is no failure.
+A block that cannot be read is written as zeros, and the manifest
+says which bytes and why
+.Pq Li zeroed ;
+a leaf of a directory that cannot be read loses the entries in it and
+no others, and is named.
+The manifest records every file's four times to the nanosecond, before
+1970 too, and any extended attribute it could not read.
 The manifest is
 .Pa manifest.json ,
 or
 .Pa manifest.1.json
-and so on when the dataset has a file of that name at its root.
+and so on when the dataset has a file of that name at its root or an
+earlier run left one there.
 .It Fl -path Ar path
 Path inside the dataset, repeatable; everything when absent.
+It is taken as the dataset spells it: a name found by folding case or
+by normalizing is written under the name on disk, and
+.Ql \&./
+is dropped.
+The directory a path names is written with its own metadata, and a
+path inside another one given is written once.
 .It Fl -strict
-Stop at the first block that cannot be read.
+Stop the run at the first block that cannot be read: the file it is in
+is named as failed, holding the bytes before it, and nothing after it
+is looked at (exit 4).
 .It Fl -preserve Ar list
 Metadata to put back, comma-separated:
 .Ql times
@@ -172,13 +194,15 @@ for an older one, by every subcommand.
 Write the objects here, by the same rules as
 .Cm extract .
 .It Fl -strict
-Stop at the first block that cannot be read.
+Stop the run at the first block that cannot be read (exit 4).
 .El
 .Sh EXIT STATUS
 As in
 .Xr zvolrescue 1 :
 0 success, 1 usage (a missing key among it), 2 evidence unreadable, 3
-the dataset unreadable at the requested TXG, 4 not every file whole, 5
+the dataset unreadable at the requested TXG, or a
+.Fl -path
+not in it there, 4 not every file whole, 5
 refused, 6 interrupted by a signal, 7 the medium refused a read.
 .Sh EXAMPLES
 One directory of a home dataset, at the TXG before it was emptied:

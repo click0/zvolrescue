@@ -214,3 +214,149 @@ fn list_of_a_file_is_that_file() {
     assert_eq!(files[0]["path"], "hello.txt");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// A path is taken as the dataset spells it: `./sub` is `sub`, and the
+/// directory it names is made with its own metadata (it was neither
+/// recorded nor given its time). A path inside another one given is
+/// written once, not refused as taken (exit 4), and one that is not
+/// there says so, and that an older TXG may still have it.
+#[test]
+fn paths_are_taken_as_the_dataset_spells_them() {
+    use std::os::unix::fs::MetadataExt;
+    let dir = scratch("paths");
+    let m = members(&dir, ["member0.img", "member1.img"]);
+    let out = dir.join("out");
+    let o = out.to_string_lossy().into_owned();
+    let (code, err) = run(&[
+        "-q",
+        "extract",
+        "tank/fs",
+        &m[0],
+        &m[1],
+        "-o",
+        &o,
+        "--path",
+        "./sub",
+        "--path",
+        "sub/deep.txt",
+        "--path",
+        "/hello.txt",
+        "--path",
+        "hello.txt",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(err.contains("written once"), "{err}");
+    assert_eq!(
+        std::fs::read(out.join("sub/deep.txt")).unwrap(),
+        zfs_read::fixture::zpl_deep()
+    );
+    assert_eq!(
+        std::fs::metadata(out.join("sub")).unwrap().mtime(),
+        1_757_100_001
+    );
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(out.join("manifest.json")).unwrap()).unwrap();
+    let paths: Vec<&str> = manifest["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, ["sub", "sub/deep.txt", "hello.txt"], "{manifest}");
+    assert_eq!(manifest["directories"], 1);
+    let (code, err) = run(&[
+        "-q", "extract", "tank/fs", &m[0], &m[1], "-o", &o, "--path", "nosuch",
+    ]);
+    assert_eq!(code, 3, "{err}");
+    assert!(
+        err.contains("no such file or directory at txg") && err.contains("older --txg"),
+        "{err}"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A second run into the same directory — `--path` for what the first
+/// did not finish — keeps the first run's manifest, the one record of
+/// what that run wrote.
+#[test]
+fn a_second_run_keeps_the_first_runs_manifest() {
+    let dir = scratch("two-runs");
+    let m = members(&dir, ["member0.img", "member1.img"]);
+    let out = dir.join("out");
+    let o = out.to_string_lossy().into_owned();
+    let (code, err) = run(&["-q", "extract", "tank/fs", &m[0], &m[1], "-o", &o]);
+    assert_eq!(code, 0, "{err}");
+    let first = std::fs::read(out.join("manifest.json")).unwrap();
+    let (code, err) = run(&[
+        "-q",
+        "extract",
+        "tank/fs",
+        &m[0],
+        &m[1],
+        "-o",
+        &o,
+        "--path",
+        "hello.txt",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(std::fs::read(out.join("manifest.json")).unwrap(), first);
+    let second: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(out.join("manifest.1.json")).unwrap()).unwrap();
+    assert_eq!(second["files"].as_array().unwrap().len(), 1, "{second}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A block that does not verify is a run of zeros the manifest names —
+/// which block, which bytes, why — and `--strict` ends the run there
+/// (exit 4), where it went on to the next file.
+#[test]
+fn zeroed_bytes_are_named_and_strict_stops() {
+    let dir = scratch("strict");
+    let m = members(&dir, ["member0.img", "member1.img"]);
+    let deep = zfs_read::fixture::zpl_deep();
+    for p in &m {
+        let mut b = std::fs::read(p).unwrap();
+        let at = b
+            .windows(deep.len())
+            .position(|w| w == deep.as_slice())
+            .expect("deep.txt is on the member");
+        b[at + 7] ^= 0xff;
+        std::fs::write(p, b).unwrap();
+    }
+    let out = dir.join("out");
+    let o = out.to_string_lossy().into_owned();
+    let (code, err) = run(&["-q", "extract", "tank/fs", &m[0], &m[1], "-o", &o]);
+    assert_eq!(code, 4, "{err}");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(out.join("manifest.json")).unwrap()).unwrap();
+    let files = manifest["files"].as_array().unwrap();
+    let deep_rec = files.iter().find(|f| f["path"] == "sub/deep.txt").unwrap();
+    assert_eq!(deep_rec["errors"], 1, "{deep_rec}");
+    let z = &deep_rec["zeroed"][0];
+    assert_eq!(
+        (z["block"].as_u64(), z["offset"].as_u64()),
+        (Some(0), Some(0))
+    );
+    assert_eq!(z["length"], 4096);
+    assert!(!z["reason"].as_str().unwrap().is_empty());
+
+    let strict = dir.join("strict");
+    let s = strict.to_string_lossy().into_owned();
+    let (code, err) = run(&[
+        "-q", "extract", "tank/fs", &m[0], &m[1], "-o", &s, "--strict",
+    ]);
+    assert_eq!(code, 4, "{err}");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(strict.join("manifest.json")).unwrap()).unwrap();
+    assert!(
+        manifest["stopped"]
+            .as_str()
+            .unwrap()
+            .starts_with("sub/deep.txt: block 0"),
+        "{manifest}"
+    );
+    let last = manifest["files"].as_array().unwrap().last().unwrap();
+    assert_eq!(last["path"], "sub/deep.txt", "nothing after it: {manifest}");
+    assert!(last["error"].as_str().unwrap().contains("--strict"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}

@@ -25,9 +25,56 @@ pub fn iso8601(unix: u64) -> String {
     )
 }
 
+/// Format a file's time — seconds either side of the epoch and the
+/// nanoseconds into that second — as `YYYY-MM-DDTHH:MM:SS.nnnnnnnnnZ`,
+/// the fraction left out when it is zero.
+pub fn iso8601_ns(secs: i64, nanos: u32) -> String {
+    let days = secs.div_euclid(86_400);
+    let tod = secs.rem_euclid(86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    let fraction = if nanos == 0 {
+        String::new()
+    } else {
+        format!(".{nanos:09}")
+    };
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}{fraction}Z",
+        tod / 3_600,
+        (tod / 60) % 60,
+        tod % 60
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::iso8601;
+    use super::{iso8601, iso8601_ns};
+
+    /// Before the epoch is before the epoch, and the nanoseconds show.
+    #[test]
+    fn file_times_either_side_of_the_epoch() {
+        assert_eq!(iso8601_ns(0, 0), "1970-01-01T00:00:00Z");
+        assert_eq!(iso8601_ns(-86_400, 0), "1969-12-31T00:00:00Z");
+        assert_eq!(
+            iso8601_ns(-1, 500_000_000),
+            "1969-12-31T23:59:59.500000000Z"
+        );
+        assert_eq!(
+            iso8601_ns(1_700_000_000, 123_456_789),
+            "2023-11-14T22:13:20.123456789Z"
+        );
+        // Damage is printed, not a panic.
+        let _ = iso8601_ns(i64::MIN, 0);
+        let _ = iso8601_ns(i64::MAX, 999_999_999);
+    }
 
     #[test]
     fn known_instants() {
