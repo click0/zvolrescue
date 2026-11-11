@@ -110,6 +110,21 @@ fn top_hint(
                     .ok_or_else(|| {
                         format!("hints: {path} is not among the members given on the command line")
                     })?;
+                // A base at or past the end leaves no vdev on the member:
+                // reads there wrapped or ran off the end, and failed as
+                // checksums.
+                if base > 0 {
+                    if let Some(len) = zvolrescue_io::FileSource::open(&paths[device])
+                        .ok()
+                        .map(|f| zvolrescue_io::BlockSource::size(&f))
+                    {
+                        if base >= len {
+                            return Err(format!(
+                                "hints: {what}.members[{m}]: base {base} is not inside {path}, which is {len} bytes"
+                            ));
+                        }
+                    }
+                }
                 bases[device] = base;
                 members.push(Some(device));
             }
@@ -130,6 +145,33 @@ fn top_hint(
                 )?);
             }
         }
+    }
+    // A kind the reader has no layout for, or a vdev with nothing in it,
+    // was taken as written and failed later as "no verified uberblock
+    // matches the requested TXG; available: " — exit 3, an empty list,
+    // and no word about the layout file.
+    const KINDS: [&str; 7] = [
+        "mirror",
+        "raidz",
+        "draid",
+        "disk",
+        "file",
+        "replacing",
+        "spare",
+    ];
+    if !KINDS.contains(&kind.as_str()) {
+        return Err(format!(
+            "hints: {what}.kind {kind:?} is no vdev this reads; one of {}",
+            KINDS.join(", ")
+        ));
+    }
+    if members.is_empty() && children.is_empty() {
+        return Err(format!("hints: {what} has no members"));
+    }
+    if !members.is_empty() && members.iter().all(Option::is_none) && children.is_empty() {
+        return Err(format!(
+            "hints: {what}: every member is null — at least one has to be given to read anything through it"
+        ));
     }
     let nparity = t.get("nparity").map(|v| as_u64(v, "nparity")).transpose()?;
     if matches!(kind.as_str(), "disk" | "file") && (members.len() != 1 || !children.is_empty()) {

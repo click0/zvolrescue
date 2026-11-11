@@ -148,6 +148,46 @@ fn hints_with_an_impossible_geometry_are_refused() {
         assert_eq!(code, 1, "{kind} {nparity} {ashift}: {err}");
         assert!(err.contains(want), "{want}: {err}");
     }
+    // A layout that names nothing readable: an unknown kind, a vdev with
+    // no member or with every member null, a base past the member's end.
+    // Each was taken as written and failed later with exit 3 and "no
+    // verified uberblock matches the requested TXG; available: ".
+    let m0 = serde_json::Value::from(paths[0].clone());
+    for (tops, want) in [
+        (
+            serde_json::json!([{"kind": "weird", "members": [&paths[0], &paths[1]]}]),
+            "is no vdev this reads",
+        ),
+        (
+            serde_json::json!([{"kind": "mirror", "members": []}]),
+            "has no members",
+        ),
+        (
+            serde_json::json!([{"kind": "mirror", "members": [null, null]}]),
+            "every member is null",
+        ),
+        (
+            serde_json::json!([{"kind": "disk", "members": [{"path": m0, "base": 1u64 << 40}]}]),
+            "is not inside",
+        ),
+    ] {
+        let hints = dir.join("layout.hints");
+        std::fs::write(
+            &hints,
+            serde_json::json!({"ashift": 12, "tops": tops}).to_string(),
+        )
+        .unwrap();
+        let (code, _, err) = run(&[
+            "-q",
+            "list",
+            &paths[0],
+            &paths[1],
+            "--hints",
+            &hints.to_string_lossy(),
+        ]);
+        assert_eq!(code, 1, "{want}: {err}");
+        assert!(err.contains(want), "{want}: {err}");
+    }
 }
 
 /// An image is written at offsets with its holes left out, which a pipe
@@ -362,8 +402,8 @@ fn a_log_is_never_written_over_a_member() {
 
 /// `--emit-label` writes a label and its geometry for a *copy* of a
 /// member; neither may land on a member or on the layout it was made
-/// from, and a label called `*.json` would be overwritten by its own
-/// geometry, so that name is refused too.
+/// from. The geometry is `FILE.json`, whatever FILE is called: with the
+/// extension replaced, it went over a `*.json` beside the label.
 #[test]
 fn emit_label_is_never_written_over_the_evidence() {
     let dir = scratch("emit-label");
@@ -410,8 +450,9 @@ fn emit_label_is_never_written_over_the_evidence() {
         "--emit-label",
         &json_name,
     ]);
-    assert_eq!(code, 1, "{err}");
-    assert!(err.contains("name the label something else"), "{err}");
+    assert_eq!(code, 0, "{err}");
+    assert!(dir.join("label.json.json").exists());
+    std::fs::write(dir.join("L0.json"), "not the label's").unwrap();
     let label = dir.join("L0.bin").to_string_lossy().into_owned();
     let (code, _, err) = run(&[
         "-q",
@@ -424,7 +465,15 @@ fn emit_label_is_never_written_over_the_evidence() {
         &label,
     ]);
     assert_eq!(code, 0, "{err}");
-    assert!(dir.join("L0.bin").exists() && dir.join("L0.json").exists());
+    assert_eq!(
+        std::fs::metadata(dir.join("L0.bin")).unwrap().len(),
+        128 << 10
+    );
+    assert!(dir.join("L0.bin.json").exists());
+    assert_eq!(
+        std::fs::read_to_string(dir.join("L0.json")).unwrap(),
+        "not the label's"
+    );
 }
 
 #[test]
@@ -1987,4 +2036,13 @@ fn a_bulk_dump_writes_only_its_own_files() {
     assert_eq!(code, 3, "{err}");
     assert!(err.contains("no volume under tank/fs"), "{err}");
     assert!(!Path::new(&empty).exists());
+    // A filesystem given to `dump` is the wrong command, not an
+    // unreadable pool: exit 1, the companion that reads it named.
+    let img = dir.join("fs.img").to_string_lossy().into_owned();
+    let (code, _, err) = run(&["-q", "dump", "tank/fs", &zpl[0], &zpl[1], "-o", &img]);
+    assert_eq!(code, 1, "{err}");
+    assert!(
+        err.contains("is a filesystem, not a volume") && !err.contains("I/O error"),
+        "{err}"
+    );
 }

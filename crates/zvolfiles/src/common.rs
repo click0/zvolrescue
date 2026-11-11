@@ -95,6 +95,21 @@ pub fn with_dataset<T>(
             last = Some(format!("txg {}: no dataset {name}", c.ub.txg));
             continue;
         };
+        // A dataset of another kind is the wrong command, not damage: it
+        // was tried at every txg as "I/O error: … is a volume", and the
+        // run ended "in none of the 3 transaction group(s) read", exit 3.
+        if let Some(kind) = ds.kind.filter(|k| *k != zfs_ondisk::dmu::ObjsetType::Zfs) {
+            eprintln!(
+                "zvolfiles: {name} is {}, not a filesystem{}",
+                kind.described(),
+                if kind == zfs_ondisk::dmu::ObjsetType::Zvol {
+                    "; zvolrescue dump extracts a volume as an image"
+                } else {
+                    ""
+                }
+            );
+            return Err(exit::USAGE);
+        }
         // An encrypted dataset needs its key before any of its blocks
         // can be read; the metadata that says so needs none.
         if let Some(enc) = &ds.encryption {

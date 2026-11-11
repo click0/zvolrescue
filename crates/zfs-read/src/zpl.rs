@@ -178,9 +178,9 @@ fn open<'r, 'a>(
     let os = ObjsetPhys::parse(&block.data, ds.phys.bp.endian)?;
     if os.os_type != ObjsetType::Zfs {
         return Err(ReadError::Io(format!(
-            "{} is a {}, not a filesystem",
+            "{} is {}, not a filesystem",
             ds.name,
-            os.os_type.name()
+            os.os_type.described()
         )));
     }
     let endian = ds.phys.bp.endian;

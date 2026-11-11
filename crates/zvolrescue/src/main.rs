@@ -51,8 +51,10 @@ enum Cmd {
         #[arg(long, value_name = "FILE")]
         hints: Option<PathBuf>,
         /// Write the label the layout describes for one member to FILE:
-        /// a 256 KiB image with the configuration nvlist sealed for its
-        /// label position, to place on a *copy* of the disk (SPEC F-67).
+        /// the first 128 KiB of a label — blank area, boot header and the
+        /// configuration nvlist sealed for its label position — to place on
+        /// a *copy* of the disk (SPEC F-67); it stops short of the
+        /// uberblock ring, so that the uberblocks surviving there are kept.
         /// The geometry goes to FILE.json beside it. Nothing is ever
         /// written to the evidence.
         #[arg(long, value_name = "FILE", requires = "hints")]

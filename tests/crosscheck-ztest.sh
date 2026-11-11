@@ -183,7 +183,7 @@ import json,sys
 d = json.load(open(sys.argv[1]))
 print(next(x["name"] for x in d["datasets"] if x.get("encryption") and not x["name"].count("@")))' "$dir/list.json" 2>/dev/null || true)
         if [ -n "$encds" ]; then
-            if $ZR -q dump "$encds" $members -o "$dir/enc.img" --key "raw:$dir/ztest.key" 2> "$dir/dump-key.err"; rc=$?; [ $rc = 3 ] && grep -q "not a volume" "$dir/dump-key.err"; then
+            if $ZR -q dump "$encds" $members -o "$dir/enc.img" --key "raw:$dir/ztest.key" 2> "$dir/dump-key.err"; rc=$?; [ $rc = 1 ] && grep -q "not a volume" "$dir/dump-key.err"; then
                 echo "   dump --key: $encds unlocked with the right key (then refused as not a volume)"
             else
                 echo "   dump --key: unexpected result (exit $rc)"; cat "$dir/dump-key.err"; fail=1

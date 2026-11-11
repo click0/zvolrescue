@@ -333,14 +333,21 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         TxgSelect::Before(ts) => candidates.iter().filter(|c| c.ub.timestamp <= ts).collect(),
     };
     if pick.is_empty() {
-        eprintln!(
-            "zvolrescue: no verified uberblock matches the requested TXG; available: {}",
-            candidates
-                .iter()
-                .map(|c| c.ub.txg.to_string())
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
+        if candidates.is_empty() {
+            // Nothing was asked for that could not be had: there is no
+            // verified uberblock at all, and "matches the requested TXG;
+            // available: " with an empty list said neither.
+            eprintln!("zvolrescue: no verified uberblock on these members");
+        } else {
+            eprintln!(
+                "zvolrescue: no verified uberblock matches the requested TXG; available: {}",
+                candidates
+                    .iter()
+                    .map(|c| c.ub.txg.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+        }
         return zvol_common::end_early(g, "zvolrescue", spec, exit::UNRECOVERABLE);
     }
     let reader = PoolReader::new(&pool, members.devices()).with_base_offsets(&members.bases());

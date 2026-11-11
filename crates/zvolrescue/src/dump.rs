@@ -849,6 +849,23 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             }
             reader.set_keys(Some(keys));
         }
+        // A filesystem is the wrong command, not an unreadable pool: it
+        // was "I/O error: … is a filesystem, not a volume", exit 3. Asked
+        // after the key, so that a key given for an encrypted dataset is
+        // still checked, whatever the dataset turns out to be.
+        if let Some(kind) = ds.kind.filter(|k| *k != zfs_ondisk::dmu::ObjsetType::Zvol) {
+            eprintln!(
+                "zvolrescue: {} is {}, not a volume{}",
+                ds.name,
+                kind.described(),
+                if kind == zfs_ondisk::dmu::ObjsetType::Zfs {
+                    "; its files come out with zvolfiles extract, its objects with zvolfiles objects"
+                } else {
+                    ""
+                }
+            );
+            return zvol_common::end_early(g, "zvolrescue", spec, exit::USAGE);
+        }
         match dump_one(
             g,
             &reader,

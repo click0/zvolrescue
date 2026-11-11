@@ -386,6 +386,17 @@ impl ObjsetType {
             ObjsetType::Unknown(v) => format!("unknown-{v}"),
         }
     }
+
+    /// What it is, in a sentence: "a filesystem", "a volume", "an object
+    /// set of type other". `"is a {name}"` said "is a other".
+    pub fn described(&self) -> String {
+        match self {
+            ObjsetType::Zfs => "a filesystem".into(),
+            ObjsetType::Zvol => "a volume".into(),
+            ObjsetType::Meta => "the MOS".into(),
+            other => format!("an object set of type {}", other.name()),
+        }
+    }
 }
 
 /// A decoded object set header.

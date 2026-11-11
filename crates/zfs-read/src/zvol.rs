@@ -90,9 +90,9 @@ pub fn open_volume<'r, 'a>(
     let os = ObjsetPhys::parse(&block.data, ds.phys.bp.endian)?;
     if os.os_type != ObjsetType::Zvol {
         return Err(ReadError::Io(format!(
-            "{} is a {}, not a volume{}",
+            "{} is {}, not a volume{}",
             ds.name,
-            os.os_type.name(),
+            os.os_type.described(),
             if os.os_type == ObjsetType::Zfs {
                 "; its files come out with zvolfiles extract, its objects with zvolfiles objects"
             } else {
@@ -298,31 +298,47 @@ pub fn extract_from(
                     }
                     Some(Salvaged::Partial(mut data, ranges)) => {
                         data.resize(bs as usize, 0);
-                        sink.write_at(offset, &data[..take])
-                            .map_err(|e| ReadError::Io(e.to_string()))?;
-                        let mut lost = 0;
-                        for (start, len) in ranges {
-                            if start >= take as u64 {
-                                break;
-                            }
-                            let len = len.min(take as u64 - start);
-                            lost += len;
+                        let within: Vec<(u64, u64)> = ranges
+                            .into_iter()
+                            .filter(|&(start, _)| start < take as u64)
+                            .map(|(start, len)| (start, len.min(take as u64 - start)))
+                            .collect();
+                        let lost: u64 = within.iter().map(|&(_, l)| l).sum();
+                        if lost >= take as u64 {
+                            // Every sector refused: nothing was kept, so the
+                            // block is zeroed, not salvaged — and no "rest of
+                            // the block was read".
                             report.bad.push(BadRange {
-                                offset: offset + start,
-                                len,
+                                offset,
+                                len: take as u64,
                                 blkid,
                                 reason: format!(
-                                    "sector(s) unreadable: {e}; the rest of the block was read and kept unverified (the checksum covers the whole block)"
+                                    "sector(s) unreadable: {e}; none of the block could be read"
                                 ),
                             });
+                            report.blocks_zeroed += 1;
+                            digests.update(&zeros[..take]);
+                        } else {
+                            sink.write_at(offset, &data[..take])
+                                .map_err(|e| ReadError::Io(e.to_string()))?;
+                            for (start, len) in within {
+                                report.bad.push(BadRange {
+                                    offset: offset + start,
+                                    len,
+                                    blkid,
+                                    reason: format!(
+                                        "sector(s) unreadable: {e}; the rest of the block was read and kept unverified (the checksum covers the whole block)"
+                                    ),
+                                });
+                            }
+                            trace!(
+                                "zvol",
+                                "blkid {blkid}: salvaged, {lost} of {take} bytes zeroed"
+                            );
+                            report.blocks_salvaged += 1;
+                            report.bytes_written += take as u64 - lost;
+                            digests.update(&data[..take]);
                         }
-                        trace!(
-                            "zvol",
-                            "blkid {blkid}: salvaged, {lost} of {take} bytes zeroed"
-                        );
-                        report.blocks_salvaged += 1;
-                        report.bytes_written += take as u64 - lost;
-                        digests.update(&data[..take]);
                     }
                     None => {
                         report.bad.push(BadRange {
@@ -790,6 +806,40 @@ mod tests {
         );
         assert!(r.bad.is_empty());
         assert_eq!(sink.data, expected_image());
+    }
+
+    /// A block every sector of which is refused is zeroed, not salvaged:
+    /// nothing of it was kept, and its reason no longer says "the rest of
+    /// the block was read".
+    #[test]
+    fn a_block_with_no_sector_left_is_zeroed_not_salvaged() {
+        let (s, a, ub, data_off) = build();
+        let flaky = FlakySource::new(s[0].clone(), vec![(LABEL_START_SIZE + data_off, 8192)]);
+        let reader = PoolReader::new(&a, vec![Some(&flaky as &dyn BlockSource)]);
+        let mos = open_mos(&reader, &ub).unwrap();
+        let tree = walk(&mos, "tank").unwrap();
+        let ds = tree.get("tank/vm/disk0").unwrap();
+        let (obj, _) = open_volume(&reader, ds).unwrap();
+        let mut sink = MemSink::default();
+        let r = extract(
+            &obj,
+            ds.volsize.unwrap(),
+            &mut sink,
+            OnError::Zero,
+            |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(
+            (r.blocks_read, r.blocks_salvaged, r.blocks_zeroed),
+            (1, 0, 1)
+        );
+        assert_eq!((r.bad[0].offset, r.bad[0].len), (0, 8192));
+        assert!(
+            r.bad[0].reason.contains("none of the block"),
+            "{}",
+            r.bad[0].reason
+        );
+        assert_eq!(&sink.data[..8192], &[0u8; 8192][..]);
     }
 
     /// A mirror heals a bad sector from its other side, and nothing is

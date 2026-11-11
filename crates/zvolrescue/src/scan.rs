@@ -1085,16 +1085,9 @@ fn emit_label(
         ));
     }
     let index = opts.emit_label_index.unwrap_or(0);
-    // A FILE that ends in .json would have its geometry land on the
-    // label just written. (Both files were checked against what the run
-    // reads before this was called.)
-    let meta = out.with_extension("json");
-    if meta == *out {
-        return Err(format!(
-            "--emit-label {}: the geometry goes to FILE.json beside the label; name the label something else",
-            out.display()
-        ));
-    }
+    // Both files were checked against what the run reads before this
+    // was called.
+    let meta = geometry_path(out);
     let nv = zfs_read::hints::label_nvlist(&hints.layout, top, leaf, txg.unwrap_or(0), None);
     let img = zfs_read::hints::label_image(&nv, index, psize)?;
     std::fs::write(out, &img).map_err(|e| format!("{}: {e}", out.display()))?;
@@ -1132,6 +1125,16 @@ fn emit_label(
         );
     }
     Ok(vec![out.clone(), meta])
+}
+
+/// Where `--emit-label FILE` puts the geometry: `FILE.json`, as the
+/// manual says. It was `FILE` with its extension replaced, so
+/// `--emit-label case.lbl` wrote over a `case.json` beside it that was
+/// nobody's to write, and a label named `*.json` had to be refused.
+fn geometry_path(label: &Path) -> PathBuf {
+    let mut p = label.as_os_str().to_owned();
+    p.push(".json");
+    PathBuf::from(p)
 }
 
 /// Run `scan`.
@@ -1301,7 +1304,7 @@ pub fn run(
             reads.push(map.clone());
         }
         let guard = WriteGuard::new(g, &reads);
-        for path in [label.clone(), label.with_extension("json")] {
+        for path in [label.clone(), geometry_path(label)] {
             if let Err(code) = guard.refuse("zvolrescue", "--emit-label", &path) {
                 return code;
             }

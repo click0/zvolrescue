@@ -169,17 +169,16 @@ turns into a label.
 .It Fl -emit-label Ar file
 Write the label the layout describes for one member to
 .Ar file :
-a 256 KiB image with the configuration nvlist sealed for its label
-position, to place on a
+the first 128 KiB of a label \(em the blank area, the boot header and
+the configuration nvlist sealed for its label position \(em to place
+on a
 .Em copy
 of the disk.
+It stops short of the uberblock ring, so that placed at a label's
+offset it keeps the uberblocks that survive there.
 The geometry goes to
 .Ar file Ns .json
-beside it, so a
-.Ar file
-ending in
-.Ql .json
-is refused.
+beside it.
 Nothing is ever written to the evidence: a
 .Ar file
 that is a member, the hints file, a map, a log, or on a device among

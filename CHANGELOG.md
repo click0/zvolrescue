@@ -218,6 +218,36 @@ tagged. `v0.7.1` is the release that carries those six.
   there is no volume there, points at `list --diff` and `--txg`, and
   exits 3 without making the directory.
 
+* **A block with no sector left was counted as salvaged.** When an
+  imager's map — or the device — refused every sector of a block, the
+  block was reported as "salvaged (unreadable sectors zeroed)" with the
+  reason "the rest of the block was read and kept unverified", though
+  nothing of it was kept. It is counted as zeroed now, with a reason that
+  says none of it could be read.
+* **`--emit-label` was not what its help said.** The help and the manual
+  promised a 256 KiB image and the geometry in `FILE.json`; the tool
+  wrote 128 KiB — on purpose: it stops short of the uberblock ring so
+  that the uberblocks surviving on the copy are kept — and put the
+  geometry at `FILE` with its extension replaced, so `--emit-label
+  case.lbl` wrote over a `case.json` beside it that was nobody's to
+  write, and a label named `*.json` had to be refused. The geometry is
+  `FILE.json` now, whatever FILE is called, and the help and the manual
+  say 128 KiB and why.
+* **The wrong kind of dataset read as damage.** `dump` of a filesystem
+  said "I/O error: tank/fs is a filesystem, not a volume" and exited 3,
+  "unrecoverable"; `zvolfiles` given a volume tried it at every txg and
+  ended "is in none of the 3 transaction group(s) read", exit 3; an
+  object set of another type was "is a other". Each now says what the
+  dataset is and which command reads it, and exits 1.
+* **`--hints` took layouts that name nothing readable.** A `kind` the
+  reader has no layout for, a vdev with no member, one whose every member
+  is `null`, and a `base` past the end of its member were all accepted,
+  and the run failed later with exit 3 and "no verified uberblock matches
+  the requested TXG; available: " followed by nothing. Each is refused
+  where the file is read (exit 1), naming the entry; and with no verified
+  uberblock at all, `list` says that, rather than speaking of a TXG
+  nobody asked for.
+
 ## v0.9.12 — 2026-11-07
 
 **Nothing written over the evidence, and no crash on a forged pool.**
