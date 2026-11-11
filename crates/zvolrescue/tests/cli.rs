@@ -10,7 +10,7 @@ use zfs_ondisk::checksum::seal_label;
 use zfs_ondisk::label::{label_offsets, LABEL_SIZE, UBERBLOCK_RING_OFFSET, UBERBLOCK_RING_SIZE};
 use zfs_read::fixture::{
     build_sample_mos, destroyed_zvol_members, objset_reused_members, removed_vdev_members,
-    two_top_mirror_members, Alloc, Pool, SAMPLE_ZVOL_BLOCK0_OFFSET,
+    two_top_mirror_members, zpl_members, Alloc, Pool, SAMPLE_ZVOL_BLOCK0_OFFSET,
 };
 use zfs_read::hash::{Digests, Extra};
 
@@ -1928,4 +1928,63 @@ fn a_run_that_produces_nothing_still_writes_its_record() {
         "both members are inputs: {rec}"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `dump -r` replaces a link already lying in its directory under a name
+/// it writes, rather than writing through it to a file outside the tree;
+/// an evidence log that cannot be written stops the run before anything
+/// is read; and a directory with no volume under it is no success.
+#[test]
+fn a_bulk_dump_writes_only_its_own_files() {
+    let dir = scratch("bulk-own-files");
+    let paths = write_members(&dir, &plain_members());
+    let out = dir.join("bulk");
+    std::fs::create_dir_all(&out).unwrap();
+    let outside = dir.join("outside.txt");
+    std::fs::write(&outside, "precious").unwrap();
+    std::os::unix::fs::symlink(&outside, out.join("tank_vm_disk0.img")).unwrap();
+    std::os::unix::fs::symlink(&outside, out.join("manifest.json")).unwrap();
+    let o = out.to_string_lossy().into_owned();
+    let (code, _, err) = run(&["-q", "dump", "-r", "tank", &paths[0], &paths[1], "-o", &o]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(std::fs::read_to_string(&outside).unwrap(), "precious");
+    for name in ["tank_vm_disk0.img", "manifest.json"] {
+        let m = std::fs::symlink_metadata(out.join(name)).unwrap();
+        assert!(m.is_file(), "{name} is a file of its own");
+    }
+
+    let img = dir.join("e.img").to_string_lossy().into_owned();
+    let log = dir
+        .join("no/such/dir/case.jsonl")
+        .to_string_lossy()
+        .into_owned();
+    let (code, _, err) = run(&[
+        "--evidence-log",
+        &log,
+        "-q",
+        "dump",
+        "tank/vm/disk0",
+        &paths[0],
+        &paths[1],
+        "-o",
+        &img,
+    ]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("cannot write evidence log"), "{err}");
+    assert!(!Path::new(&img).exists(), "nothing was extracted first");
+
+    // A filesystem with no volume under it.
+    let mut pool = Pool::mirror("tank", 0x5eed_0000_0000_0004, 12)
+        .txgs(&[(4816228, 1757100000), (4816229, 1757100005)]);
+    let zpl = write_members(&dir.join("zpl"), &{
+        std::fs::create_dir_all(dir.join("zpl")).unwrap();
+        zpl_members(&mut pool, 64 * 1024 * 1024)
+    });
+    let empty = dir.join("empty").to_string_lossy().into_owned();
+    let (code, _, err) = run(&[
+        "-q", "dump", "-r", "tank/fs", &zpl[0], &zpl[1], "-o", &empty,
+    ]);
+    assert_eq!(code, 3, "{err}");
+    assert!(err.contains("no volume under tank/fs"), "{err}");
+    assert!(!Path::new(&empty).exists());
 }

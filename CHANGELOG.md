@@ -198,6 +198,26 @@ tagged. `v0.7.1` is the release that carries those six.
   `/dev/null` takes an image as a way of hashing a volume without
   keeping it.
 
+* **An evidence log that could not be written was found out last.** It
+  was opened only to append the run's record, after the extraction —
+  hours of reading for a large volume — and the failure then replaced the
+  run's own exit status with 1, so an image with zeroed blocks (4) or an
+  interrupted one (6) read as a usage error. Every tool now opens the log
+  before it reads anything (exit 1, nothing done), and a record that
+  still cannot be written at the end leaves the run's status as it was.
+* **`dump -r` wrote through links in its directory.** A link already
+  lying there under an image's name or `manifest.json`, pointing at a
+  file outside the tree, got the image written into it and then the
+  manifest over that. What `-r` writes inside its directory is now made
+  in place of such a link, as `zvolfiles extract` does; a link that is
+  how the run names an input or a log stays, and the run is refused.
+* **`dump -r` with nothing to extract said it had succeeded.** At a txg
+  where the volumes under the dataset had been destroyed it wrote "0
+  volume(s) written" and an empty manifest, exit 0, while a single `dump`
+  of one of them would have gone back to a txg that has it. It now says
+  there is no volume there, points at `list --diff` and `--txg`, and
+  exits 3 without making the directory.
+
 ## v0.9.12 — 2026-11-07
 
 **Nothing written over the evidence, and no crash on a forged pool.**

@@ -524,6 +524,21 @@ impl Global {
                 return Err(exit::REFUSED);
             }
         }
+        // The evidence log is written at the end, after hours of reading
+        // for a large volume: a log that cannot be written — its directory
+        // missing, a directory in its place — was found out only then, and
+        // the run that did all the work had no record of it. It is opened
+        // for appending now, before anything is read, and left as it was.
+        if let Some(log) = &self.evidence_log {
+            if let Err(e) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(log)
+            {
+                eprintln!("{tool}: cannot write evidence log {}: {e}", log.display());
+                return Err(exit::USAGE);
+            }
+        }
         Ok(())
     }
 
@@ -598,7 +613,10 @@ impl Global {
             .with_incidents(incidents);
         if let Err(e) = evidence::append(log, &rec) {
             eprintln!("{tool}: cannot write evidence log {}: {e}", log.display());
-            return exit::USAGE;
+            // What the run found stays its exit status: an image with
+            // zeroed blocks (4), a refusal (5), an interruption (6) must
+            // not read as a usage error because the record failed.
+            return if status == 0 { exit::USAGE } else { status };
         }
         status
     }

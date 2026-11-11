@@ -319,7 +319,9 @@ Usage error, including a missing or wrong encryption key.
 Evidence unreadable: a member could not be opened or read.
 .It 3
 The pool is unrecoverable at the requested TXG, or the dataset is not
-readable at any TXG.
+readable at any TXG, or
+.Fl r
+found no volume under the dataset at that TXG.
 .It 4
 The image is not the whole volume: blocks that could not be read were
 written as zeros and counted, or

@@ -696,6 +696,22 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
 
     // Which datasets, and where each one goes.
     let targets: Vec<(&Dataset, PathBuf)> = if opts.recursive {
+        // Nothing to extract is not a success: "0 volume(s) written",
+        // exit 0, while the volumes were destroyed at this txg and an
+        // older one still has them — which `list --diff` names.
+        let prefix = format!("{}/", opts.dataset);
+        let any = tree.datasets.iter().any(|d| {
+            !d.snapshot
+                && (d.name == opts.dataset || d.name.starts_with(&prefix))
+                && d.kind == Some(zfs_ondisk::dmu::ObjsetType::Zvol)
+        });
+        if !any {
+            eprintln!(
+                "zvolrescue: no volume under {} at txg {txg}; `zvolrescue list --diff OLDER_TXG` names the volumes destroyed since, and --txg reads one where they are (exit 3)",
+                opts.dataset
+            );
+            return zvol_common::end_early(g, "zvolrescue", spec, exit::UNRECOVERABLE);
+        }
         if let Err(e) = std::fs::create_dir_all(&opts.output) {
             eprintln!(
                 "zvolrescue: cannot create directory {}: {e}",
@@ -761,6 +777,27 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     for w in &writes {
         if let Err(code) = guard.refuse("zvolrescue", "to write", w) {
             return zvol_common::end_early(g, "zvolrescue", spec, code);
+        }
+    }
+    // What `-r` writes inside its directory is named by the run, not by
+    // the operator: a link already lying there under one of those names
+    // is replaced, not followed, as `zvolfiles extract` replaces one. A
+    // link to some file outside the tree got the image, and then the
+    // manifest, written into it. One that is how the run names an input
+    // or a log stays, and the run is refused.
+    if opts.recursive {
+        for w in &writes {
+            if !std::fs::symlink_metadata(w).is_ok_and(|m| m.file_type().is_symlink()) {
+                continue;
+            }
+            if let Err(why) = guard.check_name(w) {
+                eprintln!("zvolrescue: refusing to write {}: {why}", w.display());
+                return zvol_common::end_early(g, "zvolrescue", spec, exit::REFUSED);
+            }
+            if let Err(e) = std::fs::remove_file(w) {
+                eprintln!("zvolrescue: {}: {e}", w.display());
+                return zvol_common::end_early(g, "zvolrescue", spec, exit::USAGE);
+            }
         }
     }
 
