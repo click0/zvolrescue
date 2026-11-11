@@ -120,10 +120,17 @@ Treat profile fields as hard filters, not as hints.
 .It Fl -range Ar start Ns - Ns Ar end
 Only this byte range of each member; a
 .Ar start
-between two 512-byte slots is taken down to the slot it is in.
+between two 512-byte slots is taken down to the slot it is in, and a
+dnode that starts before
+.Ar end
+is read whole.
+A range that starts past the end of every member is a usage error.
 .It Fl -resume
 Continue a scan that was interrupted; a SIGINT or SIGTERM ends a scan
-with its state written (exit status 6).
+with its state written (exit status 6), and the candidates whose walk
+the signal cut short are walked by the resume.
+The workspace must be from a scan of the same pool and members, with
+the same profile; another is refused (exit 1).
 .It Fl -full-assess
 Read every block a candidate claims when ranking it, rather than a
 sample.
@@ -161,6 +168,15 @@ one is extracted by.
 .Op Ar options
 .Pp
 Extract one candidate, verifying every block by its checksum.
+The members must be those of the pool the scan read; another pool's
+are refused (exit 1).
+The result has the shape of
+.Nm zvolrescue Cm dump Ns 's ,
+a
+.Li volumes
+list with the ranges that could not be read, so that
+.Xr zvolreport 1
+reports the extraction.
 .Bl -tag -width Ds
 .It Fl o , Fl -output Ar out.img
 Write the image here.
@@ -192,6 +208,9 @@ while a run is in progress.
 Find the pool's object set when no uberblock survives: the members are
 scanned for object set headers, which are ranked into
 .Ar dir .
+The same header on two sides of a mirror is listed once, with the
+other members it is on
+.Pq Li also_on .
 .Bl -tag -width Ds
 .It Fl o , Fl -output Ar dir
 Carve workspace, where the ranked headers are written; refused as the
@@ -256,7 +275,7 @@ images of two mirror members:
 zvolcarve scan --like pool/vm/disk1 -o carve \e
     --image ada0.img --image ada1.img
 zvolcarve list carve
-zvolcarve dump carve 3 --image ada0.img --image ada1.img -o disk0.img
+zvolcarve dump carve c0003 --image ada0.img --image ada1.img -o disk0.img
 .Ed
 .Sh SEE ALSO
 .Xr zvolfiles 1 ,

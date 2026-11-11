@@ -339,6 +339,47 @@ tagged. `v0.7.1` is the release that carries those six.
   error, with how far, and that SIGINT stops the run; the zeros past the
   last block are no longer read block by block. `zvolfiles` also no
   longer prints `entr(y|ies)`.
+* **A carve's extraction was invisible to the report.** `zvolcarve dump`
+  printed a flat document with no `volumes` and no unreadable ranges, so
+  `zvolreport build` saw no extraction at all and listed its zeroed
+  blocks nowhere (R-02, C-07); the text had no ABORTED line either. The
+  result now has the shape of `zvolrescue dump`'s — `volumes`, with
+  `bad`, `aborted`, `stopped_by_medium`, the pool it came from — and the
+  report says that a carved volume was born outside the window the scan
+  recorded, which is what carving is for. A candidate read through
+  another pool's members, which gave only zeros and exit 4, is refused
+  (exit 1).
+* **`scan --resume` on a mirror listed every candidate twice, and left
+  the walks a signal cut short.** The candidates of the interrupted run
+  were not counted as met, so the resume listed each again from the
+  other side of the mirror — 2644 became 5288, and `mirror_duplicates`
+  said 0 — and the ones whose walk the signal stopped stayed scored as
+  nothing walked. A resume now ends equal to one pass: the same
+  candidates, the same scores. A resume into a workspace made from
+  another pool, other members or another profile is refused (exit 1);
+  it skipped as many of the new members' bytes as the old run had read.
+* **The compressed pass was blind on a vdev that does not start on a 4
+  KiB boundary.** Offsets were stepped from the member's first byte, so
+  on a partition that starts at sector 63 no block was ever tried: 0 lz4
+  candidates where there are 43 441. They are stepped from where the
+  vdev starts; `zeropoint`, which is looking for that start, tries every
+  sector.
+* **An object-set header or a dnode at the edge of a chunk was lost.**
+  Each chunk's slots were parsed from the chunk alone, so what started in
+  its last slot was cut short: where a `--range` began decided whether
+  the newest MOS header was found, and a range that ended inside a slot
+  dropped the dnode that started there. `roots --range` also did not
+  round its start down to a slot, as `scan` does, and found nothing.
+  What starts in a chunk is read whole now.
+* **`roots` and `zeropoint` wrote nothing to `--evidence-log`.** Both are
+  on the record now, with the file each wrote. `roots` also listed the
+  same header once per side of a mirror; it is listed once, with the
+  other members it is on (`also_on`).
+* **`scan` said "(exit 4)" and exited 3.** The message names the code the
+  run exits with. A `--range` that starts past the end of every member
+  is a usage error (exit 1), not "0 bytes, nothing found" (exit 3), and
+  a member it starts past the end of is said to be skipped. The manual's
+  example dumped candidate `3`; candidates are `c0003`.
 
 ## v0.9.12 — 2026-11-07
 

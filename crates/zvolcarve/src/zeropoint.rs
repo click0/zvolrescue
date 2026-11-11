@@ -21,6 +21,7 @@ use std::path::PathBuf;
 use serde::Serialize;
 use zfs_read::carve::{scan_member, Codec, Options as ScanOptions};
 use zfs_read::pointers::{anchors, search, shifts, Options as SearchOptions};
+use zvol_common::evidence::FileRef;
 use zvol_common::members::open_members;
 use zvol_common::{exit, Format, Global, PoolSpec, WriteGuard};
 
@@ -171,7 +172,11 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         if !g.quiet {
             eprintln!("zvolcarve: reading {}", members.paths[i].display());
         }
-        let scan = match scan_member(src, i, 12, &scan_opts) {
+        // Where the vdev starts is the question, so no boundary can be
+        // counted from it: every 512-byte sector is tried. At 4 KiB a
+        // vdev that starts on sector 63 had no block tried at all, and
+        // `--compressed lz4` was the same as `none`.
+        let scan = match scan_member(src, i, 9, &scan_opts) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("zvolcarve: {}: {e}", members.paths[i].display());
@@ -239,7 +244,22 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         0
     };
     // A device refused a read (SPEC F-33, N-10): said, and the exit code.
-    zvol_common::report_medium(&members.ledger).unwrap_or(code)
+    let code = zvol_common::report_medium(&members.ledger).unwrap_or(code);
+    // On the record like every other run.
+    let written = opts
+        .output
+        .as_ref()
+        .and_then(|d| FileRef::hashed(&d.join(ZEROPOINT)).ok())
+        .into_iter()
+        .collect();
+    g.log_evidence_with_incidents(
+        "zvolcarve",
+        &serde_json::to_value(&doc).expect("serialisable"),
+        code,
+        &members.paths,
+        written,
+        &members.ledger.incidents(),
+    )
 }
 
 fn print(doc: &ZeroPointOut) {

@@ -112,6 +112,10 @@ pub struct Extraction {
     /// A device refused a read and the run stopped there (SPEC F-33).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stopped_by_medium: Option<String>,
+    /// Found by carving (`zvolcarve dump`): `txg` is the TXG its dnode
+    /// was born at, which no uberblock need lead to any more.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub carved: bool,
     /// The pool the run read, as its record names it: what R-06 holds
     /// the TXG against. Not part of the report — `verify` compares the
     /// extractions a report holds with those its logs give again, and a

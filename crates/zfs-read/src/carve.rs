@@ -213,6 +213,11 @@ pub struct Options {
     pub collect_hits: bool,
     /// Read this many bytes at a time.
     pub chunk: usize,
+    /// Where the vdev starts on the member (SPEC F-60). Blocks are
+    /// allocated at multiples of the ashift from there, not from the
+    /// member's first byte: on a partition that starts at sector 63 a
+    /// pass that stepped from byte 0 tried no offset a block was at.
+    pub vdev_start: u64,
     /// Looked at before every chunk: once it is set the scan stops
     /// where that chunk begins, says so in `stopped_early`, and
     /// `resume_at` names the offset — how a SIGINT ends a scan that
@@ -242,6 +247,7 @@ impl Default for Options {
             max_hits: 100_000,
             collect_hits: true,
             chunk: 4 << 20,
+            vdev_start: 0,
             stop: None,
         }
     }
@@ -407,9 +413,23 @@ fn consider(
 }
 
 /// Every 512-byte slot of `buf` that could be a dnode.
-fn plaintext_pass(scan: &mut Scan, opts: &Options, device: usize, base: u64, buf: &[u8]) {
+///
+/// Every slot that starts in the first `own` bytes is examined, and read
+/// from the whole of `buf`: a dnode or an object-set header in the last
+/// slot of a chunk runs past it, and cut at the chunk's end it was not
+/// one — the MOS header that held the newest pool was lost that way to
+/// where a `--range` happened to start, and a dnode starting in a range
+/// that ended inside its slot.
+fn plaintext_pass(
+    scan: &mut Scan,
+    opts: &Options,
+    device: usize,
+    base: u64,
+    buf: &[u8],
+    own: usize,
+) {
     let mut at = 0usize;
-    while at + DNODE_SIZE <= buf.len() {
+    while at < own && at + DNODE_SIZE <= buf.len() {
         scan.slots_examined += 1;
         match plausible_head(&buf[at..]) {
             Err(r) => {
@@ -579,9 +599,11 @@ pub fn scan_member(
             }
         }
         scan.bytes_read += readable as u64;
-        plaintext_pass(&mut scan, opts, device, at, &window[..own.min(readable)]);
+        plaintext_pass(&mut scan, opts, device, at, window, own.min(readable));
         if !opts.codecs.is_empty() {
-            let mut off = 0usize;
+            // The first allocation boundary in this chunk, counted from
+            // where the vdev starts.
+            let mut off = (opts.vdev_start as i128 - at as i128).rem_euclid(step as i128) as usize;
             while off < own && off < readable {
                 compressed_pass(&mut scan, opts, device, at, window, off);
                 off += step as usize;
@@ -956,6 +978,118 @@ mod tests {
             .expect("a hit");
         assert_eq!(best.dnode.datablksz(), 8192);
         assert_eq!(best.dnode.maxblkid, 3);
+    }
+
+    /// A header or a dnode in the last slot of a chunk is read whole,
+    /// from the bytes past the chunk: it was cut at the chunk's end and
+    /// was not one, so where a `--range` began decided which of the
+    /// pool's roots were found. And a range that ends inside a slot
+    /// still has the dnode that starts there.
+    #[test]
+    fn what_starts_in_a_chunk_is_read_past_its_end() {
+        let members = carved();
+        let src = MemSource::new(members[0].clone());
+        let whole = scan_member(
+            &src,
+            0,
+            12,
+            &Options {
+                collect_hits: false,
+                ..Options::default()
+            },
+        )
+        .expect("scan");
+        let header = whole.roots.first().expect("a header").offset;
+        let chunk = 4096usize;
+        // The header in the last slot of the first chunk.
+        let edge = scan_member(
+            &src,
+            0,
+            12,
+            &Options {
+                collect_hits: false,
+                chunk,
+                range: Some((header - (chunk as u64 - 512), SIZE)),
+                ..Options::default()
+            },
+        )
+        .expect("scan");
+        assert!(
+            edge.roots.iter().any(|r| r.offset == header),
+            "the header at the chunk's edge was lost"
+        );
+        // A volume's dnode, in a range that ends 100 bytes into its slot.
+        let zvol = Options {
+            profile: Profile {
+                dnode_type: Some(ot::ZVOL),
+                ..Profile::default()
+            },
+            strict_profile: true,
+            ..Options::default()
+        };
+        let at = scan_member(&src, 0, 12, &zvol).expect("scan").hits[0].offset;
+        let short = scan_member(
+            &src,
+            0,
+            12,
+            &Options {
+                range: Some((at, at + 100)),
+                ..zvol.clone()
+            },
+        )
+        .expect("scan");
+        assert_eq!(
+            short.hits.iter().map(|h| h.offset).collect::<Vec<_>>(),
+            [at]
+        );
+    }
+
+    /// The compressed pass steps from where the vdev starts. On a
+    /// member whose vdev starts at sector 7 — or 63, as an old
+    /// partition table puts it — a pass that stepped from byte 0 tried
+    /// no offset a block was at and found nothing compressed at all.
+    #[test]
+    fn the_compressed_pass_steps_from_the_vdev_start() {
+        let members = carved();
+        let zvol = Options {
+            profile: Profile {
+                dnode_type: Some(ot::ZVOL),
+                ..Profile::default()
+            },
+            strict_profile: true,
+            ..Options::default()
+        };
+        let src = MemSource::new(members[0].clone());
+        let at = scan_member(&src, 0, 12, &zvol).expect("scan").hits[0].offset as usize;
+        // That dnode alone in a block of 16 KiB, compressed with lz4 in
+        // ZFS's framing, at an allocation boundary of a vdev that starts
+        // 3584 bytes into the member.
+        let mut block = vec![0u8; 16384];
+        block[..DNODE_SIZE].copy_from_slice(&members[0][at..at + DNODE_SIZE]);
+        let packed = lz4_flex::block::compress(&block);
+        let mut framed = (packed.len() as u32).to_be_bytes().to_vec();
+        framed.extend_from_slice(&packed);
+        let vdev_start = 3584usize;
+        let mut member = vec![0u8; 1 << 20];
+        let put = vdev_start + 8 * 4096;
+        member[put..put + framed.len()].copy_from_slice(&framed);
+        let src = MemSource::new(member);
+        let lz4 = |vdev_start: u64| Options {
+            codecs: vec![Codec::Lz4],
+            vdev_start,
+            ..zvol.clone()
+        };
+        let blind = scan_member(&src, 0, 12, &lz4(0)).expect("scan");
+        assert!(blind.hits.is_empty());
+        let found = scan_member(&src, 0, 12, &lz4(vdev_start as u64)).expect("scan");
+        assert_eq!(
+            found
+                .hits
+                .iter()
+                .map(|h| (h.offset, h.found))
+                .collect::<Vec<_>>(),
+            [(put as u64, Found::Compressed(Codec::Lz4))]
+        );
     }
 
     /// A stop flag already up ends the scan before its first chunk,

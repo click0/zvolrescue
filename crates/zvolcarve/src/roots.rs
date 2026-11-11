@@ -19,6 +19,7 @@ use serde::Serialize;
 use zfs_ondisk::Endian;
 use zfs_read::carve::{scan_member, Codec, Options as ScanOptions, RootHit};
 use zfs_read::zio::PoolReader;
+use zvol_common::evidence::FileRef;
 use zvol_common::members::{choose_pool, open_members};
 use zvol_common::{exit, Format, Global, PoolSpec, WriteGuard};
 
@@ -62,6 +63,10 @@ pub struct RootOut {
     /// file; `datasets` is the true count either way.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub sample: Vec<String>,
+    /// The other members of its mirror holding the same header at the
+    /// same place: one header, listed once.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub also_on: Vec<String>,
 }
 
 /// What a run writes to the workspace.
@@ -150,8 +155,10 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         v
     };
     let range = match &opts.range {
+        // Taken down to its 512-byte slot, as `scan` takes it: `--range
+        // 1000-…` put every slot off by 488 bytes and found nothing.
         Some(s) => match byte_range(s) {
-            Ok(r) => Some(r),
+            Ok((a, b)) => Some((a / 512 * 512, b)),
             Err(e) => {
                 eprintln!("zvolcarve: {e}");
                 return exit::USAGE;
@@ -195,7 +202,11 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         if !g.quiet {
             eprintln!("zvolcarve: reading {}", members.paths[i].display());
         }
-        match scan_member(src, i, ashift, &scan_opts) {
+        let opts_here = ScanOptions {
+            vdev_start: members.base_offsets.get(i).copied().unwrap_or(0),
+            ..scan_opts.clone()
+        };
+        match scan_member(src, i, ashift, &opts_here) {
             Ok(s) => {
                 bytes_read += s.bytes_read;
                 truncated |= s.roots_truncated;
@@ -211,11 +222,36 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     // read plain is also read as the start of a compressed one.
     found.sort_by_key(|r| (r.device, r.offset));
     found.dedup_by(|a, b| (a.device, a.offset) == (b.device, b.offset));
+    // And the sides of a mirror hold the same header at the same place
+    // in the vdev: one header, walked once, with where else it is.
+    let groups = crate::scan::mirror_groups(pool.as_ref(), members.paths.len());
+    let base = |i: usize| members.base_offsets.get(i).copied().unwrap_or(0);
+    let mut copies: Vec<Vec<String>> = Vec::new();
+    let mut kept: Vec<RootHit> = Vec::new();
+    for r in found {
+        let first = groups[r.device].and_then(|g| {
+            kept.iter().position(|k| {
+                groups[k.device] == Some(g)
+                    && k.device != r.device
+                    && k.offset.saturating_sub(base(k.device))
+                        == r.offset.saturating_sub(base(r.device))
+                    && k.objset == r.objset
+            })
+        });
+        match first {
+            Some(k) => copies[k].push(members.paths[r.device].display().to_string()),
+            None => {
+                kept.push(r);
+                copies.push(Vec::new());
+            }
+        }
+    }
+    let found = kept;
 
     // Walking is what separates a header from a coincidence, so it is
     // done for every one of them before anything is ranked.
     let mut out: Vec<RootOut> = Vec::new();
-    for r in &found {
+    for (r, also_on) in found.iter().zip(copies) {
         let birth = r
             .objset
             .meta_dnode
@@ -235,6 +271,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             datasets: 0,
             error: None,
             sample: Vec::new(),
+            also_on,
         };
         match &pool {
             None => {
@@ -311,7 +348,18 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         0
     };
     // A device refused a read (SPEC F-33, N-10): said, and the exit code.
-    zvol_common::report_medium(&members.ledger).unwrap_or(code)
+    let code = zvol_common::report_medium(&members.ledger).unwrap_or(code);
+    // On the record like every other run: `--evidence-log` was taken
+    // and nothing was written to it.
+    let written = FileRef::hashed(&path).map(|f| vec![f]).unwrap_or_default();
+    g.log_evidence_with_incidents(
+        "zvolcarve",
+        &serde_json::to_value(&doc).expect("serialisable"),
+        code,
+        &members.paths,
+        written,
+        &members.ledger.incidents(),
+    )
 }
 
 fn print(doc: &RootsOut, path: &std::path::Path) {
@@ -334,6 +382,9 @@ fn print(doc: &RootsOut, path: &std::path::Path) {
         );
         if !r.sample.is_empty() {
             println!("      {}", r.sample.join(", "));
+        }
+        if !r.also_on.is_empty() {
+            println!("      also on {}", r.also_on.join(", "));
         }
         if let Some(e) = &r.error {
             println!("      {e}");

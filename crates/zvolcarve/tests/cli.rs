@@ -554,3 +554,168 @@ fn the_scan_does_what_the_manual_says() {
     assert_eq!(code, 0, "{err}");
     assert_eq!(index(&pv)["profile"]["dnode_type"], "zvol object");
 }
+
+/// Members written to `dir`, from a pool of this guid.
+fn carved_members(dir: &std::path::Path, guid: u64, tag: &str) -> Vec<String> {
+    let mut pool = Pool::mirror("tank", guid, 12).txgs(&[(100, 1)]);
+    carved_zvol_members(&mut pool, SIZE)
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let p = dir.join(format!("{tag}{i}.img"));
+            std::fs::write(&p, m).expect("write member");
+            p.to_string_lossy().into_owned()
+        })
+        .collect()
+}
+
+/// A carve's extraction is on the record in the shape `zvolrescue dump`
+/// gives one — `volumes`, with the pool it came from — so a report
+/// built from the log has it; it had none. And a candidate read
+/// through another pool's members, which only gave zeros and exit 4,
+/// is refused.
+#[test]
+fn a_carved_dump_is_a_volume_of_the_pool_it_was_found_in() {
+    let dir = scratch("dump-record");
+    let members = carved_members(&dir, 0x4242, "member");
+    let carve = dir.join("carve").to_string_lossy().into_owned();
+    let (code, _, err) = run(&["-q", "scan", &members[0], &members[1], "-o", &carve]);
+    assert_eq!(code, 0, "{err}");
+    let img = dir.join("carved.img").to_string_lossy().into_owned();
+    let (code, out, err) = run(&[
+        "-q",
+        "-f",
+        "json",
+        "dump",
+        &carve,
+        "c0001",
+        &members[0],
+        &members[1],
+        "-o",
+        &img,
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let v = json(&out);
+    assert_eq!(v["pool_guid"], "0x0000000000004242");
+    let vol = &v["volumes"][0];
+    assert_eq!(vol["dataset"], "c0001");
+    assert_eq!(vol["output"], img.as_str());
+    assert_eq!(vol["volsize"], 32 << 20);
+    assert_eq!(vol["sha256"], FIXTURE_SHA256);
+    assert_eq!(vol["blocks_zeroed"], 0);
+    assert_eq!(vol["aborted"], false);
+
+    let other = carved_members(&dir, 0x5151, "other");
+    let (code, _, err) = run(&[
+        "-q",
+        "dump",
+        &carve,
+        "c0001",
+        &other[0],
+        &other[1],
+        "-o",
+        &dir.join("never.img").to_string_lossy(),
+    ]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("give the members that scan read"), "{err}");
+    assert!(!dir.join("never.img").exists());
+}
+
+/// `--resume` goes on with the scan that was started, or refuses: with
+/// another pool's members it skipped as many bytes of theirs as the
+/// first run had read of its own, and a range past the end of every
+/// member is a usage error, not "nothing found".
+#[test]
+fn a_resume_is_of_the_same_scan() {
+    let dir = scratch("resume-same");
+    let members = carved_members(&dir, 0x4242, "member");
+    let other = carved_members(&dir, 0x5151, "other");
+    let carve = dir.join("carve").to_string_lossy().into_owned();
+    let (code, _, err) = run(&["-q", "scan", &members[0], &members[1], "-o", &carve]);
+    assert_eq!(code, 0, "{err}");
+    let (code, _, err) = run(&["-q", "scan", &other[0], &other[1], "-o", &carve, "--resume"]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("a scan of something else"), "{err}");
+    let (code, _, err) = run(&[
+        "-q",
+        "scan",
+        &members[0],
+        &members[1],
+        "-o",
+        &carve,
+        "--resume",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let past = format!("{}-{}", SIZE * 2, SIZE * 3);
+    let (code, _, err) = run(&[
+        "-q",
+        "scan",
+        &members[0],
+        "-o",
+        &dir.join("past").to_string_lossy(),
+        "--range",
+        &past,
+    ]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("past the end of every member"), "{err}");
+}
+
+/// `roots` and `zeropoint` are on the evidence record like every other
+/// run, with what they wrote; and `roots` lists a header the two sides
+/// of a mirror both hold once.
+#[test]
+fn roots_and_zeropoint_are_on_the_record() {
+    let dir = scratch("roots-record");
+    let members = carved_members(&dir, 0x4242, "member");
+    let log = dir.join("case.jsonl").to_string_lossy().into_owned();
+    let roots = dir.join("roots");
+    let (code, _, err) = run(&[
+        "-q",
+        "--evidence-log",
+        &log,
+        "roots",
+        &members[0],
+        &members[1],
+        "-o",
+        &roots.to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let doc: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(roots.join("roots.json")).unwrap()).unwrap();
+    let listed = doc["roots"].as_array().unwrap();
+    assert!(!listed.is_empty());
+    assert!(
+        listed
+            .iter()
+            .all(|r| r["member"] == members[0].as_str() && r["also_on"][0] == members[1].as_str()),
+        "{doc}"
+    );
+    let (code, _, err) = run(&[
+        "-q",
+        "--evidence-log",
+        &log,
+        "zeropoint",
+        &members[0],
+        "-o",
+        &dir.join("zp").to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let records: Vec<serde_json::Value> = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let wrote: Vec<String> = records
+        .iter()
+        .map(|r| {
+            r["outputs"][0]["path"]
+                .as_str()
+                .unwrap()
+                .rsplit('/')
+                .next()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(wrote, ["roots.json", "zeropoint.json"]);
+}

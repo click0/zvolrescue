@@ -134,7 +134,10 @@ struct ProfileFile {
 }
 
 /// For each member, the top-level mirror whose leaf it is, if any (C-09).
-fn mirror_groups(pool: Option<&zfs_read::pool::PoolAssembly>, n: usize) -> Vec<Option<u64>> {
+pub(crate) fn mirror_groups(
+    pool: Option<&zfs_read::pool::PoolAssembly>,
+    n: usize,
+) -> Vec<Option<u64>> {
     let mut groups = vec![None; n];
     let Some(pool) = pool else {
         return groups;
@@ -314,6 +317,22 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         },
         None => None,
     };
+    // A range past the end of every member asks for nothing: it was
+    // read as "0 bytes, nothing found" and exited 3, an answer about the
+    // evidence to a question that was not about it.
+    let largest = members
+        .sources
+        .iter()
+        .flatten()
+        .map(|s| s.size())
+        .max()
+        .unwrap_or(0);
+    if let Some((a, _)) = range.filter(|(a, _)| *a >= largest) {
+        eprintln!(
+            "zvolcarve: --range starts at byte {a}, past the end of every member (the largest is {largest} bytes)"
+        );
+        return exit::USAGE;
+    }
 
     // The workspace must never be the evidence — asked before anything
     // is created, so a workspace named after a member is refused rather
@@ -354,6 +373,38 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     } else {
         None
     };
+    // And it is a resume of that scan, or nothing: resumed with another
+    // pool's members it skipped as many of their bytes as the first run
+    // had read of its own, and signed the index with the new pool's
+    // name over the old one's candidates.
+    if let Some(i) = &earlier {
+        let guid = pool
+            .as_ref()
+            .map_or_else(|| "-".into(), |p| format!("{:#018x}", p.guid));
+        let same_members = i.members.len() == members.paths.len()
+            && i.members
+                .iter()
+                .zip(&members.paths)
+                .all(|(a, b)| a == b || zvol_common::same_file(a, b));
+        // The range may differ: a resume goes on from where each member
+        // got to, to the end of the range it is given.
+        let differs = if i.pool_guid != guid {
+            Some(format!("pool {} there, {guid} here", i.pool_guid))
+        } else if !same_members {
+            Some("other members, or the same in another order".into())
+        } else if i.profile != profile_out {
+            Some("another search profile".into())
+        } else {
+            None
+        };
+        if let Some(why) = differs {
+            eprintln!(
+                "zvolcarve: --resume: {} is a scan of something else ({why}); resume it as it was started, or scan into another directory",
+                opts.output.display()
+            );
+            return exit::USAGE;
+        }
+    }
     // What the allocator has given out, read once: a candidate whose
     // space is free is a race worth running, and one whose space went
     // elsewhere is not (C-06).
@@ -395,7 +446,25 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     // dnode met at the same place in two of them is one candidate. It
     // was listed — and walked — once per member.
     let groups = mirror_groups(pool.as_ref(), members.paths.len());
-    let mut seen_in_mirror = std::collections::BTreeSet::new();
+    let base_of = |i: usize| members.base_offsets.get(i).copied().unwrap_or(0);
+    // Keyed by where in the vdev and what, and holding the member it was
+    // first met on. The candidates an interrupted run already listed are
+    // in it: a resume that met them again on the other side of the
+    // mirror listed every one twice — 2644 candidates became 5288.
+    let mut seen_in_mirror: std::collections::BTreeMap<(u64, u64, u64, String), usize> =
+        std::collections::BTreeMap::new();
+    for c in &candidates {
+        if let Some(g) = groups.get(c.device).copied().flatten() {
+            seen_in_mirror
+                .entry((
+                    g,
+                    c.offset.saturating_sub(base_of(c.device)),
+                    c.slot,
+                    c.dnode_hex.clone(),
+                ))
+                .or_insert(c.device);
+        }
+    }
     let mut mirror_duplicates = earlier.as_ref().map_or(0, |i| i.mirror_duplicates);
 
     for (i, src) in members.sources.iter().enumerate() {
@@ -415,6 +484,15 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             (None, 0) => None,
             (None, f) => Some((f, src.size())),
         };
+        if let Some((a, _)) = range.filter(|(a, _)| *a >= src.size()) {
+            eprintln!(
+                "zvolcarve: {}: --range starts at byte {a}, past its end ({} bytes); not scanned",
+                members.paths[i].display(),
+                src.size()
+            );
+            reached[i] = from;
+            continue;
+        }
         if !g.quiet {
             eprintln!(
                 "zvolcarve: scanning {} ({} bytes){}",
@@ -434,6 +512,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 codecs: codecs.clone(),
                 max_hits: opts.sample.unwrap_or(opts.max_hits),
                 stop: Some(interrupt.clone()),
+                vdev_start: base_of(i),
                 ..ScanOptions::default()
             },
         ) {
@@ -469,18 +548,37 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             .as_ref()
             .map(|r| dataset_owners(r, &scan.datasets, &interrupt))
             .unwrap_or_default();
-        for hit in &scan.hits {
+        // A signal that comes while the candidates are being walked
+        // leaves the rest of them for the resume: listed as they were,
+        // each was a candidate with nothing walked, scored as nothing,
+        // and a resume — which starts past them — never looked again.
+        let mut cut_at: Option<u64> = None;
+        for (k, hit) in scan.hits.iter().enumerate() {
+            let cut = |k: usize| scan.hits[k..].iter().map(|h| h.offset).min();
+            if interrupt.load(Ordering::Relaxed) {
+                cut_at = cut(k);
+                break;
+            }
+            let hex = to_hex(&dnode_bytes(&hit.dnode));
             if let Some(g) = groups[i] {
-                let base = members.base_offsets.get(i).copied().unwrap_or(0);
                 let key = (
                     g,
-                    hit.offset.saturating_sub(base),
+                    hit.offset.saturating_sub(base_of(i)),
                     hit.slot,
-                    format!("{:?}", hit.dnode),
+                    hex.clone(),
                 );
-                if !seen_in_mirror.insert(key) {
-                    mirror_duplicates += 1;
-                    continue;
+                match seen_in_mirror.get(&key) {
+                    // The other side of the mirror: one candidate.
+                    Some(&first) if first != i => {
+                        mirror_duplicates += 1;
+                        continue;
+                    }
+                    // This member, read again by a resume: the earlier
+                    // listing stands.
+                    Some(_) => continue,
+                    None => {
+                        seen_in_mirror.insert(key, i);
+                    }
                 }
             }
             let assessed = reader.as_ref().map(|r| {
@@ -492,6 +590,19 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                     Some(interrupt.as_ref()),
                 )
             });
+            if interrupt.load(Ordering::Relaxed) {
+                // Its walk was cut short: not a verdict on it.
+                cut_at = cut(k);
+                if let Some(g) = groups[i] {
+                    seen_in_mirror.remove(&(
+                        g,
+                        hit.offset.saturating_sub(base_of(i)),
+                        hit.slot,
+                        hex,
+                    ));
+                }
+                break;
+            }
             let named = name_from_datasets(&owners, hit);
             // C-12: what is inside usually says how large the volume was
             // made, which the dnode cannot. Once a signal has come the
@@ -536,8 +647,12 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 contents,
                 dataset_guid: named.map(|(g, _)| format!("{g:#018x}")),
                 dataset_creation_txg: named.map(|(_, t)| t),
-                dnode_hex: to_hex(&dnode_bytes(&hit.dnode)),
+                dnode_hex: hex,
             });
+        }
+        if let Some(at) = cut_at {
+            reached[i] = reached[i].min(at / 512 * 512);
+            complete = false;
         }
     }
 
@@ -635,11 +750,6 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     // Exit 6: a scan that stopped early left a state file to go on
     // from (COMPANIONS §1.2). Exit 4: it went to the end, but not over
     // every byte — what lay in the unreadable ones was not searched.
-    if unreadable > 0 {
-        eprintln!(
-            "zvolcarve: {unreadable} byte(s) could not be read and were not searched; a candidate there is missed (exit 4)"
-        );
-    }
     // Exit 3: nothing found, as the manual has always said; a scan that
     // turned up no candidate exited 0.
     let code = if !complete {
@@ -651,6 +761,13 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     } else {
         0
     };
+    // The code it says is the code it exits with: "(exit 4)" was said
+    // over a run that found nothing and exited 3.
+    if unreadable > 0 {
+        eprintln!(
+            "zvolcarve: {unreadable} byte(s) could not be read and were not searched; a candidate there is missed (exit {code})"
+        );
+    }
     let written = [index_path, state_path]
         .iter()
         .filter_map(|p| FileRef::hashed(p).ok())

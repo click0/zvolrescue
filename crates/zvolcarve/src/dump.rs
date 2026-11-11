@@ -95,6 +95,22 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         Ok(p) => p,
         Err(code) => return zvol_common::end_early(g, "zvolcarve", spec, code),
     };
+    // The candidate's dnode points into the pool the scan read. Read
+    // through another pool's members its block pointers lead to
+    // whatever is at those offsets there: every block fails its
+    // checksum, the image is zeros, and the run ended 4 as if the
+    // volume were damaged.
+    let guid = format!("{:#018x}", pool.guid);
+    if index.pool_guid != "-" && index.pool_guid != guid {
+        eprintln!(
+            "zvolcarve: {} was made from pool {} ({}); these members are pool {} ({guid}): give the members that scan read",
+            opts.dir.display(),
+            index.pool,
+            index.pool_guid,
+            pool.name
+        );
+        return zvol_common::end_early(g, "zvolcarve", spec, exit::USAGE);
+    }
     let reader = PoolReader::new(&pool, members.devices()).with_base_offsets(&members.bases());
     let obj = ObjectReader::new(&reader, dnode, Endian::Little);
 
@@ -201,8 +217,60 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         resume::clear(&state_path);
     }
 
+    // The same shape as `zvolrescue dump`'s, `volumes` and all, so that
+    // a carve's extraction reaches the report: without it `zvolreport`
+    // saw none, and its zeroed blocks were listed nowhere (R-02, C-07).
+    let bad: Vec<serde_json::Value> = report
+        .bad
+        .iter()
+        .map(|b| {
+            serde_json::json!({
+                "blkid": b.blkid, "offset": b.offset, "len": b.len, "reason": b.reason,
+            })
+        })
+        .collect();
+    let mut volume = serde_json::json!({
+        "dataset": c.id,
+        "carved": true,
+        // A carved dnode has no TXG of its own to be read at; the one it
+        // was born at is the nearest thing.
+        "txg": c.birth,
+        "output": opts.output,
+        "volsize": size,
+        "blocksize": report.blocksize,
+        "blocks_total": report.blocks_total,
+        "blocks_read": report.blocks_read,
+        "blocks_holes": report.blocks_holes,
+        "blocks_zeroed": report.blocks_zeroed,
+        "blocks_salvaged": report.blocks_salvaged,
+        "bytes_written": report.bytes_written,
+        "resumed_from_block": start_block,
+        "strict": opts.strict,
+        "aborted": report.aborted,
+        "sha256": report.sha256,
+    });
+    for (key, value) in [
+        ("stopped_by_medium", report.stopped_by_medium.clone()),
+        ("sha1", report.sha1.clone()),
+        ("md5", report.md5.clone()),
+    ] {
+        if let Some(v) = value {
+            volume[key] = v.into();
+        }
+    }
+    if let Some(at) = report.interrupted_at {
+        volume["interrupted_at"] = at.into();
+    }
+    if !bad.is_empty() {
+        volume["bad"] = bad.clone().into();
+    }
     let out = serde_json::json!({
         "candidate": c.id,
+        "pool": pool.name,
+        "pool_guid": guid,
+        "members": members.paths,
+        "volumes": [volume],
+        "bad": bad,
         "output": opts.output,
         "size": size,
         "blocksize": report.blocksize,
@@ -241,6 +309,21 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             }
             if let Some(h) = &report.md5 {
                 println!("  md5:    {h}");
+            }
+            if let Some(b) = report.bad.first() {
+                println!(
+                    "  {} unreadable range(s), the first at byte {} (block {}): {}",
+                    report.bad.len(),
+                    b.offset,
+                    b.blkid,
+                    b.reason
+                );
+            }
+            if report.aborted {
+                println!("  ABORTED (--strict, exit 4): the image holds the blocks before the first unreadable one");
+            }
+            if let Some(why) = &report.stopped_by_medium {
+                println!("  STOPPED by the medium: {why}");
             }
             if let Some(at) = report.interrupted_at {
                 println!("  INTERRUPTED at block {at} (exit 6); the image is incomplete, --resume continues there");

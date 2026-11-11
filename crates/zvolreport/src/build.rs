@@ -191,6 +191,10 @@ fn extractions_of(result: &serde_json::Value) -> Vec<Extraction> {
                     .unwrap_or(false),
                 interrupted_at: u64_at(v, "interrupted_at"),
                 stopped_by_medium: str_at(v, "stopped_by_medium"),
+                carved: v
+                    .get("carved")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
                 pool_guid: pool_guid.clone(),
             })
         })
@@ -425,10 +429,17 @@ pub fn assemble(records: &[(LogRef, Vec<Record>)], opts: &Options) -> Report {
         };
         if let Some(w) = pool.and_then(|p| p.txg_window) {
             if e.txg < w[0] || e.txg > w[1] {
-                warnings.push(format!(
-                    "{}: extracted at txg {} , outside the window {}–{} the scan recorded",
-                    e.dataset, e.txg, w[0], w[1]
-                ));
+                warnings.push(if e.carved {
+                    format!(
+                        "{}: carved, its dnode born at txg {}, outside the window {}–{} the scan recorded: no uberblock on the members leads to it",
+                        e.dataset, e.txg, w[0], w[1]
+                    )
+                } else {
+                    format!(
+                        "{}: extracted at txg {}, outside the window {}–{} the scan recorded",
+                        e.dataset, e.txg, w[0], w[1]
+                    )
+                });
             }
         }
     }
