@@ -183,7 +183,14 @@ pub fn render(r: &Report) -> String {
             "| Dataset | TXG | Output | Size | SHA-256 | Zeroed blocks | Complete |"
         );
         let _ = writeln!(s, "|---|---|---|---|---|---|---|");
-        for e in &r.extractions {
+        for (i, e) in r.extractions.iter().enumerate() {
+            let complete = if e.complete() {
+                "yes"
+            } else if r.finished_later(i) {
+                "no — finished by a later run"
+            } else {
+                "no"
+            };
             let _ = writeln!(
                 s,
                 "| {} | {} | {} | {} | {} | {} | {} |",
@@ -193,7 +200,7 @@ pub fn render(r: &Report) -> String {
                 size(e.size),
                 e.sha256.as_deref().map_or("—".to_string(), code),
                 e.errors,
-                if e.complete() { "yes" } else { "no" }
+                complete
             );
         }
         let _ = writeln!(s);

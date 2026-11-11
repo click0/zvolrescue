@@ -112,6 +112,12 @@ pub struct Extraction {
     /// A device refused a read and the run stopped there (SPEC F-33).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stopped_by_medium: Option<String>,
+    /// The pool the run read, as its record names it: what R-06 holds
+    /// the TXG against. Not part of the report — `verify` compares the
+    /// extractions a report holds with those its logs give again, and a
+    /// report built by an earlier version does not carry it.
+    #[serde(skip)]
+    pub pool_guid: Option<String>,
 }
 
 impl Extraction {
@@ -119,6 +125,27 @@ impl Extraction {
     /// stopped by `--strict`, by a signal or by a device.
     pub fn complete(&self) -> bool {
         !self.aborted && self.interrupted_at.is_none() && self.stopped_by_medium.is_none()
+    }
+
+    /// Whether `later` finished what this one left: the same volume, at
+    /// the same TXG, into the same file, and whole. A dump interrupted
+    /// and then `--resume`d is two extractions, and only the first of
+    /// them is not the whole volume.
+    pub fn finished_by(&self, later: &Extraction) -> bool {
+        !self.complete()
+            && later.complete()
+            && later.dataset == self.dataset
+            && later.txg == self.txg
+            && later.output == self.output
+    }
+}
+
+impl Report {
+    /// Whether the extraction at `i` was finished by one after it.
+    pub fn finished_later(&self, i: usize) -> bool {
+        self.extractions
+            .get(i)
+            .is_some_and(|e| self.extractions[i + 1..].iter().any(|l| e.finished_by(l)))
     }
 }
 

@@ -223,10 +223,18 @@ pub fn check(key: &VerifyingKey, bytes: &[u8], sig_path: &Path) -> Result<(), St
 pub fn keygen(private: &Path, public: &Path) -> Result<VerifyingKey, String> {
     let seed = os_random_32()?;
     let key = SigningKey::from_bytes(&seed);
-    write_private(private, &private_pem(&key))?;
     let pubkey = key.verifying_key();
+    // A pair or nothing. The private half went first, and a public half
+    // that could not be written left a private key with no pair — which
+    // the next run then refused to replace, as a key that exists. The
+    // public half goes first now, and is taken back if the private one
+    // fails.
     std::fs::write(public, public_pem(&pubkey))
         .map_err(|e| format!("{}: {e}", public.display()))?;
+    if let Err(e) = write_private(private, &private_pem(&key)) {
+        let _ = std::fs::remove_file(public);
+        return Err(e);
+    }
     Ok(pubkey)
 }
 

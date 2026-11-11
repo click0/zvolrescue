@@ -247,6 +247,33 @@ tagged. `v0.7.1` is the release that carries those six.
   where the file is read (exit 1), naming the entry; and with no verified
   uberblock at all, `list` says that, rather than speaking of a TXG
   nobody asked for.
+* **A report held every extraction to one pool's TXG window.** A scan
+  of two pools gave both the same window — oldest to newest over every
+  device scanned — and R-06 checked each extraction against whichever
+  pool came first: a volume extracted at a TXG its own pool verified was
+  warned about, and one outside it was not. Each pool's window is now
+  its own members', a pool scanned twice keeps what either scan saw, and
+  an extraction is held to the pool its run read.
+* **A dump finished by `--resume` was reported as partial.** The
+  interrupted run stayed in the report as "not the whole volume (--resume
+  continues it)", and the Markdown said "Complete: no" next to the hash
+  of a file that was whole by then. An extraction a later run finished
+  into the same file, at the same TXG, is now said to be so in both. A
+  log named twice in `build` is read once, and a record that is also in
+  another log — a copy of it — is counted once, with a warning; each
+  command and extraction used to appear twice.
+* **`verify` refused a tampered signed report as unreadable.** A report
+  with one byte that is not UTF-8 stopped the run at exit 2 before the
+  signature was checked; the signature covers bytes, and now says that
+  the report was changed (exit 4).
+* **`keygen` could leave half a pair, or put the key elsewhere.** The
+  private key was written first, and when the public one could not be
+  written the private stayed, unpaired — and the next run refused to
+  replace it, as a key already there. A symbolic link at `-o` that led
+  nowhere was not "there" either, and the key was written wherever it
+  pointed. A pair is now written whole or not at all, a link at either
+  name counts as something there, and `--force` replaces the link
+  instead of writing through it.
 
 ## v0.9.12 — 2026-11-07
 

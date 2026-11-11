@@ -118,27 +118,43 @@ fn pools_of(result: &serde_json::Value) -> Vec<Pool> {
     let Some(list) = result.get("pools").and_then(serde_json::Value::as_array) else {
         return Vec::new();
     };
-    // The TXG window is the span of what the members verified, which the
-    // devices report and the pool does not.
-    let window = result
+    let devices: &[serde_json::Value] = result
         .get("devices")
         .and_then(serde_json::Value::as_array)
-        .map(|devs| {
-            let oldest = devs.iter().filter_map(|d| u64_at(d, "oldest_txg")).min();
-            let newest = devs.iter().filter_map(|d| u64_at(d, "newest_txg")).max();
-            (oldest, newest)
-        })
-        .unwrap_or((None, None));
+        .map_or(&[], Vec::as_slice);
+    // The TXG window is the span of what the members verified, which the
+    // devices report and the pool does not — this pool's members: taken
+    // over every device scanned, two pools on one scan shared one window,
+    // the span of both.
+    let window = |p: &serde_json::Value| {
+        let own: Option<Vec<&str>> = p
+            .get("devices")
+            .and_then(serde_json::Value::as_array)
+            .map(|v| v.iter().filter_map(serde_json::Value::as_str).collect());
+        let members = devices.iter().filter(|d| {
+            own.as_ref().is_none_or(|own| {
+                d.get("path")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|path| own.contains(&path))
+            })
+        });
+        let oldest = members
+            .clone()
+            .filter_map(|d| u64_at(d, "oldest_txg"))
+            .min();
+        let newest = members.filter_map(|d| u64_at(d, "newest_txg")).max();
+        match (oldest, newest) {
+            (Some(a), Some(b)) => Some([a, b]),
+            _ => None,
+        }
+    };
     list.iter()
         .filter_map(|p| {
             Some(Pool {
                 name: str_at(p, "name")?,
                 guid: str_at(p, "guid").unwrap_or_default(),
                 state: str_at(p, "state"),
-                txg_window: match window {
-                    (Some(a), Some(b)) => Some([a, b]),
-                    _ => None,
-                },
+                txg_window: window(p),
                 readable: p
                     .get("readable")
                     .and_then(serde_json::Value::as_bool)
@@ -153,6 +169,7 @@ fn extractions_of(result: &serde_json::Value) -> Vec<Extraction> {
     let Some(list) = result.get("volumes").and_then(serde_json::Value::as_array) else {
         return Vec::new();
     };
+    let pool_guid = str_at(result, "pool_guid");
     list.iter()
         .filter_map(|v| {
             Some(Extraction {
@@ -174,6 +191,7 @@ fn extractions_of(result: &serde_json::Value) -> Vec<Extraction> {
                     .unwrap_or(false),
                 interrupted_at: u64_at(v, "interrupted_at"),
                 stopped_by_medium: str_at(v, "stopped_by_medium"),
+                pool_guid: pool_guid.clone(),
             })
         })
         .collect()
@@ -200,18 +218,40 @@ pub fn assemble(records: &[(LogRef, Vec<Record>)], opts: &Options) -> Report {
         }
     }
 
+    // A run writes its record to one log. The same record in a second
+    // log is a copy of the first — `build case.jsonl copy-of-case.jsonl`
+    // — and counting it again put every command, extraction and warning
+    // in the report twice. Within one log, two equal records are two
+    // runs, and both stay.
+    let mut first_seen: BTreeMap<String, usize> = BTreeMap::new();
+    let mut copies: BTreeMap<(usize, usize), usize> = BTreeMap::new();
+    let mut flat: Vec<(u64, usize, usize, &Record)> = Vec::new();
+    for (log, (_, rs)) in records.iter().enumerate() {
+        for (line, r) in rs.iter().enumerate() {
+            let key = serde_json::to_string(r).expect("serialisable");
+            match first_seen.get(&key) {
+                Some(&earlier) if earlier != log => {
+                    *copies.entry((log, earlier)).or_default() += 1;
+                    continue;
+                }
+                Some(_) => {}
+                None => {
+                    first_seen.insert(key, log);
+                }
+            }
+            flat.push((r.ts, log, line, r));
+        }
+    }
+    for ((log, earlier), n) in copies {
+        warnings.push(format!(
+            "{}: {n} record(s) also in {}; each is counted once",
+            records[log].0.path.display(),
+            records[earlier].0.path.display()
+        ));
+    }
     // Chronological, and deterministic when two records share a second:
     // a log is appended to, so its own order is the order things ran,
     // and that is what breaks the tie (R-02, R-03).
-    let mut flat: Vec<(u64, usize, usize, &Record)> = records
-        .iter()
-        .enumerate()
-        .flat_map(|(log, (_, rs))| {
-            rs.iter()
-                .enumerate()
-                .map(move |(line, r)| (r.ts, log, line, r))
-        })
-        .collect();
     flat.sort_by_key(|(ts, log, line, _)| (*ts, *log, *line));
 
     for (_, _, _, r) in flat {
@@ -301,8 +341,18 @@ pub fn assemble(records: &[(LogRef, Vec<Record>)], opts: &Options) -> Report {
             );
         }
         for p in pools_of(&r.result) {
-            if !pools.iter().any(|q| q.guid == p.guid && q.name == p.name) {
-                pools.push(p);
+            match pools
+                .iter_mut()
+                .find(|q| q.guid == p.guid && q.name == p.name)
+            {
+                // Scanned twice: the window is what either scan saw.
+                Some(q) => {
+                    q.txg_window = match (q.txg_window, p.txg_window) {
+                        (Some(a), Some(b)) => Some([a[0].min(b[0]), a[1].max(b[1])]),
+                        (a, b) => a.or(b),
+                    }
+                }
+                None => pools.push(p),
             }
         }
         extractions.extend(extractions_of(&r.result));
@@ -317,27 +367,40 @@ pub fn assemble(records: &[(LogRef, Vec<Record>)], opts: &Options) -> Report {
     }
 
     // R-06: what a reader should not have to notice for themselves.
-    for e in &extractions {
-        if e.aborted {
+    for (i, e) in extractions.iter().enumerate() {
+        // Interrupted, then finished by `--resume`: what is in the file
+        // now is the whole volume, and saying it is not was wrong.
+        if extractions[i + 1..]
+            .iter()
+            .any(|later| e.finished_by(later))
+        {
             warnings.push(format!(
-                "{}: the extraction stopped early; {} is not the whole volume",
+                "{}: the extraction into {} stopped early; a later run wrote the whole volume there",
                 e.dataset,
                 e.output.display()
             ));
-        }
-        if let Some(at) = e.interrupted_at {
-            warnings.push(format!(
-                "{}: the extraction was interrupted at block {at}; {} is not the whole volume (--resume continues it)",
-                e.dataset,
-                e.output.display()
-            ));
-        }
-        if let Some(why) = &e.stopped_by_medium {
-            warnings.push(format!(
-                "{}: a device refused a read and the extraction stopped ({why}); {} is not the whole volume",
-                e.dataset,
-                e.output.display()
-            ));
+        } else {
+            if e.aborted {
+                warnings.push(format!(
+                    "{}: the extraction stopped early; {} is not the whole volume",
+                    e.dataset,
+                    e.output.display()
+                ));
+            }
+            if let Some(at) = e.interrupted_at {
+                warnings.push(format!(
+                    "{}: the extraction was interrupted at block {at}; {} is not the whole volume (--resume continues it)",
+                    e.dataset,
+                    e.output.display()
+                ));
+            }
+            if let Some(why) = &e.stopped_by_medium {
+                warnings.push(format!(
+                    "{}: a device refused a read and the extraction stopped ({why}); {} is not the whole volume",
+                    e.dataset,
+                    e.output.display()
+                ));
+            }
         }
         if e.errors > 0 {
             warnings.push(format!(
@@ -352,7 +415,15 @@ pub fn assemble(records: &[(LogRef, Vec<Record>)], opts: &Options) -> Report {
                 e.output.display()
             ));
         }
-        if let Some(w) = pools.iter().find_map(|p| p.txg_window) {
+        // Against the pool the extraction read: the first pool's window
+        // was the one every extraction was held to. A record that names
+        // no pool is held to the only one, or to none.
+        let pool = match &e.pool_guid {
+            Some(g) => pools.iter().find(|p| &p.guid == g),
+            None if pools.len() == 1 => pools.first(),
+            None => None,
+        };
+        if let Some(w) = pool.and_then(|p| p.txg_window) {
             if e.txg < w[0] || e.txg > w[1] {
                 warnings.push(format!(
                     "{}: extracted at txg {} , outside the window {}–{} the scan recorded",
@@ -433,7 +504,19 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
         }
     }
     let mut logs = Vec::new();
-    for path in &opts.logs {
+    for (i, path) in opts.logs.iter().enumerate() {
+        // The same log named twice is read once.
+        if let Some(earlier) = opts.logs[..i]
+            .iter()
+            .find(|e| zvol_common::same_file(path, e))
+        {
+            eprintln!(
+                "zvolreport: {} is {} again; read once",
+                path.display(),
+                earlier.display()
+            );
+            continue;
+        }
         let read = match read_log(path) {
             Ok(r) => r,
             Err(e) => {
@@ -892,5 +975,116 @@ mod tests {
         assert_eq!(run(&g, &md_over_json), exit::USAGE);
         assert!(!dir.join("r.json").exists());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Each pool's window is its own members', and an extraction is held
+    /// to the window of the pool it read. One window over every device
+    /// scanned, checked against whichever pool came first, warned about
+    /// a TXG that was in its own pool's window and kept quiet about one
+    /// that was not.
+    #[test]
+    fn each_extraction_is_held_to_its_own_pools_window() {
+        let scan = serde_json::json!({
+            "devices": [
+                {"path": "/dev/a", "oldest_txg": 100, "newest_txg": 120},
+                {"path": "/dev/b", "oldest_txg": 500, "newest_txg": 520},
+            ],
+            "pools": [
+                {"name": "old", "guid": "0x1", "readable": true, "devices": ["/dev/a"]},
+                {"name": "new", "guid": "0x2", "readable": true, "devices": ["/dev/b"]},
+            ],
+        });
+        let dump = |guid: &str, txg: u64| {
+            serde_json::json!({
+                "pool_guid": guid,
+                "volumes": [{"dataset": "new/vol", "txg": txg, "output": "/case/v.img",
+                             "volsize": 1, "sha256": "ab", "blocks_zeroed": 0}],
+            })
+        };
+        let r = assemble(
+            &log(vec![
+                record("zvolrescue", 1, 0, scan),
+                record("zvolrescue", 2, 0, dump("0x2", 510)),
+                record("zvolrescue", 3, 0, dump("0x2", 110)),
+            ]),
+            &opts(),
+        );
+        let windows: Vec<_> = r.pools.iter().map(|p| p.txg_window).collect();
+        assert_eq!(windows, [Some([100, 120]), Some([500, 520])]);
+        let outside: Vec<_> = r
+            .warnings
+            .iter()
+            .filter(|w| w.contains("outside the window"))
+            .collect();
+        assert_eq!(outside.len(), 1, "{:?}", r.warnings);
+        assert!(outside[0].contains("txg 110"), "{outside:?}");
+    }
+
+    /// Interrupted, then finished by `--resume`: the report says the
+    /// file holds the whole volume now, not that it does not.
+    #[test]
+    fn an_extraction_finished_later_is_not_called_partial() {
+        let interrupted = serde_json::json!({
+            "volumes": [{"dataset": "tank/vm/disk0", "txg": 9, "output": "/case/disk0.img",
+                         "volsize": 1024, "sha256": "aa", "blocks_zeroed": 0,
+                         "interrupted_at": 3}]
+        });
+        let r = assemble(
+            &log(vec![
+                record("zvolrescue", 10, 6, interrupted.clone()),
+                record("zvolrescue", 11, 0, dump(9, 0, false)),
+            ]),
+            &opts(),
+        );
+        assert!(
+            !r.warnings
+                .iter()
+                .any(|w| w.contains("not the whole volume")),
+            "{:?}",
+            r.warnings
+        );
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("a later run wrote the whole volume")),
+            "{:?}",
+            r.warnings
+        );
+        assert!(r.finished_later(0) && !r.finished_later(1));
+        let md = crate::markdown::render(&r);
+        assert!(md.contains("finished by a later run"), "{md}");
+        // Never finished, it still is not the whole volume.
+        let r = assemble(
+            &log(vec![record("zvolrescue", 10, 6, interrupted)]),
+            &opts(),
+        );
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("not the whole volume")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    /// A copy of a log built alongside it counts each record once and
+    /// says so; two equal records in one log are two runs.
+    #[test]
+    fn a_record_in_two_logs_is_counted_once() {
+        let one = record("zvolrescue", 10, 0, dump(9, 0, false));
+        let mut logs = log(vec![one.clone(), one.clone()]);
+        let mut copy = log(vec![one]);
+        copy[0].0.path = PathBuf::from("copy.jsonl");
+        logs.extend(copy);
+        let r = assemble(&logs, &opts());
+        assert_eq!(r.commands.len(), 2);
+        assert_eq!(r.extractions.len(), 2);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.starts_with("copy.jsonl: 1 record(s) also in case.jsonl")),
+            "{:?}",
+            r.warnings
+        );
     }
 }

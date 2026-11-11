@@ -64,6 +64,10 @@ Print the version.
 .Ar log ...
 .Pp
 Consolidate evidence logs into one report.
+A log named twice is read once, and a record that is also in an
+earlier log \(em a copy of it \(em is counted once, with a warning.
+Each extraction is held to the TXG window of the pool it read, and one
+that a later run finished into the same file is not called partial.
 .Bl -tag -width Ds
 .It Fl o , Fl -output Ar report.json
 Write the report here.
@@ -134,6 +138,10 @@ Read the signature here instead of next to the report.
 .Pp
 Write a new Ed25519 key pair to sign reports with.
 The private key is written owner-only (mode 0600).
+A pair is written whole or not at all, and a symbolic link at either
+name, one that leads nowhere included, counts as a key already there:
+.Fl -force
+replaces the link rather than writing through it.
 .Bl -tag -width Ds
 .It Fl o , Fl -output Ar key
 Write the private key here, and the public key at

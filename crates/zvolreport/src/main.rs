@@ -188,13 +188,27 @@ fn keygen(g: &Global, private: &std::path::Path, public: Option<PathBuf>, force:
         );
         return exit::USAGE;
     }
+    // Anything at either name counts, a link that leads nowhere included:
+    // `exists()` follows it, said no, and the key was written to wherever
+    // the link pointed.
+    let there = |p: &std::path::Path| std::fs::symlink_metadata(p).is_ok();
     if !force {
-        if let Some(there) = [private, public.as_path()].into_iter().find(|p| p.exists()) {
+        if let Some(p) = [private, public.as_path()].into_iter().find(|p| there(p)) {
             eprintln!(
                 "zvolreport: {} already exists; --force replaces the key pair",
-                there.display()
+                p.display()
             );
             return exit::USAGE;
+        }
+    }
+    // Replaced, not written through: a link at either name goes, and the
+    // key is made in its place.
+    for p in [private, public.as_path()] {
+        if std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()) {
+            if let Err(e) = std::fs::remove_file(p) {
+                eprintln!("zvolreport: {}: {e}", p.display());
+                return exit::USAGE;
+            }
         }
     }
     match sign::keygen(private, &public) {

@@ -311,3 +311,71 @@ fn a_report_run_is_on_the_evidence_record() {
         records[1]
     );
 }
+
+/// One byte of a signed report that is not UTF-8 is a report somebody
+/// changed, and the signature says so (exit 4, COMPANIONS §4.4): it was
+/// refused as unreadable before the signature was asked (exit 2).
+#[test]
+fn a_signed_report_with_a_byte_that_is_not_text_breaks_its_signature() {
+    let dir = scratch("not-text");
+    let img = dir.join("vol.img");
+    std::fs::write(&img, b"the bytes of a volume, such as they are").expect("write");
+    let log = evidence_log(&dir, &img);
+    let key = dir.join("k").to_string_lossy().into_owned();
+    let (code, _, err) = run(&["-q", "keygen", "-o", &key]);
+    assert_eq!(code, 0, "{err}");
+    let report = dir.join("report.json");
+    let r = report.to_string_lossy().into_owned();
+    let (code, _, err) = run(&[
+        "-q",
+        "build",
+        &log.to_string_lossy(),
+        "-o",
+        &r,
+        "--sign",
+        &key,
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let mut bytes = std::fs::read(&report).unwrap();
+    let at = bytes.iter().position(|&b| b == b'"').unwrap() + 1;
+    bytes[at] = 0xff;
+    std::fs::write(&report, bytes).unwrap();
+    let (code, _, err) = run(&["-q", "verify", &r, "--key", &format!("{key}.pub")]);
+    assert_eq!(code, 4, "{err}");
+    assert!(err.contains("signature"), "{err}");
+}
+
+/// `keygen` makes a pair or nothing, and makes it at the names given:
+/// a link there that leads nowhere is something there, not a way to
+/// put the key somewhere else.
+#[test]
+fn keygen_writes_a_whole_pair_and_never_through_a_link() {
+    let dir = scratch("keygen");
+    let key = dir.join("k");
+    let far = dir.join("far.key");
+    std::os::unix::fs::symlink(&far, &key).unwrap();
+    let k = key.to_string_lossy().into_owned();
+    let (code, _, err) = run(&["-q", "keygen", "-o", &k]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("already exists"), "{err}");
+    assert!(!far.exists());
+    let (code, _, err) = run(&["-q", "keygen", "-o", &k, "--force"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!far.exists());
+    assert!(std::fs::symlink_metadata(&key)
+        .unwrap()
+        .file_type()
+        .is_file());
+    // The public half cannot be written: no private half is left either.
+    let lone = dir.join("lone");
+    let (code, _, err) = run(&[
+        "-q",
+        "keygen",
+        "-o",
+        &lone.to_string_lossy(),
+        "--public",
+        &dir.join("no/such/dir/lone.pub").to_string_lossy(),
+    ]);
+    assert_ne!(code, 0, "{err}");
+    assert!(!lone.exists());
+}

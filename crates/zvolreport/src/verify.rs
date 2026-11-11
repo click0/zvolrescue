@@ -350,7 +350,10 @@ fn against_logs(at: &Path, report: &Report, logs: &[(&crate::model::LogRef, Path
 
 /// Run `verify`.
 pub fn run(g: &Global, opts: &Options) -> u8 {
-    let text = match std::fs::read_to_string(&opts.report) {
+    // Bytes, not text: a report with one byte that is not UTF-8 was
+    // refused as unreadable (exit 2) before the signature over those
+    // very bytes could say it had been changed (exit 4).
+    let bytes = match std::fs::read(&opts.report) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("zvolreport: {}: {e}", opts.report.display());
@@ -384,7 +387,7 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
                     Some("no signature beside the report".into()),
                 )
             } else {
-                match crate::sign::check(&key, text.as_bytes(), &path) {
+                match crate::sign::check(&key, &bytes, &path) {
                     Ok(()) => (Status::Pass, None),
                     Err(e) => (Status::Fail, Some(e)),
                 }
@@ -402,7 +405,10 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
     // stops being JSON at all, and "not a report" would be a confusing
     // way to say "somebody changed this": the signature is over the
     // bytes, so it can answer that first and does.
-    let report: Report = match serde_json::from_str(&text) {
+    let parsed = std::str::from_utf8(&bytes)
+        .map_err(|e| format!("not text: {e}"))
+        .and_then(|t| serde_json::from_str::<Report>(t).map_err(|e| e.to_string()));
+    let report: Report = match parsed {
         Ok(r) => r,
         Err(e) => {
             if let Some(s) = &signature {
