@@ -207,11 +207,11 @@ fn datasets_at(
     c: &Candidate,
     pool_name: &str,
     want_pending: bool,
-) -> Option<(Vec<Dataset>, Option<Pending>)> {
+) -> Option<(zfs_read::dsl::DatasetTree, Option<Pending>)> {
     let mos = open_mos(reader, &c.ub).ok()?;
     let tree = walk(&mos, pool_name).ok()?;
     let p = want_pending.then(|| zfs_read::dsl::pending(&mos, &tree.datasets));
-    Some((tree.datasets, p))
+    Some((tree, p))
 }
 
 /// Run the tool.
@@ -254,7 +254,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     let mut previous: Option<(u64, Vec<Dataset>)> = None;
     // Only two dataset lists are ever held at once (T-11).
     for c in &candidates {
-        let Some((now, pending)) = datasets_at(&reader, c, &pool.name, opts.pending) else {
+        let Some((mut tree, pending)) = datasets_at(&reader, c, &pool.name, opts.pending) else {
             unreadable.push(c.ub.txg);
             events.push(Event {
                 txg: c.ub.txg,
@@ -267,6 +267,42 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             });
             continue;
         };
+        let mut now = std::mem::take(&mut tree.datasets);
+        // A part of the tree that could not be read here is not a part
+        // that is gone. What was there at the last transaction group is
+        // taken to be there still, and said: missing, it was "destroyed"
+        // here and "created" again at the next one, the same GUID, on a
+        // pool whose DSL directory simply did not read at this one.
+        let carried: Vec<Dataset> = match &previous {
+            Some((_, before)) if !tree.unread.is_empty() => before
+                .iter()
+                .filter(|d| tree.unread_at(&d.name) && !now.iter().any(|n| n.guid == d.guid))
+                .cloned()
+                .collect(),
+            _ => Vec::new(),
+        };
+        if !tree.unread.is_empty() {
+            let more = tree.errors.len().saturating_sub(3);
+            events.push(Event {
+                txg: c.ub.txg,
+                time: Some(c.ub.timestamp),
+                kind: Kind::Unreadable,
+                object: None,
+                guid: 0,
+                details: format!(
+                    "part of the dataset tree could not be read at this transaction group ({}{}); {} dataset(s) and snapshot(s) there before are taken as unchanged",
+                    tree.errors.iter().take(3).cloned().collect::<Vec<_>>().join("; "),
+                    if more > 0 {
+                        format!("; and {more} more")
+                    } else {
+                        String::new()
+                    },
+                    carried.len()
+                ),
+                last_seen_txg: None,
+            });
+        }
+        now.extend(carried);
         if let Some(p) = pending {
             events.push(Event {
                 txg: c.ub.txg,

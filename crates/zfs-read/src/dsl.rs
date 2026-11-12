@@ -354,6 +354,40 @@ pub struct DatasetTree {
     pub datasets: Vec<Dataset>,
     /// Directories or datasets that could not be read, with the reason.
     pub errors: Vec<String>,
+    /// Parts of the tree that could not be read, by the name they are
+    /// under: what is there is not known from this tree — which is not
+    /// the same as not there.
+    pub unread: Vec<(String, Unread)>,
+}
+
+/// Which part of a directory's subtree could not be read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unread {
+    /// The directory itself: the dataset, its snapshots, its children.
+    All,
+    /// Its head dataset, and so the dataset and its snapshots.
+    Head,
+    /// Its children ZAP, and so everything below it.
+    Children,
+    /// The list of its snapshots, and so every one of them.
+    Snapshots,
+}
+
+impl DatasetTree {
+    /// Whether `name` lies where this tree could not be read.
+    pub fn unread_at(&self, name: &str) -> bool {
+        self.unread.iter().any(|(u, what)| {
+            let rest = name.strip_prefix(u.as_str());
+            let own = rest.is_some_and(|r| r.is_empty() || r.starts_with('@'));
+            let below = rest.is_some_and(|r| r.starts_with('/'));
+            match what {
+                Unread::All => own || below,
+                Unread::Head => own,
+                Unread::Children => below,
+                Unread::Snapshots => rest.is_some_and(|r| r.starts_with('@')),
+            }
+        })
+    }
 }
 
 impl DatasetTree {
@@ -698,6 +732,9 @@ fn walk_dir(
     if depth > MAX_DEPTH || !seen.insert(dir_obj) {
         tree.errors
             .push(format!("{name}: directory {dir_obj} revisited or too deep"));
+        if depth > MAX_DEPTH {
+            tree.unread.push((name.to_string(), Unread::All));
+        }
         return;
     }
     let dir = match read_dir(mos, dir_obj) {
@@ -706,6 +743,7 @@ fn walk_dir(
             trace!("dsl", "dir {dir_obj} ({name}): unreadable: {e}");
             tree.errors
                 .push(format!("{name}: DSL directory {dir_obj}: {e}"));
+            tree.unread.push((name.to_string(), Unread::All));
             return;
         }
     };
@@ -721,16 +759,20 @@ fn walk_dir(
     if dir.head_dataset_obj != 0 {
         match describe(mos, dir.head_dataset_obj, name, &dir, origin_snap) {
             Ok(mut head) => {
-                let snaps = snapshots(mos, &head, name, origin_snap);
+                let snaps = snapshots(mos, &head, name, origin_snap, tree);
                 tree.datasets.push(head.clone());
                 for s in snaps {
                     tree.datasets.push(s);
                 }
                 head.warnings.clear();
             }
-            Err(e) => tree
-                .errors
-                .push(format!("{name}: dataset {}: {e}", dir.head_dataset_obj)),
+            Err(e) => {
+                tree.errors
+                    .push(format!("{name}: dataset {}: {e}", dir.head_dataset_obj));
+                // The head and its snapshots are unknown here; the
+                // children below are walked as usual.
+                tree.unread.push((name.to_string(), Unread::Head));
+            }
         }
     }
     if dir.child_dir_zapobj == 0 {
@@ -743,6 +785,7 @@ fn walk_dir(
                 "{name}: children ZAP {}: {e}",
                 dir.child_dir_zapobj
             ));
+            tree.unread.push((name.to_string(), Unread::Children));
             return;
         }
     };
@@ -868,11 +911,16 @@ fn describe(
     })
 }
 
+///
+/// What cannot be read is put in `tree` as unread: dropped without a
+/// word, a snapshot whose list did not read at one transaction group was
+/// "destroyed" there and "made" again at the next.
 fn snapshots(
     mos: &DnodeArray<'_, '_>,
     head: &Dataset,
     name: &str,
     origin_snap: u64,
+    tree: &mut DatasetTree,
 ) -> Vec<Dataset> {
     let mut out = Vec::new();
     if head.phys.snapnames_zapobj == 0 {
@@ -883,7 +931,14 @@ fn snapshots(
         .and_then(|o| read_zap(&o))
     {
         Ok(e) => e,
-        Err(_) => return out,
+        Err(e) => {
+            tree.errors.push(format!(
+                "{name}: snapshot names ZAP {}: {e}",
+                head.phys.snapnames_zapobj
+            ));
+            tree.unread.push((name.to_string(), Unread::Snapshots));
+            return out;
+        }
     };
     let dir = DslDirPhys {
         origin_obj: head.origin_obj,
@@ -893,9 +948,16 @@ fn snapshots(
     for e in entries {
         let Value::U64(obj) = e.value else { continue };
         let snap_name = format!("{name}@{}", e.name);
-        if let Ok(mut d) = describe(mos, obj, &snap_name, &dir, origin_snap) {
-            d.snapshot = true;
-            out.push(d);
+        match describe(mos, obj, &snap_name, &dir, origin_snap) {
+            Ok(mut d) => {
+                d.snapshot = true;
+                out.push(d);
+            }
+            Err(err) => {
+                tree.errors
+                    .push(format!("{snap_name}: dataset {obj}: {err}"));
+                tree.unread.push((snap_name, Unread::Head));
+            }
         }
     }
     out.sort_by_key(|d| d.creation_txg);
@@ -934,6 +996,46 @@ mod tests {
     use zvolrescue_io::{BlockSource, MemSource};
 
     const SIZE: u64 = 64 * LABEL_SIZE;
+
+    /// What did not read covers what it says and no more: a name that
+    /// only starts the same, `tank/vm2` beside `tank/vm`, is not under it.
+    #[test]
+    fn an_unread_part_covers_its_own_names_only() {
+        let tree = |what| DatasetTree {
+            unread: vec![("tank/vm".to_string(), what)],
+            ..Default::default()
+        };
+        let names = [
+            "tank/vm",
+            "tank/vm@a",
+            "tank/vm/disk0",
+            "tank/vm/disk0@a",
+            "tank/vm2",
+            "tank",
+        ];
+        let covered = |what| names.map(|n| tree(what).unread_at(n));
+        assert_eq!(covered(Unread::All), [true, true, true, true, false, false]);
+        assert_eq!(
+            covered(Unread::Head),
+            [true, true, false, false, false, false]
+        );
+        assert_eq!(
+            covered(Unread::Children),
+            [false, false, true, true, false, false]
+        );
+        assert_eq!(
+            covered(Unread::Snapshots),
+            [false, true, false, false, false, false]
+        );
+        // One snapshot that did not read is that snapshot.
+        let one = DatasetTree {
+            unread: vec![("tank/vm@a".to_string(), Unread::Head)],
+            ..Default::default()
+        };
+        assert!(one.unread_at("tank/vm@a"));
+        assert!(!one.unread_at("tank/vm@ab"));
+        assert!(!one.unread_at("tank/vm"));
+    }
 
     /// A pool whose MOS describes: tank (fs), tank/vm (fs), tank/vm/disk0
     /// (zvol) with snapshot @before, and a $MOS bookkeeping dir.

@@ -441,6 +441,16 @@ tagged. `v0.7.1` is the release that carries those six.
   bytes the image took on it, and checked over those; `/dev/null` keeps
   nothing and is no output on the record, the image's hash staying in
   the result. The same for `zvolcarve dump`.
+* **A dataset tree that did not read in full gave destroy events.** At
+  a transaction group where a DSL directory, a dataset or a snapshot
+  list failed its checksum, `zvoltimeline` dropped that part of the tree
+  and reported what had been in it as `destroyed` — and, at the next
+  group where it read again, as `created`, with the same GUID. On the
+  dRAID-2 crosscheck pool `ztest/ds_0@0` was destroyed at 459 and back
+  at 461. That transaction group is now `unreadable`, naming the first
+  three parts that did not read, and what was there before in them is
+  taken as unchanged. The crosscheck now fails on any GUID that is
+  destroyed and comes back.
 
 ## v0.9.12 — 2026-11-07
 

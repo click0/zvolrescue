@@ -109,7 +109,7 @@ TXG       TIME                  EVENT      OBJECT                     DETAILS
 | T-01 | M | Enumerate every TXG that has a valid uberblock in any label of any member (SPEC F-04), plus the checkpoint TXG if present. |
 | T-02 | M | For each TXG, list datasets with GUID, type, name, creation TXG (reusing `zfs-read` dsl; SPEC F-11/F-12). |
 | T-03 | M | Diff consecutive TXGs into events: `created`, `destroyed`, `renamed` (same GUID, new name), `snapshot`, `snapshot-destroyed`, `clone`, `promoted`. |
-| T-04 | M | A TXG whose MOS can no longer be read (blocks reused) is reported as `unreadable`, with the first failing block, and never aborts the run. |
+| T-04 | M | A TXG whose MOS can no longer be read (blocks reused) is reported as `unreadable`, with the first failing block, and never aborts the run. A TXG where only part of the dataset tree reads is `unreadable` too, naming what did not; what was there at the TXG before, in that part, is taken as unchanged — never `destroyed` there and `created` again at the next. |
 | T-05 | M | For every `destroyed` event, print the last TXG that still referenced the object and the exact `zvolrescue dump` command line. |
 | T-06 | S | `host` events from label nvlists: `hostid`, `hostname`, label TXG — detects imports on another machine. |
 | T-07 | S | `--pending` (SPEC F-15): per TXG, size of the free bpobj / deadlists that still hold blocks of destroyed datasets, so the user can judge whether data is still physically present. |

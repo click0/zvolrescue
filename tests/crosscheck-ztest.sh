@@ -490,6 +490,17 @@ held = int(re.match(r"(\d+) byte", newest["details"]).group(1))
 lists = int(re.search(r"in (\d+) deadlist", newest["details"]).group(1))
 print(f"   pending: {held} byte(s) still held in {lists} deadlist(s), "
       f"and their own objects come to the same")
+# A GUID is never destroyed and then made again: one that comes back
+# was not destroyed — the part of the tree it is in did not read at
+# that transaction group.
+gone = {}
+for e in sorted(report["events"], key=lambda e: e["txg"]):
+    g = e.get("guid")
+    if e["event"] in ("destroyed", "snapshot-destroyed"):
+        gone[g] = e["txg"]
+    elif g in gone and e["event"] in ("created", "snapshot", "clone"):
+        print(f"{e['object']} ({g}) destroyed at txg {gone[g]} and back at txg {e['txg']}")
+        sys.exit(1)
 EOF
             then :; else echo "   pending: FAILED"; fail=1; fi
         else
