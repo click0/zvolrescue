@@ -917,7 +917,6 @@ impl Alloc {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     fn bp(
         &self,
         offset: u64,
