@@ -33,7 +33,8 @@ pub struct Members {
     pub paths: Vec<PathBuf>,
     /// Where each member's vdev begins, indexed like the scans.
     pub base_offsets: Vec<u64>,
-    /// Files read besides the members: the imagers' maps (SPEC F-72).
+    /// Files read besides the members: the imagers' maps (SPEC F-72),
+    /// and the layout `--hints` gave (F-65).
     pub map_files: Vec<PathBuf>,
     /// The run's ledger of refused device reads (SPEC F-33, N-10):
     /// what to report, and whether the run was stopped.
@@ -42,7 +43,7 @@ pub struct Members {
 
 impl Members {
     /// Everything read from disk for the evidence record: the members,
-    /// and any imager's map read alongside one (SPEC F-72).
+    /// any imager's map read alongside one (SPEC F-72), and the hints.
     pub fn inputs(&self) -> Vec<PathBuf> {
         let mut v = self.paths.clone();
         v.extend(self.map_files.iter().cloned());
@@ -115,6 +116,48 @@ fn search_layout(
         }
     }
     Ok(out)
+}
+
+/// The layout a run reads through, for its evidence record: the hints
+/// file, whether the order was searched for, and every top-level vdev
+/// with its members by name, in the order read — the order
+/// `--search-order` settled on being one no argument names.
+fn layout_record(
+    layout: &LayoutHints,
+    paths: &[PathBuf],
+    file: &std::path::Path,
+    searched: bool,
+) -> serde_json::Value {
+    fn top(t: &zfs_read::hints::TopHint, paths: &[PathBuf]) -> serde_json::Value {
+        let mut v = serde_json::json!({
+            "kind": t.kind,
+            "members": t
+                .members
+                .iter()
+                .map(|m| m.and_then(|i| paths.get(i)).map(|p| p.display().to_string()))
+                .collect::<Vec<_>>(),
+        });
+        for (key, value) in [
+            ("nparity", t.nparity),
+            ("draid_ndata", t.draid_ndata),
+            ("draid_nspares", t.draid_nspares),
+            ("draid_ngroups", t.draid_ngroups),
+        ] {
+            if let Some(n) = value {
+                v[key] = n.into();
+            }
+        }
+        if !t.children.is_empty() {
+            v["children"] = t.children.iter().map(|c| top(c, paths)).collect();
+        }
+        v
+    }
+    serde_json::json!({
+        "hints": file.display().to_string(),
+        "search_order": searched,
+        "ashift": layout.ashift,
+        "tops": layout.tops.iter().map(|t| top(t, paths)).collect::<Vec<_>>(),
+    })
 }
 
 /// Apply every `--assume-member`: put a member whose labels are gone into
@@ -466,6 +509,7 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
                     .collect();
                 layout = search_layout(&layout, &scans, &devices, &bases)?;
             }
+            crate::evidence::note_layout(layout_record(&layout, &paths, file, spec.search_order));
             let pool = layout.assemble();
             say!(
                 "reading through the layout in {}: {}",
@@ -512,7 +556,11 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
         pools,
         paths,
         base_offsets: bases,
-        map_files: open.map_files(),
+        map_files: open
+            .map_files()
+            .into_iter()
+            .chain(spec.hints.clone())
+            .collect(),
         ledger: open.ledger.clone(),
     })
 }

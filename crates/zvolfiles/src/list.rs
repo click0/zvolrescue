@@ -232,7 +232,7 @@ pub fn run(
             },
             unreadable,
             listed,
-            opened.members.paths.clone(),
+            opened.members.inputs(),
             opened.members.ledger.clone(),
         ))
     });

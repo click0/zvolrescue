@@ -626,6 +626,16 @@ tagged. `v0.7.1` is the release that carries those six.
   written, before the run refused it: `-r` names its images only once
   the pool is read. A log there named as an image, a state or the
   manifest is refused up front.
+* **A carve's record left out the maps, and no record said which layout
+  was read.** `zvolcarve` (`scan`, `dump`, `roots`, `zeropoint`) and
+  `zvolfiles` named only the members among a run's inputs: the
+  `--map` files they read were on no record (SPEC F-72). No tool listed
+  the `--hints` file, and nothing said which member order
+  `--search-order` had settled on — the virtual label lives "in memory
+  and in the evidence log only" (F-65), and was in neither. Every record
+  now lists the maps and the hints among its inputs, and a run read
+  through hints carries `layout`: the vdevs and their members by name,
+  in the order read.
 
 ## v0.9.12 — 2026-11-07
 

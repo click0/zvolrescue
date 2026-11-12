@@ -1100,7 +1100,8 @@ impl PoolSpec {
     }
 
     /// Every file a run on this spec reads, for the evidence record:
-    /// the members and the imagers' maps named for them (SPEC F-72).
+    /// the members, the imagers' maps named for them (SPEC F-72) and
+    /// the hints (F-65).
     pub fn inputs(&self) -> Vec<PathBuf> {
         let mut v = self.members().unwrap_or_default();
         v.extend(
@@ -1108,6 +1109,7 @@ impl PoolSpec {
                 .iter()
                 .filter_map(|m| m.split_once('=').map(|(_, f)| PathBuf::from(f))),
         );
+        v.extend(self.hints.iter().cloned());
         v
     }
 

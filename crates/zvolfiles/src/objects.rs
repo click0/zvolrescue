@@ -179,7 +179,7 @@ pub fn run(
                 interrupted: interrupt.load(std::sync::atomic::Ordering::Relaxed),
                 stopped,
             },
-            opened.members.paths.clone(),
+            opened.members.inputs(),
             opened.members.ledger.clone(),
             tree,
         ))

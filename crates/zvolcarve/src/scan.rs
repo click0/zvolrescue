@@ -907,7 +907,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         "zvolcarve",
         &json,
         code,
-        &members.paths,
+        &members.inputs(),
         written,
         &members.ledger.incidents(),
     )

@@ -256,7 +256,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         "zvolcarve",
         &serde_json::to_value(&doc).expect("serialisable"),
         code,
-        &members.paths,
+        &members.inputs(),
         written,
         &members.ledger.incidents(),
     )

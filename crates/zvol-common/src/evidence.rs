@@ -267,8 +267,24 @@ pub struct Record {
     /// stopped the run (SPEC F-33, N-10). Absent when there were none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub incidents: Vec<serde_json::Value>,
+    /// The layout the pool was read through when `--hints` gave it: the
+    /// virtual label, which lives in memory and here only (SPEC F-65) —
+    /// with the member order `--search-order` settled on, which no
+    /// argument says. Absent when the labels gave the layout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<serde_json::Value>,
     /// Exit code the run is about to return.
     pub status: u8,
+}
+
+/// The layout this run reads its pool through, once `--hints` has given
+/// it: every record the run writes carries it. One pool is read per
+/// run, and the record is written far from where the layout was made.
+static LAYOUT: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+
+/// Say which layout the run reads through (SPEC F-65).
+pub fn note_layout(layout: serde_json::Value) {
+    let _ = LAYOUT.set(layout);
 }
 
 impl Record {
@@ -291,6 +307,7 @@ impl Record {
             outputs: Vec::new(),
             result: result.clone(),
             incidents: Vec::new(),
+            layout: LAYOUT.get().cloned(),
             status,
         }
     }

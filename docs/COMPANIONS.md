@@ -69,6 +69,13 @@ One JSON object per line, appended, never rewritten:
 * A device among the inputs is not hashed even with `--hash-inputs`: that
   is a read of every sector outside the run's own (N-10). Its `size` is
   the device's own.
+* `inputs` lists everything the run read beside the members: each
+  imager's map (`--map`, SPEC F-72) and the `--hints` file (F-65).
+* `layout` is the layout a run read the pool through when `--hints` gave
+  it — the hints file, whether `--search-order` was asked, the `ashift`
+  and each top-level vdev with its members by name in the order read, the
+  order the search settled on included, which no argument says. Absent
+  when the labels gave the layout.
 * `zvolreport` consumes these records; nothing else reads them.
 
 ### 1.4 Read-only invariants

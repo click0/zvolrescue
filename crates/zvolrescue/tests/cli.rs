@@ -179,6 +179,68 @@ fn hints_with_an_impossible_geometry_are_refused() {
     }
 }
 
+/// A run read through `--hints` says so on its record: the hints file is
+/// one of its inputs, and the layout read through — every vdev with its
+/// members by name, in the order read — is there (SPEC F-65), as no
+/// argument can say which order `--search-order` settled on.
+#[test]
+fn the_layout_a_run_read_through_is_on_its_record() {
+    let dir = scratch("hints-record");
+    let paths = write_members(&dir, &plain_members());
+    let hints = dir.join("layout.hints");
+    std::fs::write(
+        &hints,
+        serde_json::json!({"name": "tank", "ashift": 12,
+            "tops": [{"kind": "mirror", "members": [&paths[0], &paths[1]]}]})
+        .to_string(),
+    )
+    .unwrap();
+    let hints = hints.to_string_lossy().into_owned();
+    let log = dir.join("case.jsonl");
+    let (code, _, err) = run(&[
+        "-q",
+        "--evidence-log",
+        &log.to_string_lossy(),
+        "list",
+        &paths[0],
+        &paths[1],
+        "--hints",
+        &hints,
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let text = std::fs::read_to_string(&log).unwrap();
+    let rec: serde_json::Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+    let inputs: Vec<&str> = rec["inputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["path"].as_str().unwrap())
+        .collect();
+    assert!(inputs.contains(&hints.as_str()), "{inputs:?}");
+    let layout = &rec["layout"];
+    assert_eq!(layout["hints"], hints.as_str(), "{rec}");
+    assert_eq!(layout["search_order"], false);
+    assert_eq!(layout["tops"][0]["kind"], "mirror");
+    assert_eq!(
+        layout["tops"][0]["members"],
+        serde_json::json!([&paths[0], &paths[1]])
+    );
+
+    // Read through the labels, a run has no layout to record.
+    let (code, _, err) = run(&[
+        "-q",
+        "--evidence-log",
+        &log.to_string_lossy(),
+        "list",
+        &paths[0],
+        &paths[1],
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let text = std::fs::read_to_string(&log).unwrap();
+    let rec: serde_json::Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+    assert!(rec.get("layout").is_none(), "{rec}");
+}
+
 /// An image is written at offsets with its holes left out, which a pipe
 /// cannot take: `-o /dev/stdout` into a pipe is a usage error up front,
 /// where it failed on the first seek as exit 3, "unrecoverable".

@@ -741,7 +741,7 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
                 not_restored: run.not_restored,
                 not_found,
             },
-            opened.members.paths.clone(),
+            opened.members.inputs(),
             opened.members.ledger.clone(),
             tree,
             refused,

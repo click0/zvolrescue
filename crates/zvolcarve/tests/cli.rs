@@ -75,8 +75,11 @@ fn an_unreadable_sector_costs_a_sector_not_a_chunk() {
     )
     .unwrap();
     let mapped = dir.join("mapped").to_string_lossy().into_owned();
+    let log = dir.join("case.jsonl");
     let (code, _, err) = run(&[
         "-q",
+        "--evidence-log",
+        &log.to_string_lossy(),
         "scan",
         &members[0],
         &members[1],
@@ -88,6 +91,20 @@ fn an_unreadable_sector_costs_a_sector_not_a_chunk() {
     assert_eq!(code, 4, "{err}");
     assert!(err.contains("512 byte(s) could not be read"), "{err}");
     assert_eq!(count(&mapped), want);
+    // The map is evidence the run read, on its record like the members
+    // (SPEC F-72); a carve's record had the members only.
+    let text = std::fs::read_to_string(&log).unwrap();
+    let rec: serde_json::Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+    let inputs: Vec<String> = rec["inputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["path"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(
+        inputs.contains(&map.to_string_lossy().into_owned()),
+        "{inputs:?}"
+    );
 }
 
 /// Nothing a carve writes lands on what it reads: a member lying in the

@@ -787,6 +787,7 @@ mod tests {
             outputs: Vec::new(),
             result,
             incidents: Vec::new(),
+            layout: None,
             status,
         }
     }
