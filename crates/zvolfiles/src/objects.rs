@@ -130,8 +130,10 @@ pub fn run(
                 Ok((hash, zeroed)) => {
                     if let Some(first) = zeroed.first() {
                         eprintln!(
-                            "zvolfiles: object {obj}: {} block(s) written as zeros, the first {}: {} (the index lists each)",
+                            "zvolfiles: object {obj}: {} run(s) of bytes written as zeros, the first {}–{} (block {}): {} (the index lists each)",
                             zeroed.len(),
+                            first.offset,
+                            first.offset + first.length,
                             first.block,
                             first.reason
                         );

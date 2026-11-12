@@ -464,6 +464,26 @@ tagged. `v0.7.1` is the release that carries those six.
   size did not read either is an error. `list` shows the same, and a
   `--path` whose object does not read shows why. A link target that
   went to the spill block is an error, never the file's contents.
+* **`zvolfiles` counted and listed what did not read as entries.** A
+  directory leaf, or a whole directory, that did not read was a line of
+  its own: in `list` a second entry under the directory's name, or `?`
+  with no mode or time though the directory's had read, and one more in
+  the "N entries" count; in `extract` a record that "could not be
+  written" beside the directory that was. The extraction summary's
+  "N file(s)" counted every record but directories — failures, refusals
+  and devices not made among them — and a directory that could not be
+  made was a directory there too. What of a directory did not read is
+  now `contents_errors` on the directory's own entry (the dataset's root,
+  which nothing lists, gets one of its own, not counted as an entry),
+  and `extract` counts it as not read whole; the summary counts the
+  files and directories written. `--path file/x` says the file is not a
+  directory, where it said "object is not a ZAP", and a path through a
+  directory that did not read names it. `list -f json` gives a device's
+  number as `{raw, major, minor}`, as the manifest does, not as
+  `"8,1"`; an extended attribute whose value did not read keeps the
+  length its metadata gave, where it was `bytes: 0`; a `--path` given
+  twice is "the same path as", not "within", the other; and `objects`
+  names the zeroed bytes as `extract` does, not by block number.
 
 ## v0.9.12 — 2026-11-07
 

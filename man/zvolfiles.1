@@ -131,7 +131,8 @@ A block that cannot be read is written as zeros, and the manifest
 says which bytes and why
 .Pq Li zeroed ;
 a leaf of a directory that cannot be read loses the entries in it and
-no others, and is named.
+no others, and is named on the directory's record
+.Pq Li contents_errors .
 The manifest records every file's four times to the nanosecond, before
 1970 too, and any extended attribute it could not read.
 The manifest is

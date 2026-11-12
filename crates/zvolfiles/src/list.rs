@@ -6,7 +6,7 @@ use zfs_read::zpl::{walk_from, Entry};
 use zvol_common::timefmt::iso8601_ns;
 use zvol_common::{exit, Format, Global, PoolSpec};
 
-use crate::common::{resolve_path, with_dataset, AtArgs};
+use crate::common::{resolve_path, with_dataset, AtArgs, Rdev};
 
 #[derive(Debug, Serialize)]
 struct FileOut {
@@ -35,9 +35,9 @@ struct FileOut {
     /// Modification time, to the nanosecond, either side of the epoch.
     #[serde(skip_serializing_if = "Option::is_none")]
     mtime: Option<String>,
-    /// A device's number as `major,minor`.
+    /// A device's number, as the manifest of `extract` records it.
     #[serde(skip_serializing_if = "Option::is_none")]
-    rdev: Option<String>,
+    rdev: Option<Rdev>,
     #[serde(skip_serializing_if = "Option::is_none")]
     target: Option<String>,
     /// Extended attributes, in name order (Z-04).
@@ -46,6 +46,10 @@ struct FileOut {
     /// Extended attributes, or sets of them, that could not be read.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     xattr_errors: Vec<String>,
+    /// What of a directory's contents could not be read: the entries in
+    /// it are missing from the list.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    contents_errors: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
@@ -88,12 +92,11 @@ fn describe(
         gid: z.map(|z| z.gid),
         projid: z.and_then(|z| z.projid),
         mtime: z.map(|z| iso8601_ns(z.mtime.secs, z.mtime.nanos)),
-        rdev: z
-            .filter(|z| matches!(z.file_type(), FileType::CharDevice | FileType::BlockDevice))
-            .map(|z| format!("{},{}", z.rdev >> 32, z.rdev & 0xffff_ffff)),
+        rdev: z.and_then(Rdev::of),
         target,
         xattrs,
         xattr_errors,
+        contents_errors: e.contents_errors.clone(),
         // Met a second time, a directory is listed where it was met
         // first: said, where it used to be an empty directory.
         error: e.error.clone().or_else(|| {
@@ -139,6 +142,7 @@ pub fn run(
                 znode,
                 error,
                 walked_at: None,
+                contents_errors: Vec::new(),
             }]
         };
         let a_directory = || {
@@ -175,8 +179,16 @@ pub fn run(
             .collect();
         let unreadable = files
             .iter()
-            .filter(|f| f.error.is_some() || !f.xattr_errors.is_empty())
+            .filter(|f| {
+                f.error.is_some() || !f.xattr_errors.is_empty() || !f.contents_errors.is_empty()
+            })
             .count();
+        // The directory listed is no entry in itself: it is there only to
+        // carry what of it did not read, and was counted as one more.
+        let own = entries.first().is_some_and(|e| {
+            e.object == from && e.raw_path == raw_prefix && !e.contents_errors.is_empty()
+        });
+        let listed = files.len() - usize::from(own);
         Ok((
             ListOut {
                 dataset: dataset.to_string(),
@@ -188,11 +200,12 @@ pub fn run(
                 interrupted: interrupt.load(std::sync::atomic::Ordering::Relaxed),
             },
             unreadable,
+            listed,
             opened.members.paths.clone(),
             opened.members.ledger.clone(),
         ))
     });
-    let (out, unreadable, paths, ledger) = match result {
+    let (out, unreadable, listed, paths, ledger) = match result {
         Ok(v) => v,
         // Nothing was produced — the members did not open, or the
         // dataset was not reached — but a device may have refused a
@@ -212,8 +225,8 @@ pub fn run(
                 "{} at txg {}: {} entr{}",
                 out.dataset,
                 out.txg,
-                out.files.len(),
-                if out.files.len() == 1 { "y" } else { "ies" }
+                listed,
+                if listed == 1 { "y" } else { "ies" }
             );
             for f in &out.files {
                 println!(
@@ -233,10 +246,13 @@ pub fn run(
                     println!("       xattrs: {}", f.xattrs.join(", "));
                 }
                 if let Some(r) = &f.rdev {
-                    println!("       device {r}");
+                    println!("       device {},{}", r.major, r.minor);
                 }
                 for x in &f.xattr_errors {
                     println!("       xattrs: {x}");
+                }
+                for c in &f.contents_errors {
+                    println!("       {c}");
                 }
                 if let Some(e) = &f.error {
                     println!("       {e}");

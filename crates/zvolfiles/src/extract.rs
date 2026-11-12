@@ -19,7 +19,7 @@ use zvol_common::evidence::FileRef;
 use zvol_common::timefmt::iso8601_ns;
 use zvol_common::{exit, Format, Global, PoolSpec};
 
-use crate::common::{resolve_path, with_dataset, AtArgs, Zeroed, TAIL_NOTE};
+use crate::common::{resolve_path, with_dataset, AtArgs, Rdev, Zeroed, TAIL_NOTE};
 use crate::out::{OutError, OutTree};
 
 /// Options of an `extract` run.
@@ -72,6 +72,10 @@ pub struct Extracted {
     /// Sets of extended attributes that could not be read at all.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub xattr_errors: Vec<String>,
+    /// What of a directory's contents could not be read: the entries in
+    /// it are missing from the tree, and from this manifest.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub contents_errors: Vec<String>,
     /// Blocks that could not be read whole and were written as zeros,
     /// in whole or in part.
     pub errors: u64,
@@ -112,25 +116,6 @@ impl Times {
     }
 }
 
-/// A device number, as stored and as the major and minor it packs: the
-/// major in the high 32 bits, the minor in the low (`zfs_expldev`).
-#[derive(Debug, Serialize)]
-pub struct Rdev {
-    pub raw: u64,
-    pub major: u64,
-    pub minor: u64,
-}
-
-impl Rdev {
-    fn of(z: &Znode) -> Option<Rdev> {
-        matches!(z.file_type(), FileType::CharDevice | FileType::BlockDevice).then_some(Rdev {
-            raw: z.rdev,
-            major: z.rdev >> 32,
-            minor: z.rdev & 0xffff_ffff,
-        })
-    }
-}
-
 /// One extended attribute, as the manifest records it.
 ///
 /// The value is in exactly one of two fields, and which one it is in
@@ -157,8 +142,10 @@ pub struct Xattr {
     /// `value` is absent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value_hex: Option<String>,
-    /// The value's length on disk.
-    pub bytes: u64,
+    /// The value's length on disk; absent when the attribute's own
+    /// metadata did not read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
     /// How much of it is recorded, present only when that is less: a
     /// value is read up to 64 KiB.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -187,7 +174,8 @@ struct ManifestOut {
     output: PathBuf,
     files: Vec<Extracted>,
     directories: usize,
-    /// Files with at least one block written as zeros.
+    /// Entries not read whole: a file with a block written as zeros or
+    /// extended attributes missing, a directory with entries missing.
     incomplete: usize,
     /// Entries that could not be written at all.
     failed: usize,
@@ -585,8 +573,13 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
             let (obj, raw) = resolve_path(fs, p, opened.txg)?;
             if let Some((_, outer)) = roots.iter().find(|(_, r)| *r == raw || under(r, &raw)) {
                 eprintln!(
-                    "zvolfiles: --path {}: within --path {}; written once",
+                    "zvolfiles: --path {}: {} --path {}; written once",
                     p.to_string_lossy(),
+                    if *outer == raw {
+                        "the same path as"
+                    } else {
+                        "within"
+                    },
                     shown(outer)
                 );
                 continue;
@@ -628,6 +621,7 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
                     znode,
                     error,
                     walked_at: None,
+                    contents_errors: Vec::new(),
                 };
                 extract_entry(fs, &tree, &e, opts, preserve, &mut run, &interrupt);
             }
@@ -635,6 +629,24 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
                 for e in walk_from(fs, obj, &prefix, &raw_prefix, true, Some(&interrupt)) {
                     if interrupt.load(Ordering::Relaxed) || run.stopped.is_some() {
                         break;
+                    }
+                    // What of the start's own contents did not read: on
+                    // the record written for it just above, or — for the
+                    // dataset's root, which is the output directory and
+                    // has none — on one of its own, written nowhere.
+                    if e.object == obj && e.raw_path == raw_prefix {
+                        match run.files.last_mut() {
+                            Some(r) if !raw_prefix.is_empty() && r.object == obj => {
+                                r.contents_errors.extend(e.contents_errors)
+                            }
+                            _ => run.files.push(match &e.znode {
+                                Some(z) => record_of(fs, &e, z),
+                                None => {
+                                    failed(&e, e.error.as_deref().unwrap_or("metadata unreadable"))
+                                }
+                            }),
+                        }
+                        continue;
                     }
                     extract_entry(fs, &tree, &e, opts, preserve, &mut run, &interrupt);
                 }
@@ -664,6 +676,7 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
             .filter(|f| {
                 f.errors > 0
                     || !f.xattr_errors.is_empty()
+                    || !f.contents_errors.is_empty()
                     || f.xattrs.iter().any(|x| x.error.is_some())
             })
             .count();
@@ -738,19 +751,27 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
             serde_json::to_string_pretty(&json).expect("serialisable")
         ),
         Format::Text => {
+            // What was written: a record that failed, was refused or is
+            // a device recorded and not made is no file in the tree, and
+            // was counted as one.
+            let written = out
+                .files
+                .iter()
+                .filter(|f| f.kind != "d" && f.error.is_none() && f.not_made.is_none())
+                .count();
             println!(
                 "{} at txg {}: {} file(s), {} director{} -> {}",
                 out.dataset,
                 out.txg,
-                out.files.len() - out.directories,
+                written,
                 out.directories,
                 if out.directories == 1 { "y" } else { "ies" },
                 out.output.display()
             );
             if out.incomplete > 0 {
                 println!(
-                    "  {} file(s) not read whole: blocks written as zeros, or extended attributes missing",
-                    out.incomplete
+                    "  {} not read whole: blocks written as zeros, extended attributes or directory entries missing",
+                    entries(out.incomplete)
                 );
             }
             if out.failed > 0 {
@@ -820,6 +841,7 @@ fn record_of(fs: &Filesystem<'_, '_>, e: &Entry, z: &Znode) -> Extracted {
         hardlink_to: None,
         xattrs: xattrs.0,
         xattr_errors: xattrs.1,
+        contents_errors: e.contents_errors.clone(),
         errors: 0,
         zeroed: Vec::new(),
         not_made: None,
@@ -901,14 +923,16 @@ fn extract_entry(
         record.error = Some(err.to_string());
     };
     match z.file_type() {
-        FileType::Dir => {
-            run.directories += 1;
-            if let Err(err) = tree.dir(&to) {
+        // Counted when made: one that was not is `failed`, and was a
+        // directory in the summary too.
+        FileType::Dir => match tree.dir(&to) {
+            Ok(()) => run.directories += 1,
+            Err(err) => {
                 fail(&mut record, err);
                 run.unwritten_dirs
                     .push((e.raw_path.clone(), e.path.clone(), e.object));
             }
-        }
+        },
         FileType::Symlink => match fs.symlink_target(e.object, z) {
             Ok(t) => {
                 let target = String::from_utf8_lossy(&t).into_owned();
@@ -1043,6 +1067,7 @@ fn failed(e: &Entry, why: &str) -> Extracted {
         hardlink_to: None,
         xattrs: Vec::new(),
         xattr_errors: Vec::new(),
+        contents_errors: e.contents_errors.clone(),
         errors: 0,
         zeroed: Vec::new(),
         not_made: None,
@@ -1092,7 +1117,7 @@ fn xattrs_of(fs: &Filesystem<'_, '_>, z: &Znode) -> (Vec<Xattr>, Vec<String>) {
                 value,
                 value_hex,
                 bytes: x.size,
-                recorded: (x.error.is_none() && (bytes.len() as u64) < x.size)
+                recorded: (x.error.is_none() && x.size.is_some_and(|s| (bytes.len() as u64) < s))
                     .then_some(bytes.len()),
                 error: x.error,
             }

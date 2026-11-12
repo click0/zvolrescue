@@ -323,7 +323,7 @@ fn paths_are_taken_as_the_dataset_spells_them() {
         "hello.txt",
     ]);
     assert_eq!(code, 0, "{err}");
-    assert!(err.contains("written once"), "{err}");
+    assert!(err.contains("the same path as --path"), "{err}");
     assert_eq!(
         std::fs::read(out.join("sub/deep.txt")).unwrap(),
         zfs_read::fixture::zpl_deep()
@@ -349,6 +349,160 @@ fn paths_are_taken_as_the_dataset_spells_them() {
     assert!(
         err.contains("no such file or directory at txg") && err.contains("older --txg"),
         "{err}"
+    );
+    // A name under a file is said as that: it was "object is not a ZAP".
+    let (code, err) = run(&[
+        "-q",
+        "list",
+        "tank/fs",
+        &m[0],
+        &m[1],
+        "--path",
+        "hello.txt/x",
+    ]);
+    assert_eq!(code, 3, "{err}");
+    assert!(err.contains("hello.txt is not a directory"), "{err}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Members whose first copy of `name`, on each, is flipped: the
+/// directory block holding the name no longer verifies.
+fn members_without(dir: &Path, name: &[u8]) -> Vec<String> {
+    let m = members(dir, ["member0.img", "member1.img"]);
+    for p in &m {
+        let mut b = std::fs::read(p).unwrap();
+        let at = b
+            .windows(name.len())
+            .position(|w| w == name)
+            .expect("the name is on the member");
+        b[at] ^= 0xff;
+        std::fs::write(p, b).unwrap();
+    }
+    m
+}
+
+fn json_of(args: &[&str]) -> (i32, serde_json::Value) {
+    let out = Command::new(env!("CARGO_BIN_EXE_zvolfiles"))
+        .args(args)
+        .output()
+        .expect("run zvolfiles");
+    (
+        out.status.code().expect("exit code"),
+        serde_json::from_slice(&out.stdout).expect("json on stdout"),
+    )
+}
+
+/// A directory whose contents did not read is said on its own entry,
+/// with its metadata: it was listed a second time, as `?` with no mode
+/// or time, and counted as one more entry. The dataset's root, which
+/// nothing lists, gets an entry of its own. `extract` writes the
+/// directory, records why it is empty and counts it as not read whole,
+/// not as a file that could not be written.
+#[test]
+fn a_directory_that_did_not_read_is_said_on_its_own_entry() {
+    let dir = scratch("dir-unread");
+    let m = members_without(&dir, b"deep.txt");
+    let (code, v) = json_of(&[
+        "-q",
+        "-f",
+        "json",
+        "list",
+        "--recursive",
+        "tank/fs",
+        &m[0],
+        &m[1],
+    ]);
+    assert_eq!(code, 4, "{v}");
+    let subs: Vec<&serde_json::Value> = v["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["path"] == "sub")
+        .collect();
+    assert_eq!(subs.len(), 1, "{v}");
+    assert_eq!(
+        (subs[0]["type"].as_str(), subs[0]["mode"].as_str()),
+        (Some("d"), Some("0755"))
+    );
+    assert!(
+        subs[0]["contents_errors"][0]
+            .as_str()
+            .unwrap()
+            .starts_with("directory: "),
+        "{v}"
+    );
+    let out = dir.join("out");
+    let (code, v) = json_of(&[
+        "-q",
+        "-f",
+        "json",
+        "extract",
+        "tank/fs",
+        &m[0],
+        &m[1],
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 4, "{v}");
+    assert_eq!(
+        (
+            v["failed"].as_u64(),
+            v["incomplete"].as_u64(),
+            v["directories"].as_u64()
+        ),
+        (Some(0), Some(1), Some(1)),
+        "{v}"
+    );
+    let sub = v["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["path"] == "sub")
+        .unwrap();
+    assert!(
+        sub.get("error").is_none() && sub["contents_errors"].is_array(),
+        "{sub}"
+    );
+    assert!(out.join("sub").is_dir());
+    // The summary counts what was written: the record of what did not
+    // read was one more file.
+    let text = Command::new(env!("CARGO_BIN_EXE_zvolfiles"))
+        .args(["extract", "tank/fs", &m[0], &m[1], "-o"])
+        .arg(dir.join("out2"))
+        .output()
+        .expect("run zvolfiles");
+    let text = String::from_utf8_lossy(&text.stdout);
+    assert!(text.contains(": 6 file(s), 1 directory ->"), "{text}");
+    std::fs::remove_dir_all(&dir).unwrap();
+
+    let dir = scratch("root-unread");
+    let m = members_without(&dir, b"hello.txt");
+    let (code, v) = json_of(&["-q", "-f", "json", "list", "tank/fs", &m[0], &m[1]]);
+    assert_eq!(code, 4, "{v}");
+    let files = v["files"].as_array().unwrap();
+    assert_eq!(files.len(), 1, "{v}");
+    assert_eq!(
+        (files[0]["path"].as_str(), files[0]["type"].as_str()),
+        (Some("."), Some("d"))
+    );
+    assert!(files[0]["contents_errors"].is_array(), "{v}");
+    let out = dir.join("out");
+    let (code, v) = json_of(&[
+        "-q",
+        "-f",
+        "json",
+        "extract",
+        "tank/fs",
+        &m[0],
+        &m[1],
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 4, "{v}");
+    assert_eq!(
+        (v["failed"].as_u64(), v["incomplete"].as_u64()),
+        (Some(0), Some(1)),
+        "{v}"
     );
     std::fs::remove_dir_all(&dir).unwrap();
 }

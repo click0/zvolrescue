@@ -54,6 +54,30 @@ pub struct Zeroed {
     pub reason: String,
 }
 
+/// A device number, as stored and as the major and minor it packs: the
+/// major in the high 32 bits, the minor in the low (`zfs_expldev`).
+///
+/// One shape for `list` and for the manifest: `list` gave `"8,1"`, the
+/// manifest `{raw, major, minor}`, for the same device.
+#[derive(Debug, serde::Serialize)]
+pub struct Rdev {
+    pub raw: u64,
+    pub major: u64,
+    pub minor: u64,
+}
+
+impl Rdev {
+    /// The number of a character or block device; nothing for the rest.
+    pub fn of(z: &zfs_ondisk::zpl::Znode) -> Option<Rdev> {
+        use zfs_ondisk::zpl::FileType;
+        matches!(z.file_type(), FileType::CharDevice | FileType::BlockDevice).then_some(Rdev {
+            raw: z.rdev,
+            major: z.rdev >> 32,
+            minor: z.rdev & 0xffff_ffff,
+        })
+    }
+}
+
 /// Resolve a `--path` to its object and to its path as the dataset
 /// spells it (Z-09), or say why not.
 ///

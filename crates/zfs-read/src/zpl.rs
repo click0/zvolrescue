@@ -559,7 +559,26 @@ impl Filesystem<'_, '_> {
             .split(|&b| b == b'/')
             .filter(|p| !p.is_empty() && *p != b".")
         {
-            let read = self.read_dir_partial(at)?;
+            // A name under a file is under nothing: said as that, where
+            // the file's contents were read as a directory and the
+            // answer was "object is not a ZAP".
+            if !on_disk.is_empty()
+                && self.objects.object(at)?.dnode().object_type != ot::DIRECTORY_CONTENTS
+            {
+                return Err(ReadError::Io(format!(
+                    "{shown}: {} is not a directory",
+                    String::from_utf8_lossy(&on_disk)
+                )));
+            }
+            // Which directory did not read, where the message was the
+            // checksum's alone.
+            let read = self.read_dir_partial(at).map_err(|e| match e {
+                ReadError::Medium { .. } => e,
+                e => ReadError::Io(format!(
+                    "{shown}: the directory {} did not read: {e}",
+                    shown_dir(&String::from_utf8_lossy(&on_disk))
+                )),
+            })?;
             let entries = &read.entries;
             let found = entries
                 .iter()
@@ -649,7 +668,7 @@ impl Filesystem<'_, '_> {
                         };
                         out.values.push(XattrValue {
                             name: name.to_string(),
-                            size: bytes.len() as u64,
+                            size: Some(bytes.len() as u64),
                             value: bytes,
                             error: None,
                         });
@@ -673,13 +692,22 @@ impl Filesystem<'_, '_> {
                         // The value is the object's contents, read up to
                         // a bound: an attribute is small by construction,
                         // and one that is not is said to be cut.
-                        let read = self.znode(e.object).and_then(|vz| {
-                            let len = vz.size.min(XATTR_READ_MAX) as usize;
-                            let bytes = self.objects.object(e.object)?.read_range(0, len)?;
-                            Ok((vz.size, bytes))
-                        });
+                        // Its length is the metadata's, and stays known
+                        // when only the value did not read: it was
+                        // recorded as 0 bytes, a length it never had.
+                        let (size, read) = match self.znode(e.object) {
+                            Ok(vz) => {
+                                let len = vz.size.min(XATTR_READ_MAX) as usize;
+                                let bytes = self
+                                    .objects
+                                    .object(e.object)
+                                    .and_then(|o| o.read_range(0, len));
+                                (Some(vz.size), bytes)
+                            }
+                            Err(err) => (None, Err(err)),
+                        };
                         out.values.push(match read {
-                            Ok((size, value)) => XattrValue {
+                            Ok(value) => XattrValue {
                                 name: e.name,
                                 size,
                                 value,
@@ -687,7 +715,7 @@ impl Filesystem<'_, '_> {
                             },
                             Err(err) => XattrValue {
                                 name: e.name,
-                                size: 0,
+                                size,
                                 value: Vec::new(),
                                 error: Some(err.to_string()),
                             },
@@ -786,8 +814,9 @@ pub struct XattrValue {
     /// Its name.
     pub name: String,
     /// The value's length on disk; more than `value` holds when it was
-    /// cut at [`XATTR_READ_MAX`].
-    pub size: u64,
+    /// cut at [`XATTR_READ_MAX`], and unknown when the attribute's own
+    /// metadata did not read.
+    pub size: Option<u64>,
     /// The value, or as much of it as was read.
     pub value: Vec<u8>,
     /// Why the value could not be read; `value` is empty then.
@@ -815,6 +844,12 @@ pub struct Entry {
     /// no hard links to directories — and the path it was walked at the
     /// first time. Its contents are listed there and not again.
     pub walked_at: Option<String>,
+    /// What of a directory's contents could not be read — a leaf of it,
+    /// all of it, or a depth not walked — so what is listed under it is
+    /// not all it held. On the directory's own entry: a line of its own
+    /// was a second entry of the same name, or one with no metadata
+    /// when the directory's had read.
+    pub contents_errors: Vec<String>,
 }
 
 impl Entry {
@@ -909,6 +944,38 @@ fn shown_dir(prefix: &str) -> String {
     }
 }
 
+/// Say that part of a directory's contents is missing, on the
+/// directory's own entry: the one its parent listed just before walking
+/// into it, or — for the directory the walk started at, which nothing
+/// listed — one of its own, with its metadata.
+fn missing_contents(
+    fs: &Filesystem<'_, '_>,
+    w: &mut Walk<'_>,
+    object: u64,
+    prefix: &str,
+    raw_prefix: &[u8],
+    why: String,
+) {
+    match w.out.last_mut() {
+        Some(e) if e.object == object && e.raw_path == raw_prefix => e.contents_errors.push(why),
+        _ => {
+            let (znode, error) = match fs.znode(object) {
+                Ok(z) => (Some(z), None),
+                Err(e) => (None, Some(e.to_string())),
+            };
+            w.out.push(Entry {
+                path: shown_dir(prefix),
+                raw_path: raw_prefix.to_vec(),
+                object,
+                znode,
+                error,
+                walked_at: None,
+                contents_errors: vec![why],
+            });
+        }
+    }
+}
+
 fn walk_into(
     fs: &Filesystem<'_, '_>,
     object: u64,
@@ -923,29 +990,22 @@ fn walk_into(
     if depth > MAX_DEPTH {
         // Said, not dropped: a file below here used to be missing from
         // the walk with nothing to show it had been there.
-        w.out.push(Entry {
-            path: prefix.to_string(),
-            raw_path: raw_prefix.to_vec(),
+        missing_contents(
+            fs,
+            w,
             object,
-            znode: None,
-            error: Some(format!(
+            prefix,
+            raw_prefix,
+            format!(
                 "directory more than {MAX_DEPTH} levels deep; not walked (list --path {prefix} reaches it)"
-            )),
-            walked_at: None,
-        });
+            ),
+        );
         return;
     }
     let read = match fs.read_dir_partial(object) {
         Ok(r) => r,
         Err(e) => {
-            w.out.push(Entry {
-                path: shown_dir(prefix),
-                raw_path: raw_prefix.to_vec(),
-                object,
-                znode: None,
-                error: Some(format!("directory: {e}")),
-                walked_at: None,
-            });
+            missing_contents(fs, w, object, prefix, raw_prefix, format!("directory: {e}"));
             return;
         }
     };
@@ -953,16 +1013,16 @@ fn walk_into(
     // hashed into it, and only those: each is said, and the rest of the
     // directory is walked.
     for (blkid, e) in &read.lost {
-        w.out.push(Entry {
-            path: shown_dir(prefix),
-            raw_path: raw_prefix.to_vec(),
+        missing_contents(
+            fs,
+            w,
             object,
-            znode: None,
-            error: Some(format!(
+            prefix,
+            raw_prefix,
+            format!(
                 "directory: leaf block {blkid} could not be read ({e}); the entries in it are missing"
-            )),
-            walked_at: None,
-        });
+            ),
+        );
     }
     for e in read.entries {
         let path = if prefix.is_empty() {
@@ -986,6 +1046,7 @@ fn walk_into(
                     e.name
                 )),
                 walked_at: None,
+                contents_errors: Vec::new(),
             });
             continue;
         }
@@ -1015,6 +1076,7 @@ fn walk_into(
             znode,
             error,
             walked_at,
+            contents_errors: Vec::new(),
         });
         if walk {
             walk_into(fs, e.object, &path, &raw_path, depth + 1, w);
