@@ -582,7 +582,10 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
                 if let Some(d) = &c.detail {
                     println!("{:<9} {:<9} {:<7}   {d}", "", "", "");
                 }
-                if c.status == Status::Fail {
+                // Only where there is something to show: a report that
+                // no longer matches its logs has no one value of each,
+                // and printed "recorded —" and "found —" under its reason.
+                if c.status == Status::Fail && (c.recorded.is_some() || c.found.is_some()) {
                     println!(
                         "{:<9} {:<9} {:<7}   recorded {}",
                         "",

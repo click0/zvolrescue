@@ -157,6 +157,22 @@ fn a_carve_writes_nothing_over_what_it_reads() {
         index,
         "the index was written"
     );
+    // A candidate asked for by its number is pointed at its name: it
+    // was "no candidate 1", and nothing said to type c0001.
+    let number = id.trim_start_matches(['c', '0']);
+    let out = dir.join("n.img").to_string_lossy().into_owned();
+    let (code, _, err) = run(&[
+        "-q",
+        "dump",
+        &ws,
+        number,
+        &members[0],
+        &members[1],
+        "-o",
+        &out,
+    ]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains(&format!("did you mean {id}?")), "{err}");
 
     // Nor do the logs, which no word of the command line ties to the
     // index: a debug log there was created over it at the start — then

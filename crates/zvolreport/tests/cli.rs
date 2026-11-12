@@ -259,6 +259,20 @@ fn an_edited_log_breaks_the_report() {
             .any(|c| c["kind"] == "log" && c["status"] == "fail"),
         "{v}"
     );
+    // A report edited since it was built fails against its logs, which
+    // have no one hash to show: its reason, and no "recorded —" and
+    // "found —" under it.
+    let log = evidence_log(&dir, &img);
+    let (code, _, err) = run(&["-q", "build", &log.to_string_lossy(), "-o", &report]);
+    assert_eq!(code, 0, "{err}");
+    let mut r: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
+    r["commands"][0]["status"] = 4.into();
+    std::fs::write(&report, serde_json::to_vec(&r).unwrap()).unwrap();
+    let (code, out, err) = run(&["-q", "verify", &report]);
+    assert_eq!(code, 4, "{err}\n{out}");
+    assert!(out.contains("commands[0]: the report says"), "{out}");
+    assert!(!out.contains("—\n"), "{out}");
 }
 
 /// `--evidence-log` and `--hash-inputs` do what they say for this tool

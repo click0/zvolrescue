@@ -34,6 +34,27 @@ pub struct Options {
     pub resume: bool,
 }
 
+/// How many candidates the index holds, and what they are called.
+fn there(candidates: &[crate::model::Candidate]) -> String {
+    match (candidates.first(), candidates.last()) {
+        (Some(a), Some(b)) => format!("{} there, {} to {}", candidates.len(), a.id, b.id),
+        _ => "none there".to_string(),
+    }
+}
+
+/// The candidate a number names when it is not spelled as the index
+/// spells it: `3` or `c3` for `c0003`. It was "no candidate 3", with
+/// nothing to say what to type instead.
+fn spelled_as(asked: &str, candidates: &[crate::model::Candidate]) -> Option<String> {
+    let n: u64 = asked
+        .strip_prefix(['c', 'C'])
+        .unwrap_or(asked)
+        .parse()
+        .ok()?;
+    let id = format!("c{n:04}");
+    (id != asked && candidates.iter().any(|c| c.id == id)).then_some(id)
+}
+
 /// Run `dump`.
 pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     // From here a SIGINT ends the extraction at the next block with its
@@ -48,10 +69,13 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     };
     let Some(c) = index.candidates.iter().find(|c| c.id == opts.candidate) else {
         eprintln!(
-            "zvolcarve: no candidate {} in {} ({} there)",
+            "zvolcarve: no candidate {} in {} ({}){}",
             opts.candidate,
             opts.dir.display(),
-            index.candidates.len()
+            there(&index.candidates),
+            spelled_as(&opts.candidate, &index.candidates)
+                .map(|id| format!("; did you mean {id}?"))
+                .unwrap_or_default()
         );
         return exit::USAGE;
     };

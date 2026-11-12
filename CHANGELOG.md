@@ -497,6 +497,12 @@ tagged. `v0.7.1` is the release that carries those six.
   still to be made was named by the directory it lands in ("output
   directory mnt is on input device"), and is now named itself, with
   that directory.
+* **Two messages with nothing in them.** `zvolreport verify` printed
+  "recorded —" and "found —" under a report that no longer matches its
+  logs, which has no single value of either; they are now left out
+  there. `zvolcarve dump WS 3` said "no candidate 3" and stopped; it
+  now names the range the index holds and asks "did you mean c0003?"
+  when a number names one.
 
 ## v0.9.12 — 2026-11-07
 
