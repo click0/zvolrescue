@@ -1,18 +1,16 @@
 //! The command line, end to end, on fixture members written to disk.
 
-use std::path::PathBuf;
 use std::process::Command;
 
 use zfs_ondisk::label::LABEL_SIZE;
 use zfs_read::fixture::{build_sample_mos, Alloc, Pool};
+use zvol_common::scratch::Scratch;
 
 const SIZE: u64 = 64 * LABEL_SIZE;
 
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("zvoltimeline-cli-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("scratch dir");
-    dir
+/// A directory for one test, removed when the test ends.
+fn scratch(name: &str) -> Scratch {
+    Scratch::new("zvoltimeline-cli", name)
 }
 
 /// A two-way mirror with the sample MOS at one txg, written to `dir`.

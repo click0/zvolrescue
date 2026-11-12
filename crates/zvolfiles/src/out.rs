@@ -201,11 +201,8 @@ mod tests {
         }
     }
 
-    fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("zvolfiles-out-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn scratch(name: &str) -> zvol_common::scratch::Scratch {
+        zvol_common::scratch::Scratch::new("zvolfiles-out", name)
     }
 
     /// A link already in the tree — to a member, or to a directory

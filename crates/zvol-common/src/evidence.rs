@@ -407,10 +407,7 @@ mod tests {
     /// the lines unreadable.
     #[test]
     fn records_from_runs_side_by_side_stay_whole() {
-        let dir =
-            std::env::temp_dir().join(format!("zvol-common-evidence-{}-side", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::scratch::Scratch::new("zvol-common-evidence", "side");
         let log = dir.join("case.jsonl");
         std::thread::scope(|s| {
             for t in 0..8u64 {
@@ -435,10 +432,7 @@ mod tests {
     /// next record used to be glued onto it and lost with it.
     #[test]
     fn a_torn_last_line_does_not_take_the_next_record_with_it() {
-        let dir =
-            std::env::temp_dir().join(format!("zvol-common-evidence-{}-torn", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::scratch::Scratch::new("zvol-common-evidence", "torn");
         let log = dir.join("case.jsonl");
         append(&log, &record(1)).unwrap();
         let mut torn = serde_json::to_vec(&record(2)).unwrap();
@@ -459,8 +453,7 @@ mod tests {
 
     #[test]
     fn the_hash_of_a_file_is_the_hash_of_its_bytes() {
-        let dir = std::env::temp_dir().join("zvol-common-evidence-test");
-        std::fs::create_dir_all(&dir).expect("mkdir");
+        let dir = crate::scratch::Scratch::new("zvol-common-evidence", "hash");
         let p = dir.join("empty");
         std::fs::write(&p, b"").expect("write");
         assert_eq!(

@@ -237,12 +237,8 @@ mod tests {
     use super::*;
     use zvolrescue_io::BlockSink;
 
-    fn scratch(name: &str) -> PathBuf {
-        let d =
-            std::env::temp_dir().join(format!("zvol-common-resume-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn scratch(name: &str) -> crate::scratch::Scratch {
+        crate::scratch::Scratch::new("zvol-common-resume", name)
     }
 
     fn expected() -> State {

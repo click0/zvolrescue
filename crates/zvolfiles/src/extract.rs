@@ -1180,9 +1180,7 @@ mod tests {
     #[test]
     fn what_preserve_puts_back() {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        let dir = std::env::temp_dir().join(format!("zvolfiles-meta-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = zvol_common::scratch::Scratch::new("zvolfiles-meta", "preserve");
         let f = dir.join("prog");
         std::fs::write(&f, b"#!/bin/sh\n").unwrap();
         let at = |secs| zfs_ondisk::zpl::Time { secs, nanos: 0 };

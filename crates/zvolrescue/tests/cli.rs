@@ -2,7 +2,7 @@
 //! what `scan`, `list` and `dump` print and exit with is the contract a
 //! script relies on, and until now only CI steps held it.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use zfs_ondisk::blkptr::LABEL_START_SIZE;
@@ -13,24 +13,13 @@ use zfs_read::fixture::{
     two_top_mirror_members, zpl_members, Alloc, Pool, SAMPLE_ZVOL_BLOCK0_OFFSET,
 };
 use zfs_read::hash::{Digests, Extra};
+use zvol_common::scratch::Scratch;
 
 const SIZE: u64 = 64 * LABEL_SIZE;
 
-fn scratch(name: &str) -> PathBuf {
-    let tmp = std::env::temp_dir();
-    // What an earlier run left under this name: each test writes tens
-    // of megabytes, and a directory per process id adds up.
-    if let Ok(entries) = std::fs::read_dir(&tmp) {
-        for e in entries.flatten() {
-            let n = e.file_name().to_string_lossy().into_owned();
-            if n.starts_with("zvolrescue-cli-") && n.ends_with(&format!("-{name}")) {
-                let _ = std::fs::remove_dir_all(e.path());
-            }
-        }
-    }
-    let dir = tmp.join(format!("zvolrescue-cli-{}-{name}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("scratch dir");
-    dir
+/// A directory for one test, removed when the test ends.
+fn scratch(name: &str) -> Scratch {
+    Scratch::new("zvolrescue-cli", name)
 }
 
 /// A two-way mirror with the sample MOS at one txg, the volume present.
@@ -582,7 +571,8 @@ fn a_deduplicated_volume_reads_like_any_other() {
     // not consulted — there is none here to consult — and the bytes
     // come out the same as from the volume that was never deduplicated.
     let dir = scratch("dedup");
-    let plain = write_members(&scratch("dedup-plain"), &plain_members());
+    let plain_dir = scratch("dedup-plain");
+    let plain = write_members(&plain_dir, &plain_members());
     let dedup = write_members(&dir, &dedup_members());
     assert_ne!(
         std::fs::read(&plain[0]).unwrap(),

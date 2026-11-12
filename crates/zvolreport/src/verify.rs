@@ -642,12 +642,8 @@ mod check_tests {
     use std::path::PathBuf;
     use zvol_common::evidence::digests_of;
 
-    fn scratch(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("zvolreport-verify-{}-{name}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).expect("scratch dir");
-        dir
+    fn scratch(name: &str) -> zvol_common::scratch::Scratch {
+        zvol_common::scratch::Scratch::new("zvolreport-verify", name)
     }
 
     fn image(dir: &Path) -> PathBuf {

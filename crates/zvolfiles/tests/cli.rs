@@ -1,15 +1,14 @@
 //! The command line, end to end, on fixture members written to disk.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use zfs_read::fixture::{zpl_members, zpl_members_with, zpl_spilled, Matching, Pool, Spill};
+use zvol_common::scratch::Scratch;
 
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("zvolfiles-cli-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("scratch dir");
-    dir
+/// A directory for one test, removed when the test ends.
+fn scratch(name: &str) -> Scratch {
+    Scratch::new("zvolfiles-cli", name)
 }
 
 /// The fixture's two mirror members, written to `dir` under `names`.

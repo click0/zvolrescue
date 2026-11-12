@@ -2,12 +2,12 @@
 //! the scan finds it, the dump gets it out, and the legacy digests are
 //! taken in the same pass, only when asked (SPEC F-53).
 
-use std::path::PathBuf;
 use std::process::Command;
 
 use zfs_ondisk::label::LABEL_SIZE;
 use zfs_read::fixture::{carved_zvol_members, Pool};
 use zfs_read::hash::{Digests, Extra};
+use zvol_common::scratch::Scratch;
 
 const SIZE: u64 = 64 * LABEL_SIZE;
 
@@ -15,21 +15,9 @@ const SIZE: u64 = 64 * LABEL_SIZE;
 /// cross-check holds `zvolrescue dump` and `zvolcarve dump` to.
 const FIXTURE_SHA256: &str = "febfe0108392728dbde89ee63f9f25419a0192ac04420db3ad88b0032a088585";
 
-fn scratch(name: &str) -> PathBuf {
-    let tmp = std::env::temp_dir();
-    // What an earlier run left under this name: each test writes tens
-    // of megabytes, and a directory per process id adds up.
-    if let Ok(entries) = std::fs::read_dir(&tmp) {
-        for e in entries.flatten() {
-            let n = e.file_name().to_string_lossy().into_owned();
-            if n.starts_with("zvolcarve-cli-") && n.ends_with(&format!("-{name}")) {
-                let _ = std::fs::remove_dir_all(e.path());
-            }
-        }
-    }
-    let dir = tmp.join(format!("zvolcarve-cli-{}-{name}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("scratch dir");
-    dir
+/// A directory for one test, removed when the test ends.
+fn scratch(name: &str) -> Scratch {
+    Scratch::new("zvolcarve-cli", name)
 }
 
 fn run(args: &[&str]) -> (i32, String, String) {

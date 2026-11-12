@@ -6,12 +6,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use zvol_common::evidence::{digests_of, Extra, FORMAT_VERSION};
+use zvol_common::scratch::Scratch;
 
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("zvolreport-cli-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("scratch dir");
-    dir
+/// A directory for one test, removed when the test ends.
+fn scratch(name: &str) -> Scratch {
+    Scratch::new("zvolreport-cli", name)
 }
 
 fn run(args: &[&str]) -> (i32, String, String) {
