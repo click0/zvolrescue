@@ -337,10 +337,13 @@ pub fn parse_leaf(buf: &[u8], endian: Endian) -> Result<Vec<Entry>, ParseError> 
         let value_numints = u16_at(at + 10).expect("in chunk") as usize;
         let cd = u32_at(at + 12).expect("in chunk");
         let name_bytes = read_array(name_chunk, name_numints)?;
-        let end = name_bytes
-            .iter()
-            .position(|&b| b == 0)
-            .unwrap_or(name_bytes.len());
+        // A string name is stored with its terminating NUL counted in
+        // `name_numints`, and that one NUL is all there is to drop: cut
+        // at the first, `x\0y` was read as `x` — another entry's name,
+        // and the entry that really was `x` lost as its duplicate. A NUL
+        // inside the name is damage, and the name keeps it for whatever
+        // reads it to refuse.
+        let end = name_bytes.len() - usize::from(name_bytes.last() == Some(&0));
         let name = String::from_utf8_lossy(&name_bytes[..end]).into_owned();
         let raw = name_bytes[..end].to_vec();
         let bytes = read_array(value_chunk, intlen * value_numints)?;
@@ -549,6 +552,22 @@ mod tests {
                 raw: vec![0, 1, 0, 2]
             }
         );
+    }
+
+    /// A fat-ZAP name keeps every byte but its terminator: `x\0y` was
+    /// read as `x`, which is another entry's name.
+    #[test]
+    fn a_nul_inside_a_name_is_kept() {
+        let l = leaf(
+            4096,
+            &[
+                ("x\0y", 8, 1u64.to_be_bytes().to_vec()),
+                ("x", 8, 2u64.to_be_bytes().to_vec()),
+            ],
+        );
+        let e = parse_leaf(&l, Endian::Little).unwrap();
+        assert_eq!(e[0].raw, b"x\0y");
+        assert_eq!(e[1].raw, b"x");
     }
 
     #[test]

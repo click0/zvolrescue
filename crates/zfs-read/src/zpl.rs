@@ -92,25 +92,28 @@ pub enum Normalization {
 impl Normalization {
     /// Decode the `normalization` property, which is a bit set:
     /// `U8_CANON_DECOMP` 0x10, `U8_COMPAT_DECOMP` 0x20, `U8_CANON_COMP`
-    /// 0x40 (`u8_textprep.h`). `None` for 0 — the property's own way of
-    /// saying names are not normalized — and for any value whose bits
-    /// name no form, because guessing at one would be worse than
-    /// matching only what is exactly there.
+    /// 0x40 (`u8_textprep.h`), a form being one decomposition and maybe
+    /// the composition — NFD 0x10, NFC 0x50, NFKD 0x20, NFKC 0x60. The
+    /// compatibility forms carry no canonical-decomposition bit, and
+    /// requiring one made `formKD` and `formKC` read as no normalization.
+    /// `None` for 0 — the property's own way of saying names are not
+    /// normalized — and for any value whose bits name no form, because
+    /// guessing at one would be worse than matching only what is
+    /// exactly there.
     pub fn from_property(value: u64) -> Option<Normalization> {
         const CANON_DECOMP: u64 = 0x10;
         const COMPAT_DECOMP: u64 = 0x20;
         const CANON_COMP: u64 = 0x40;
-        if value & CANON_DECOMP == 0 {
+        let compat = value & COMPAT_DECOMP != 0;
+        if !compat && value & CANON_DECOMP == 0 {
             return None;
         }
-        Some(
-            match (value & COMPAT_DECOMP != 0, value & CANON_COMP != 0) {
-                (false, false) => Normalization::D,
-                (false, true) => Normalization::C,
-                (true, false) => Normalization::KD,
-                (true, true) => Normalization::KC,
-            },
-        )
+        Some(match (compat, value & CANON_COMP != 0) {
+            (false, false) => Normalization::D,
+            (false, true) => Normalization::C,
+            (true, false) => Normalization::KD,
+            (true, true) => Normalization::KC,
+        })
     }
 
     /// `name` in this form.
@@ -737,8 +740,8 @@ impl Filesystem<'_, '_> {
     ///
     /// The property is a bit set, the one OpenZFS's `u8_textprep.h`
     /// defines: `U8_CANON_DECOMP` 0x10, `U8_COMPAT_DECOMP` 0x20,
-    /// `U8_CANON_COMP` 0x40. So `formD` is 0x10, `formKD` 0x30, `formC`
-    /// 0x50 and `formKC` 0x70. It is read by its bits rather than as one
+    /// `U8_CANON_COMP` 0x40. So `formD` is 0x10, `formKD` 0x20, `formC`
+    /// 0x50 and `formKC` 0x60. It is read by its bits rather than as one
     /// of four numbers, because that is how it is written.
     ///
     /// **Not verified against a pool.** `ztest` makes no dataset with
@@ -1203,6 +1206,17 @@ mod tests {
                 fs.symlink_target(link.object, lz).expect("target"),
                 b"sub/deep.txt"
             );
+            // Its security label lies after the target, at the next
+            // eight-byte boundary (`sa_attr_iter`), not right after it.
+            let read = fs.xattrs(lz);
+            assert!(read.errors.is_empty(), "{:?}", read.errors);
+            assert_eq!(
+                read.values
+                    .iter()
+                    .map(|x| x.name.as_str())
+                    .collect::<Vec<_>>(),
+                [crate::fixture::ZPL_LINK_XATTR]
+            );
 
             // Z-03: the file's own bytes, through the pool, checksums and all.
             let deep = fs.object(at(b"sub/deep.txt").object).expect("object");
@@ -1288,21 +1302,27 @@ mod tests {
     }
 
     /// The property is a bit set from `u8_textprep.h`, not one of four
-    /// numbers. Nothing in this workspace has seen one on a real pool,
-    /// so the decoding is pinned here against the header's constants.
+    /// numbers: `U8_TEXTPREP_NFD` is `U8_CANON_DECOMP`, `NFC` adds
+    /// `U8_CANON_COMP`, `NFKD` is `U8_COMPAT_DECOMP` alone and `NFKC`
+    /// adds the composition to it. The compatibility forms used to need
+    /// the canonical bit as well, and `formKD` (0x20) and `formKC` (0x60)
+    /// read as no normalization at all.
     #[test]
     fn the_normalization_property_is_read_by_its_bits() {
         use Normalization::*;
         for (value, want) in [
             (0x00, None),
-            (0x10, Some(D)),  // U8_CANON_DECOMP
-            (0x30, Some(KD)), // | U8_COMPAT_DECOMP
-            (0x50, Some(C)),  // | U8_CANON_COMP
-            (0x70, Some(KC)), // all three
-            // No canonical decomposition bit names no form; composing
-            // alone is not one of the four, and is not guessed at.
+            (0x10, Some(D)),  // U8_TEXTPREP_NFD
+            (0x50, Some(C)),  // U8_TEXTPREP_NFC
+            (0x20, Some(KD)), // U8_TEXTPREP_NFKD
+            (0x60, Some(KC)), // U8_TEXTPREP_NFKC
+            // Both decompositions: the compatibility one includes the
+            // canonical one.
+            (0x30, Some(KD)),
+            (0x70, Some(KC)),
+            // Composing alone is not one of the four, and is not
+            // guessed at.
             (0x40, None),
-            (0x20, None),
         ] {
             assert_eq!(Normalization::from_property(value), want, "{value:#x}");
         }

@@ -202,12 +202,23 @@ impl Znode {
     }
 }
 
+/// How long a legacy `znode_phys_t` is (`ZFS_OLD_ZNODE_PHYS_SIZE`): the
+/// fields, three spare words and the ACL. A short symbolic link keeps
+/// its target in the bonus right after it.
+pub const OLD_ZNODE_PHYS_SIZE: usize = 264;
+
 /// Parse a legacy `znode_phys_t` bonus buffer (Z-02's fallback).
 ///
-/// The layout is fixed: four 16-byte timestamps, then generation, size,
-/// parent, links, xattr, rdev, mode, uid and gid as 64-bit words.
+/// The layout is fixed (`zfs_znode.h`): four 16-byte timestamps, then
+/// generation, mode, size, parent, links, xattr, rdev, flags, uid and
+/// gid as 64-bit words, at 64, 72, 80 … 136. The offsets were read one
+/// word off from 72 on — size where mode is, mode where the flags are —
+/// and no file of a pool made before system attributes came out right.
+///
+/// A symbolic link whose target fits the bonus keeps it after the
+/// structure (`zfs_sa_symlink`); a longer one is the object's data.
 pub fn parse_znode_phys(bonus: &[u8], endian: Endian) -> Result<Znode, ParseError> {
-    const NEEDED: usize = 168;
+    const NEEDED: usize = 144;
     if bonus.len() < NEEDED {
         return Err(ParseError::Truncated {
             needed: NEEDED,
@@ -216,20 +227,28 @@ pub fn parse_znode_phys(bonus: &[u8], endian: Endian) -> Result<Znode, ParseErro
     }
     let at = |o: usize| endian.u64_at(bonus, o).expect("length checked");
     let time = |o: usize| Time::from_words(at(o), at(o + 8));
+    let mode = at(72);
+    let size = at(80);
+    let symlink = (FileType::from_mode(mode) == FileType::Symlink)
+        .then(|| {
+            let end = OLD_ZNODE_PHYS_SIZE.checked_add(usize::try_from(size).ok()?)?;
+            bonus.get(OLD_ZNODE_PHYS_SIZE..end).map(<[u8]>::to_vec)
+        })
+        .flatten();
     Ok(Znode {
         atime: time(0),
         mtime: time(16),
         ctime: time(32),
         crtime: time(48),
-        size: at(72),
-        parent: at(80),
-        links: at(88),
+        mode,
+        size,
+        parent: at(88),
+        links: at(96),
         xattr: at(104),
         rdev: at(112),
-        mode: at(120),
         uid: at(128),
         gid: at(136),
-        symlink: None,
+        symlink,
         dxattr: None,
         // A legacy `znode_phys_t` predates the feature by a decade.
         projid: None,
@@ -286,12 +305,16 @@ pub struct RegisteredAttr {
 
 /// Decode one entry of the SA registry ZAP.
 ///
-/// The value packs the byteswap function, the attribute number and the
-/// length; only the last two matter to a reader that already knows the
-/// byte order of the block it is looking at.
+/// The value packs the attribute number in bits 0–15, the byteswap
+/// function in 16–23 and the length in 24–39 (`sa_impl.h`: `ATTR_NUM`,
+/// `ATTR_BSWAP`, `ATTR_LENGTH`); only the number and the length matter
+/// to a reader that already knows the byte order of the block it is
+/// looking at. The number was read from bits 8–23 — the byteswap
+/// function and half of nothing — and every attribute of a real pool
+/// came out as number 0: no file had a mode, a size or an owner.
 pub fn registered_attr(value: u64) -> RegisteredAttr {
     RegisteredAttr {
-        num: ((value >> 8) & 0xffff) as u16,
+        num: (value & 0xffff) as u16,
         length: ((value >> 24) & 0xffff) as u16,
     }
 }
@@ -362,8 +385,11 @@ pub fn parse_sa_header(buf: &[u8], endian: Endian) -> Result<SaHeader, ParseErro
 ///
 /// Variable-length attributes take their size from the header, in the
 /// order they appear in the layout; everything else is exactly as long
-/// as the registry says. A layout that runs past the end of the buffer
-/// stops there rather than reading whatever follows.
+/// as the registry says. Each one starts on an eight-byte boundary
+/// (`sa_attr_iter`: `P2ROUNDUP(length, 8)`): a variable-length one —
+/// an ACL, a link target — is padded, and what follows it was read
+/// from inside the padding. A layout that runs past the end of the
+/// buffer stops there rather than reading whatever follows.
 pub fn place_attrs(
     buf: &[u8],
     header: &SaHeader,
@@ -394,7 +420,7 @@ pub fn place_attrs(
             break;
         };
         out.push((*num, value.to_vec()));
-        at += len;
+        at += len.next_multiple_of(8);
     }
     out
 }
@@ -402,4 +428,85 @@ pub fn place_attrs(
 /// A 64-bit attribute value, or `None` when it is the wrong size.
 pub fn attr_u64(bytes: &[u8], endian: Endian) -> Option<u64> {
     endian.u64_at(bytes, 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The registry value as OpenZFS writes it (`ATTR_ENCODE`): the
+    /// number in the low sixteen bits. `ZPL_MODE` on a real pool is
+    /// 0x8000005 — eight bytes, an array of 64-bit words, number 5 —
+    /// and `ZPL_DACL_ACES` 0x40013: no fixed length, byteswapped as an
+    /// ACL, number 0x13.
+    #[test]
+    fn a_registry_entry_is_read_as_openzfs_encodes_it() {
+        assert_eq!(
+            registered_attr(0x800_0005),
+            RegisteredAttr { num: 5, length: 8 }
+        );
+        assert_eq!(
+            registered_attr(0x4_0013),
+            RegisteredAttr {
+                num: 0x13,
+                length: 0
+            }
+        );
+    }
+
+    /// Every attribute starts on an eight-byte boundary: what follows a
+    /// five-byte variable-length value is three bytes further on.
+    #[test]
+    fn attributes_are_placed_on_eight_byte_boundaries() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&SA_MAGIC.to_le_bytes());
+        // Layout 2, a 16-byte header: two variable lengths, 5 and 3.
+        buf.extend_from_slice(&(2u16 | (2 << 10)).to_le_bytes());
+        buf.extend_from_slice(&5u16.to_le_bytes());
+        buf.extend_from_slice(&3u16.to_le_bytes());
+        buf.resize(16, 0);
+        buf.extend_from_slice(b"abcde\0\0\0");
+        buf.extend_from_slice(&0x1122_3344_5566_7788u64.to_le_bytes());
+        buf.extend_from_slice(b"xyz\0\0\0\0\0");
+        let header = parse_sa_header(&buf, Endian::Little).unwrap();
+        let lengths = |n: u16| Some(if n == 2 { 8 } else { 0 });
+        let placed = place_attrs(&buf, &header, &[1, 2, 3], &lengths, Endian::Little);
+        assert_eq!(
+            placed,
+            vec![
+                (1, b"abcde".to_vec()),
+                (2, 0x1122_3344_5566_7788u64.to_le_bytes().to_vec()),
+                (3, b"xyz".to_vec()),
+            ]
+        );
+    }
+
+    /// `znode_phys_t` as `zfs_znode.h` lays it out — mode at 72, size
+    /// at 80, parent 88, links 96, flags 120, uid 128, gid 136 — and a
+    /// short link's target after its 264 bytes.
+    #[test]
+    fn a_legacy_znode_is_read_at_its_offsets() {
+        let mut b = vec![0u8; OLD_ZNODE_PHYS_SIZE];
+        let mut put = |o: usize, v: u64| b[o..o + 8].copy_from_slice(&v.to_le_bytes());
+        put(16, 1_243_919_918); // mtime
+        put(64, 7); // generation
+        put(72, 0o120777); // mode
+        put(80, 5); // size
+        put(88, 3); // parent
+        put(96, 1); // links
+        put(120, 0x2_0000_0000); // flags
+        put(128, 1001); // uid
+        put(136, 1002); // gid
+        b.extend_from_slice(b"abcde");
+        let z = parse_znode_phys(&b, Endian::Little).unwrap();
+        assert_eq!(
+            (z.mode, z.size, z.parent, z.links, z.uid, z.gid),
+            (0o120777, 5, 3, 1, 1001, 1002)
+        );
+        assert_eq!(z.mtime.secs, 1_243_919_918);
+        assert_eq!(z.symlink.as_deref(), Some(&b"abcde"[..]));
+        // A target that is not in the bonus is the object's data.
+        b.truncate(OLD_ZNODE_PHYS_SIZE);
+        assert_eq!(parse_znode_phys(&b, Endian::Little).unwrap().symlink, None);
+    }
 }

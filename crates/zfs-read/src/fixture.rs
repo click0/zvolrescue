@@ -1654,6 +1654,13 @@ mod zpl_attr {
     pub const WITH_SYMLINK: [u16; 11] = [
         ATIME, MTIME, CTIME, CRTIME, MODE, SIZE, PARENT, LINKS, UID, GID, SYMLINK,
     ];
+    /// A link target followed by extended attributes in the system
+    /// attributes — what every symbolic link on a host with SELinux
+    /// has: the attributes start at the next eight-byte boundary after
+    /// the target, not right after it.
+    pub const WITH_SYMLINK_XATTR: [u16; 12] = [
+        ATIME, MTIME, CTIME, CRTIME, MODE, SIZE, PARENT, LINKS, UID, GID, SYMLINK, DXATTR,
+    ];
     /// The same, plus system-attribute extended attributes.
     pub const WITH_XATTR: [u16; 11] = [
         ATIME, MTIME, CTIME, CRTIME, MODE, SIZE, PARENT, LINKS, UID, GID, DXATTR,
@@ -1670,35 +1677,41 @@ mod zpl_attr {
     pub const SPILLED: [u16; 1] = [DXATTR];
 }
 
-/// The registry value OpenZFS encodes for one attribute.
+/// The registry value OpenZFS encodes for one attribute (`ATTR_ENCODE`):
+/// the number in bits 0–15, the byteswap function in 16–23 — an array
+/// of bytes (3) for what has no fixed length, of 64-bit words (0) for
+/// the rest — and the length in 24–39.
 fn registry_value(num: u16, length: u16) -> u64 {
-    (u64::from(length) << 24) | (u64::from(num) << 8)
+    let bswap: u64 = if length == 0 { 3 } else { 0 };
+    (u64::from(length) << 24) | (bswap << 16) | u64::from(num)
 }
 
-/// A system-attribute bonus buffer in `layout`.
+/// A system-attribute bonus buffer in `layout`, as `sa_build_layouts`
+/// writes one.
 ///
 /// The header is the magic, the layout number with the header size in
 /// eight-byte units above it, and one 16-bit size per variable-length
-/// attribute. Fixed attributes take the length the registry gives.
+/// attribute, padded to eight bytes. Fixed attributes take the length
+/// the registry gives, and every attribute starts on an eight-byte
+/// boundary: a link target or an ACL is padded before what follows it.
 fn sa_bonus(layout: u16, fields: &[(u16, Vec<u8>)], variable: &[u16]) -> Vec<u8> {
+    let hdrsize = (6 + 2 * variable.len()).next_multiple_of(8);
     let mut out = Vec::new();
     out.extend_from_slice(&zfs_ondisk::zpl::SA_MAGIC.to_le_bytes());
-    let info: u16 = layout | (1 << 10); // one eight-byte header chunk
+    let info: u16 = layout | (((hdrsize / 8) as u16) << 10);
     out.extend_from_slice(&info.to_le_bytes());
-    // Sizes of the variable-length attributes, in layout order; the
-    // header is padded to eight bytes whether or not any are used.
-    let mut sizes = Vec::new();
+    // Sizes of the variable-length attributes, in layout order.
     for num in variable {
         let len = fields
             .iter()
             .find(|(n, _)| n == num)
             .map_or(0, |(_, v)| v.len()) as u16;
-        sizes.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(&len.to_le_bytes());
     }
-    sizes.resize(2, 0);
-    out.extend_from_slice(&sizes[..2]);
+    out.resize(hdrsize, 0);
     for (_, v) in fields {
         out.extend_from_slice(v);
+        out.resize(out.len().next_multiple_of(8), 0);
     }
     out
 }
@@ -1745,6 +1758,10 @@ pub fn zpl_spilled() -> Vec<u8> {
 
 /// The name of that attribute.
 pub const ZPL_SPILLED_XATTR: &str = "user.spilled";
+
+/// The extended attribute of `link`, which lies after the link's
+/// target in the system attributes.
+pub const ZPL_LINK_XATTR: &str = "security.selinux";
 
 /// Its value: 600 bytes, where the bonus buffer of a one-slot dnode
 /// with one block pointer has 192 in total.
@@ -1949,7 +1966,7 @@ fn build_zpl_objset(
     // arrays, so this one has to be a fatzap.
     let as_bytes =
         |nums: &[u16]| -> Vec<u8> { nums.iter().flat_map(|n| n.to_be_bytes()).collect() };
-    let hdr = zfs_ondisk::zap::encode::fat_header(4096, 1, 3);
+    let hdr = zfs_ondisk::zap::encode::fat_header(4096, 1, 6);
     let leaf = zfs_ondisk::zap::encode::leaf(
         4096,
         &[
@@ -1958,6 +1975,7 @@ fn build_zpl_objset(
             ("4", 2, as_bytes(&zpl_attr::WITH_XATTR)),
             ("6", 2, as_bytes(&zpl_attr::SPILLED)),
             ("7", 2, as_bytes(&zpl_attr::WITH_PROJID)),
+            ("8", 2, as_bytes(&zpl_attr::WITH_SYMLINK_XATTR)),
         ],
     );
     let b0 = a.put(m, &hdr, ot::SA, 0, 100);
@@ -2056,17 +2074,26 @@ fn build_zpl_objset(
         }
         .build(),
     );
-    // 8: a symbolic link whose target is in the attributes, not a block.
+    // 8: a symbolic link whose target is in the attributes, not a block,
+    // with a security label after it as a host with SELinux gives one:
+    // twelve bytes of target, padded to sixteen before the label.
     let target = b"sub/deep.txt".to_vec();
     let mut symlink_fields = meta(0o120777, target.len() as u64, 3, 1);
     symlink_fields.push((zpl_attr::SYMLINK, target.clone()));
+    symlink_fields.push((
+        zpl_attr::DXATTR,
+        pack(&list(vec![(
+            ZPL_LINK_XATTR,
+            Value::Bytes(b"system_u:object_r:user_home_t:s0\0".to_vec()),
+        )])),
+    ));
     put(
         8,
         DnodeSpec {
             object_type: ot::PLAIN_FILE_CONTENTS,
             datablksz: 4096,
             bonus_type: ot::SA,
-            bonus: sa_bonus(3, &symlink_fields, &[zpl_attr::SYMLINK]),
+            bonus: sa_bonus(8, &symlink_fields, &[zpl_attr::SYMLINK, zpl_attr::DXATTR]),
             blkptrs: vec![[0u8; blkptr::SIZE]],
             ..DnodeSpec::default()
         }
