@@ -145,6 +145,13 @@ pub struct Znode {
     /// project 0 unless told otherwise. Reporting the first as zero
     /// would invent a project that was never set.
     pub projid: Option<u64>,
+    /// Why the spill block could not be read, when it could not (Z-10).
+    ///
+    /// What did not fit the bonus — an extended attribute too large for
+    /// it, as a rule, or an ACL, or a long link target — is in the spill
+    /// block, and from the bonus alone nothing says which. The rest of
+    /// the object is as read; whatever reads its attributes says this.
+    pub spill_error: Option<String>,
 }
 
 /// One timestamp of a file: seconds either side of the epoch and the
@@ -226,6 +233,7 @@ pub fn parse_znode_phys(bonus: &[u8], endian: Endian) -> Result<Znode, ParseErro
         dxattr: None,
         // A legacy `znode_phys_t` predates the feature by a decade.
         projid: None,
+        spill_error: None,
     })
 }
 

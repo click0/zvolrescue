@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use zfs_read::fixture::{zpl_members, Pool};
+use zfs_read::fixture::{zpl_members, zpl_members_with, zpl_spilled, Matching, Pool, Spill};
 
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("zvolfiles-cli-{}-{name}", std::process::id()));
@@ -212,6 +212,84 @@ fn list_of_a_file_is_that_file() {
     let files = v["files"].as_array().unwrap();
     assert_eq!(files.len(), 1, "{v}");
     assert_eq!(files[0]["path"], "hello.txt");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A spill block that does not read loses what was kept there, not the
+/// file: its contents are written, the error is on its record and the
+/// run is partial (exit 4). `list --path` of it says the same; the whole
+/// file was missing, and `list` said "object is not a ZAP".
+#[test]
+fn an_unreadable_spill_block_loses_its_attributes_not_the_file() {
+    let dir = scratch("spill");
+    let mut pool = Pool::mirror("tank", 0x5eed_0000_0000_0004, 12)
+        .txgs(&[(4816228, 1757100000), (4816229, 1757100005)]);
+    let m: Vec<String> = zpl_members_with(
+        &mut pool,
+        64 * 1024 * 1024,
+        Matching::Exact,
+        Spill::Unreadable,
+    )
+    .iter()
+    .enumerate()
+    .map(|(i, m)| {
+        let p = dir.join(format!("member{i}.img"));
+        std::fs::write(&p, m).expect("write member");
+        p.to_string_lossy().into_owned()
+    })
+    .collect();
+    let out = dir.join("out");
+    let (code, err) = run(&[
+        "-q",
+        "extract",
+        "tank/fs",
+        &m[0],
+        &m[1],
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 4, "{err}");
+    assert_eq!(
+        std::fs::read(out.join("spilled.txt")).unwrap(),
+        zpl_spilled()
+    );
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(out.join("manifest.json")).unwrap()).unwrap();
+    let rec = manifest["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["path"] == "spilled.txt")
+        .expect("its record");
+    assert!(rec.get("error").is_none(), "{rec}");
+    assert!(
+        rec["xattr_errors"][0]
+            .as_str()
+            .is_some_and(|e| e.contains("spill block")),
+        "{rec}"
+    );
+    let listed = Command::new(env!("CARGO_BIN_EXE_zvolfiles"))
+        .args([
+            "-q",
+            "-f",
+            "json",
+            "list",
+            "tank/fs",
+            &m[0],
+            &m[1],
+            "--path",
+            "spilled.txt",
+        ])
+        .output()
+        .expect("run");
+    assert_eq!(listed.status.code(), Some(4));
+    let v: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let files = v["files"].as_array().unwrap();
+    assert_eq!(files.len(), 1, "{v}");
+    assert!(
+        files[0]["xattr_errors"].to_string().contains("spill block"),
+        "{v}"
+    );
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

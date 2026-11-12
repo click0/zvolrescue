@@ -347,11 +347,32 @@ impl Filesystem<'_, '_> {
         let mut by_num: BTreeMap<u16, Vec<u8>> = placed.into_iter().collect();
         // Whatever did not fit the bonus buffer is in the spill block,
         // under a header and a layout of its own (Z-10).
+        let mut spill_error = None;
         if d.bonus_type == ot::SA {
             if let Some(bp) = &d.spill {
-                for (num, value) in self.spilled_attrs(object, bp)? {
-                    by_num.entry(num).or_insert(value);
+                match self.spilled_attrs(object, bp) {
+                    Ok(attrs) => {
+                        for (num, value) in attrs {
+                            by_num.entry(num).or_insert(value);
+                        }
+                    }
+                    Err(e) => spill_error = Some(e.to_string()),
                 }
+            }
+        }
+        // A spill block that did not read is the object's error
+        // only when what the object is did not read with it — its mode
+        // or its size. Otherwise the object is as read, and the error
+        // travels with it to everything that reads its attributes: the
+        // whole file, its data intact, was lost over an attribute.
+        if let Some(e) = &spill_error {
+            let has = |name: &str| {
+                self.attr_num
+                    .get(name)
+                    .is_some_and(|n| by_num.contains_key(n))
+            };
+            if !has(attr::MODE) || !has(attr::SIZE) {
+                return Err(ReadError::Io(e.clone()));
             }
         }
         let word = |name: &str| -> u64 {
@@ -404,6 +425,7 @@ impl Filesystem<'_, '_> {
             rdev: word(attr::RDEV),
             parent: word(attr::PARENT),
             symlink,
+            spill_error,
         })
     }
 
@@ -417,7 +439,9 @@ impl Filesystem<'_, '_> {
     /// reader that looks only at the bonus loses whatever went there
     /// without noticing. That is why an unreadable spill is an error
     /// and not a warning: a file whose attributes are half-read is a
-    /// wrong answer, and a refusal is not.
+    /// wrong answer unless it says so. It says so on the znode
+    /// ([`Znode::spill_error`]), and [`Filesystem::xattrs`] and
+    /// [`Filesystem::symlink_target`] report it.
     fn spilled_attrs(&self, object: u64, bp: &BlkPtr) -> Result<Vec<(u16, Vec<u8>)>, ReadError> {
         if bp.is_hole() {
             return Ok(Vec::new());
@@ -608,6 +632,13 @@ impl Filesystem<'_, '_> {
     /// no attributes at all.
     pub fn xattrs(&self, z: &Znode) -> Xattrs {
         let mut out = Xattrs::default();
+        // Where an attribute too large for the bonus goes: unread, what
+        // is below is not all there was.
+        if let Some(e) = &z.spill_error {
+            out.errors.push(format!(
+                "{e}; what the object kept there (extended attributes too large for the bonus, an ACL) is missing"
+            ));
+        }
         if let Some(packed) = &z.dxattr {
             match zfs_ondisk::nvlist::parse_packed(packed) {
                 Ok(nv) => {
@@ -707,6 +738,11 @@ impl Filesystem<'_, '_> {
     pub fn symlink_target(&self, object: u64, z: &Znode) -> Result<Vec<u8>, ReadError> {
         if let Some(t) = &z.symlink {
             return Ok(t.clone());
+        }
+        // A target too long for the bonus went to the spill block: read
+        // from the contents instead, it was whatever they hold.
+        if let Some(e) = &z.spill_error {
+            return Err(ReadError::Io(e.clone()));
         }
         let obj = self.objects.object(object)?;
         let len = z.size.min(4096) as usize;
@@ -1278,23 +1314,38 @@ mod tests {
     /// The distinction this test exists for: the file's bonus is
     /// intact, so a reader could return a perfectly plausible znode
     /// with no extended attributes at all. The dnode says an attribute
-    /// lives in the spill block; unreadable is not absent.
+    /// lives in the spill block; unreadable is not absent. Nor is the
+    /// file lost over it: its mode and size read, and so do its
+    /// contents, with the spill block's error on what reads its
+    /// attributes.
     #[test]
-    fn a_spill_block_that_is_not_attributes_is_refused_not_ignored() {
+    fn a_spill_block_that_is_not_attributes_is_said_not_ignored() {
         with_fixture(Matching::Exact, Spill::Unreadable, |fs| {
             let obj = fs.lookup("spilled.txt").expect("lookup");
-            let e = fs
-                .znode(obj)
-                .expect_err("a half-read object is not an answer");
-            let said = e.to_string();
+            let z = fs.znode(obj).expect("the bonus half reads");
+            let said = z.spill_error.clone().expect("the spill block's error");
             assert!(said.contains("spill block"), "{said}");
-            // The file that spills is the only one affected: everything
-            // else in the dataset still reads.
-            let other = fs.lookup("hello.txt").expect("lookup");
-            assert_eq!(
-                fs.znode(other).expect("znode").size,
-                zpl_hello().len() as u64
+            assert_eq!(z.size, zpl_spilled().len() as u64);
+            let xattrs = fs.xattrs(&z);
+            assert!(xattrs.values.is_empty());
+            assert_eq!(xattrs.errors.len(), 1, "{:?}", xattrs.errors);
+            assert!(
+                xattrs.errors[0].contains("spill block"),
+                "{:?}",
+                xattrs.errors
             );
+            let data = fs
+                .object(obj)
+                .expect("object")
+                .read_range(0, z.size as usize)
+                .expect("contents");
+            assert_eq!(data, zpl_spilled());
+            // The file that spills is the only one affected: everything
+            // else in the dataset still reads, and says nothing.
+            let other = fs.lookup("hello.txt").expect("lookup");
+            let z = fs.znode(other).expect("znode");
+            assert_eq!(z.size, zpl_hello().len() as u64);
+            assert_eq!(z.spill_error, None);
         });
     }
 

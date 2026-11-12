@@ -562,6 +562,10 @@ block under a header and a layout of its own; both halves are placed and
 merged. An unreadable spill block is an error rather than a warning,
 because the bonus half on its own is a plausible-looking object: a file
 with no extended attributes, instead of a file that was only half read.
+It is the file's attributes' error, not the file's: where the mode and
+the size read, the contents are written and the spill block's error is
+on the record with its extended attributes, the file counted as not
+read whole. Where they did not, the object is an error, as before.
 
 A project id (`ZPL_PROJID`) is reported where the dataset keeps one, in
 the listing and in the manifest, and nowhere else. Absent and zero are

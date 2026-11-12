@@ -451,6 +451,16 @@ tagged. `v0.7.1` is the release that carries those six.
   three parts that did not read, and what was there before in them is
   taken as unchanged. The crosscheck now fails on any GUID that is
   destroyed and comes back.
+* **An unreadable spill block lost the whole file.** The spill block
+  holds what did not fit a file's bonus — an extended attribute, as a
+  rule — and when it did not read, `zvolfiles extract` wrote nothing of
+  the file, its contents intact on the pool; `list --path` of it said
+  "object is not a ZAP", the reason dropped. The file is now written,
+  the spill block's error on its record with its extended attributes,
+  and counted as not read whole (exit 4); only a file whose mode or
+  size did not read either is an error. `list` shows the same, and a
+  `--path` whose object does not read shows why. A link target that
+  went to the spill block is an error, never the file's contents.
 
 ## v0.9.12 — 2026-11-07
 

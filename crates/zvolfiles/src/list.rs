@@ -128,20 +128,28 @@ pub fn run(
         // A path that names a file is that one entry, as `extract` takes
         // it: walking it as a directory said "object is not a ZAP", with
         // the file's metadata as `?`, and exit 4.
-        let z = fs.znode(from).ok();
-        let entries =
-            if path.is_some() && z.as_ref().is_some_and(|z| z.file_type() != FileType::Dir) {
-                vec![Entry {
-                    path: prefix.clone(),
-                    raw_path: raw_prefix.clone(),
-                    object: from,
-                    znode: z,
-                    error: None,
-                    walked_at: None,
-                }]
-            } else {
-                walk_from(fs, from, &prefix, &raw_prefix, recursive, Some(&interrupt))
-            };
+        // And one whose own metadata did not read is that entry with its
+        // error, unless it is a directory all the same: walked, it said
+        // "object is not a ZAP", the reason it did not read dropped.
+        let one = |znode: Option<Znode>, error: Option<String>| {
+            vec![Entry {
+                path: prefix.clone(),
+                raw_path: raw_prefix.clone(),
+                object: from,
+                znode,
+                error,
+                walked_at: None,
+            }]
+        };
+        let a_directory = || {
+            fs.object(from)
+                .is_ok_and(|o| o.dnode().object_type == zfs_ondisk::dmu::ot::DIRECTORY_CONTENTS)
+        };
+        let entries = match fs.znode(from) {
+            Ok(z) if path.is_some() && z.file_type() != FileType::Dir => one(Some(z), None),
+            Err(e) if path.is_some() && !a_directory() => one(None, Some(e.to_string())),
+            _ => walk_from(fs, from, &prefix, &raw_prefix, recursive, Some(&interrupt)),
+        };
         let files: Vec<FileOut> = entries
             .iter()
             .map(|e| {
