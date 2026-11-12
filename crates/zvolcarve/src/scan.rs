@@ -317,6 +317,32 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         },
         None => None,
     };
+    // A resume goes on with the range the scan was started with. One
+    // given again may end elsewhere — a scan resumed to the end of a
+    // range is how a long one is done in parts — but it starts where the
+    // scan did, or the part between was never read and nothing said so.
+    let range = if !opts.resume {
+        range
+    } else {
+        let recorded = std::fs::read_to_string(opts.output.join(STATE))
+            .ok()
+            .and_then(|t| serde_json::from_str::<State>(&t).ok())
+            .and_then(|s| s.range);
+        match (range, recorded) {
+            (None, Some([a, b])) => Some((a, b)),
+            (Some((a, b)), recorded) => {
+                let started = recorded.map_or(0, |[a, _]| a);
+                if a != started {
+                    eprintln!(
+                        "zvolcarve: --resume --range {a}-{b}: the scan began at byte {started}; a resume goes on from where it got to, to the end of a range that starts there (scan into another directory for another range)"
+                    );
+                    return exit::USAGE;
+                }
+                Some((a, b))
+            }
+            (None, None) => None,
+        }
+    };
     // A range past the end of every member asks for nothing: it was
     // read as "0 bytes, nothing found" and exited 3, an answer about the
     // evidence to a question that was not about it.
@@ -469,11 +495,13 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             }
         }
     }
-    let mut datasets_met = 0usize;
+    let mut datasets_met = earlier.as_ref().map_or(0, |i| i.datasets_met);
     let mut bytes_read = earlier.as_ref().map_or(0, |i| i.bytes_read);
     let mut unreadable = earlier.as_ref().map_or(0, |i| i.unreadable_bytes);
     let mut slots = earlier.as_ref().map_or(0, |i| i.slots_examined);
     let mut reached = vec![0u64; members.paths.len()];
+    let mut counted = vec![0u64; members.paths.len()];
+    let mut cuts: Vec<Option<[u64; 2]>> = vec![None; members.paths.len()];
     let mut complete = true;
     // C-09: the leaves of a mirror are copies of one another, and a
     // dnode met at the same place in two of them is one candidate. It
@@ -505,6 +533,10 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             continue;
         };
         let from = previous.reached.get(i).copied().unwrap_or(0);
+        let count_from = previous.counted.get(i).copied().unwrap_or(0).max(from);
+        let cut_before = previous.cut.get(i).copied().flatten();
+        counted[i] = count_from;
+        cuts[i] = cut_before;
         // Interrupted on an earlier member: this one keeps what an
         // earlier run reached, and the state says the scan is not done.
         if interrupt.load(Ordering::Relaxed) {
@@ -546,10 +578,16 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 max_hits: opts.sample.unwrap_or(opts.max_hits),
                 stop: Some(interrupt.clone()),
                 vdev_start: base_of(i),
+                count_from,
                 ..ScanOptions::default()
             },
         ) {
-            Ok(s) => s,
+            Ok(mut s) => {
+                // In the order they lie on the member, so that where a
+                // walk is cut short divides the walked from the rest.
+                s.hits.sort_by_key(|h| (h.offset, h.slot));
+                s
+            }
             Err(e) => {
                 eprintln!("zvolcarve: {}: {e}", members.paths[i].display());
                 return exit::EVIDENCE;
@@ -557,9 +595,15 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         };
         bytes_read += scan.bytes_read;
         unreadable += scan.unreadable_bytes;
-        datasets_met += scan.datasets.len();
+        datasets_met += scan
+            .datasets
+            .iter()
+            .filter(|d| d.offset >= count_from)
+            .count();
         slots += scan.slots_examined;
         reached[i] = scan.resume_at;
+        counted[i] = count_from.max(scan.resume_at);
+        cuts[i] = None;
         if scan.stopped_early {
             complete = false;
         }
@@ -585,11 +629,14 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         // leaves the rest of them for the resume: listed as they were,
         // each was a candidate with nothing walked, scored as nothing,
         // and a resume — which starts past them — never looked again.
-        let mut cut_at: Option<u64> = None;
-        for (k, hit) in scan.hits.iter().enumerate() {
-            let cut = |k: usize| scan.hits[k..].iter().map(|h| h.offset).min();
+        let mut cut_at: Option<[u64; 2]> = None;
+        for hit in &scan.hits {
+            // Before where an earlier run's walk was cut: listed by it.
+            if cut_before.is_some_and(|[o, s]| (hit.offset, hit.slot) < (o, s)) {
+                continue;
+            }
             if interrupt.load(Ordering::Relaxed) {
-                cut_at = cut(k);
+                cut_at = Some([hit.offset, hit.slot]);
                 break;
             }
             let hex = to_hex(&dnode_bytes(&hit.dnode));
@@ -625,7 +672,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             });
             if interrupt.load(Ordering::Relaxed) {
                 // Its walk was cut short: not a verdict on it.
-                cut_at = cut(k);
+                cut_at = Some([hit.offset, hit.slot]);
                 if let Some(g) = groups[i] {
                     seen_in_mirror.remove(&(
                         g,
@@ -683,8 +730,9 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 dnode_hex: hex,
             });
         }
-        if let Some(at) = cut_at {
+        if let Some([at, slot]) = cut_at {
             reached[i] = reached[i].min(at / 512 * 512);
+            cuts[i] = Some([at, slot]);
             complete = false;
         }
     }
@@ -698,7 +746,10 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.id.cmp(&b.id))
+            // And by where it was found where they tie: the order it was
+            // found in is not the same for a scan done in one pass and
+            // one resumed, and the ids were not either.
+            .then((a.device, a.offset, a.slot).cmp(&(b.device, b.offset, b.slot)))
     });
     for (n, c) in candidates.iter_mut().enumerate() {
         c.id = format!("c{:04}", n + 1);
@@ -764,6 +815,13 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         index_version: INDEX_VERSION,
         reached,
         complete,
+        range: range.map(|(a, b)| [a, b]),
+        counted,
+        cut: if cuts.iter().any(Option::is_some) {
+            cuts
+        } else {
+            Vec::new()
+        },
     };
     if let Err(e) = std::fs::write(
         &state_path,

@@ -646,6 +646,43 @@ fn a_resume_is_of_the_same_scan() {
         "--resume",
     ]);
     assert_eq!(code, 0, "{err}");
+    // A scan of the second half, resumed: the same half, not the
+    // whole member from where the first one stopped; and a resume over
+    // a range that starts elsewhere is refused.
+    let half = dir.join("half").to_string_lossy().into_owned();
+    let second = format!("{}-{}", SIZE / 2, SIZE);
+    let (code, _, err) = run(&[
+        "-q",
+        "scan",
+        &members[0],
+        &members[1],
+        "-o",
+        &half,
+        "--range",
+        &second,
+    ]);
+    assert!(code == 0 || code == 3, "{err}");
+    let state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("half/state.json")).unwrap()).unwrap();
+    assert_eq!(
+        state["range"],
+        serde_json::json!([SIZE / 2, SIZE]),
+        "{state}"
+    );
+    let whole = format!("0-{SIZE}");
+    let (code, _, err) = run(&[
+        "-q",
+        "scan",
+        &members[0],
+        &members[1],
+        "-o",
+        &half,
+        "--resume",
+        "--range",
+        &whole,
+    ]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("the scan began at byte"), "{err}");
     let past = format!("{}-{}", SIZE * 2, SIZE * 3);
     let (code, _, err) = run(&[
         "-q",

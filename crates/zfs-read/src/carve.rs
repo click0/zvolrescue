@@ -218,11 +218,22 @@ pub struct Options {
     /// member's first byte: on a partition that starts at sector 63 a
     /// pass that stepped from byte 0 tried no offset a block was at.
     pub vdev_start: u64,
+    /// Count nothing before this offset: slots, rejections, bytes. A
+    /// resume reads again what an interrupted run had read and counted,
+    /// and counted it twice — more slots than both members have.
+    pub count_from: u64,
     /// Looked at before every chunk: once it is set the scan stops
     /// where that chunk begins, says so in `stopped_early`, and
     /// `resume_at` names the offset — how a SIGINT ends a scan that
     /// `--resume` continues (C-08) instead of killing one.
     pub stop: Option<Arc<AtomicBool>>,
+}
+
+impl Options {
+    /// Whether what is at `offset` is counted (see `count_from`).
+    fn counts(&self, offset: u64) -> bool {
+        offset >= self.count_from
+    }
 }
 
 impl Default for Options {
@@ -248,6 +259,7 @@ impl Default for Options {
             collect_hits: true,
             chunk: 4 << 20,
             vdev_start: 0,
+            count_from: 0,
             stop: None,
         }
     }
@@ -365,8 +377,11 @@ fn consider(
     if !opts.collect_hits {
         return;
     }
+    let counting = opts.counts(offset);
     if let Err(r) = plausible_dnode(&dnode) {
-        scan.counts.bump(r);
+        if counting {
+            scan.counts.bump(r);
+        }
         return;
     }
     // A dataset dnode is kept whatever was asked for: it is not a
@@ -383,8 +398,10 @@ fn consider(
         });
     }
     let misses = opts.profile.misses(&dnode);
-    for m in &misses {
-        scan.counts.bump(*m);
+    if counting {
+        for m in &misses {
+            scan.counts.bump(*m);
+        }
     }
     if opts.strict_profile && !misses.is_empty() {
         return;
@@ -430,14 +447,23 @@ fn plaintext_pass(
 ) {
     let mut at = 0usize;
     while at < own && at + DNODE_SIZE <= buf.len() {
-        scan.slots_examined += 1;
+        let counting = opts.counts(base + at as u64);
+        if counting {
+            scan.slots_examined += 1;
+        }
         match plausible_head(&buf[at..]) {
             Err(r) => {
-                scan.counts.bump(r);
+                if counting {
+                    scan.counts.bump(r);
+                }
             }
             Ok(()) => match DnodePhys::parse(&buf[at..], Endian::Little) {
                 Ok(d) => consider(scan, opts, device, base + at as u64, 0, Found::Plaintext, d),
-                Err(_) => scan.counts.bump(Reject::BonusLen),
+                Err(_) => {
+                    if counting {
+                        scan.counts.bump(Reject::BonusLen);
+                    }
+                }
             },
         }
         if let Some(os) = as_meta_objset(&buf[at..]) {
@@ -482,13 +508,20 @@ fn compressed_pass(
             }
             let mut slot = 0u64;
             let mut off = 0usize;
+            let counting = opts.counts(base + at as u64);
             while off + DNODE_SIZE <= out.len() {
-                scan.slots_examined += 1;
+                if counting {
+                    scan.slots_examined += 1;
+                }
                 // Counted the same way as a slot read in plaintext: a
                 // rejection reason for every slot looked at is what
                 // makes an empty result readable (C-15).
                 match plausible_head(&out[off..]) {
-                    Err(r) => scan.counts.bump(r),
+                    Err(r) => {
+                        if counting {
+                            scan.counts.bump(r);
+                        }
+                    }
                     Ok(()) => match DnodePhys::parse(&out[off..], Endian::Little) {
                         Ok(d) => consider(
                             scan,
@@ -499,7 +532,11 @@ fn compressed_pass(
                             Found::Compressed(*codec),
                             d,
                         ),
-                        Err(_) => scan.counts.bump(Reject::BonusLen),
+                        Err(_) => {
+                            if counting {
+                                scan.counts.bump(Reject::BonusLen);
+                            }
+                        }
                     },
                 }
                 off += DNODE_SIZE;
@@ -573,11 +610,14 @@ pub fn scan_member(
         // the 4 MiB around it: the chunk is read again around it, the
         // sector left as zeros, and counted (SPEC F-72). A device is
         // asked once (N-10); its refusal skips the chunk, counted too.
+        // What of this chunk is counted: none of it a resume read and
+        // counted before.
+        let own_from = opts.count_from.saturating_sub(at).min(own as u64);
         match src.read_at_salvaging(at, window) {
             Ok(bad) => {
                 scan.unreadable_bytes += bad
                     .iter()
-                    .map(|&(s, l)| (s + l).min(own as u64).saturating_sub(s))
+                    .map(|&(s, l)| (s + l).min(own as u64).saturating_sub(s.max(own_from)))
                     .sum::<u64>();
                 if !bad.is_empty() {
                     trace!(
@@ -592,13 +632,15 @@ pub fn scan_member(
                     "carve",
                     "device {device} offset {at:#x}: {e}; skipping chunk"
                 );
-                scan.unreadable_bytes += own as u64;
+                scan.unreadable_bytes += own as u64 - own_from;
                 at += opts.chunk as u64;
                 scan.resume_at = at;
                 continue;
             }
         }
-        scan.bytes_read += readable as u64;
+        // The chunk's own bytes: the tail read past it is the next
+        // chunk's, and counted there.
+        scan.bytes_read += (own.min(readable) as u64).saturating_sub(own_from);
         plaintext_pass(&mut scan, opts, device, at, window, own.min(readable));
         if !opts.codecs.is_empty() {
             // The first allocation boundary in this chunk, counted from

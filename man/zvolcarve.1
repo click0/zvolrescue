@@ -133,6 +133,11 @@ The workspace must be from a scan of the same pool and members, with
 the same profile; another is refused (exit 1), and so is a state or an
 index there that cannot be read.
 With no state at all the scan starts from the beginning, and says so.
+It goes on with the range the scan was started with; a
+.Fl -range
+given again may end elsewhere but must start where that one did.
+A scan interrupted and resumed ends with the index one pass would have
+written.
 .It Fl -full-assess
 Read every block a candidate claims when ranking it, rather than a
 sample.

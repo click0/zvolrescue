@@ -220,6 +220,21 @@ pub struct State {
     pub reached: Vec<u64>,
     /// The scan finished the range it was given.
     pub complete: bool,
+    /// The `--range` the scan was started with, so that a resume goes on
+    /// with the same one: a resume with no range, after a scan of the
+    /// second half of the members, skipped the first half unread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range: Option<[u64; 2]>,
+    /// Offset up to which each member's slots, rejections and bytes are
+    /// counted already. A walk cut short by a signal moves `reached`
+    /// back to the first candidate not walked; what lies between was
+    /// counted, and is not counted again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub counted: Vec<u64>,
+    /// The first candidate not walked, as `[offset, slot]`, per member:
+    /// what a resume met before it on that member was listed already.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cut: Vec<Option<[u64; 2]>>,
 }
 
 /// Read the index of a workspace.

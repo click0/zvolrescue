@@ -369,9 +369,16 @@ tagged. `v0.7.1` is the release that carries those six.
   other side of the mirror — 2644 became 5288, and `mirror_duplicates`
   said 0 — and the ones whose walk the signal stopped stayed scored as
   nothing walked. A resume now ends equal to one pass: the same
-  candidates, the same scores. A resume into a workspace made from
-  another pool, other members or another profile is refused (exit 1);
-  it skipped as many of the new members' bytes as the old run had read.
+  candidates, the same scores to the last bit (the index's numbers are
+  read back exactly), the same ids — they were ordered among equal
+  scores by the order they were found in, which a resume changes — and
+  the same counts of slots, bytes, rejections and datasets, which a
+  resume counted again where it read again. A resume into a workspace
+  made from another pool, other members or another profile is refused
+  (exit 1); it skipped as many of the new members' bytes as the old run
+  had read. A resume goes on with the range the scan was started with,
+  and one given again must start where that did: a resume with no range,
+  after a scan of the second half, skipped the first half unread.
 * **The compressed pass was blind on a vdev that does not start on a 4
   KiB boundary.** Offsets were stepped from the member's first byte, so
   on a partition that starts at sector 63 no block was ever tried: 0 lz4
