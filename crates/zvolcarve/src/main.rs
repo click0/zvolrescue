@@ -167,8 +167,11 @@ fn main() -> ExitCode {
             .iter()
             .map(|d| d.join(zeropoint::ZEROPOINT))
             .collect(),
-        Command::List { dir } => vec![dir.join(model::INDEX)],
-        Command::Dump { dir, output, .. } => std::iter::once(dir.join(model::INDEX))
+        // The scan's state too: written over, a later `scan --resume`
+        // started again from nothing.
+        Command::List { dir } => vec![dir.join(model::INDEX), dir.join(model::STATE)],
+        Command::Dump { dir, output, .. } => [dir.join(model::INDEX), dir.join(model::STATE)]
+            .into_iter()
             .chain(zvol_common::resume::sidecars(output))
             .collect(),
     };

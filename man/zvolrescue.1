@@ -248,6 +248,12 @@ Refused, with exit 5, if it is anything the run reads or shares bytes
 with it: a member under any name, a map, the hints, a key file, a
 device a member is on or a loop device over one, or the path a log
 goes to.
+A member on an overlay is traced to the file in its layer, and one on
+a filesystem with no device of its own, such as btrfs, to the device
+its mount names.
+A member on a ZFS dataset is not traced to the pool's disks: there is
+no way to ask without running
+.Xr zpool 8 .
 With
 .Fl r
 every image, its resume state and

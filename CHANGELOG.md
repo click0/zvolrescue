@@ -405,6 +405,27 @@ tagged. `v0.7.1` is the release that carries those six.
   says, in the text as in the JSON, the TXG it was last seen at, and
   both give the command that reads it back (T-05) — `zvolrescue dump
   tank/vm/disk0@before … --txg N` gives the image it had.
+* **A log could still be written over a carve's state, and a state that
+  did not read was a scan from nothing.** The index of a carve
+  workspace was kept from `--debug-log` and `--evidence-log`; its
+  `state.json` was not, and `zvolcarve --debug-log ws/state.json dump`
+  replaced it with a trace (exit 0). `list` and `dump` now keep both,
+  `dump` writes no image over the state either, and `scan --resume`
+  refuses a state or an index that is there and cannot be read (exit 1)
+  — it began again from the first byte, said nothing, and wrote its own
+  state over the one that knew how far hours of scanning had got. A
+  resume with no state at all says that it starts from the beginning.
+* **A member on an overlay or on btrfs was not traced to its disk.** A
+  filesystem that is not one block device has a device number that
+  names no device, and the trace from a member to what holds it stopped
+  there: with the members on an overlay over an ext4 image mounted
+  through a loop, `-o` on that loop device, or on the image file, passed
+  with exit 0 and destroyed the filesystem. The guard now reads the
+  mount: a file on an overlay is the file in the layer that holds it
+  (writing that is refused too), and a filesystem whose source is a
+  device node is on that device. A ZFS dataset names no device, and is
+  not traced; the manual says so. An output's own message names it a
+  file or a directory, as it is.
 
 ## v0.9.12 — 2026-11-07
 

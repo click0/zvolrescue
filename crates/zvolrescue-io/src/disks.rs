@@ -151,6 +151,159 @@ fn parents(_dev: u64) -> Vec<u64> {
     Vec::new()
 }
 
+/// Where a filesystem with no device of its own keeps its bytes.
+///
+/// On Linux a filesystem that is not one block device — btrfs, an
+/// overlay, a ZFS dataset, tmpfs — has a device number of major 0, which
+/// names no device at all: the trace from an image to the disk under it
+/// stopped there, and an output on that disk, or on the image file it
+/// was loop-mounted from, was let through. What the kernel says of the
+/// mount says where to go on: an overlay's file is a file in one of its
+/// layers, and a filesystem whose source is a device node is on that
+/// device. A ZFS dataset's source is a dataset name, and a tmpfs has no
+/// bytes on a disk; neither goes further.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Beneath {
+    /// Devices the filesystem's bytes are on.
+    pub devs: Vec<u64>,
+    /// For a file that exists in an overlay: the file in the layer that
+    /// holds it, which is the same bytes under another name.
+    pub file: Option<std::path::PathBuf>,
+}
+
+/// One line of `/proc/self/mountinfo`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) struct Mount {
+    /// The directory of the filesystem mounted here (`/` unless a bind).
+    pub root: std::path::PathBuf,
+    /// Where it is mounted.
+    pub point: std::path::PathBuf,
+    pub fstype: String,
+    pub source: String,
+    /// The superblock's options: an overlay's layers are among them.
+    pub options: String,
+}
+
+/// The mount of device `MAJ:MIN` in `mountinfo`'s text, the first one
+/// when there are several (a bind mount is the same filesystem).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn mount_in(mountinfo: &str, major: u64, minor: u64) -> Option<Mount> {
+    let want = format!("{major}:{minor}");
+    mountinfo.lines().find_map(|l| {
+        let (pre, post) = l.split_once(" - ")?;
+        let f: Vec<&str> = pre.split(' ').collect();
+        if *f.get(2)? != want {
+            return None;
+        }
+        let mut p = post.splitn(3, ' ');
+        Some(Mount {
+            root: unescape(f.get(3)?).into(),
+            point: unescape(f.get(4)?).into(),
+            fstype: p.next()?.to_string(),
+            source: unescape(p.next()?),
+            options: p.next().unwrap_or("").to_string(),
+        })
+    })
+}
+
+/// The kernel writes a space, a tab, a newline and a backslash in a
+/// mount's fields as three octal digits after a backslash.
+fn unescape(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'\\'
+            && i + 3 < b.len()
+            && b[i + 1..i + 4].iter().all(|c| (b'0'..=b'7').contains(c))
+        {
+            out.push((b[i + 1] - b'0') * 64 + (b[i + 2] - b'0') * 8 + (b[i + 3] - b'0'));
+            i += 4;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// An overlay's layers, the upper one first: where a file of it is.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn overlay_layers(options: &str) -> Vec<std::path::PathBuf> {
+    let opt = |name: &str| {
+        options
+            .split(',')
+            .find_map(|o| o.strip_prefix(name))
+            .map(str::to_string)
+    };
+    let mut out: Vec<std::path::PathBuf> = opt("upperdir=").into_iter().map(Into::into).collect();
+    if let Some(lower) = opt("lowerdir=") {
+        out.extend(lower.split(':').filter(|l| !l.is_empty()).map(Into::into));
+    }
+    out
+}
+
+/// What is beneath `dev`, the filesystem `path` is (or would be made)
+/// on; nothing when `dev` is a device of its own.
+#[cfg(target_os = "linux")]
+pub(crate) fn beneath(dev: u64, path: &std::path::Path) -> Beneath {
+    beneath_at(dev, path, 0)
+}
+
+#[cfg(target_os = "linux")]
+fn beneath_at(dev: u64, path: &std::path::Path, depth: usize) -> Beneath {
+    use std::os::unix::fs::MetadataExt;
+    let mut out = Beneath::default();
+    // An overlay over an overlay is a few deep; the bound is a cycle's.
+    if linux_major(dev) != 0 || depth > 4 {
+        return out;
+    }
+    let Some(m) = std::fs::read_to_string("/proc/self/mountinfo")
+        .ok()
+        .and_then(|t| mount_in(&t, 0, linux_minor(dev)))
+    else {
+        return out;
+    };
+    if m.fstype == "overlay" {
+        let layers = overlay_layers(&m.options);
+        // The path inside the overlay, and so inside each layer.
+        let inside = std::fs::canonicalize(path).ok().and_then(|c| {
+            let rel = c.strip_prefix(&m.point).ok()?.to_path_buf();
+            Some(m.root.strip_prefix("/").unwrap_or(&m.root).join(rel))
+        });
+        let found = inside.as_ref().and_then(|rel| {
+            layers
+                .iter()
+                .map(|l| l.join(rel))
+                .find(|f| std::fs::symlink_metadata(f).is_ok())
+        });
+        // A file that is there is in one layer; one still to be made goes
+        // to the upper one.
+        let on = found.clone().or_else(|| layers.first().cloned());
+        if let Some(on_meta) = on.as_deref().and_then(|p| std::fs::metadata(p).ok()) {
+            out.devs.push(on_meta.dev());
+            let deeper = beneath_at(on_meta.dev(), on.as_deref().expect("checked"), depth + 1);
+            out.devs.extend(deeper.devs);
+        }
+        out.file = found;
+        return out;
+    }
+    if m.source.starts_with('/') {
+        if let Ok(s) = std::fs::metadata(&m.source) {
+            if is_device(&s) {
+                out.devs.push(s.rdev());
+            }
+        }
+    }
+    out
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn beneath(_dev: u64, _path: &std::path::Path) -> Beneath {
+    Beneath::default()
+}
+
 /// The major number of a Linux `dev_t` (glibc's encoding).
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn linux_major(dev: u64) -> u64 {
@@ -234,6 +387,29 @@ mod tests {
         for whole in ["ada0", "da12", "nvd0", "das1", "md", "zvol"] {
             assert_eq!(freebsd_parent_name(whole), None, "{whole}");
         }
+    }
+
+    /// What the kernel writes of a mount is read back as it was meant:
+    /// the device by its numbers, the fields unescaped, an overlay's
+    /// layers upper first.
+    #[test]
+    fn a_mount_is_read_from_its_line() {
+        let text = "\
+22 1 8:2 / / rw,relatime shared:1 - ext4 /dev/sda2 rw\n\
+41 22 0:41 / /srv/ov rw,relatime - overlay overlay rw,lowerdir=/mnt/l1:/mnt/l2,upperdir=/mnt/up,workdir=/mnt/w\n\
+42 22 0:43 /sub /data\\040two rw - btrfs /dev/loop3 rw,space_cache=v2\n";
+        let ov = mount_in(text, 0, 41).expect("the overlay");
+        assert_eq!(ov.fstype, "overlay");
+        assert_eq!(ov.point, std::path::Path::new("/srv/ov"));
+        assert_eq!(
+            overlay_layers(&ov.options),
+            ["/mnt/up", "/mnt/l1", "/mnt/l2"].map(std::path::PathBuf::from)
+        );
+        let bt = mount_in(text, 0, 43).expect("the btrfs");
+        assert_eq!(bt.point, std::path::Path::new("/data two"));
+        assert_eq!(bt.root, std::path::Path::new("/sub"));
+        assert_eq!(bt.source, "/dev/loop3");
+        assert_eq!(mount_in(text, 0, 44), None);
     }
 
     /// A device overlaps itself; without a device tree to read, two

@@ -80,6 +80,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     let mut reads = spec.reads();
     reads.extend(members.paths.iter().cloned());
     reads.push(opts.dir.join(crate::model::INDEX));
+    reads.push(opts.dir.join(crate::model::STATE));
     let guard = WriteGuard::new(g, &reads);
     let [state, tmp] = resume::sidecars(&opts.output);
     for (what, path) in [

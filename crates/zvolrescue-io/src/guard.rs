@@ -64,6 +64,10 @@ struct Input {
     path: PathBuf,
     /// The input itself: `(st_dev, st_ino)` of the file or device node.
     node: (u64, u64),
+    /// The same bytes under another name the kernel knows of: the file
+    /// in an overlay's layer that the input, read through the overlay,
+    /// is.
+    aliases: Vec<(u64, u64)>,
     /// The files an input device is made of: what a loop device in its
     /// stack reads, at any depth, by the same pair. Writing one, or
     /// writing into a filesystem inside one, writes the input.
@@ -95,6 +99,7 @@ impl Evidence {
             let mut input = Input {
                 path: path.clone(),
                 node: (m.dev(), m.ino()),
+                aliases: Vec::new(),
                 backing: Vec::new(),
                 holders: Vec::new(),
                 raw: Vec::new(),
@@ -113,14 +118,27 @@ impl Evidence {
             } else {
                 m.dev()
             };
-            input.raw.push(dev);
-            for f in loop_files(dev) {
-                if input.device.is_some() {
-                    input.backing.push(f.node);
-                } else {
-                    input.holders.push(f.node);
+            // A filesystem with no device of its own — an overlay,
+            // btrfs — is on the devices its mount names, and an overlay's
+            // file is a file in one of its layers.
+            let mut devs = vec![dev];
+            if input.device.is_none() {
+                let b = disks::beneath(dev, path);
+                if let Some(f) = b.file.as_ref().and_then(|f| std::fs::metadata(f).ok()) {
+                    input.aliases.push((f.dev(), f.ino()));
                 }
-                input.raw.push(f.on);
+                devs.extend(b.devs);
+            }
+            for dev in devs {
+                input.raw.push(dev);
+                for f in loop_files(dev) {
+                    if input.device.is_some() {
+                        input.backing.push(f.node);
+                    } else {
+                        input.holders.push(f.node);
+                    }
+                    input.raw.push(f.on);
+                }
             }
             out.push(input);
         }
@@ -149,6 +167,12 @@ impl Evidence {
                 if i.node == node {
                     return Err(refusal(format!(
                         "output {shown} is the same file as input {}",
+                        i.path.display()
+                    )));
+                }
+                if i.aliases.contains(&node) {
+                    return Err(refusal(format!(
+                        "output {shown} is the file input {} is, in the layer of the overlay it is read through",
                         i.path.display()
                     )));
                 }
@@ -186,23 +210,31 @@ impl Evidence {
             Some(m) => (target, m),
             None => nearest_existing(&target)?,
         };
-        for i in &self.inputs {
-            if i.device.is_some_and(|e| disks::overlap(m.dev(), e)) {
-                return Err(refusal(format!(
-                    "output directory {} is on input device {}",
-                    landing.display(),
-                    i.path.display()
-                )));
+        // The filesystem it lands on, and — when that has no device of
+        // its own — the devices beneath it.
+        let mut devs = vec![m.dev()];
+        devs.extend(disks::beneath(m.dev(), &landing).devs);
+        let what = if m.is_dir() { "directory" } else { "file" };
+        for dev in devs {
+            for i in &self.inputs {
+                if i.device.is_some_and(|e| disks::overlap(dev, e)) {
+                    return Err(refusal(format!(
+                        "output {what} {} is on input device {}",
+                        landing.display(),
+                        i.path.display()
+                    )));
+                }
             }
+            self.over_loops(
+                &format!(
+                    "output {what} {} is on a filesystem in a loop device",
+                    landing.display()
+                ),
+                dev,
+                false,
+            )?;
         }
-        self.over_loops(
-            &format!(
-                "output directory {} is on a filesystem in a loop device",
-                landing.display()
-            ),
-            m.dev(),
-            false,
-        )
+        Ok(())
     }
 
     /// Refuse when a loop device in `dev`'s stack, at any depth, reads a

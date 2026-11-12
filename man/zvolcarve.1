@@ -130,7 +130,9 @@ Continue a scan that was interrupted; a SIGINT or SIGTERM ends a scan
 with its state written (exit status 6), and the candidates whose walk
 the signal cut short are walked by the resume.
 The workspace must be from a scan of the same pool and members, with
-the same profile; another is refused (exit 1).
+the same profile; another is refused (exit 1), and so is a state or an
+index there that cannot be read.
+With no state at all the scan starts from the beginning, and says so.
 .It Fl -full-assess
 Read every block a candidate claims when ranking it, rather than a
 sample.
@@ -254,6 +256,8 @@ Collect probes from at most this many dnodes; default 4096.
 .It Pa dir/state.json
 The state of a scan, for
 .Fl -resume .
+No run writes a log over it, or over
+.Pa dir/candidates.json .
 .It Pa out.img.resume.json
 The state of an interrupted
 .Cm dump .

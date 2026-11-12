@@ -719,3 +719,54 @@ fn roots_and_zeropoint_are_on_the_record() {
         .collect();
     assert_eq!(wrote, ["roots.json", "zeropoint.json"]);
 }
+
+/// The scan's state is kept from the logs and the image like its index,
+/// and a state that does not read stops a resume rather than letting it
+/// begin again from nothing over the record of where it had got to.
+#[test]
+fn the_scan_state_is_kept_and_a_bad_one_stops_a_resume() {
+    let dir = scratch("state-kept");
+    let members = carved_members(&dir, 0x4242, "member");
+    let carve = dir.join("carve");
+    let c = carve.to_string_lossy().into_owned();
+    let (code, _, err) = run(&["-q", "scan", &members[0], &members[1], "-o", &c]);
+    assert_eq!(code, 0, "{err}");
+    let state = carve.join("state.json");
+    let before = std::fs::read(&state).unwrap();
+    let s = state.to_string_lossy().into_owned();
+    for args in [
+        vec![
+            "-q",
+            "--debug-log",
+            &s,
+            "dump",
+            &c,
+            "c0001",
+            &members[0],
+            "-o",
+        ],
+        vec!["-q", "--evidence-log", &s, "list", &c],
+    ] {
+        let mut args = args.clone();
+        let img = dir.join("c.img").to_string_lossy().into_owned();
+        if args.last() == Some(&"-o") {
+            args.push(&img);
+            let (code, _, err) = run(&args);
+            assert_eq!(code, 5, "{err}");
+        } else {
+            let (code, _, err) = run(&args);
+            assert_eq!(code, 5, "{err}");
+        }
+    }
+    let (code, _, err) = run(&["-q", "dump", &c, "c0001", &members[0], "-o", &s]);
+    assert_eq!(code, 5, "{err}");
+    assert_eq!(std::fs::read(&state).unwrap(), before);
+
+    let mut bad = before.clone();
+    bad.extend_from_slice(b"garbage\n");
+    std::fs::write(&state, &bad).unwrap();
+    let (code, _, err) = run(&["-q", "scan", &members[0], &members[1], "-o", &c, "--resume"]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("not a scan state"), "{err}");
+    assert_eq!(std::fs::read(&state).unwrap(), bad);
+}

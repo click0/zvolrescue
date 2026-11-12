@@ -357,19 +357,52 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         return exit::USAGE;
     }
 
-    let previous: State = if opts.resume {
-        std::fs::read_to_string(opts.output.join(STATE))
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default()
-    } else {
+    // What a resume goes on from. A state or an index that is there and
+    // cannot be read is refused: taken as nothing, the scan began again
+    // from the first byte, said nothing, and wrote its own state over the
+    // one that knew where the hours of work before had got to. One that
+    // is not there at all is a scan that never began, and is said.
+    let state_path = opts.output.join(STATE);
+    let index_path = opts.output.join(INDEX);
+    let unreadable = |path: &std::path::Path, why: String| {
+        eprintln!(
+            "zvolcarve: --resume: {}: {why}; it says where the scan got to, and is left as it is (scan into another directory to start over)",
+            path.display()
+        );
+        exit::USAGE
+    };
+    let previous: State = if !opts.resume {
         State::default()
+    } else {
+        match std::fs::read_to_string(&state_path) {
+            Ok(t) => match serde_json::from_str(&t) {
+                Ok(s) => s,
+                Err(e) => return unreadable(&state_path, format!("not a scan state: {e}")),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if !g.quiet {
+                    eprintln!(
+                        "zvolcarve: --resume: no {} to go on from; scanning from the start",
+                        state_path.display()
+                    );
+                }
+                State::default()
+            }
+            Err(e) => return unreadable(&state_path, e.to_string()),
+        }
     };
 
     // A resume adds to what the earlier run found; replacing the index
     // would throw away the part of the member that was already read.
-    let earlier = if opts.resume {
-        crate::model::load_index(&opts.output).ok()
+    let earlier = if opts.resume && std::fs::symlink_metadata(&index_path).is_ok() {
+        match crate::model::load_index(&opts.output) {
+            Ok(i) => Some(i),
+            Err(e) => {
+                let shown = format!("{}: ", index_path.display());
+                let why = e.strip_prefix(&shown).unwrap_or(&e).to_string();
+                return unreadable(&index_path, why);
+            }
+        }
     } else {
         None
     };
