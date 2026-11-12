@@ -367,7 +367,7 @@ jobs:
           set +e; wait $pid; code=$?; set -e
           cat /tmp/sigint/carved1.err
           test "$code" = 6
-          python3 -c 'import json; v=json.load(open("/tmp/sigint/carved1.json")); at=v["interrupted_at"]; s=json.load(open("/tmp/sigint/carved.img.resume.json")); assert at > 0 and s["blocks_done"] == at and s["dataset"] == v["candidate"] and s["dataset_guid"] == "candidate", (v, s); open("/tmp/sigint/cat","w").write(str(at))'
+          python3 -c 'import json; v=json.load(open("/tmp/sigint/carved1.json")); at=v["interrupted_at"]; s=json.load(open("/tmp/sigint/carved.img.resume.json")); assert at > 0 and s["blocks_done"] == at and s["dataset"] == v["candidate"] and s["dataset_guid"].startswith("candidate, dnode sha256 "), (v, s); open("/tmp/sigint/cat","w").write(str(at))'
           ./target/release/zvolcarve -f json dump /tmp/sigint/carve-tail "$id" /tmp/sigint/member0.img /tmp/sigint/member1.img -o /tmp/sigint/carved.img --resume | python3 -c 'import json,sys; v=json.load(sys.stdin); assert v["resumed_from_block"] == int(open("/tmp/sigint/cat").read()), v; assert v["interrupted_at"] is None, v; assert v["sha256"] == open("/tmp/sigint/ref.sha").read(), v'
           cmp /tmp/sigint/carved.img /tmp/sigint/ref.img
           test ! -e /tmp/sigint/carved.img.resume.json

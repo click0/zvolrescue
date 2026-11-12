@@ -261,7 +261,15 @@ pub fn open(
     #[cfg(unix)]
     {
         use std::os::unix::fs::FileTypeExt;
-        if let Ok(m) = std::fs::metadata(output) {
+        // `/dev/stdout` is the stream itself where the system keeps it
+        // as a device of its own (FreeBSD's devfs, macOS): what it leads
+        // to is what the stream is.
+        let named = stream_named(output);
+        if let Some(m) = named
+            .as_ref()
+            .map(|(_, m)| m.clone())
+            .or_else(|| std::fs::metadata(output).ok())
+        {
             let ft = m.file_type();
             if ft.is_fifo() || ft.is_socket() {
                 return Err(format!(
@@ -275,7 +283,11 @@ pub fn open(
         // while the summary went into it from the start, over the image's
         // first bytes: the sha256 recorded was of bytes the file no longer
         // held, with exit 0.
-        if let Some(stream) = own_stream(output) {
+        let own = match named {
+            Some((stream, m)) => (m.is_file() || m.file_type().is_block_device()).then_some(stream),
+            None => own_stream(output),
+        };
+        if let Some(stream) = own {
             return Err(format!(
                 "{}: this is the {stream} of the run, where its summary goes, and the summary would be written over the image; name the file itself",
                 output.display()
@@ -345,6 +357,33 @@ pub fn open(
     }
     .map_err(|e| format!("cannot open {}: {e}", output.display()))?;
     Ok((start_block, digests, sink, lost))
+}
+
+/// The stream of this process `output` names as `/dev/stdout`,
+/// `/dev/stderr` or `/dev/fd/1` and `2`, with what that stream is —
+/// where the system keeps those names as devices of their own, as
+/// FreeBSD's devfs and macOS do, rather than as links to the file the
+/// stream goes to, as Linux's `/proc` does: a device that, opened, is
+/// the stream again, and that `stat` calls a character device whatever
+/// the stream leads to.
+#[cfg(unix)]
+fn stream_named(output: &Path) -> Option<(&'static str, std::fs::Metadata)> {
+    use std::os::fd::AsFd;
+    let which = match std::fs::canonicalize(output).ok()?.to_str()? {
+        "/dev/fd/1" | "/dev/stdout" => 1,
+        "/dev/fd/2" | "/dev/stderr" => 2,
+        _ => return None,
+    };
+    let (out, err) = (std::io::stdout(), std::io::stderr());
+    let (name, fd) = if which == 1 {
+        ("standard output", out.as_fd())
+    } else {
+        ("standard error", err.as_fd())
+    };
+    let m = std::fs::File::from(fd.try_clone_to_owned().ok()?)
+        .metadata()
+        .ok()?;
+    Some((name, m))
 }
 
 /// Whether `output` is the file or disk this process's standard output

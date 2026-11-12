@@ -243,8 +243,10 @@ fn the_layout_a_run_read_through_is_on_its_record() {
 
 /// An image is written at offsets with its holes left out, which a pipe
 /// cannot take: `-o /dev/stdout` into a pipe is a usage error up front,
-/// where it failed on the first seek as exit 3, "unrecoverable".
-#[cfg(target_os = "linux")]
+/// where it failed on the first seek as exit 3, "unrecoverable". Where
+/// `/dev/stdout` is a device of its own (FreeBSD, macOS) rather than a
+/// link to the pipe, the pipe is found behind it all the same.
+#[cfg(unix)]
 #[test]
 fn an_image_is_not_written_into_a_pipe() {
     let dir = scratch("pipe");
