@@ -61,8 +61,17 @@ pub struct Zeroed {
 pub const NO_BLOCK_SIZE: &str =
     "the dnode's block size is 0, which ZFS never writes: it is damaged, and where the object's blocks fall cannot be known";
 
-/// A device number, as stored and as the major and minor it packs: the
-/// major in the high 32 bits, the minor in the low (`zfs_expldev`).
+/// A device number, as stored and as the major and minor it packs.
+///
+/// How it packs them depends on the system that made the node: illumos
+/// (and the Solaris the format came from) stores the expanded 64-bit
+/// form, the major in the high 32 bits (`zfs_expldev`); Linux stores its
+/// kernel's `dev_t`, a 12-bit major above a 20-bit minor. Read the first
+/// way only, a Linux disk's `8,1` came out as `0,8388609`. A value with
+/// anything in its high half can only be the first; one without is read
+/// the Linux way, the system nearly every pool with device nodes in it
+/// comes from, and `encoding` says which was taken — `raw` is there for
+/// whoever knows better.
 ///
 /// One shape for `list` and for the manifest: `list` gave `"8,1"`, the
 /// manifest `{raw, major, minor}`, for the same device.
@@ -71,17 +80,54 @@ pub struct Rdev {
     pub raw: u64,
     pub major: u64,
     pub minor: u64,
+    /// `illumos` or `linux`: how `raw` was split.
+    pub encoding: &'static str,
 }
 
 impl Rdev {
     /// The number of a character or block device; nothing for the rest.
     pub fn of(z: &zfs_ondisk::zpl::Znode) -> Option<Rdev> {
         use zfs_ondisk::zpl::FileType;
-        matches!(z.file_type(), FileType::CharDevice | FileType::BlockDevice).then_some(Rdev {
-            raw: z.rdev,
-            major: z.rdev >> 32,
-            minor: z.rdev & 0xffff_ffff,
-        })
+        matches!(z.file_type(), FileType::CharDevice | FileType::BlockDevice)
+            .then(|| Rdev::split(z.rdev))
+    }
+
+    fn split(raw: u64) -> Rdev {
+        if raw >> 32 != 0 {
+            Rdev {
+                raw,
+                major: raw >> 32,
+                minor: raw & 0xffff_ffff,
+                encoding: "illumos",
+            }
+        } else {
+            Rdev {
+                raw,
+                major: (raw >> 20) & 0xfff,
+                minor: raw & 0xf_ffff,
+                encoding: "linux",
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod rdev_tests {
+    use super::Rdev;
+
+    /// `/dev/sda1` (8,1) and `/dev/null` (1,3) as each system stores
+    /// them.
+    #[test]
+    fn a_device_number_is_split_as_its_system_packed_it() {
+        for (raw, want) in [
+            ((8u64 << 32) | 1, (8, 1, "illumos")),
+            ((1u64 << 32) | 3, (1, 3, "illumos")),
+            ((8u64 << 20) | 1, (8, 1, "linux")),
+            ((1u64 << 20) | 3, (1, 3, "linux")),
+        ] {
+            let r = Rdev::split(raw);
+            assert_eq!((r.major, r.minor, r.encoding), want, "{raw:#x}");
+        }
     }
 }
 

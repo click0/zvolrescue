@@ -535,6 +535,31 @@ tagged. `v0.7.1` is the release that carries those six.
   the start in a second. The scan now asks the member's block pointers
   the same way, uses a start they agree on, says so and records it
   (`starts_by_pointers`): 43 441 lz4 candidates on the same member.
+* **No real ZPL dataset read.** Every fixture in this repository was
+  written by this repository, and two decoding mistakes were made in
+  the reader and in the fixture alike, so every test agreed with every
+  other. The SA registry's attribute number was taken from bits 8–23
+  of its entry, where OpenZFS keeps it in 0–15 (`ATTR_NUM`): on a pool
+  OpenZFS wrote, every attribute came out as number 0, and every file
+  as type `?`, mode 0000, size 0 — `extract` wrote nothing. A legacy
+  `znode_phys_t` (ZPL version 4 and before) was read one word off from
+  byte 72 on — size where mode is, mode where the flags are — and a
+  short symbolic link's target, which such a pool keeps after the
+  structure, was not looked for. Besides: system attributes start on
+  eight-byte boundaries (`sa_attr_iter`), so an attribute after a link
+  target or an ACL — a symlink's SELinux label — was read from inside
+  the padding; a NUL inside a fat-ZAP name cut it there, so `x\0y` was
+  read as `x` and the real `x` lost as its duplicate; the `formKD` and
+  `formKC` normalizations (0x20, 0x60) read as none; and a device number
+  a Linux host stored (12-bit major above a 20-bit minor) was split as
+  illumos stores one, `8,1` as `0,8388609` — the manifest now says
+  which encoding it read (`encoding`) beside the raw value. The fixture
+  encodes as OpenZFS does, and a new CI job has the kernel's OpenZFS
+  write a dataset of each kind — system attributes with `xattr=sa` and
+  `xattr=dir`, ZPL version 4, case-insensitive, `formKC`, `formKD` —
+  and holds `zvolfiles extract` to every path, mode, owner, time,
+  byte, link target, device number and extended attribute the kernel
+  reports.
 
 ## v0.9.12 — 2026-11-07
 

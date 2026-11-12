@@ -1579,6 +1579,28 @@ jobs:
       - run: cargo build --release && cargo build --release -p zfs-read --examples
       - run: tests/crosscheck-ztest.sh ./target/release/zvolrescue /tmp/crosscheck ./target/release/examples/walk-objects ./target/release/examples/unwrap-key ./target/release/zvoltimeline ./target/release/examples/space
 
+  # Every fixture here is written by this repository, and a decoding
+  # mistake made twice — once in the reader, once in the fixture — passes
+  # every test: the SA registry and the legacy znode were read wrong for
+  # a year that way. This has the kernel's own OpenZFS write the files —
+  # a dataset of each kind the reader decodes differently — and holds
+  # `zvolfiles extract` to what the kernel says is in them.
+  zpl:
+    name: Files from datasets the kernel's OpenZFS wrote
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends zfsutils-linux
+      - name: The zfs kernel module
+        run: |
+          sudo modprobe zfs || {
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "linux-modules-extra-$(uname -r)"
+            sudo modprobe zfs
+          }
+      - run: cargo build --release -p zvolfiles
+      - run: sudo python3 tests/crosscheck-zpl.py ./target/release/zvolfiles /tmp/zpl-crosscheck
+
   # The damage matrix found two real defects in the tool during one
   # afternoon and then ran only when someone remembered to run it. This
   # is a subset — one geometry, ten manifests, about five minutes — kept

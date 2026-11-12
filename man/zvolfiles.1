@@ -127,6 +127,11 @@ A directory met a second time \(em damaged metadata, since a directory
 has one name \(em is named in the manifest and not walked again.
 A fifo, a device or a socket is recorded in the manifest, with a
 device's major and minor number, and not made; it is no failure.
+The number is split as the system that made the node stored it \(em
+the illumos form when its high 32 bits are set, the Linux form when
+not \(em and the manifest says which
+.Pq Li encoding
+beside the raw value.
 A block that cannot be read is written as zeros, and the manifest
 says which bytes and why
 .Pq Li zeroed ;
