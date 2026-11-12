@@ -804,22 +804,32 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     //
     // Before the guard looks: it followed the link, and one to a member
     // refused the run (exit 5) over a file it would never have touched.
-    if opts.recursive {
-        for w in &writes {
-            if !std::fs::symlink_metadata(w).is_ok_and(|m| m.file_type().is_symlink()) {
-                continue;
-            }
-            if let Err(why) = guard.check_name(w) {
-                eprintln!("zvolrescue: refusing to write {}: {why}", w.display());
-                return zvol_common::end_early(g, "zvolrescue", spec, exit::REFUSED);
-            }
-            if let Err(e) = std::fs::remove_file(w) {
-                eprintln!("zvolrescue: {}: {e}", w.display());
-                return zvol_common::end_early(g, "zvolrescue", spec, exit::USAGE);
-            }
+    //
+    // Every name is judged before any link goes: a run refused over the
+    // third name had already removed the links at the first two, and a
+    // refused run is to have changed nothing.
+    let is_link = |w: &Path| std::fs::symlink_metadata(w).is_ok_and(|m| m.file_type().is_symlink());
+    let links: Vec<&PathBuf> = if opts.recursive {
+        writes.iter().filter(|w| is_link(w)).collect()
+    } else {
+        Vec::new()
+    };
+    for w in &links {
+        if let Err(why) = guard.check_name(w) {
+            eprintln!("zvolrescue: refusing to write {}: {why}", w.display());
+            return zvol_common::end_early(g, "zvolrescue", spec, exit::REFUSED);
         }
     }
-    for w in &writes {
+    for w in writes.iter().filter(|w| !links.contains(w)) {
+        if let Err(code) = guard.refuse("zvolrescue", "to write", w) {
+            return zvol_common::end_early(g, "zvolrescue", spec, code);
+        }
+    }
+    for w in &links {
+        if let Err(e) = std::fs::remove_file(w) {
+            eprintln!("zvolrescue: {}: {e}", w.display());
+            return zvol_common::end_early(g, "zvolrescue", spec, exit::USAGE);
+        }
         if let Err(code) = guard.refuse("zvolrescue", "to write", w) {
             return zvol_common::end_early(g, "zvolrescue", spec, code);
         }

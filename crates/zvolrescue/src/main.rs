@@ -8,7 +8,7 @@ mod dump;
 mod list;
 mod scan;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
@@ -151,10 +151,12 @@ enum Cmd {
 
 /// What a dump reads and writes beside its image, named by no word of
 /// the command line: the resume state, and the name it is written under
-/// first; with `-r`, the states and the manifest already in the
-/// directory. A debug log given as one of them was created over it at
-/// the start, before the run refused it.
-fn dump_sidecars(cmd: &Cmd) -> Vec<PathBuf> {
+/// first; with `-r`, the states, the images and the manifest already in
+/// the directory, and any name a log is given there that an image could
+/// take. A debug log given as one of them was created over it at the
+/// start, before the run refused it — over an image an earlier run had
+/// written, too, since `-r` names its images only once the pool is read.
+fn dump_sidecars(cmd: &Cmd, global: &Global) -> Vec<PathBuf> {
     let Cmd::Dump {
         output, recursive, ..
     } = cmd
@@ -165,11 +167,36 @@ fn dump_sidecars(cmd: &Cmd) -> Vec<PathBuf> {
         return zvol_common::resume::sidecars(output).into();
     }
     let mut v = vec![output.join("manifest.json")];
+    let image_or_state = |p: &Path| {
+        let name = p.file_name().unwrap_or_default().to_string_lossy();
+        name.ends_with(".img")
+            || name.ends_with(".resume.json")
+            || name.ends_with(".resume.json.tmp")
+    };
     if let Ok(dir) = std::fs::read_dir(output) {
-        v.extend(dir.flatten().map(|e| e.path()).filter(|p| {
-            let name = p.file_name().unwrap_or_default().to_string_lossy();
-            name.ends_with(".resume.json") || name.ends_with(".resume.json.tmp")
-        }));
+        v.extend(
+            dir.flatten()
+                .map(|e| e.path())
+                .filter(|p| image_or_state(p)),
+        );
+    }
+    for log in [&global.debug_log, &global.evidence_log]
+        .into_iter()
+        .flatten()
+    {
+        let inside = log
+            .parent()
+            .map(|d| {
+                if d.as_os_str().is_empty() {
+                    Path::new(".")
+                } else {
+                    d
+                }
+            })
+            .is_some_and(|d| zvol_common::same_file(d, output));
+        if inside && image_or_state(log) {
+            v.push(log.clone());
+        }
     }
     v
 }
@@ -180,7 +207,7 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     if let Err(code) = cli
         .global
-        .refuse_logs_over("zvolrescue", &dump_sidecars(&cli.cmd))
+        .refuse_logs_over("zvolrescue", &dump_sidecars(&cli.cmd, &cli.global))
     {
         return ExitCode::from(code);
     }

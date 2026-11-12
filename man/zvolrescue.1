@@ -266,7 +266,11 @@ With
 .Fl r
 every image, its resume state and
 .Pa manifest.json
-are checked the same way before the first is written.
+are checked the same way before the first is written, and a link lying
+in the directory under one of those names is replaced only once all of
+them have passed.
+A log given a name there that an image could take is refused at the
+start, before it is created.
 A pipe is refused with exit 1, and so is the file or disk the run's own
 standard output or standard error goes to, by that name or as
 .Pa /dev/stdout :

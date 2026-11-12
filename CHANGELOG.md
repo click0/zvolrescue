@@ -616,6 +616,16 @@ tagged. `v0.7.1` is the release that carries those six.
   now refuses them with exit 1, naming both with the transaction groups
   of their labels and newest uberblocks; the same file under two names
   is one disk and passes.
+* **A refused `dump -r` had already changed its directory.** Links lying
+  in the directory under the names `-r` writes are replaced, not
+  followed; they were removed one by one as each name was judged, so a
+  run refused over a later name (exit 5) had removed the earlier links.
+  Every name is judged first now, and nothing is removed from a run
+  that is refused. A `--debug-log` given an image's name in that
+  directory was created at the start, over an image an earlier run had
+  written, before the run refused it: `-r` names its images only once
+  the pool is read. A log there named as an image, a state or the
+  manifest is refused up front.
 
 ## v0.9.12 — 2026-11-07
 

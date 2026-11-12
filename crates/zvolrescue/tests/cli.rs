@@ -2104,6 +2104,62 @@ fn a_run_that_produces_nothing_still_writes_its_record() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A refused `dump -r` changes nothing: every name it writes is judged
+/// before any link lying there is removed — one refused over the state
+/// of an image had removed the link at the image's name already — and a
+/// log given an image's name in the directory is refused before it is
+/// created over an image an earlier run wrote.
+#[cfg(unix)]
+#[test]
+fn a_refused_bulk_dump_changes_nothing() {
+    let dir = scratch("bulk-refused");
+    let paths = write_members(&dir, &plain_members());
+    let out = dir.join("bulk");
+    std::fs::create_dir_all(&out).unwrap();
+    let o = out.to_string_lossy().into_owned();
+    let outside = dir.join("outside.txt");
+    std::fs::write(&outside, "precious").unwrap();
+    let link = out.join("tank_vm_disk0.img");
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+    // The image's state is a member under another name.
+    std::fs::hard_link(&paths[1], out.join("tank_vm_disk0.img.resume.json")).unwrap();
+    let (code, _, err) = run(&["-q", "dump", "-r", "tank", &paths[0], &paths[1], "-o", &o]);
+    assert_eq!(code, 5, "{err}");
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the link was removed by a run that was refused"
+    );
+    std::fs::remove_file(out.join("tank_vm_disk0.img.resume.json")).unwrap();
+    std::fs::remove_file(&link).unwrap();
+
+    // An image an earlier run wrote, and a debug log given its name.
+    let (code, _, err) = run(&["-q", "dump", "-r", "tank", &paths[0], &paths[1], "-o", &o]);
+    assert_eq!(code, 0, "{err}");
+    let image = std::fs::read(&link).unwrap();
+    for log in [link.clone(), out.join("not-yet.img")] {
+        let l = log.to_string_lossy().into_owned();
+        let (code, _, err) = run(&[
+            "-q",
+            "--debug-log",
+            &l,
+            "dump",
+            "-r",
+            "tank",
+            &paths[0],
+            &paths[1],
+            "-o",
+            &o,
+        ]);
+        assert_eq!(code, 5, "{l}: {err}");
+        assert!(err.contains("refusing --debug-log"), "{err}");
+    }
+    assert_eq!(std::fs::read(&link).unwrap(), image);
+    assert!(!out.join("not-yet.img").exists());
+}
+
 /// `dump -r` replaces a link already lying in its directory under a name
 /// it writes, rather than writing through it to a file outside the tree;
 /// an evidence log that cannot be written stops the run before anything
