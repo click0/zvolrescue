@@ -107,6 +107,35 @@ fn describe(
     }
 }
 
+/// Two entries of one directory under one name are damage: they were
+/// listed as two files at one path, exit 0, where `extract` writes the
+/// first and names the second. What a second directory of the name
+/// holds is listed under the same path as the first's, after it — the
+/// walk is depth first — and is said to be in the second.
+fn mark_second_names(files: &mut [FileOut], entries: &[Entry]) {
+    let mut seen = std::collections::HashSet::new();
+    let mut second: Vec<(&[u8], &str, u64)> = Vec::new();
+    for (f, e) in files.iter_mut().zip(entries) {
+        if let Some((_, path, obj)) = second.iter().find(|(d, _, _)| {
+            e.raw_path
+                .strip_prefix(*d)
+                .is_some_and(|r| r.first() == Some(&b'/'))
+        }) {
+            f.error.get_or_insert_with(|| {
+                format!("inside the second directory named {path}, object {obj}; `extract` does not write it, and the object is under `objects`")
+            });
+        } else if !seen.insert(e.raw_path.as_slice()) && f.error.is_none() {
+            f.error = Some(
+                "another entry of its directory has this name (damage): `extract` writes the first, and this object is under `objects`"
+                    .into(),
+            );
+            if e.file_type() == Some(FileType::Dir) {
+                second.push((e.raw_path.as_slice(), e.path.as_str(), e.object));
+            }
+        }
+    }
+}
+
 /// Run `list`.
 pub fn run(
     g: &Global,
@@ -177,6 +206,8 @@ pub fn run(
                 describe(e, target, xattrs, xattr_errors)
             })
             .collect();
+        let mut files = files;
+        mark_second_names(&mut files, &entries);
         let unreadable = files
             .iter()
             .filter(|f| {
@@ -279,4 +310,44 @@ pub fn run(
         Vec::new(),
         &ledger.incidents(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(path: &str, object: u64) -> Entry {
+        Entry {
+            path: path.into(),
+            raw_path: path.as_bytes().to_vec(),
+            object,
+            znode: None,
+            error: None,
+            walked_at: None,
+            contents_errors: Vec::new(),
+        }
+    }
+
+    /// The second of two names is said, and so is what is listed under
+    /// it when it is a directory; the first and what is under it are
+    /// not, nor a name that merely starts like it.
+    #[test]
+    fn a_second_entry_of_one_name_is_said() {
+        let mut entries = vec![entry("dup", 50), entry("dup/a", 51), entry("dup", 52)];
+        // Only a directory carries what is under it.
+        entries[2].znode = Some(zfs_ondisk::zpl::Znode {
+            mode: 0o40755,
+            ..Default::default()
+        });
+        entries.push(entry("dup/b", 53));
+        entries.push(entry("dupe", 54));
+        let mut files: Vec<FileOut> = entries
+            .iter()
+            .map(|e| describe(e, None, Vec::new(), Vec::new()))
+            .collect();
+        mark_second_names(&mut files, &entries);
+        let said: Vec<bool> = files.iter().map(|f| f.error.is_some()).collect();
+        assert_eq!(said, [false, false, true, true, false], "{files:?}");
+        assert!(files[3].error.as_deref().unwrap().contains("object 52"));
+    }
 }

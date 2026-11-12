@@ -19,7 +19,9 @@ use zvol_common::evidence::FileRef;
 use zvol_common::timefmt::iso8601_ns;
 use zvol_common::{exit, Format, Global, PoolSpec};
 
-use crate::common::{resolve_path, with_dataset, AtArgs, Rdev, Zeroed, TAIL_NOTE};
+use crate::common::{
+    resolve_path_or_why, with_dataset, AtArgs, Rdev, Zeroed, NO_BLOCK_SIZE, TAIL_NOTE,
+};
 use crate::out::{OutError, OutTree};
 
 /// Options of an `extract` run.
@@ -199,6 +201,10 @@ struct ManifestOut {
     /// clock can hold.
     #[serde(skip_serializing_if = "BTreeSet::is_empty")]
     not_restored: BTreeSet<String>,
+    /// The `--path`s that are not in the dataset at this transaction
+    /// group, each with why (exit 3); the others are written.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    not_found: Vec<String>,
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -430,7 +436,15 @@ fn copy_file(
     // The last block is the last one its pointers have, where they say:
     // a forged block count of 2^40 was 2^40 blocks located through no
     // pointer at all, for days and without a word.
-    let blocks_end = crate::common::data_end(&obj, bs);
+    let unplaced = obj.dnode().datablksz() == 0 && size > 0;
+    if unplaced && strict {
+        return Err(CopyError::Strict(NO_BLOCK_SIZE.to_string()));
+    }
+    let blocks_end = if unplaced {
+        0
+    } else {
+        crate::common::data_end(&obj, bs)
+    };
     if size.saturating_sub(blocks_end) > TAIL_NOTE {
         eprintln!(
             "zvolfiles: {shown}: {size} bytes, and its last block with data ends at byte {blocks_end}: the rest is a hole, hashed as zeros (a sparse file, or a damaged size or block count; SIGINT stops the run)"
@@ -440,6 +454,9 @@ fn copy_file(
     let mut hasher = Sha256::new();
     let mut written = 0u64;
     let mut zeroed = Vec::new();
+    if unplaced {
+        zero(&mut zeroed, 0, 0, size, NO_BLOCK_SIZE.to_string());
+    }
     let zeros = vec![0u8; bs as usize];
     while written < size {
         if stop.load(Ordering::Relaxed) {
@@ -550,6 +567,25 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
         }
     };
     let result = with_dataset(spec, dataset, at, false, |fs, opened| {
+        // Every path looked up before anything is made: one not there
+        // made the output directory, empty, and then ended the run —
+        // the paths that were there not written either. Those are now
+        // written, the rest named (exit 3); when none is there, nothing
+        // is made at all.
+        let mut found = Vec::new();
+        let mut not_found = Vec::new();
+        for p in &opts.paths {
+            match resolve_path_or_why(fs, p, opened.txg) {
+                Ok(r) => found.push((p, r)),
+                Err(why) => {
+                    eprintln!("zvolfiles: {why}");
+                    not_found.push(why);
+                }
+            }
+        }
+        if !opts.paths.is_empty() && found.is_empty() {
+            return Err(exit::UNRECOVERABLE);
+        }
         let tree = OutTree::open(g, spec, at, opened, &opts.output)?;
 
         // Nothing given means the whole dataset. A path is taken as the
@@ -569,8 +605,7 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
                 String::from_utf8_lossy(raw).into_owned()
             }
         };
-        for p in &opts.paths {
-            let (obj, raw) = resolve_path(fs, p, opened.txg)?;
+        for (p, (obj, raw)) in found {
             if let Some((_, outer)) = roots.iter().find(|(_, r)| *r == raw || under(r, &raw)) {
                 eprintln!(
                     "zvolfiles: --path {}: {} --path {}; written once",
@@ -704,6 +739,7 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
                 stopped: run.stopped,
                 interrupted,
                 not_restored: run.not_restored,
+                not_found,
             },
             opened.members.paths.clone(),
             opened.members.ledger.clone(),
@@ -792,6 +828,9 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
             if out.interrupted {
                 println!("  INTERRUPTED (exit 6): the entries above are what was written; re-run with --path for the rest");
             }
+            for n in &out.not_found {
+                println!("  NOT FOUND (exit 3): {n}");
+            }
             println!("  manifest: {}", manifest.display());
         }
     }
@@ -799,6 +838,8 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
         exit::INTERRUPTED
     } else if refused > 0 {
         exit::REFUSED
+    } else if !out.not_found.is_empty() {
+        exit::UNRECOVERABLE
     } else if out.failed > 0 || out.incomplete > 0 || out.stopped.is_some() {
         exit::PARTIAL
     } else {

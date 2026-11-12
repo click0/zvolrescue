@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use zvol_common::evidence::FileRef;
 use zvol_common::{exit, Format, Global, PoolSpec};
 
-use crate::common::{with_dataset, AtArgs, Zeroed};
+use crate::common::{with_dataset, AtArgs, Zeroed, NO_BLOCK_SIZE};
 use crate::out::{OutError, OutTree};
 
 #[derive(Debug, Serialize)]
@@ -126,6 +126,15 @@ pub fn run(
                 error: None,
                 refused: false,
             };
+            if d.datablksz() == 0 {
+                record.error = Some(format!("{NO_BLOCK_SIZE}; not written"));
+                if strict {
+                    stopped = Some(format!("object {obj}: {NO_BLOCK_SIZE}"));
+                }
+                objects.push(record);
+                obj = next;
+                continue;
+            }
             match write_object(fs, &tree, obj, record.size, output, strict, &interrupt) {
                 Ok((hash, zeroed)) => {
                     if let Some(first) = zeroed.first() {

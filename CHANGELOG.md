@@ -503,6 +503,23 @@ tagged. `v0.7.1` is the release that carries those six.
   there. `zvolcarve dump WS 3` said "no candidate 3" and stopped; it
   now names the range the index holds and asks "did you mean c0003?"
   when a number names one.
+* **A `--path` that is not there stopped the others, and made `-o`.**
+  `zvolfiles extract --path nosuch --path hello.txt` created the output
+  directory, empty, and ended (exit 3) with `hello.txt` not written.
+  Every path is now looked up first: those that are there are written,
+  the rest named on stderr, in the manifest (`not_found`) and in the
+  exit status (3); when none is there, nothing is made.
+* **A block size of 0 was a file of zeros.** No dnode ZFS writes has
+  one, and where such an object's blocks fall cannot be known; `extract`
+  wrote the file's size in zeros and `objects` an empty object, both
+  without a word and exit 0. `extract` now records the bytes as zeroed
+  for that reason (`--strict` stops there) and `objects` names the
+  object as not written, both exit 4.
+* **`zvolfiles list` showed two entries of one name as two files.** A
+  directory holding two entries of one name is damage; `extract` writes
+  the first and names the second, but `list` showed both at one path,
+  the second directory's contents under the first's, exit 0. The second
+  entry, and what is listed under it, now say so (exit 4).
 
 ## v0.9.12 — 2026-11-07
 

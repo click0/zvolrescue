@@ -149,6 +149,10 @@ by normalizing is written under the name on disk, and
 is dropped.
 The directory a path names is written with its own metadata, and a
 path inside another one given is written once.
+A path not in the dataset at that TXG is named, in the manifest too
+.Pq Li not_found ,
+and the others are written (exit 3); when none is there, nothing is
+made.
 .It Fl -strict
 Stop the run at the first block that cannot be read: the file it is in
 is named as failed, holding the bytes before it, and nothing after it

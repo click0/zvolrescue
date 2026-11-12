@@ -350,6 +350,43 @@ fn paths_are_taken_as_the_dataset_spells_them() {
         err.contains("no such file or directory at txg") && err.contains("older --txg"),
         "{err}"
     );
+    // Nothing is made for a run with no path there, and a path that is
+    // not there no longer stops the others: the output directory was
+    // made empty, and the paths that were there were not written.
+    let fresh = dir.join("fresh");
+    let f = fresh.to_string_lossy().into_owned();
+    let (code, err) = run(&[
+        "-q", "extract", "tank/fs", &m[0], &m[1], "-o", &f, "--path", "nosuch",
+    ]);
+    assert_eq!(code, 3, "{err}");
+    assert!(!fresh.exists(), "the output directory was made");
+    let (code, err) = run(&[
+        "-q",
+        "extract",
+        "tank/fs",
+        &m[0],
+        &m[1],
+        "-o",
+        &f,
+        "--path",
+        "nosuch",
+        "--path",
+        "hello.txt",
+    ]);
+    assert_eq!(code, 3, "{err}");
+    assert_eq!(
+        std::fs::read(fresh.join("hello.txt")).unwrap(),
+        zfs_read::fixture::zpl_hello()
+    );
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(fresh.join("manifest.json")).unwrap()).unwrap();
+    assert!(
+        manifest["not_found"][0]
+            .as_str()
+            .unwrap()
+            .contains("--path nosuch"),
+        "{manifest}"
+    );
     // A name under a file is said as that: it was "object is not a ZAP".
     let (code, err) = run(&[
         "-q",

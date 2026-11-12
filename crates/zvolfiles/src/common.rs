@@ -54,6 +54,13 @@ pub struct Zeroed {
     pub reason: String,
 }
 
+/// Why an object whose dnode gives a block size of 0 has nothing that
+/// can be read: no size ZFS writes, so where its blocks fall cannot be
+/// known. It came out as a file of zeros, or an empty object, and no
+/// error.
+pub const NO_BLOCK_SIZE: &str =
+    "the dnode's block size is 0, which ZFS never writes: it is damaged, and where the object's blocks fall cannot be known";
+
 /// A device number, as stored and as the major and minor it packs: the
 /// major in the high 32 bits, the minor in the low (`zfs_expldev`).
 ///
@@ -89,6 +96,19 @@ pub fn resolve_path(
     asked: &std::ffi::OsStr,
     txg: u64,
 ) -> Result<(u64, Vec<u8>), u8> {
+    resolve_path_or_why(fs, asked, txg).map_err(|why| {
+        eprintln!("zvolfiles: {why}");
+        exit::UNRECOVERABLE
+    })
+}
+
+/// [`resolve_path`], with the reason returned rather than printed: for
+/// a run that goes on with the paths that are there.
+pub fn resolve_path_or_why(
+    fs: &Filesystem<'_, '_>,
+    asked: &std::ffi::OsStr,
+    txg: u64,
+) -> Result<(u64, Vec<u8>), String> {
     fs.resolve(&os_bytes(asked)).map_err(|e| {
         let e = match e {
             zfs_read::zio::ReadError::Io(m) => m,
@@ -101,10 +121,9 @@ pub fn resolve_path(
             .strip_prefix(&format!("{shown}: "))
             .unwrap_or(&e)
             .to_string();
-        eprintln!(
-            "zvolfiles: --path {shown}: {why} at txg {txg}; a file removed since may still be at an older --txg"
-        );
-        exit::UNRECOVERABLE
+        format!(
+            "--path {shown}: {why} at txg {txg}; a file removed since may still be at an older --txg"
+        )
     })
 }
 
