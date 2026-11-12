@@ -95,6 +95,11 @@ takes those of them it names.
 .It Fl -image Ar file
 An image file that is a member of the pool; repeatable.
 Devices are given as plain arguments.
+Each disk of the pool is given once: two files that are the same disk
+\(em a disk and its image, or a disk imaged twice \(em are refused with
+exit status 1, both named with the transaction groups of their labels
+and uberblocks, since which of them to read is the operator's choice.
+The same file under two names is one disk.
 .It Fl -hints Ar file
 Describe the layout by hand when the labels cannot: a JSON file with
 the ashift, the top-level vdevs and their members in vdev order.

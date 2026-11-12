@@ -478,7 +478,11 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
             );
             vec![pool]
         }
-        None => assemble(&scans),
+        None => {
+            let pools = assemble(&scans);
+            refuse_twins(&pools, &scans, &paths)?;
+            pools
+        }
     };
     let devices: Vec<Option<&dyn BlockSource>> = sources
         .iter()
@@ -511,6 +515,65 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
         map_files: open.map_files(),
         ledger: open.ledger.clone(),
     })
+}
+
+/// Two members that are one disk: the same leaf of the same pool, in
+/// two files — an image taken twice, a disk and its image. A read went
+/// to whichever was named first and the other was never looked at, so
+/// the same two files in the other order gave another volume, each with
+/// exit 0. Which of them is the disk to read is the operator's to say;
+/// the same file under two names is no question and passes.
+fn refuse_twins(
+    pools: &[PoolAssembly],
+    scans: &[Option<DeviceScan>],
+    paths: &[PathBuf],
+) -> Result<(), u8> {
+    let newest_uberblock = |i: usize| {
+        scans[i]
+            .as_ref()
+            .and_then(|s| {
+                s.labels
+                    .iter()
+                    .flat_map(|l| &l.uberblocks)
+                    .filter(|u| u.checksum == zfs_ondisk::checksum::ChecksumStatus::Ok)
+                    .map(|u| u.ub.txg)
+                    .max()
+            })
+            .unwrap_or(0)
+    };
+    let mut refused = false;
+    for pool in pools {
+        let live: Vec<(usize, u64, u64)> = pool
+            .devices
+            .iter()
+            .filter(|i| !pool.stale.iter().any(|m| m.device == **i))
+            .filter_map(|&i| {
+                let c = scans[i].as_ref()?.config()?;
+                Some((i, c.guid?, c.txg.unwrap_or(0)))
+            })
+            .collect();
+        for (n, &(a, leaf, a_txg)) in live.iter().enumerate() {
+            for &(b, other, b_txg) in &live[n + 1..] {
+                if other != leaf || crate::same_file(&paths[a], &paths[b]) {
+                    continue;
+                }
+                say!(
+                    "{} and {} are the same disk of pool {} (leaf {leaf:#x}): labels at txg {a_txg} and {b_txg}, newest uberblock txg {} and {}; give the one to read",
+                    paths[a].display(),
+                    paths[b].display(),
+                    pool.name,
+                    newest_uberblock(a),
+                    newest_uberblock(b)
+                );
+                refused = true;
+            }
+        }
+    }
+    if refused {
+        Err(exit::USAGE)
+    } else {
+        Ok(())
+    }
 }
 
 /// Pick the pool named by `--pool-guid`, or the only one found.

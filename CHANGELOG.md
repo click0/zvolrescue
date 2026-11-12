@@ -608,6 +608,14 @@ tagged. `v0.7.1` is the release that carries those six.
   members given to the dump were checked: with the pool given as
   copies, `-o` over an original that `candidates.json` names was
   written. The members the index names are checked too (exit 5).
+* **Two images of one disk were read as whichever came first.** Two
+  files that are the same leaf of the pool — a disk and its image, or a
+  disk imaged twice — were both taken: reads went to the first named,
+  the other was never looked at, and the same two in the other order
+  gave another volume, each with exit 0. Every tool that reads a pool
+  now refuses them with exit 1, naming both with the transaction groups
+  of their labels and newest uberblocks; the same file under two names
+  is one disk and passes.
 
 ## v0.9.12 — 2026-11-07
 

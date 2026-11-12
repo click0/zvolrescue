@@ -752,6 +752,37 @@ fn an_image_with_zeroed_blocks_exits_4_and_a_healed_one_exits_0() {
     assert_eq!(json(&out)["volumes"][0]["aborted"], true);
 }
 
+/// Two files that are one disk of the pool — a disk imaged twice — were
+/// read as whichever came first, the other never looked at: the same
+/// two in the other order gave another volume, each with exit 0. The
+/// run now names both and asks which; the same file under two names is
+/// one disk and passes.
+#[cfg(unix)]
+#[test]
+fn two_images_of_one_disk_are_not_read_as_one() {
+    let dir = scratch("twin-leaf");
+    let paths = write_members(&dir, &plain_members());
+    let again = dir.join("member0-again.img");
+    std::fs::copy(&paths[0], &again).unwrap();
+    let again = again.to_string_lossy().into_owned();
+    for order in [[&paths[0], &again], [&again, &paths[0]]] {
+        let (code, _, err) = run(&["-q", "list", order[0], order[1], &paths[1]]);
+        assert_eq!(code, 1, "{err}");
+        assert!(
+            err.contains(&format!(
+                "{} and {} are the same disk of pool tank",
+                order[0], order[1]
+            )),
+            "{err}"
+        );
+        assert!(err.contains("give the one to read"), "{err}");
+    }
+    let link = dir.join("member0-link.img");
+    std::os::unix::fs::symlink(&paths[0], &link).unwrap();
+    let (code, _, err) = run(&["-q", "list", &paths[0], &link.to_string_lossy(), &paths[1]]);
+    assert_eq!(code, 0, "one file by two names: {err}");
+}
+
 /// A resumed dump reports what the run before it lost: the blocks it
 /// wrote as zeros are in the image, and they used to be in no summary,
 /// a resumed dump of a damaged volume exiting 0 with none listed.
