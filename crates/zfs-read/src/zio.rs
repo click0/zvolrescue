@@ -208,8 +208,15 @@ const MAX_PARITY_WIDTH: u64 = 255;
 
 /// Reconstructions combinatorial repair tries for one block before it
 /// gives up: every subset of up to three columns of a 40-wide raidz, and
-/// a bound on what a forged block can cost.
+/// a bound on what a forged block can cost — for the block, however many
+/// rows of a dRAID it spans.
 const MAX_COMBREC_TRIES: usize = 10_000;
+
+/// Bytes of block combinatorial repair checks against the checksum, for
+/// one block: what bounds the tries of a large block, each of which is
+/// the whole block assembled and checksummed again. 16 GiB is every
+/// subset of up to three columns of a 12-wide raidz3 at 16 MiB.
+const MAX_COMBREC_BYTES: u64 = 16 << 30;
 
 const ASHIFT_MIN: u32 = 9;
 const ASHIFT_MAX: u32 = 16;
@@ -1108,6 +1115,11 @@ impl<'a> PoolReader<'a> {
         for row in rows.iter_mut() {
             self.read_parity(row, children, cfg);
         }
+        // One budget for the block. Counted per row it started again for
+        // each row of a dRAID: sixteen rows, sixteen times the tries.
+        let max_tries =
+            MAX_COMBREC_TRIES.min((MAX_COMBREC_BYTES / (psize.max(1) as u64)).max(1) as usize);
+        let mut tries = 0usize;
         for r in 0..rows.len() {
             let (parity, data, lost, _) = &rows[r];
             let available = parity.iter().filter(|p| p.is_some()).count();
@@ -1120,14 +1132,13 @@ impl<'a> PoolReader<'a> {
                 .map(|&i| (true, i))
                 .chain(readable_data.iter().map(|&i| (false, i)))
                 .collect();
-            let mut tries = 0usize;
             for k in 1..=budget.min(columns.len()) {
                 for combo in Combinations::new(columns.len(), k) {
                     tries += 1;
-                    if tries > MAX_COMBREC_TRIES {
+                    if tries > max_tries {
                         trace!(
                             "raidz",
-                            "    combinatorial reconstruction gave up after {MAX_COMBREC_TRIES} tries"
+                            "    combinatorial reconstruction gave up after {max_tries} tries"
                         );
                         return Err(ReadError::AllCopiesBad);
                     }
@@ -1155,11 +1166,19 @@ impl<'a> PoolReader<'a> {
                     if missing.is_empty() || missing.len() > usable_count {
                         continue;
                     }
-                    let mut work = rows.clone();
-                    if raidz::reconstruct(&mut work[r].1, &usable, &missing).is_err() {
+                    // Only this row's data is rebuilt; the rest of the
+                    // block is as read, and is not copied for each try.
+                    let mut work = rows[r].1.clone();
+                    if raidz::reconstruct(&mut work, &usable, &missing).is_err() {
                         continue;
                     }
-                    let raw = assemble(&work);
+                    let mut raw: Vec<u8> = Vec::with_capacity(psize);
+                    for (i, (_, data, _, _)) in rows.iter().enumerate() {
+                        for column in if i == r { &work } else { data } {
+                            raw.extend_from_slice(column);
+                        }
+                    }
+                    raw.truncate(psize);
                     let v = self.verify(bp, &raw);
                     if v != Verify::Mismatch {
                         trace!(
@@ -1468,6 +1487,19 @@ impl<'a> PoolReader<'a> {
             );
             let mut attempts = Vec::new();
             out.extend_from_slice(&self.read_raw_verified(child, depth + 1, &mut attempts)?);
+        }
+        // The children are the block: OpenZFS splits a gang block's data
+        // among them to the byte. Fewer bytes than that is not the block
+        // — and taken as it was, a gang whose children were holes was
+        // "read" as nothing, padded with zeros and passed its checksum
+        // over the short buffer, and a tree of such gangs read every
+        // header it had: 31 to the eighth power of them.
+        if out.len() < bp.psize as usize {
+            return Err(ReadError::Gang(format!(
+                "the children give {} of the block's {} bytes",
+                out.len(),
+                bp.psize
+            )));
         }
         out.truncate(bp.psize as usize);
         Ok(out)
@@ -1924,6 +1956,110 @@ mod tests {
         ));
     }
 
+    /// A pool assembled by hand: one raidz or dRAID top-level vdev of
+    /// `width` members, with no labels behind it.
+    fn striped_by_hand(kind: &str, width: usize, nparity: u64, ndata: Option<u64>) -> PoolAssembly {
+        use zfs_ondisk::label::VdevNode;
+        let children: Vec<VdevNode> = (0..width)
+            .map(|i| VdevNode {
+                kind: "file".into(),
+                id: i as u64,
+                guid: i as u64 + 1,
+                ..VdevNode::default()
+            })
+            .collect();
+        let tree = VdevNode {
+            kind: kind.into(),
+            guid: 999,
+            nparity: Some(nparity),
+            ashift: Some(9),
+            draid_ndata: ndata,
+            draid_nspares: Some(0),
+            draid_ngroups: Some(1),
+            children,
+            ..VdevNode::default()
+        };
+        PoolAssembly {
+            name: "tank".into(),
+            guid: 1,
+            state: None,
+            txg: None,
+            vdev_children: Some(1),
+            features_for_read: vec![],
+            tops: vec![crate::pool::TopVdev {
+                id: 0,
+                guid: 999,
+                name: format!("{kind}-0"),
+                kind: kind.into(),
+                nparity: Some(nparity),
+                ashift: Some(9),
+                members: (0..width)
+                    .map(|i| crate::pool::Member {
+                        guid: i as u64 + 1,
+                        path: None,
+                        present: Some(i),
+                    })
+                    .collect(),
+                tree,
+            }],
+            removed_tops: vec![],
+            hosts: vec![],
+            devices: (0..width).collect(),
+            stale: vec![],
+        }
+    }
+
+    /// A block no combination of columns repairs gives up in bounded
+    /// time, on a raidz as wide as a label may say and on a dRAID whose
+    /// block spans many rows: the budget is for the block, and a try is
+    /// a column, not a byte at a time. A hopeless 128 KiB block on a
+    /// 255-wide raidz3 took three minutes.
+    #[test]
+    fn a_hopeless_block_gives_up_in_bounded_time() {
+        let zero = MemSource::new(vec![0u8; 16 << 20]);
+        let read = |a: &PoolAssembly, width: usize, psize: u64| {
+            let devs: Vec<Option<&dyn BlockSource>> = (0..width)
+                .map(|_| Some(&zero as &dyn BlockSource))
+                .collect();
+            let reader = PoolReader::new(a, devs);
+            let raw = Builder::new()
+                .dva(0, 0, 0x10_0000, psize * 2, false)
+                .sizes(psize, psize)
+                .props(2, 7, ot::ZVOL, 0)
+                .births(0, 100, 1)
+                .cksum([1, 2, 3, 4])
+                .bytes(Endian::Little);
+            let bp = BlkPtr::parse(&raw, Endian::Little).unwrap();
+            let t = std::time::Instant::now();
+            let r = reader.read_block(&bp, false).map(|b| b.data.len());
+            (r, t.elapsed())
+        };
+        // Release builds are held to a time; a debug build only to the
+        // answer, on the narrower geometries.
+        let cases: &[(&str, usize, u64, Option<u64>, u64)] = if cfg!(debug_assertions) || cfg!(miri)
+        {
+            &[("raidz", 12, 3, None, 16 << 10)]
+        } else {
+            &[
+                ("raidz", 40, 3, None, 128 << 10),
+                ("raidz", 255, 3, None, 128 << 10),
+                ("draid", 20, 3, Some(17), 128 << 10),
+            ]
+        };
+        for &(kind, width, nparity, ndata, psize) in cases {
+            let a = striped_by_hand(kind, width, nparity, ndata);
+            let (r, took) = read(&a, width, psize);
+            assert!(
+                matches!(r, Err(ReadError::AllCopiesBad)),
+                "{kind} {width}: {r:?}"
+            );
+            if !cfg!(debug_assertions) {
+                assert!(took.as_secs() < 20, "{kind} {width}: {took:?}");
+            }
+            eprintln!("{kind}-{width} p{nparity}: {took:?}");
+        }
+    }
+
     /// The subsets are what they were when collected up front — the same
     /// ones, in the same order — but made one at a time.
     #[test]
@@ -2309,6 +2445,54 @@ mod tests {
             let scans: Vec<_> = sources.iter().map(|s| scan_device(s).ok()).collect();
             let assembly = assemble(&scans).into_iter().next().unwrap();
             (sources, assembly, bp)
+        }
+
+        /// A tree of gang headers, every one of whose 31 pointers leads to
+        /// the next level's header, and the last level all holes: the
+        /// children give no bytes at all. Read as a block it was 31^8
+        /// header reads, two months of them, and at a shallower depth a
+        /// block of zeros that passed its checksum. It is a gang error at
+        /// once.
+        #[test]
+        fn a_gang_whose_children_give_short_is_an_error_at_once() {
+            use crate::fixture::write_at_dva;
+            use zfs_ondisk::blkptr::encode::Builder;
+            let pool = Pool::mirror("tank", 0x6a6e, 12)
+                .txgs(&[(100, 1)])
+                .with_feature(DGH);
+            let mut members = vec![pool.member_image(0, SIZE), pool.member_image(1, SIZE)];
+            let (levels, fanout, hsize) = (8usize, 31usize, 4096usize);
+            let off = |l: usize| 0x10_0000u64 + (l * hsize) as u64;
+            let gang_ptr = |at: u64| {
+                Builder::new()
+                    .dva(0, 0, at, hsize as u64, true)
+                    .sizes(128 * 1024, 128 * 1024)
+                    .props(2, 7, ot::ZVOL, 0)
+                    .births(0, 100, 1)
+                    .cksum([0, 0, 0, 0])
+                    .bytes(Endian::Little)
+            };
+            for l in (0..=levels).rev() {
+                let mut header = vec![0u8; hsize];
+                if l < levels {
+                    let child = gang_ptr(off(l + 1));
+                    for i in 0..fanout {
+                        header[i * 128..(i + 1) * 128].copy_from_slice(&child);
+                    }
+                }
+                zfs_ondisk::checksum::seal_embedded(&mut header, [0, off(l), 100, 0]);
+                for m in members.iter_mut() {
+                    write_at_dva(m, off(l), &header);
+                }
+            }
+            let s: Vec<MemSource> = members.into_iter().map(MemSource::new).collect();
+            let scans: Vec<_> = s.iter().map(|m| scan_device(m).ok()).collect();
+            let a = assemble(&scans).into_iter().next().unwrap();
+            let top = BlkPtr::parse(&gang_ptr(off(0)), Endian::Little).unwrap();
+            let t = std::time::Instant::now();
+            let r = reader(&s, &a).read_block(&top, false);
+            assert!(matches!(r, Err(ReadError::Gang(_))), "{r:?}");
+            assert!(t.elapsed().as_secs() < 5, "{:?}", t.elapsed());
         }
 
         /// With `dynamic_gang_header` active the header is read at the

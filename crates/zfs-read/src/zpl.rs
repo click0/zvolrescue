@@ -800,34 +800,51 @@ impl Entry {
 /// in damaged metadata — is reported once at each path but walked once,
 /// which is what stops a loop from becoming an infinite tree.
 pub fn walk(fs: &Filesystem<'_, '_>, from: u64, prefix: &str, recursive: bool) -> Vec<Entry> {
-    walk_from(fs, from, prefix, prefix.as_bytes(), recursive)
+    walk_from(fs, from, prefix, prefix.as_bytes(), recursive, None)
 }
 
 /// Walk from a prefix whose bytes are not its text.
 ///
 /// The two forms are carried side by side all the way down, because one
 /// is what a report prints and the other is what a file is called.
+///
+/// `stop` is looked at before each directory is read: once it is set the
+/// walk ends with what it has. A tree of many directories took as long as
+/// it took, and a SIGINT was heard only after the whole of it.
 pub fn walk_from(
     fs: &Filesystem<'_, '_>,
     from: u64,
     prefix: &str,
     raw_prefix: &[u8],
     recursive: bool,
+    stop: Option<&std::sync::atomic::AtomicBool>,
 ) -> Vec<Entry> {
     let mut out = Vec::new();
     let mut seen_dirs = std::collections::BTreeMap::new();
     seen_dirs.insert(from, shown_dir(prefix));
-    walk_into(
-        fs,
-        from,
-        prefix,
-        raw_prefix,
+    let mut walk = Walk {
         recursive,
-        0,
-        &mut seen_dirs,
-        &mut out,
-    );
+        stop,
+        seen_dirs: &mut seen_dirs,
+        out: &mut out,
+    };
+    walk_into(fs, from, prefix, raw_prefix, 0, &mut walk);
     out
+}
+
+/// What a walk carries from one directory to the next.
+struct Walk<'w> {
+    recursive: bool,
+    stop: Option<&'w std::sync::atomic::AtomicBool>,
+    seen_dirs: &'w mut std::collections::BTreeMap<u64, String>,
+    out: &'w mut Vec<Entry>,
+}
+
+impl Walk<'_> {
+    fn stopped(&self) -> bool {
+        self.stop
+            .is_some_and(|s| s.load(std::sync::atomic::Ordering::Relaxed))
+    }
 }
 
 /// Whether `name` can be one component of a path.
@@ -856,21 +873,21 @@ fn shown_dir(prefix: &str) -> String {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn walk_into(
     fs: &Filesystem<'_, '_>,
     object: u64,
     prefix: &str,
     raw_prefix: &[u8],
-    recursive: bool,
     depth: usize,
-    seen_dirs: &mut std::collections::BTreeMap<u64, String>,
-    out: &mut Vec<Entry>,
+    w: &mut Walk<'_>,
 ) {
+    if w.stopped() {
+        return;
+    }
     if depth > MAX_DEPTH {
         // Said, not dropped: a file below here used to be missing from
         // the walk with nothing to show it had been there.
-        out.push(Entry {
+        w.out.push(Entry {
             path: prefix.to_string(),
             raw_path: raw_prefix.to_vec(),
             object,
@@ -885,7 +902,7 @@ fn walk_into(
     let read = match fs.read_dir_partial(object) {
         Ok(r) => r,
         Err(e) => {
-            out.push(Entry {
+            w.out.push(Entry {
                 path: shown_dir(prefix),
                 raw_path: raw_prefix.to_vec(),
                 object,
@@ -900,7 +917,7 @@ fn walk_into(
     // hashed into it, and only those: each is said, and the rest of the
     // directory is walked.
     for (blkid, e) in &read.lost {
-        out.push(Entry {
+        w.out.push(Entry {
             path: shown_dir(prefix),
             raw_path: raw_prefix.to_vec(),
             object,
@@ -923,7 +940,7 @@ fn walk_into(
         // name `sub/deep.txt` in the root joined into the same path as the
         // real `sub/deep.txt` — one silently written over the other.
         if !is_component(&e.raw) {
-            out.push(Entry {
+            w.out.push(Entry {
                 path,
                 raw_path,
                 object: e.object,
@@ -948,12 +965,14 @@ fn walk_into(
         // them damage. Its contents were walked where it was first met
         // and are not walked again — and that is said: such a directory
         // came out empty, and what was in it was missing without a word.
-        let walked_at = is_dir.then(|| seen_dirs.get(&e.object).cloned()).flatten();
-        let walk = is_dir && recursive && walked_at.is_none();
+        let walked_at = is_dir
+            .then(|| w.seen_dirs.get(&e.object).cloned())
+            .flatten();
+        let walk = is_dir && w.recursive && walked_at.is_none();
         if walk {
-            seen_dirs.insert(e.object, path.clone());
+            w.seen_dirs.insert(e.object, path.clone());
         }
-        out.push(Entry {
+        w.out.push(Entry {
             path: path.clone(),
             raw_path: raw_path.clone(),
             object: e.object,
@@ -962,16 +981,7 @@ fn walk_into(
             walked_at,
         });
         if walk {
-            walk_into(
-                fs,
-                e.object,
-                &path,
-                &raw_path,
-                recursive,
-                depth + 1,
-                seen_dirs,
-                out,
-            );
+            walk_into(fs, e.object, &path, &raw_path, depth + 1, w);
         }
     }
 }

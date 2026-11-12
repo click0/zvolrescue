@@ -142,7 +142,12 @@ tagged. `v0.7.1` is the release that carries those six.
   And combinatorial raidz repair collected every subset of the columns
   before trying the first — a forged width of 2000 is a billion vectors:
   a raidz or dRAID is now at most 255 wide, the subsets come one at a
-  time, and a block gives up after 10 000 tries.
+  time, and a block gives up after 10 000 tries — for the block, not for
+  each row of a dRAID, and fewer for a block so large that they would
+  check more than 16 GiB of it. A try rebuilds a column with tables
+  rather than a byte at a time with every coefficient raised to its
+  power again: a hopeless 128 KiB block on a 255-wide raidz3 took three
+  minutes, and takes under a second.
 
 * **One forged ZAP header hung every reader of it.** A fat ZAP's
   pointer table was read for as many blocks as its header said. Blocks
@@ -151,13 +156,22 @@ tagged. `v0.7.1` is the release that carries those six.
   and never reached the bound on leaves: `zvolfiles list -R` and
   `extract` hung on one subdirectory (SIGINT unheard), and so would the
   MOS's own directories. A table that does not fit the object's blocks,
-  or is longer than 2^20 blocks, is now an unreadable ZAP, named with
-  its numbers, and the rest of the walk goes on.
+  or holds more than 128 MiB of pointers, is now an unreadable ZAP, named
+  with its numbers, and the rest of the walk goes on. A hole in the
+  table, or a leaf that is a hole, is passed over without a buffer of
+  zeros the size of a block — a dnode claiming 2^20 blocks of 32 MiB
+  was ten hours of them for one directory — and a block named twice is
+  read once. A walk hears SIGINT before each directory: `zvolfiles list`
+  ends with what it has listed (exit 6), where it died with nothing
+  printed.
 * **A gang header could make one block cost 31^8 reads.** Every child of
   every header was read whole, eight levels deep, and only then was the
   result cut to the block's size; with `dynamic_gang_header` a header
   holds 31 children at ashift 12. Children are now read only until the
-  block's bytes are in hand.
+  block's bytes are in hand, and a gang whose children give fewer bytes
+  than the block is an error: a gang of holes was read as nothing,
+  padded with zeros, passed its checksum over the short buffer, and let
+  a tree of such gangs read every header it had.
 
 * **A long space map took hours to replay.** Every allocation or free
   rebuilt the whole sorted list of ranges, so replaying was quadratic:

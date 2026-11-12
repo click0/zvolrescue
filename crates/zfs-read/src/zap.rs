@@ -17,9 +17,35 @@ use zvolrescue_io::trace::hexdump;
 /// tables (a real MOS ZAP has at most thousands).
 pub const MAX_LEAVES: usize = 1 << 20;
 
-/// The most blocks a fat ZAP's pointer table is read from: 2^20 blocks
-/// of pointers name far more leaves than [`MAX_LEAVES`].
-pub const MAX_PTRTBL_BLOCKS: u64 = 1 << 20;
+/// The most bytes of pointer table read from one fat ZAP: 2^24 pointers,
+/// sixteen times what [`MAX_LEAVES`] leaves need.
+///
+/// In bytes, not blocks: a bound of 2^20 blocks let a dnode that claimed
+/// blocks of 32 MiB ask for 32 TiB of table — holes, read as zeros, ten
+/// hours of nothing for one directory.
+pub const MAX_PTRTBL_BYTES: u64 = 1 << 27;
+
+/// One block of `obj`, when there is one: `None` for a hole, and for a
+/// block already read under another id. A hole used to be a buffer of
+/// zeros as large as the dnode's block size, built and scanned for
+/// pointers; and a forged tree that points every id at one block read it
+/// once per id.
+fn read_present(
+    obj: &ObjectReader<'_, '_>,
+    blkid: u64,
+    seen: &mut BTreeSet<[u8; zfs_ondisk::blkptr::SIZE]>,
+) -> Result<Option<(Vec<u8>, zfs_ondisk::Endian)>, ReadError> {
+    let Some(bp) = obj.locate(blkid)? else {
+        return Ok(None);
+    };
+    if !seen.insert(*bp.raw()) {
+        trace!("zap", "block {blkid}: the same block as one already read");
+        return Ok(None);
+    }
+    let mut data = obj.reader().read_block(&bp, false)?.data;
+    data.resize(obj.dnode().datablksz() as usize, 0);
+    Ok(Some((data, bp.endian)))
+}
 
 /// Read every entry of the ZAP object `obj`, in on-disk order.
 ///
@@ -94,19 +120,29 @@ pub fn read_zap_partial(obj: &ObjectReader<'_, '_>) -> Result<ZapRead, ReadError
             // as zeros without touching a disk: a loop of 2^40 steps that
             // named no leaf and never tripped the bound on leaves.
             let blocks = obj.dnode().maxblkid.saturating_add(1);
-            if hdr.ptrtbl_numblks > MAX_PTRTBL_BLOCKS
-                || hdr.ptrtbl_blk.saturating_add(hdr.ptrtbl_numblks) > blocks
-            {
+            if hdr.ptrtbl_blk.saturating_add(hdr.ptrtbl_numblks) > blocks {
                 return Err(ReadError::Io(format!(
                     "ZAP pointer table of {} block(s) from block {} does not fit the object's {blocks} block(s)",
                     hdr.ptrtbl_numblks, hdr.ptrtbl_blk
                 )));
             }
+            let table_bytes = hdr.ptrtbl_numblks.saturating_mul(obj.dnode().datablksz());
+            if table_bytes > MAX_PTRTBL_BYTES {
+                return Err(ReadError::Io(format!(
+                    "ZAP pointer table of {} block(s) of {} bytes is larger than any directory's ({table_bytes} bytes; at most {MAX_PTRTBL_BYTES} are read)",
+                    hdr.ptrtbl_numblks,
+                    obj.dnode().datablksz()
+                )));
+            }
+            let mut seen = BTreeSet::new();
             if hdr.ptrtbl_numblks == 0 {
                 leaves.extend(embedded_ptrtbl(&block0, endian));
             } else {
                 for b in hdr.ptrtbl_blk..hdr.ptrtbl_blk.saturating_add(hdr.ptrtbl_numblks) {
-                    let (blk, e) = obj.read_blkid_ext(b)?;
+                    // A hole in the table points at no leaf.
+                    let Some((blk, e)) = read_present(obj, b, &mut seen)? else {
+                        continue;
+                    };
                     leaves.extend(ptrtbl_block(&blk, e));
                     if leaves.len() > MAX_LEAVES {
                         return Err(ReadError::Io(
@@ -125,8 +161,11 @@ pub fn read_zap_partial(obj: &ObjectReader<'_, '_>) -> Result<ZapRead, ReadError
             let mut out = Vec::new();
             let mut lost = Vec::new();
             for blkid in leaves {
-                let (leaf, e) = match obj.read_blkid_ext(blkid) {
-                    Ok(v) => v,
+                let (leaf, e) = match read_present(obj, blkid, &mut seen) {
+                    Ok(Some(v)) => v,
+                    // A pointer into a hole: the table can be stale
+                    // during a split, and there is nothing to read.
+                    Ok(None) => continue,
                     Err(e @ ReadError::Medium { stop: true, .. }) => return Err(e),
                     Err(e) => {
                         trace!("zap", "leaf {blkid}: {e}");
@@ -353,6 +392,47 @@ mod tests {
         let e = read_zap(&obj).unwrap_err().to_string();
         assert!(e.contains("does not fit"), "{e}");
         assert!(t.elapsed().as_secs() < 5);
+    }
+
+    /// A table that fits the object but not reason — a dnode that claims
+    /// 2^20 blocks of 32 MiB — is refused by its size in bytes; one of
+    /// holes inside the bound costs no buffer per hole. Each was hours
+    /// of zeros for one directory.
+    #[test]
+    fn a_pointer_table_of_holes_costs_nothing_and_a_huge_one_is_refused() {
+        let run = |numblks: u64, datablksz: u64| {
+            let (s, a, d) = setup(|al, m| {
+                let mut hdr = fat_header(4096, 1, 0);
+                hdr[16..24].copy_from_slice(&1u64.to_le_bytes());
+                hdr[24..32].copy_from_slice(&numblks.to_le_bytes());
+                let bp = al.put(m, &hdr, ot::OBJECT_DIRECTORY, 0, 100);
+                let raw = DnodeSpec {
+                    object_type: ot::OBJECT_DIRECTORY,
+                    indblkshift: 17,
+                    nlevels: 1,
+                    datablksz,
+                    maxblkid: 1 << 20,
+                    blkptrs: vec![bp],
+                    ..DnodeSpec::default()
+                }
+                .build();
+                DnodePhys::parse(&raw, Endian::Little).unwrap()
+            });
+            let dyns: Vec<Option<&dyn BlockSource>> =
+                s.iter().map(|x| Some(x as &dyn BlockSource)).collect();
+            let reader = PoolReader::new(&a, dyns);
+            let obj = ObjectReader::new(&reader, d, Endian::Little);
+            let t = std::time::Instant::now();
+            let r = read_zap(&obj).map(|e| e.len());
+            (r, t.elapsed())
+        };
+        let (r, took) = run(1 << 20, (32 << 20) - 512);
+        let e = r.unwrap_err().to_string();
+        assert!(e.contains("larger than any directory"), "{e}");
+        assert!(took.as_secs() < 2, "{took:?}");
+        let (r, took) = run(1024, 128 << 10);
+        assert_eq!(r.unwrap(), 0);
+        assert!(took.as_secs() < 5, "{took:?}");
     }
 
     /// One leaf that does not verify loses the entries in it and no

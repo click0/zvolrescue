@@ -59,6 +59,10 @@ struct ListOut {
     path: Option<String>,
     properties: std::collections::BTreeMap<String, u64>,
     files: Vec<FileOut>,
+    /// A signal ended the walk (exit 6): the entries listed are what was
+    /// walked before it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    interrupted: bool,
 }
 
 /// Turn one walked entry into the report's shape.
@@ -109,6 +113,10 @@ pub fn run(
     path: Option<&std::ffi::OsStr>,
     recursive: bool,
 ) -> u8 {
+    // A tree of many directories takes as long as it takes; a SIGINT
+    // ends the walk at the next directory, with what was listed. It was
+    // the default action: the run died with nothing printed.
+    let interrupt = zvol_common::interrupt_flag();
     let result = with_dataset(spec, dataset, at, false, |fs, opened| {
         // As the dataset spells it (Z-09): `./sub` lists as `sub/…`, and
         // a name found by folding case as the name on disk.
@@ -132,7 +140,7 @@ pub fn run(
                     walked_at: None,
                 }]
             } else {
-                walk_from(fs, from, &prefix, &raw_prefix, recursive)
+                walk_from(fs, from, &prefix, &raw_prefix, recursive, Some(&interrupt))
             };
         let files: Vec<FileOut> = entries
             .iter()
@@ -169,6 +177,7 @@ pub fn run(
                 path: path.map(|p| p.to_string_lossy().into_owned()),
                 properties: fs.properties.clone(),
                 files,
+                interrupted: interrupt.load(std::sync::atomic::Ordering::Relaxed),
             },
             unreadable,
             opened.members.paths.clone(),
@@ -227,7 +236,14 @@ pub fn run(
             }
         }
     }
-    let code = if unreadable > 0 { exit::PARTIAL } else { 0 };
+    let code = if out.interrupted {
+        eprintln!("zvolfiles: interrupted; what is listed is what was walked (exit 6)");
+        exit::INTERRUPTED
+    } else if unreadable > 0 {
+        exit::PARTIAL
+    } else {
+        0
+    };
     // A device refused a read: every incident on stderr, and the stop —
     // when one stopped the run — as the exit code (SPEC F-33, N-10).
     let code = zvol_common::report_medium(&ledger).unwrap_or(code);

@@ -634,7 +634,7 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
                 extract_entry(fs, &tree, &e, opts, preserve, &mut run, &interrupt);
             }
             if is_dir {
-                for e in walk_from(fs, obj, &prefix, &raw_prefix, true) {
+                for e in walk_from(fs, obj, &prefix, &raw_prefix, true, Some(&interrupt)) {
                     if interrupt.load(Ordering::Relaxed) || run.stopped.is_some() {
                         break;
                     }

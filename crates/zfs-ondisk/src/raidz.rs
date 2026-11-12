@@ -138,6 +138,48 @@ pub fn gf_mul(mut a: u8, mut b: u8) -> u8 {
     p
 }
 
+/// Logarithms and powers of 2 in GF(2^8), the generator of the field
+/// OpenZFS builds `vdev_raidz_pow2` and `vdev_raidz_log2` from. The
+/// powers run to 510 so that a sum of two logarithms needs no modulo.
+const GF_TABLES: ([u8; 256], [u8; 512]) = {
+    let mut log = [0u8; 256];
+    let mut exp = [0u8; 512];
+    let mut x: u16 = 1;
+    let mut i = 0;
+    while i < 255 {
+        exp[i] = x as u8;
+        log[x as usize] = i as u8;
+        x <<= 1;
+        if x & 0x100 != 0 {
+            x ^= 0x11d;
+        }
+        i += 1;
+    }
+    while i < 512 {
+        exp[i] = exp[i - 255];
+        i += 1;
+    }
+    (log, exp)
+};
+
+/// `dst ^= c * src`, byte by byte; a `src` shorter than `dst` counts as
+/// zeros past its end.
+fn mul_xor(dst: &mut [u8], src: &[u8], c: u8) {
+    let (log, exp) = &GF_TABLES;
+    match c {
+        0 => {}
+        1 => dst.iter_mut().zip(src).for_each(|(d, s)| *d ^= s),
+        _ => {
+            let lc = log[c as usize] as usize;
+            for (d, &s) in dst.iter_mut().zip(src) {
+                if s != 0 {
+                    *d ^= exp[lc + log[s as usize] as usize];
+                }
+            }
+        }
+    }
+}
+
 /// `base ^ exp` in GF(2^8).
 pub fn gf_pow(base: u8, mut exp: u32) -> u8 {
     let mut result = 1u8;
@@ -253,31 +295,32 @@ pub fn reconstruct(
         .collect();
     // Invert the first k independent rows by Gauss-Jordan on [A | I].
     let (sel, inv) = invert_rows(&a, k).ok_or(ReconstructError::Singular)?;
-    for pos in 0..len {
-        // Syndromes: parity minus the contribution of known columns.
-        let mut syn = vec![0u8; k];
-        for (j, &ri) in sel.iter().enumerate() {
+    // Syndromes, a column at a time: each selected parity minus what the
+    // known columns contribute to it. Done a byte at a time, with every
+    // coefficient raised to its power again for every byte, one try of
+    // combinatorial repair on a wide vdev took milliseconds, and a
+    // forged block took minutes of them.
+    let syn: Vec<Vec<u8>> = sel
+        .iter()
+        .map(|&ri| {
             let r = rows[ri];
-            let mut s = parity[r].as_ref().expect("selected rows exist")[pos];
-            for i in 0..ndata {
-                if missing.contains(&i) {
-                    continue;
+            let p = parity[r].as_ref().expect("selected rows exist");
+            let mut s = vec![0u8; len];
+            mul_xor(&mut s, p, 1);
+            for (i, col) in data.iter().enumerate() {
+                if !missing.contains(&i) {
+                    mul_xor(&mut s, col, coefficient(r, i, ndata));
                 }
-                let d = data[i].get(pos).copied().unwrap_or(0);
-                s ^= gf_mul(coefficient(r, i, ndata), d);
             }
-            syn[j] = s;
+            s
+        })
+        .collect();
+    for (m, &col) in missing.iter().enumerate() {
+        let mut v = vec![0u8; data[col].len().min(len)];
+        for (j, s) in syn.iter().enumerate() {
+            mul_xor(&mut v, s, inv[m][j]);
         }
-        for (m, &col) in missing.iter().enumerate() {
-            if pos >= data[col].len() {
-                continue;
-            }
-            let mut v = 0u8;
-            for (j, &s) in syn.iter().enumerate() {
-                v ^= gf_mul(inv[m][j], s);
-            }
-            data[col][pos] = v;
-        }
+        data[col][..v.len()].copy_from_slice(&v);
     }
     Ok(())
 }
@@ -468,6 +511,20 @@ mod tests {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /// The table multiply is the field's multiply, for every pair.
+    #[test]
+    fn the_tables_multiply_as_the_field_does() {
+        let step = if cfg!(miri) { 37 } else { 1 };
+        for c in (0..=255u8).step_by(step) {
+            let src: Vec<u8> = (0..=255u8).collect();
+            let mut dst = vec![0u8; 256];
+            mul_xor(&mut dst, &src, c);
+            for x in 0..=255u8 {
+                assert_eq!(dst[x as usize], gf_mul(c, x), "{c} * {x}");
             }
         }
     }
