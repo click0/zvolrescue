@@ -142,7 +142,7 @@ pub fn extract(
     volsize: u64,
     sink: &mut dyn BlockSink,
     on_error: OnError,
-    progress: impl FnMut(u64, u64),
+    mut progress: impl FnMut(u64, u64),
 ) -> Result<Report, ReadError> {
     extract_from(
         obj,
@@ -152,7 +152,7 @@ pub fn extract(
         0,
         Digests::new(Extra::none()),
         None,
-        progress,
+        |done, total, _: &Report| progress(done, total),
     )
 }
 
@@ -164,7 +164,7 @@ pub fn extract_hashing(
     sink: &mut dyn BlockSink,
     on_error: OnError,
     extra: Extra,
-    progress: impl FnMut(u64, u64),
+    mut progress: impl FnMut(u64, u64),
 ) -> Result<Report, ReadError> {
     extract_from(
         obj,
@@ -174,7 +174,7 @@ pub fn extract_hashing(
         0,
         Digests::new(extra),
         None,
-        progress,
+        |done, total, _: &Report| progress(done, total),
     )
 }
 
@@ -187,6 +187,9 @@ pub fn extract_hashing(
 /// there, the report says so in `interrupted_at`, and everything before
 /// that block is in the sink. It is how a SIGINT ends a run that can be
 /// resumed instead of killing one that cannot.
+///
+/// `progress` is also given the report so far, for a caller that records
+/// what the blocks done have lost along with how many are done.
 #[allow(clippy::too_many_arguments)]
 pub fn extract_from(
     obj: &ObjectReader<'_, '_>,
@@ -196,7 +199,7 @@ pub fn extract_from(
     start_block: u64,
     mut digests: Digests,
     stop: Option<&AtomicBool>,
-    mut progress: impl FnMut(u64, u64),
+    mut progress: impl FnMut(u64, u64, &Report),
 ) -> Result<Report, ReadError> {
     let bs = obj.dnode().datablksz();
     if bs == 0 {
@@ -365,7 +368,7 @@ pub fn extract_from(
             }
         }
         hashed_to = offset + take as u64;
-        progress(blkid + 1, blocks_total);
+        progress(blkid + 1, blocks_total, &report);
     }
     if !report.aborted && report.interrupted_at.is_none() {
         // Everything past the last block is implicit zeros — which for a
@@ -1266,7 +1269,7 @@ mod tests {
             2,
             h,
             None,
-            |_, _| {},
+            |_, _, _: &Report| {},
         )
         .unwrap();
         assert_eq!(partial.data, full.data);
@@ -1308,7 +1311,7 @@ mod tests {
             0,
             Digests::new(Extra::none()),
             Some(&flag),
-            |done, _| {
+            |done, _, _: &Report| {
                 if done == 1 {
                     flag.store(true, Ordering::Relaxed);
                 }
@@ -1330,7 +1333,7 @@ mod tests {
             0,
             Digests::new(Extra::none()),
             Some(&flag),
-            |_, _| {},
+            |_, _, _: &Report| {},
         )
         .unwrap();
         assert_eq!(at_once.interrupted_at, Some(0));
@@ -1348,7 +1351,7 @@ mod tests {
             stopped.interrupted_at.unwrap(),
             h,
             None,
-            |_, _| {},
+            |_, _, _: &Report| {},
         )
         .unwrap();
         assert_eq!(rest.interrupted_at, None);
@@ -1371,7 +1374,7 @@ mod tests {
             0,
             Digests::new(Extra::none()),
             Some(&flag),
-            |done, total| {
+            |done, total, _: &Report| {
                 if done == total {
                     flag.store(true, Ordering::Relaxed);
                 }

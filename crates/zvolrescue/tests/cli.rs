@@ -752,6 +752,92 @@ fn an_image_with_zeroed_blocks_exits_4_and_a_healed_one_exits_0() {
     assert_eq!(json(&out)["volumes"][0]["aborted"], true);
 }
 
+/// A resumed dump reports what the run before it lost: the blocks it
+/// wrote as zeros are in the image, and they used to be in no summary,
+/// a resumed dump of a damaged volume exiting 0 with none listed.
+#[test]
+fn a_resumed_dump_reports_what_the_run_before_it_lost() {
+    let dir = scratch("dump-resume-lost");
+    let mut members = plain_members();
+    let at = (LABEL_START_SIZE + SAMPLE_ZVOL_BLOCK0_OFFSET) as usize;
+    members[0][at + 5] ^= 0xff;
+    members[1][at + 5] ^= 0xff;
+    let paths = write_members(&dir, &members);
+    let img = dir.join("vol.img");
+    let img_s = img.to_string_lossy().into_owned();
+    let dump = |extra: &[&str]| {
+        let mut args = vec![
+            "-q",
+            "-f",
+            "json",
+            "dump",
+            "tank/vm/disk0",
+            &paths[0],
+            &paths[1],
+            "-o",
+            &img_s,
+        ];
+        args.extend_from_slice(extra);
+        let (code, out, err) = run(&args);
+        (code, json(&out)["volumes"][0].clone(), err)
+    };
+    let (code, first, _) = dump(&[]);
+    assert_eq!(code, 4);
+    assert_eq!(first["blocks_zeroed"], 1, "{first}");
+    let bad = first["bad"].clone();
+    assert_eq!(bad[0]["blkid"], 0, "{first}");
+
+    // The state a run interrupted after block 1 leaves: block 0 is lost.
+    let state_path = dir.join("vol.img.resume.json");
+    let state = serde_json::json!({
+        "version": 1,
+        "dataset": "tank/vm/disk0",
+        "dataset_guid": first["dataset_guid"],
+        "txg": first["txg"],
+        "volsize": first["volsize"],
+        "blocksize": first["blocksize"],
+        "blocks_done": 2,
+        "lost": { "bad": bad, "blocks_zeroed": 1 },
+    });
+    std::fs::write(&state_path, state.to_string()).unwrap();
+    let (code, v, err) = dump(&["--resume"]);
+    assert_eq!(v["resumed_from_block"], 2, "{err}");
+    assert_eq!(code, 4, "{v}");
+    assert_eq!(v["blocks_zeroed"], 1, "{v}");
+    assert_eq!(v["bad"], bad);
+    assert_eq!(v["sha256"], first["sha256"]);
+    assert!(!state_path.exists(), "the image is whole");
+}
+
+/// `-o /dev/stdout > img` wrote the image into the file at offsets and
+/// the summary into it from the start, over the image; the recorded
+/// hash was of bytes the file no longer held, exit 0. The output that
+/// is the run's own standard output — by that name or by its own — is
+/// refused before anything is read.
+#[cfg(unix)]
+#[test]
+fn the_runs_standard_output_is_not_taken_for_an_image() {
+    let dir = scratch("dump-own-stdout");
+    let members = write_members(&dir, &plain_members());
+    let img = dir.join("vol.img");
+    let mut names = vec![img.to_string_lossy().into_owned()];
+    if Path::new("/dev/stdout").exists() {
+        names.push("/dev/stdout".into());
+    }
+    for name in &names {
+        let sink = std::fs::File::create(&img).unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_zvolrescue"))
+            .args(["-q", "dump", "tank/vm/disk0", &members[0], "-o", name])
+            .stdout(sink)
+            .output()
+            .expect("run zvolrescue");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{name}: {err}");
+        assert!(err.contains("standard output of the run"), "{name}: {err}");
+        assert_eq!(std::fs::metadata(&img).unwrap().len(), 0, "{name}");
+    }
+}
+
 /// `--diff` names what one transaction group has that the other does
 /// not, by guid: the destroyed volume and its snapshot, with the
 /// command that gets each back.

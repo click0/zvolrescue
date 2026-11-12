@@ -581,6 +581,33 @@ tagged. `v0.7.1` is the release that carries those six.
   device among the inputs is recorded at its own size, not as 0 bytes,
   and `--hash-inputs` no longer reads it end to end a second time
   (N-10): it says so.
+* **A resumed dump forgot what the run before it lost.** The resume
+  state said how many blocks were done and nothing else: the ranges an
+  interrupted run had written as zeros were in a summary nobody kept,
+  and the run that finished the image listed only those it met itself.
+  A damaged volume dumped in two goes came out with exit 0 and no
+  unreadable range, `--strict` or not. The state (`lost`) now keeps
+  the ranges and the counts of the blocks before its resume point, and
+  `zvolrescue dump --resume` and `zvolcarve dump --resume` report them
+  with their own — exit 4, every range listed. An abort is resumed at
+  the block it stopped at, not at the first range listed, so the blocks
+  zeroed before it are not read again.
+* **`-o /dev/stdout > img` wrote the summary over the image.** The
+  image went into the file at offsets and the summary into it from its
+  start; the sha256 recorded was of bytes the file no longer held, with
+  exit 0. An output that is the run's own standard output or standard
+  error — a file or a disk, by that name or its own — is refused with
+  exit 1, as a pipe already was.
+* **`zvolcarve dump --resume` took up another scan's state.** A carved
+  image's state named the candidate by its id, which is only its place
+  in one scan's list: `c0001` of another scan of the same size resumed
+  and the image went on with the other volume's blocks. The state now
+  names the candidate by a hash of its dnode. A state an earlier
+  version wrote starts over, and says so.
+* **`zvolcarve dump -o` could name a member the scan read.** Only the
+  members given to the dump were checked: with the pool given as
+  copies, `-o` over an original that `candidates.json` names was
+  written. The members the index names are checked too (exit 5).
 
 ## v0.9.12 — 2026-11-07
 

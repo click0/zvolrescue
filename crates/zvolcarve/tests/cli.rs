@@ -382,8 +382,21 @@ fn a_carved_dump_resumes_from_its_state_file() {
     // file in the shared shape saying so.
     let cut = dir.join("cut.img");
     std::fs::write(&cut, &image[..2 * blocksize as usize]).expect("prefix");
+    // A candidate is known by its dnode, which is the volume; its id
+    // is only its place in one scan's list.
+    let dnode: Vec<u8> = {
+        let hex = index["candidates"][0]["dnode_hex"].as_str().expect("dnode");
+        (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("hex"))
+            .collect()
+    };
+    let known_as = format!(
+        "candidate, dnode sha256 {}",
+        zvol_common::evidence::sha256_hex(&dnode)
+    );
     let state = serde_json::json!({
-        "version": 1, "dataset": id, "dataset_guid": "candidate", "txg": 0,
+        "version": 1, "dataset": id, "dataset_guid": known_as, "txg": 0,
         "volsize": 32 << 20, "blocksize": blocksize, "blocks_done": 2,
     });
     std::fs::write(dir.join("cut.img.resume.json"), state.to_string()).expect("state");
@@ -407,29 +420,89 @@ fn a_carved_dump_resumes_from_its_state_file() {
     assert_eq!(std::fs::read(&cut).expect("image"), image);
     assert!(!dir.join("cut.img.resume.json").exists());
 
-    // The same state against another candidate id starts over.
-    let state = serde_json::json!({
-        "version": 1, "dataset": "c9999", "dataset_guid": "candidate", "txg": 0,
-        "volsize": 32 << 20, "blocksize": blocksize, "blocks_done": 2,
-    });
-    std::fs::write(dir.join("cut.img.resume.json"), state.to_string()).expect("state");
-    let (code, out, err) = run(&[
-        "-f",
-        "json",
+    // The same state against another candidate id starts over; so does
+    // one of the same id and size whose dnode is another — `c0001` of
+    // another scan.
+    for (other_id, other_dnode) in [
+        ("c9999", known_as.as_str()),
+        (id.as_str(), "candidate, dnode sha256 00"),
+        (id.as_str(), "candidate"),
+    ] {
+        let state = serde_json::json!({
+            "version": 1, "dataset": other_id, "dataset_guid": other_dnode, "txg": 0,
+            "volsize": 32 << 20, "blocksize": blocksize, "blocks_done": 2,
+        });
+        std::fs::write(dir.join("cut.img.resume.json"), state.to_string()).expect("state");
+        let (code, out, err) = run(&[
+            "-f",
+            "json",
+            "dump",
+            &carve_s,
+            &id,
+            &members[0],
+            "-o",
+            &cut.to_string_lossy(),
+            "--resume",
+        ]);
+        assert_eq!(code, 0, "{out}{err}");
+        assert!(
+            err.contains("describes a different dataset/txg/size"),
+            "{other_id} {other_dnode}: {err}"
+        );
+        assert_eq!(json(&out)["resumed_from_block"], 0);
+    }
+}
+
+/// `-o` cannot name a member the scan read, as its index names it, even
+/// when this run is given the members by other names.
+#[cfg(unix)]
+#[test]
+fn a_carved_image_is_not_written_over_a_member_the_scan_read() {
+    let dir = scratch("dump-over-member");
+    let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1)]);
+    let members: Vec<String> = carved_zvol_members(&mut pool, SIZE)
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let p = dir.join(format!("member{i}.img"));
+            std::fs::write(&p, m).expect("write member");
+            p.to_string_lossy().into_owned()
+        })
+        .collect();
+    let carve = dir.join("carve");
+    let carve_s = carve.to_string_lossy().into_owned();
+    let (code, _, err) = run(&["-q", "scan", &members[0], &members[1], "-o", &carve_s]);
+    assert_eq!(code, 0, "{err}");
+    let index: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(carve.join("candidates.json")).expect("index"))
+            .expect("index");
+    let id = index["candidates"][0]["id"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+    // The same pool, copied: the dump reads the copies.
+    let copies: Vec<String> = members
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let p = dir.join(format!("copy{i}.img"));
+            std::fs::copy(m, &p).expect("copy");
+            p.to_string_lossy().into_owned()
+        })
+        .collect();
+    let before = std::fs::read(&members[1]).expect("member");
+    let (code, _, err) = run(&[
+        "-q",
         "dump",
         &carve_s,
         &id,
-        &members[0],
+        &copies[0],
+        &copies[1],
         "-o",
-        &cut.to_string_lossy(),
-        "--resume",
+        &members[1],
     ]);
-    assert_eq!(code, 0, "{out}{err}");
-    assert!(
-        err.contains("describes a different dataset/txg/size"),
-        "{err}"
-    );
-    assert_eq!(json(&out)["resumed_from_block"], 0);
+    assert_eq!(code, 5, "{err}");
+    assert_eq!(std::fs::read(&members[1]).expect("member"), before);
 }
 
 /// The refusal follows what the path resolves to: a symlink to a

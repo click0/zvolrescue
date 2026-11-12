@@ -262,6 +262,10 @@ With
 every image, its resume state and
 .Pa manifest.json
 are checked the same way before the first is written.
+A pipe is refused with exit 1, and so is the file or disk the run's own
+standard output or standard error goes to, by that name or as
+.Pa /dev/stdout :
+the summary would be written over the image's first bytes.
 .It Fl -txg Ar n
 Transaction group to read.
 .It Fl -strict
@@ -283,6 +287,10 @@ written (exit status 6); the state is kept in
 .Pa out.img.resume.json
 while a run is in progress, and a second signal kills the run the
 usual way.
+The state also keeps the ranges the blocks before it lost, and the run
+that takes it up reports them with its own: a resumed image with
+blocks written as zeros lists every one of them and ends with exit
+status 4, as a run that was never interrupted would.
 .It Fl r , Fl -recursive
 Extract every volume under
 .Ar dataset

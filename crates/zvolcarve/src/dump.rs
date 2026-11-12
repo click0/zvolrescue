@@ -14,7 +14,7 @@ use zfs_ondisk::Endian;
 use zfs_read::dmu::ObjectReader;
 use zfs_read::hash::Extra;
 use zfs_read::zio::PoolReader;
-use zfs_read::zvol::{extract_from, OnError};
+use zfs_read::zvol::{extract_from, OnError, Report};
 use zvol_common::evidence::FileRef;
 use zvol_common::members::{choose_pool, open_members};
 use zvol_common::{exit, resume, Format, Global, PoolSpec, WriteGuard};
@@ -103,6 +103,11 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     // from.
     let mut reads = spec.reads();
     reads.extend(members.paths.iter().cloned());
+    // And the members the scan read, as the index names them: given
+    // here by other names — copies, or links — they were not among the
+    // reads, and `-o` could name one of them.
+    reads.extend(index.members.iter().cloned());
+    reads.extend(index.candidates.iter().map(|c| c.path.clone()));
     reads.push(opts.dir.join(crate::model::INDEX));
     reads.push(opts.dir.join(crate::model::STATE));
     let guard = WriteGuard::new(g, &reads);
@@ -171,18 +176,27 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     }
     // The same state file, the same resume, as `zvolrescue dump`
     // (C-07): a candidate has no dataset GUID or TXG to record, and
-    // says so rather than inventing them.
+    // says so rather than inventing them. What it has instead is its
+    // dnode, which is the volume: an id is only a place in one scan's
+    // list, and `c0001` of another scan — of another pool, or of this
+    // one with another profile — has the same id and, often, the same
+    // size; its state was taken up and the image went on with the other
+    // volume's blocks.
     let state_path = resume::path(&opts.output);
     let expected_state = resume::State {
         version: 1,
         dataset: c.id.clone(),
-        dataset_guid: "candidate".into(),
+        dataset_guid: format!(
+            "candidate, dnode sha256 {}",
+            zvol_common::evidence::sha256_hex(&bytes)
+        ),
         txg: 0,
         volsize: size,
         blocksize: obj.dnode().datablksz(),
         blocks_done: 0,
+        lost: resume::Lost::default(),
     };
-    let (start_block, digests, mut sink) = match resume::open(
+    let (start_block, digests, mut sink, earlier) = match resume::open(
         "zvolcarve",
         &c.id,
         &opts.output,
@@ -204,13 +218,14 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     };
     let mut last_state = Instant::now();
     let state_file = state_path.clone();
-    let progress = |done: u64, total: u64| {
+    let progress = |done: u64, total: u64, so_far: &Report| {
         if last_state.elapsed().as_secs() >= 5 && done < total {
-            resume::write(&opts.output, &state_file, &expected_state, done);
+            let lost = earlier.and(so_far, done);
+            resume::write(&opts.output, &state_file, &expected_state, done, &lost);
             last_state = Instant::now();
         }
     };
-    let report = match extract_from(
+    let mut report = match extract_from(
         &obj,
         size,
         &mut sink,
@@ -235,12 +250,15 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     if report.aborted || report.interrupted_at.is_some() {
         let done = report
             .interrupted_at
-            .or_else(|| report.bad.first().map(|b| b.blkid))
+            .or_else(|| report.bad.last().map(|b| b.blkid))
             .unwrap_or(start_block);
-        resume::write(&opts.output, &state_path, &expected_state, done);
+        let lost = earlier.and(&report, done);
+        resume::write(&opts.output, &state_path, &expected_state, done, &lost);
     } else {
         resume::clear(&state_path);
     }
+    // What the run that was resumed lost is this image's too.
+    earlier.into_report(&mut report);
 
     // The same shape as `zvolrescue dump`'s, `volumes` and all, so that
     // a carve's extraction reaches the report: without it `zvolreport`

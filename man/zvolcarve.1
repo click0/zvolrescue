@@ -198,7 +198,10 @@ reports the extraction.
 Write the image here.
 Refused, with exit 5, as the workspace of
 .Cm scan
-is, and also when it is the workspace's own index.
+is, and also when it is the workspace's own index or a member the
+index names, whatever names the members are given by now.
+A pipe, or the run's own standard output or standard error, is refused
+with exit 1.
 .It Fl -strict
 Stop at the first block that cannot be read.
 .It Fl -size Ar bytes
@@ -214,6 +217,13 @@ Continue an interrupted extraction of the same candidate; the state is
 kept in
 .Pa out.img.resume.json
 while a run is in progress.
+The candidate is known there by a hash of its dnode, not only by its
+id, which is no more than its place in one scan's list: the state of
+another scan's candidate of the same id is not taken up.
+As with
+.Xr zvolrescue 1 ,
+the ranges an interrupted run lost are reported by the run that
+finishes the image.
 .El
 .Ss roots
 .Nm Cm roots

@@ -385,9 +385,11 @@ fn dump_one(
         volsize,
         blocksize,
         blocks_done: 0,
+        lost: resume::Lost::default(),
     };
-    // Where to start, and the hash of what is already there.
-    let (start_block, hasher, mut sink) = resume::open(
+    // Where to start, the hash of what is already there, and what that
+    // lost.
+    let (start_block, hasher, mut sink, earlier) = resume::open(
         "zvolrescue",
         &ds.name,
         output,
@@ -406,14 +408,15 @@ fn dump_one(
     let mut last_report = Instant::now();
     let mut last_state = Instant::now();
     let state_file = state_path.clone();
-    let progress = |done: u64, total: u64| {
+    let progress = |done: u64, total: u64, so_far: &Report| {
         if !quiet && (last_report.elapsed().as_secs() >= 2 || done == total) {
             eprint!("\r  {} {done}/{total} blocks", ds.name);
             let _ = std::io::stderr().flush();
             last_report = Instant::now();
         }
         if last_state.elapsed().as_secs() >= 5 && done < total {
-            resume::write(output, &state_file, &expected_state, done);
+            let lost = earlier.and(so_far, done);
+            resume::write(output, &state_file, &expected_state, done, &lost);
             last_state = Instant::now();
         }
     };
@@ -423,7 +426,7 @@ fn dump_one(
         OnError::Zero
     };
     let interrupt = zvol_common::interrupt_flag();
-    let report: Report = match extract_from(
+    let mut report: Report = match extract_from(
         &obj,
         volsize,
         &mut sink,
@@ -452,16 +455,20 @@ fn dump_one(
         );
     }
     if report.aborted || report.interrupted_at.is_some() {
-        // Leave a state file so --resume can continue past the fix — or,
+        // Leave a state file so --resume can continue past the fix — at
+        // the block the abort stopped at, the last range listed — or,
         // after an interrupt, from the block that was next.
         let done = report
             .interrupted_at
-            .or_else(|| report.bad.first().map(|b| b.blkid))
+            .or_else(|| report.bad.last().map(|b| b.blkid))
             .unwrap_or(start_block);
-        resume::write(output, &state_path, &expected_state, done);
+        let lost = earlier.and(&report, done);
+        resume::write(output, &state_path, &expected_state, done, &lost);
     } else {
         resume::clear(&state_path);
     }
+    // What the run that was resumed lost is this image's too.
+    earlier.into_report(&mut report);
     Ok(DumpOut {
         dataset: ds.name.clone(),
         dataset_guid: format!("{:#018x}", ds.guid),
