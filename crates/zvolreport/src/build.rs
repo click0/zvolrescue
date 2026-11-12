@@ -29,6 +29,8 @@ pub(crate) struct ReadLog {
     pub left_out: Vec<(usize, String)>,
     /// SHA-256 of the very bytes the records were read from.
     pub sha256: String,
+    /// How many bytes those are.
+    pub bytes: u64,
 }
 
 /// Read one evidence log.
@@ -46,7 +48,16 @@ pub(crate) struct ReadLog {
 /// record appended in between was covered by the hash but missing from
 /// the report, and `verify` passed the log.
 pub(crate) fn read_log(path: &Path) -> Result<ReadLog, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    read_log_prefix(path, None)
+}
+
+/// [`read_log`] of the first `limit` bytes alone: the log as it was when
+/// a report was built from it, whatever was appended since.
+pub(crate) fn read_log_prefix(path: &Path, limit: Option<u64>) -> Result<ReadLog, String> {
+    let mut bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if let Some(n) = limit {
+        bytes.truncate(usize::try_from(n).unwrap_or(usize::MAX));
+    }
     let sha256 = evidence::sha256_hex(&bytes);
     let mut records = Vec::new();
     let mut left_out = Vec::new();
@@ -97,6 +108,7 @@ pub(crate) fn read_log(path: &Path) -> Result<ReadLog, String> {
         records,
         left_out,
         sha256,
+        bytes: bytes.len() as u64,
     })
 }
 
@@ -164,6 +176,57 @@ fn pools_of(result: &serde_json::Value) -> Vec<Pool> {
         .collect()
 }
 
+/// Where a path a record names is: relative to the directory the run
+/// was started in, when the record says which. Taken as it was written,
+/// a relative path was looked for wherever `verify` happened to run.
+fn at_cwd(r: &Record, p: &Path) -> PathBuf {
+    match &r.cwd {
+        Some(dir) if p.is_relative() => dir.join(p),
+        _ => p.to_path_buf(),
+    }
+}
+
+/// The extraction a `zvolfiles extract` record describes: a tree of
+/// files rather than an image, listed in a manifest that is among the
+/// record's outputs with every file it wrote. It was in no section of
+/// the report, and `verify` checked the manifest and none of the files.
+fn tree_extraction(r: &Record) -> Option<Extraction> {
+    let result = &r.result;
+    let files = result.get("files")?.as_array()?;
+    let output = at_cwd(r, Path::new(&str_at(result, "output")?));
+    let manifest = r
+        .outputs
+        .iter()
+        .map(|o| (at_cwd(r, &o.path), o))
+        .find(|(p, _)| {
+            p.parent() == Some(output.as_path())
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("manifest") && n.ends_with(".json"))
+        });
+    let written: Vec<&serde_json::Value> = files
+        .iter()
+        .filter(|f| f.get("sha256").is_some_and(serde_json::Value::is_string))
+        .collect();
+    let count = |key: &str| u64_at(result, key).unwrap_or(0);
+    Some(Extraction {
+        dataset: str_at(result, "dataset")?,
+        txg: u64_at(result, "txg").unwrap_or(0),
+        output: manifest.as_ref().map_or(output.clone(), |(p, _)| p.clone()),
+        size: written.iter().filter_map(|f| u64_at(f, "size")).sum(),
+        sha256: manifest.and_then(|(_, o)| o.sha256.clone()),
+        sha1: None,
+        md5: None,
+        errors: count("incomplete").saturating_add(count("failed")),
+        aborted: result.get("stopped").is_some_and(|s| !s.is_null()),
+        interrupted_at: None,
+        stopped_by_medium: None,
+        carved: false,
+        pool_guid: None,
+        files: Some(written.len() as u64),
+    })
+}
+
 /// The extractions a `dump` record described.
 fn extractions_of(result: &serde_json::Value) -> Vec<Extraction> {
     let Some(list) = result.get("volumes").and_then(serde_json::Value::as_array) else {
@@ -196,6 +259,7 @@ fn extractions_of(result: &serde_json::Value) -> Vec<Extraction> {
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false),
                 pool_guid: pool_guid.clone(),
+                files: None,
             })
         })
         .collect()
@@ -280,11 +344,12 @@ pub fn assemble(records: &[(LogRef, Vec<Record>)], opts: &Options) -> Report {
             status: r.status,
         });
         for i in &r.inputs {
+            let path = at_cwd(r, &i.path);
             let e = evidence_by_path
-                .entry(i.path.clone())
+                .entry(path.clone())
                 .or_insert_with(|| Evidence {
                     file: FileRef {
-                        path: i.path.clone(),
+                        path: path.clone(),
                         kind: i.kind,
                         size: i.size,
                         sha256: i.sha256.clone(),
@@ -331,11 +396,16 @@ pub fn assemble(records: &[(LogRef, Vec<Record>)], opts: &Options) -> Report {
                 }
             }
         }
-        for o in &r.outputs {
+        // What a build wrote is a report, which the next build replaces
+        // and which is checked by its signature and its logs: as an
+        // output of the case it failed the moment it was built again.
+        let written = (r.tool != "zvolreport").then_some(&r.outputs);
+        for o in written.into_iter().flatten() {
+            let path = at_cwd(r, &o.path);
             outputs.insert(
-                o.path.clone(),
+                path.clone(),
                 FileRef {
-                    path: o.path.clone(),
+                    path,
                     kind: o.kind,
                     size: o.size,
                     sha256: o.sha256.clone(),
@@ -359,7 +429,14 @@ pub fn assemble(records: &[(LogRef, Vec<Record>)], opts: &Options) -> Report {
                 None => pools.push(p),
             }
         }
-        extractions.extend(extractions_of(&r.result));
+        if r.tool == "zvolfiles" {
+            extractions.extend(tree_extraction(r));
+        } else {
+            extractions.extend(extractions_of(&r.result).into_iter().map(|mut e| {
+                e.output = at_cwd(r, &e.output);
+                e
+            }));
+        }
         if r.status != 0 {
             warnings.push(format!(
                 "{} exited {} : {}",
@@ -543,13 +620,48 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
         }
         logs.push((
             LogRef {
-                path: path.clone(),
+                // Where it is, not where `build` happened to run: named
+                // relative, a report checked from anywhere else hashed
+                // whatever file of that name was there.
+                path: std::path::absolute(path).unwrap_or_else(|_| path.clone()),
                 records: read.records.len(),
                 sha256: read.sha256,
+                bytes: read.bytes,
                 left_out: read.left_out.iter().map(|(n, _)| *n).collect(),
             },
             read.records,
         ));
+    }
+    // Nor over anything the logs name: the evidence every run read and
+    // what every run wrote. `build case.jsonl -o member0.img` replaced a
+    // pool member with the report, exit 0. A report an earlier build
+    // wrote is the one exception: building again over it is the point.
+    let named: Vec<PathBuf> = logs
+        .iter()
+        .flat_map(|(_, records)| records)
+        .flat_map(|r| {
+            let written = (r.tool != "zvolreport").then_some(&r.outputs);
+            r.inputs
+                .iter()
+                .chain(written.into_iter().flatten())
+                .map(move |f| at_cwd(r, &f.path))
+        })
+        .collect();
+    let mut all = reads.clone();
+    all.extend(named.iter().cloned());
+    let guard = zvol_common::WriteGuard::new(g, &all);
+    for (flag, path) in &writes {
+        if let Some(n) = named.iter().find(|n| zvol_common::same_file(path, n)) {
+            eprintln!(
+                "zvolreport: refusing {flag} {}: it is {}, which the logs name as evidence or as an output of the case",
+                path.display(),
+                n.display()
+            );
+            return exit::REFUSED;
+        }
+        if let Err(code) = guard.refuse("zvolreport", flag, path) {
+            return code;
+        }
     }
     let status = if logs.iter().any(|(l, _)| !l.left_out.is_empty()) {
         exit::PARTIAL
@@ -659,6 +771,7 @@ mod tests {
             tool: tool.into(),
             version: "0.2.0".into(),
             host: Some("rescue1".into()),
+            cwd: None,
             argv: vec![tool.into()],
             inputs: vec![EvFileRef {
                 path: PathBuf::from("/dev/sda1"),
@@ -684,6 +797,7 @@ mod tests {
                 path: PathBuf::from("case.jsonl"),
                 records: records.len(),
                 sha256: "00".into(),
+                bytes: 0,
                 left_out: Vec::new(),
             },
             records,

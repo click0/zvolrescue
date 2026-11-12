@@ -256,7 +256,20 @@ pub fn run(
     } else {
         0
     };
-    let written = FileRef::hashed(&index).map(|f| vec![f]).unwrap_or_default();
+    // Every object written, with its hash, beside the index (COMPANIONS
+    // §1.3): the index alone was the record's output.
+    let mut written: Vec<FileRef> = FileRef::hashed(&index).into_iter().collect();
+    written.extend(
+        out.objects
+            .iter()
+            .filter(|o| o.error.is_none())
+            .filter_map(|o| {
+                Some(FileRef::known(
+                    &output.join("objects").join(format!("{:06}.bin", o.object)),
+                    o.sha256.as_ref()?,
+                ))
+            }),
+    );
     // A device refused a read: every incident on stderr, and the stop —
     // when one stopped the run — as the exit code (SPEC F-33, N-10).
     let code = zvol_common::report_medium(&ledger).unwrap_or(code);

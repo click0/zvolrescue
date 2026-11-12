@@ -60,7 +60,15 @@ One JSON object per line, appended, never rewritten:
 
 * `inputs[].sha256` is present only when `--hash-inputs` was given (hashing
   multi-TB evidence is slow; the user chooses).
-* `outputs[].sha256` is always present: every tool hashes what it writes.
+* `outputs[].sha256` is always present: every tool hashes what it writes,
+  and lists every file it writes — `zvolfiles extract` each file of the
+  tree beside its manifest, `objects` each object beside its index.
+* `cwd` is the directory the run started in, which a relative path in
+  `argv`, `inputs` and `outputs` is relative to; absent from records
+  written before it existed.
+* A device among the inputs is not hashed even with `--hash-inputs`: that
+  is a read of every sector outside the run's own (N-10). Its `size` is
+  the device's own.
 * `zvolreport` consumes these records; nothing else reads them.
 
 ### 1.4 Read-only invariants
@@ -391,7 +399,8 @@ and the build exits 4; refusing the whole log for it lost every record
 around it. The log's hash is taken of the bytes the records were read
 from, in the same read. `verify` does not stop at the logs' hashes: when
 every log is as recorded it builds the report from them again (R-03) and
-compares the logs, commands, evidence, outputs and extractions with the
+compares every section — logs, tools, hosts, evidence, commands, pools,
+outputs, extractions, warnings, and no section besides — with the
 report it was given, so an unsigned report edited to match a changed
 image fails on the row `report`; the Markdown escapes everything that
 comes from a log or a pool, so a forged dataset name cannot write a

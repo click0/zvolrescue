@@ -560,6 +560,27 @@ tagged. `v0.7.1` is the release that carries those six.
   and holds `zvolfiles extract` to every path, mode, owner, time,
   byte, link target, device number and extended attribute the kernel
   reports.
+* **A report was no check of what zvolfiles extracted, and of much
+  else.** `zvolfiles extract` listed its manifest as its one output, so
+  `zvolreport verify` passed a tree whose files had been changed or
+  deleted and the report showed no extraction; every file written is
+  now among the record's outputs with its hash (`objects` each object),
+  and the tree is an extraction in the report. `build` wrote `-o`,
+  `--md` and `--signature` over whatever the logs named — a pool member
+  became a report, exit 0 — and now refuses any of them (exit 5), a
+  report an earlier build wrote excepted. A record appended to a log
+  after a report was built broke that report: the report keeps how many
+  bytes of each log it read, and `verify` hashes those and says what
+  was appended. Evidence that is a directory or a fifo now, or a device
+  of another size, passed as "present, at the size recorded"; it fails.
+  The report row was a PASS when five of its sections matched the logs
+  — edited pools, tools or warnings, or a section of the report's own,
+  went through — and is held to all of them. A record now says the
+  directory its run started in (`cwd`), so a relative path is found
+  wherever `verify` runs, and logs are named by their absolute paths. A
+  device among the inputs is recorded at its own size, not as 0 bytes,
+  and `--hash-inputs` no longer reads it end to end a second time
+  (N-10): it says so.
 
 ## v0.9.12 — 2026-11-07
 

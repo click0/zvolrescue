@@ -845,9 +845,24 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
     } else {
         0
     };
-    let written = FileRef::hashed(&manifest)
-        .map(|f| vec![f])
-        .unwrap_or_default();
+    // Every file written, with the hash taken as it was written, beside
+    // the manifest (COMPANIONS §1.3: every tool lists what it writes).
+    // The manifest alone was the record's one output, and `zvolreport
+    // verify` passed a tree whose files had been changed or deleted.
+    // A name that is not text cannot be in a JSON record; the manifest
+    // has it, under `path_hex`.
+    let mut written: Vec<FileRef> = FileRef::hashed(&manifest).into_iter().collect();
+    written.extend(
+        out.files
+            .iter()
+            .filter(|f| f.error.is_none() && f.path_hex.is_none())
+            .filter_map(|f| {
+                Some(FileRef::known(
+                    &out.output.join(&f.path),
+                    f.sha256.as_ref()?,
+                ))
+            }),
+    );
     // A device refused a read: every incident on stderr, and the stop —
     // when one stopped the run — as the exit code (SPEC F-33, N-10).
     let code = zvol_common::report_medium(&ledger).unwrap_or(code);
@@ -985,8 +1000,11 @@ fn extract_entry(
                     f.write_all(&t)
                         .map_err(|err| OutError::Failed(format!("{}: {err}", to.display())))
                 });
-                if let Err(err) = wrote {
-                    fail(&mut record, err);
+                match wrote {
+                    // The hash of what was written, as for a file: the
+                    // evidence record lists it among the outputs.
+                    Ok(()) => record.sha256 = Some(zvol_common::evidence::sha256_hex(&t)),
+                    Err(err) => fail(&mut record, err),
                 }
             }
             Err(err) => record.error = Some(err.to_string()),

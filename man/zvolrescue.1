@@ -66,6 +66,9 @@ what was opened, what was read, what was written and its hash.
 Also record the SHA-256 of every input in the evidence log.
 Off by default: hashing a shelf of disk images means reading all of
 them through, which can take hours.
+A device is not read again for it: that would read every sector of a
+disk the run may have stopped on for one (SPEC N-10); its size is
+recorded instead, and an image of it is what to hash.
 Outputs are always hashed.
 .It Fl -no-color
 Disable colour in text output.

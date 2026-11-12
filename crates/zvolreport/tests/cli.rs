@@ -244,9 +244,10 @@ fn an_edited_log_breaks_the_report() {
     let report = dir.join("report.json").to_string_lossy().into_owned();
     let (code, _, err) = run(&["-q", "build", &log.to_string_lossy(), "-o", &report]);
     assert_eq!(code, 0, "{err}");
-    let mut text = std::fs::read_to_string(&log).unwrap();
-    text.push_str("{}\n");
-    std::fs::write(&log, text).unwrap();
+    // Edited inside what the report was built from (appending is not
+    // editing: a log is appended to).
+    let text = std::fs::read_to_string(&log).unwrap();
+    std::fs::write(&log, text.replace("\"status\":0", "\"status\":9")).unwrap();
     let (code, out, err) = run(&["-q", "-f", "json", "verify", &report]);
     assert_eq!(code, 4, "{err}\n{out}");
     let v: serde_json::Value = serde_json::from_str(&out).expect("json");
@@ -391,4 +392,115 @@ fn keygen_writes_a_whole_pair_and_never_through_a_link() {
     ]);
     assert_ne!(code, 0, "{err}");
     assert!(!lone.exists());
+}
+
+/// What a report is held to, and what it is not: no build writes over a
+/// file its logs name; a record appended to a log after the build is not
+/// held against the report; a file the report recorded that is now a
+/// directory fails; a section the logs do not give fails the report; and
+/// a relative path is taken from where its run started, wherever
+/// `verify` runs.
+#[test]
+fn a_report_holds_to_its_logs_and_to_nothing_else() {
+    let dir = scratch("holds");
+    let img = dir.join("vol.img");
+    std::fs::write(&img, b"the bytes of a volume, such as they are").expect("write");
+    let log = evidence_log(&dir, &img);
+    let l = log.to_string_lossy().into_owned();
+    let member = dir.join("evidence.img");
+    let before = std::fs::read(&member).unwrap();
+
+    // Not over the evidence, and not over an output.
+    for (flag, over) in [("-o", &member), ("--md", &img)] {
+        let report = dir.join("r.json").to_string_lossy().into_owned();
+        let target = over.to_string_lossy().into_owned();
+        let args = if flag == "-o" {
+            vec!["-q", "build", &l, "-o", &target]
+        } else {
+            vec!["-q", "build", &l, "-o", &report, "--md", &target]
+        };
+        let (code, _, err) = run(&args);
+        assert_eq!(code, 5, "{flag}: {err}");
+        assert!(err.contains("which the logs name"), "{err}");
+    }
+    assert_eq!(std::fs::read(&member).unwrap(), before);
+
+    let report = dir.join("report.json").to_string_lossy().into_owned();
+    let (code, _, err) = run(&["-q", "build", &l, "-o", &report]);
+    assert_eq!(code, 0, "{err}");
+    // A later run's record is appended: said, not a failure.
+    let mut text = std::fs::read_to_string(&log).unwrap();
+    let first = text.lines().next().unwrap().to_string();
+    text.push_str(&first.replace("\"status\":0", "\"status\":3"));
+    text.push('\n');
+    std::fs::write(&log, text).unwrap();
+    let (code, out, err) = run(&["-q", "verify", &report]);
+    assert_eq!(code, 0, "{err}\n{out}");
+    assert!(out.contains("appended since the report was built"), "{out}");
+
+    // From another directory: the paths in it are absolute now.
+    let elsewhere = dir.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_zvolreport"))
+        .args(["-q", "verify", &report])
+        .current_dir(&elsewhere)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    // A section of its own fails the report.
+    let mut r: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
+    r["summary"] = "all good".into();
+    let edited = dir.join("edited.json");
+    std::fs::write(&edited, serde_json::to_vec(&r).unwrap()).unwrap();
+    let (code, out, _) = run(&["-q", "verify", &edited.to_string_lossy()]);
+    assert_eq!(code, 4, "{out}");
+    assert!(out.contains("summary: the report says"), "{out}");
+
+    // Evidence that is a directory now is not "present, at the size
+    // recorded".
+    std::fs::remove_file(&member).unwrap();
+    std::fs::create_dir(&member).unwrap();
+    let (code, out, _) = run(&["-q", "verify", &report]);
+    assert_eq!(code, 4, "{out}");
+    assert!(out.contains("FAIL      kind"), "{out}");
+}
+
+/// A path a record gives relative to where its run started is found
+/// there, not where `verify` runs.
+#[test]
+fn a_relative_path_is_taken_from_where_its_run_started() {
+    let dir = scratch("cwd");
+    std::fs::write(dir.join("out.img"), b"an image").unwrap();
+    let sha = zvol_common::evidence::sha256_hex(b"an image");
+    let record = serde_json::json!({
+        "v": FORMAT_VERSION, "ts": 1_757_100_000u64, "tool": "zvolrescue", "version": "0.9.12",
+        "cwd": dir.to_string_lossy(),
+        "argv": ["zvolrescue", "dump", "tank/vm/disk0", "-o", "out.img"],
+        "inputs": [],
+        "outputs": [{"path": "out.img", "kind": "file", "size": 8, "sha256": sha}],
+        "result": {},
+        "status": 0,
+    });
+    let log = dir.join("case.jsonl");
+    std::fs::write(&log, format!("{record}\n")).unwrap();
+    let report = dir.join("r.json").to_string_lossy().into_owned();
+    let (code, _, err) = run(&["-q", "build", &log.to_string_lossy(), "-o", &report]);
+    assert_eq!(code, 0, "{err}");
+    let elsewhere = dir.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_zvolreport"))
+        .args(["-q", "verify", &report])
+        .current_dir(&elsewhere)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{text}");
+    assert!(text.contains("PASS") && text.contains("out.img"), "{text}");
 }

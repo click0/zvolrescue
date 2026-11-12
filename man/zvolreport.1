@@ -47,7 +47,8 @@ Suppress non-essential output.
 Append a JSON Lines evidence log of this run to
 .Ar file .
 .It Fl -hash-inputs
-Also record the SHA-256 of every input in the evidence log.
+Also record the SHA-256 of every input in the evidence log; a device is
+not read again for it (SPEC N-10), and its size is recorded instead.
 .It Fl -no-color
 Disable colour in text output.
 .It Fl -debug , Fl -debug-log Ar file
@@ -97,17 +98,28 @@ Write the signature here instead of next to the report.
 .Ar report.json
 .Pp
 Recompute the hashes a report recorded and say what still matches:
-of the logs it was built from, of the evidence, and of the outputs.
-A file read without a hash is still looked for, and its size compared
-with the one recorded.
+of the logs it was built from, of the evidence, and of the outputs \(em
+every file a run wrote, each file of a
+.Xr zvolfiles 1
+extraction among them.
+A file read without a hash is still looked for, its size compared with
+the one recorded, and what it is: an image that is a directory or a
+fifo now, or a device that is another size, fails.
+A log is checked over the bytes the report was built from; records
+appended to it since are other runs', said and not held against the
+report.
+Paths a record gives relative to where its run started are taken from
+there, and the logs' own paths as absolute, so a report is checked the
+same way from any directory.
 An image written to a device is checked over the bytes it took there,
 not over the whole device; one sent to
 .Pa /dev/null
 is no output, and its hash is only in the record's result.
 A log not where it was recorded is looked for beside the report.
 When every log still hashes as recorded, the report is built from them
-again and compared with the one given: its logs, commands, evidence,
-outputs and extractions must be what the logs say, or the row
+again and compared with the one given: every section of it \(em logs,
+tools, hosts, evidence, commands, pools, outputs, extractions, warnings
+\(em and no section besides must be what the logs say, or the row
 .Ql report
 fails \(em a report edited to match a changed file is caught here even
 when it is not signed.

@@ -65,7 +65,8 @@ Suppress non-essential output.
 Append a JSON Lines evidence log to
 .Ar file .
 .It Fl -hash-inputs
-Also record the SHA-256 of every input in the evidence log.
+Also record the SHA-256 of every input in the evidence log; a device is
+not read again for it (SPEC N-10), and its size is recorded instead.
 .It Fl -no-color
 Disable colour in text output.
 .It Fl -debug , Fl -debug-log Ar file

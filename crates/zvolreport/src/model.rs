@@ -12,6 +12,10 @@ use serde::{Deserialize, Serialize};
 /// Report format this build writes and understands.
 pub const REPORT_VERSION: u32 = 1;
 
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
 /// One evidence log the report was built from.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogRef {
@@ -20,6 +24,13 @@ pub struct LogRef {
     pub records: usize,
     /// Hash of the log itself, so a report can be tied to the log.
     pub sha256: String,
+    /// How many bytes of it the hash and the records are of. A log is
+    /// appended to and never rewritten, so what a later run added is
+    /// after them and is not this report's: hashed whole, any record
+    /// appended since broke every report built before it. Absent (0)
+    /// from reports built before it existed, whose hash is of the whole.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub bytes: u64,
     /// Lines of it that are not records and were left out, by number:
     /// a run killed while it wrote leaves part of a line behind. Absent
     /// when every line was read.
@@ -102,8 +113,14 @@ pub struct Extraction {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub md5: Option<String>,
     /// Blocks that could not be read whole: written as zeros, or kept
-    /// with their unreadable sectors zeroed.
+    /// with their unreadable sectors zeroed. For a tree of files, the
+    /// entries not read whole or not written.
     pub errors: u64,
+    /// For a tree of files (`zvolfiles extract`): how many were written,
+    /// each of them among the outputs with its hash; `output` is the
+    /// manifest that lists them and `sha256` its hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<u64>,
     /// The extraction stopped early (`--strict` on an unreadable block).
     pub aborted: bool,
     /// A signal ended it before this block; `--resume` goes on from it.

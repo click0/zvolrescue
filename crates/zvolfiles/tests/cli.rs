@@ -628,3 +628,55 @@ fn zeroed_bytes_are_named_and_strict_stops() {
     assert!(last["error"].as_str().unwrap().contains("--strict"));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// Every file written is among the record's outputs, with the hash it
+/// was written under, beside the manifest: the manifest alone was, and
+/// `zvolreport verify` passed a tree whose files had been changed.
+#[test]
+fn the_evidence_record_lists_every_file_written() {
+    let dir = scratch("record-files");
+    let m = members(&dir, ["member0.img", "member1.img"]);
+    let out = dir.join("out");
+    let log = dir.join("ev.jsonl");
+    let (code, err) = run(&[
+        "-q",
+        "--evidence-log",
+        log.to_str().unwrap(),
+        "extract",
+        "tank/fs",
+        &m[0],
+        &m[1],
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let rec: serde_json::Value = serde_json::from_str(
+        std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    let outputs: Vec<(String, String)> = rec["outputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| {
+            (
+                o["path"].as_str().unwrap().to_string(),
+                o["sha256"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    let hello = out.join("hello.txt").to_string_lossy().into_owned();
+    let want = zvol_common::evidence::sha256_hex(&zfs_read::fixture::zpl_hello());
+    assert!(outputs.contains(&(hello, want)), "{outputs:?}");
+    // A link is written as a file holding its target, and listed so.
+    let link = out.join("link").to_string_lossy().into_owned();
+    assert!(outputs.iter().any(|(p, _)| *p == link), "{outputs:?}");
+    assert!(
+        outputs.iter().any(|(p, _)| p.ends_with("manifest.json")),
+        "{outputs:?}"
+    );
+}

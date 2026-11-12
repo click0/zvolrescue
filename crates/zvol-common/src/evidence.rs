@@ -96,11 +96,24 @@ impl Kind {
 
 impl FileRef {
     /// Describe a file without reading its contents.
+    ///
+    /// A device's size is its own, found by seeking to its end: a stat
+    /// gives a block device as 0 bytes, and a disk was in the report as
+    /// "0 B", a size no later check could hold it to.
     pub fn stat(path: &Path) -> FileRef {
+        let kind = Kind::of(path);
+        let size = if kind.is_device() {
+            use std::io::Seek;
+            std::fs::File::open(path)
+                .and_then(|mut f| f.seek(io::SeekFrom::End(0)))
+                .unwrap_or(0)
+        } else {
+            std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+        };
         FileRef {
             path: path.to_path_buf(),
-            kind: Some(Kind::of(path)),
-            size: std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
+            kind: Some(kind),
+            size,
             sha256: None,
             sha1: None,
             md5: None,
@@ -235,6 +248,13 @@ pub struct Record {
     /// system to run anything (see [`host`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
+    /// The directory the run was started in: what a relative path in
+    /// `argv`, `inputs` and `outputs` is relative to. Without it, a
+    /// report checked from anywhere else looked for every such file
+    /// there instead. Absent from records written before it existed,
+    /// and when the directory's name is not text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
     /// Full command line as invoked.
     pub argv: Vec<String>,
     /// Evidence the run read.
@@ -263,6 +283,9 @@ impl Record {
             tool: tool.to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             host: host(),
+            cwd: std::env::current_dir()
+                .ok()
+                .filter(|d| d.to_str().is_some()),
             argv: std::env::args().collect(),
             inputs: Vec::new(),
             outputs: Vec::new(),
@@ -274,12 +297,25 @@ impl Record {
 
     /// The evidence this run read. Hashed only when asked: `--hash-inputs`
     /// on a shelf of disk images costs hours.
+    ///
+    /// A device is not hashed even then. Hashing is a read of every
+    /// sector, a second one of everything the run read and a first of
+    /// all it did not, outside the ledger that stops a run at the first
+    /// refused read (SPEC N-10): a failing disk was read end to end,
+    /// bad sectors and all, after the run that stopped for one. It is
+    /// said, and the record carries its size.
     #[must_use]
     pub fn with_inputs(mut self, paths: &[PathBuf], hash: bool) -> Record {
         self.inputs = paths
             .iter()
             .map(|p| {
-                if hash {
+                if hash && Kind::of(p).is_device() {
+                    crate::say!(
+                        "--hash-inputs: {} is a device and is not read again to hash it (SPEC N-10); hash its image",
+                        p.display()
+                    );
+                    FileRef::stat(p)
+                } else if hash {
                     FileRef::hashed(p).unwrap_or_else(|_| FileRef::stat(p))
                 } else {
                     FileRef::stat(p)

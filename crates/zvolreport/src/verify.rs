@@ -158,6 +158,8 @@ struct Recorded<'a> {
     /// Hash only this many bytes from the start: an image written to a
     /// device is the device's first bytes, not the whole device.
     prefix: Option<u64>,
+    /// What it was: a file, or a device.
+    kind: Option<zvol_common::evidence::Kind>,
 }
 
 /// Check a file against every digest the report recorded for it.
@@ -190,6 +192,8 @@ fn check(kind: &'static str, path: &Path, recorded: &Recorded<'_>) -> Vec<Checke
                     detail: Some(detail),
                 }]
             };
+        use zvol_common::evidence::Kind;
+        let now = Kind::of(path);
         return match std::fs::metadata(path) {
             Err(e) => row(
                 Status::Missing,
@@ -198,6 +202,33 @@ fn check(kind: &'static str, path: &Path, recorded: &Recorded<'_>) -> Vec<Checke
                 None,
                 format!("{e}; no hash was recorded when it was read"),
             ),
+            // What it is now against what it was: a directory or a fifo
+            // where an image was had "the size recorded" by default and
+            // passed.
+            Ok(_) if recorded.kind.is_some_and(|k| k != Kind::Other && k != now) => row(
+                Status::Fail,
+                "kind",
+                recorded.kind.map(|k| format!("{k:?}").to_lowercase()),
+                Some(format!("{now:?}").to_lowercase()),
+                format!(
+                    "no hash was recorded when it was read, and it is not what it was: {}",
+                    if now == Kind::Other { "neither a file nor a device now" } else { "a different kind of file now" }
+                ),
+            ),
+            Ok(_) if now == Kind::Device
+                && recorded
+                    .size
+                    .is_some_and(|s| s != zvol_common::evidence::FileRef::stat(path).size) =>
+            {
+                row(
+                    Status::Fail,
+                    "size",
+                    recorded.size.map(|s| s.to_string()),
+                    Some(zvol_common::evidence::FileRef::stat(path).size.to_string()),
+                    "no hash was recorded when it was read, and the device is not the size recorded"
+                        .into(),
+                )
+            }
             Ok(m) if m.is_file() && recorded.size.is_some_and(|s| s != m.len()) => row(
                 Status::Fail,
                 "size",
@@ -261,20 +292,23 @@ fn check(kind: &'static str, path: &Path, recorded: &Recorded<'_>) -> Vec<Checke
 }
 
 /// Build the report again from its logs, as `build` would (R-03), and
-/// compare what a verdict rests on: the logs and their record counts,
-/// the commands, the evidence, the outputs and the extractions. The
-/// warnings are left out, since their wording belongs to the build that
-/// wrote them; a report built by another version of zvolreport can
-/// differ in the rest too, and the detail says so.
+/// compare all of it — every section, and nothing besides them: the
+/// logs, tools, hosts, evidence, commands, pools, outputs, extractions
+/// and warnings. Five of them were compared, and a report whose pools,
+/// tools or warnings were edited, or that carried a section of its own,
+/// was a `report PASS`. A report built by another version of zvolreport
+/// can differ too, and the detail says so.
 fn against_logs(at: &Path, report: &Report, logs: &[(&crate::model::LogRef, PathBuf)]) -> Checked {
     let mut read = Vec::new();
     for (recorded, path) in logs {
-        match crate::build::read_log(path) {
+        let limit = (recorded.bytes > 0).then_some(recorded.bytes);
+        match crate::build::read_log_prefix(path, limit) {
             Ok(r) => read.push((
                 crate::model::LogRef {
                     path: recorded.path.clone(),
                     records: r.records.len(),
                     sha256: recorded.sha256.clone(),
+                    bytes: recorded.bytes,
                     left_out: r.left_out.iter().map(|(n, _)| *n).collect(),
                 },
                 r.records,
@@ -303,14 +337,41 @@ fn against_logs(at: &Path, report: &Report, logs: &[(&crate::model::LogRef, Path
         signature: None,
     };
     let again = crate::build::assemble(&read, &opts);
-    let value = |r: &Report| serde_json::to_value(r).expect("serialisable");
-    let (said, built) = (value(report), value(&again));
-    let differs = ["logs", "commands", "evidence", "outputs", "extractions"]
+    let built = serde_json::to_value(&again).expect("serialisable");
+    // The report as it is in the file, not as this build reads it: a
+    // field this build does not know is still in the file.
+    let said = std::fs::read(at)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .unwrap_or_else(|| serde_json::to_value(report).expect("serialisable"));
+    let empty = serde_json::Map::new();
+    let sections: std::collections::BTreeSet<&String> = said
+        .as_object()
+        .unwrap_or(&empty)
+        .keys()
+        .chain(built.as_object().unwrap_or(&empty).keys())
+        .collect();
+    let differs = sections
         .into_iter()
+        .map(String::as_str)
         .find_map(|section| {
             let (a, b) = (&said[section], &built[section]);
             if a == b {
                 return None;
+            }
+            if !a.is_array() && !b.is_array() {
+                let show = |v: &serde_json::Value| {
+                    if v.is_null() {
+                        "nothing".to_string()
+                    } else {
+                        v.to_string().chars().take(160).collect()
+                    }
+                };
+                return Some(format!(
+                    "{section}: the report says {}, its logs say {}",
+                    show(a),
+                    show(b)
+                ));
             }
             let (xs, ys) = (a.as_array(), b.as_array());
             let (xs, ys) = (
@@ -472,7 +533,10 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
                 _ => l.path.clone(),
             }
         };
-        let rows = check(
+        // The log as it was when the report was built: what was
+        // appended since is other runs', and is said, not counted
+        // against the report.
+        let mut rows = check(
             "log",
             &path,
             &Recorded {
@@ -480,9 +544,28 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
                 sha1: None,
                 md5: None,
                 size: None,
-                prefix: None,
+                prefix: (l.bytes > 0).then_some(l.bytes),
+                kind: None,
             },
         );
+        let now = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        for r in rows.iter_mut().filter(|r| r.status == Status::Pass) {
+            if l.bytes > 0 && now > l.bytes {
+                r.detail = Some(format!(
+                    "{} byte(s) appended since the report was built; they are not in it",
+                    now - l.bytes
+                ));
+            }
+        }
+        if l.bytes > 0 && now < l.bytes {
+            for r in &mut rows {
+                r.status = Status::Fail;
+                r.detail = Some(format!(
+                    "{now} byte(s), shorter than the {} the report was built from",
+                    l.bytes
+                ));
+            }
+        }
         if rows.iter().all(|c| c.status == Status::Pass) {
             found_logs.push((l, path.clone()));
         }
@@ -520,6 +603,7 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
                 md5: e.file.md5.as_ref(),
                 size: Some(e.file.size),
                 prefix: None,
+                kind: e.file.kind,
             },
         ));
     }
@@ -537,6 +621,7 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
                     .kind
                     .is_some_and(zvol_common::evidence::Kind::is_device)
                     .then_some(o.size),
+                kind: o.kind,
             },
         ));
     }
@@ -682,6 +767,7 @@ mod check_tests {
                 md5: Some(&h5),
                 size: None,
                 prefix: None,
+                kind: None,
             },
         );
         assert_eq!(algorithms(&rows), vec!["sha256", "sha1", "md5"]);
@@ -706,6 +792,7 @@ mod check_tests {
                 md5: Some(&h5),
                 size: None,
                 prefix: None,
+                kind: None,
             },
         );
         assert_eq!(rows.len(), 3);
@@ -730,6 +817,7 @@ mod check_tests {
                 md5: Some(&h5),
                 size: None,
                 prefix: None,
+                kind: None,
             },
         );
         assert_eq!(rows.len(), 3);
@@ -752,6 +840,7 @@ mod check_tests {
                 md5: None,
                 size: Some(fs::metadata(&p).unwrap().len()),
                 prefix: None,
+                kind: None,
             },
         );
         assert_eq!(rows.len(), 1);
@@ -773,6 +862,7 @@ mod check_tests {
             md5: None,
             size,
             prefix: None,
+            kind: None,
         };
         fs::write(&p, b"").unwrap();
         let rows = check("evidence", &p, &none(Some(size)));
@@ -801,6 +891,7 @@ mod check_tests {
             md5: None,
             size: Some(image),
             prefix,
+            kind: None,
         };
         let rows = check("output", &p, &recorded(Some(image)));
         assert!(rows[0].status == Status::Pass, "{rows:?}");
@@ -824,6 +915,7 @@ mod check_tests {
                 md5: Some(&h5),
                 size: None,
                 prefix: None,
+                kind: None,
             },
         );
         assert_eq!(algorithms(&rows), vec!["sha256", "md5"]);
