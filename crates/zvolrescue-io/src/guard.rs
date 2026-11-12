@@ -206,30 +206,37 @@ impl Evidence {
         // A file: on whichever filesystem it is, or would be, made on —
         // and when that filesystem is a loop-mounted image, inside the
         // image file.
-        let (landing, m) = match out_meta {
-            Some(m) => (target, m),
-            None => nearest_existing(&target)?,
+        let (landing, m, to_be_made) = match out_meta {
+            Some(m) => (target, m, false),
+            None => {
+                let (landing, m) = nearest_existing(&target)?;
+                (landing, m, true)
+            }
         };
         // The filesystem it lands on, and — when that has no device of
         // its own — the devices beneath it.
         let mut devs = vec![m.dev()];
         devs.extend(disks::beneath(m.dev(), &landing).devs);
-        let what = if m.is_dir() { "directory" } else { "file" };
+        // The output named, and where it lands when it is still to be
+        // made: the directory it lands in was called the output, an
+        // `-o mnt/B.img` refused as "output directory mnt".
+        let what = if to_be_made {
+            format!("output {shown}, to be made in {},", landing.display())
+        } else {
+            let kind = if m.is_dir() { "directory" } else { "file" };
+            format!("output {kind} {}", landing.display())
+        };
         for dev in devs {
             for i in &self.inputs {
                 if i.device.is_some_and(|e| disks::overlap(dev, e)) {
                     return Err(refusal(format!(
-                        "output {what} {} is on input device {}",
-                        landing.display(),
+                        "{what} is on input device {}",
                         i.path.display()
                     )));
                 }
             }
             self.over_loops(
-                &format!(
-                    "output {what} {} is on a filesystem in a loop device",
-                    landing.display()
-                ),
+                &format!("{what} is on a filesystem in a loop device"),
                 dev,
                 false,
             )?;

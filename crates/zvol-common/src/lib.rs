@@ -496,6 +496,18 @@ impl Global {
             ("--evidence-log", &self.evidence_log),
         ] {
             let Some(log) = log else { continue };
+            // The very file a word names — an input, or the run's own
+            // output — said as that: the check below called the log the
+            // output and every word an input, "output out.img is the same
+            // file as input out.img" for a log given as the image.
+            if let Some(file) = named.iter().find(|n| same_existing(log, n)) {
+                eprintln!(
+                    "{tool}: refusing {flag} {}: it is {}, which this run reads or writes",
+                    log.display(),
+                    file.display()
+                );
+                return Err(exit::REFUSED);
+            }
             if let Err(e) = zvolrescue_io::refuse_if_evidence(log, &named) {
                 if !zvolrescue_io::is_refusal(&e) {
                     eprintln!("{tool}: {flag} {}: {e}", log.display());
@@ -620,6 +632,15 @@ impl Global {
         }
         status
     }
+}
+
+/// Whether `a` and `b` both exist and are one file.
+fn same_existing(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    matches!(
+        (std::fs::metadata(a), std::fs::metadata(b)),
+        (Ok(x), Ok(y)) if x.dev() == y.dev() && x.ino() == y.ino()
+    )
 }
 
 /// Whether `a` and `b` are one file: the same inode when both exist, the

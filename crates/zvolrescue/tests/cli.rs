@@ -287,6 +287,25 @@ fn dump_never_writes_over_what_it_reads() {
     }
     assert_eq!(std::fs::read_to_string(&map).unwrap(), "0x0 +\n");
     assert_eq!(std::fs::read(&key).unwrap(), [7u8; 32]);
+    // A log given as the image itself is said to be the image: it was
+    // "output out.img is the same file as input out.img".
+    let (code, _, err) = run(&[
+        "--evidence-log",
+        &map,
+        "-q",
+        "dump",
+        "tank/vm/disk0",
+        &named,
+        &paths[1],
+        "-o",
+        &map,
+    ]);
+    assert_eq!(code, 5, "{err}");
+    assert!(
+        err.contains(&format!("it is {map}, which this run reads or writes")),
+        "{err}"
+    );
+    assert!(!err.contains("as input"), "{err}");
 
     // The name the resume state is written under before its rename is
     // a file the run writes: a link there to the mapfile is refused.
@@ -2001,6 +2020,20 @@ fn a_bulk_dump_writes_only_its_own_files() {
         let m = std::fs::symlink_metadata(out.join(name)).unwrap();
         assert!(m.is_file(), "{name} is a file of its own");
     }
+    // A link to a member is replaced the same way: the guard followed it
+    // and refused the run (exit 5), the member never at risk.
+    let member = std::fs::read(&paths[0]).unwrap();
+    std::fs::remove_file(out.join("tank_vm_disk0.img")).unwrap();
+    std::os::unix::fs::symlink(&paths[0], out.join("tank_vm_disk0.img")).unwrap();
+    let (code, _, err) = run(&["-q", "dump", "-r", "tank", &paths[0], &paths[1], "-o", &o]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        std::fs::read(&paths[0]).unwrap() == member,
+        "the member is untouched"
+    );
+    assert!(std::fs::symlink_metadata(out.join("tank_vm_disk0.img"))
+        .unwrap()
+        .is_file());
 
     let img = dir.join("e.img").to_string_lossy().into_owned();
     let log = dir

@@ -484,6 +484,19 @@ tagged. `v0.7.1` is the release that carries those six.
   length its metadata gave, where it was `bytes: 0`; a `--path` given
   twice is "the same path as", not "within", the other; and `objects`
   names the zeroed bytes as `extract` does, not by block number.
+* **`dump -r` refused a link to a member it would have replaced.**
+  A link lying in the directory under an image's name is replaced, not
+  followed — but the guard followed it first, and one leading to a
+  member refused the run (exit 5) over a file it never touches. The
+  link is now replaced before the guard looks, as `zvolfiles` does.
+  Three messages said other than what was so: a dump to a
+  device reported the volume's bytes of data as all it wrote ("16384
+  bytes written" for 32 MiB written densely), and now says both; a log
+  given as the run's own output was "output out.img is the same file as
+  input out.img", and is now the file the run writes; and an output
+  still to be made was named by the directory it lands in ("output
+  directory mnt is on input device"), and is now named itself, with
+  that directory.
 
 ## v0.9.12 — 2026-11-07
 

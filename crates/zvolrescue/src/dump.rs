@@ -522,9 +522,19 @@ fn print_text(out: &RunOut) {
                 String::new()
             }
         );
+        // A device gets every byte of the image, holes as zeros: the
+        // bytes of data alone read as all that went to it.
+        let written = if std::fs::metadata(&v.output).is_ok_and(|m| !m.is_file()) {
+            format!(
+                "{} bytes of data, {} on the device with the holes as zeros,",
+                v.bytes_written, v.image_bytes
+            )
+        } else {
+            format!("{} bytes written", v.bytes_written)
+        };
         println!(
-            "  blocks: {} total, {} read, {} holes, {} zeroed (unreadable), {} salvaged (unreadable sectors zeroed); {} bytes written in {:.1}s",
-            v.blocks_total, v.blocks_read, v.blocks_holes, v.blocks_zeroed, v.blocks_salvaged, v.bytes_written, v.seconds
+            "  blocks: {} total, {} read, {} holes, {} zeroed (unreadable), {} salvaged (unreadable sectors zeroed); {written} in {:.1}s",
+            v.blocks_total, v.blocks_read, v.blocks_holes, v.blocks_zeroed, v.blocks_salvaged, v.seconds
         );
         println!("  sha256: {}", v.sha256);
         if let Some(h) = &v.sha1 {
@@ -778,17 +788,15 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     if opts.recursive {
         writes.push(opts.output.join("manifest.json"));
     }
-    for w in &writes {
-        if let Err(code) = guard.refuse("zvolrescue", "to write", w) {
-            return zvol_common::end_early(g, "zvolrescue", spec, code);
-        }
-    }
     // What `-r` writes inside its directory is named by the run, not by
     // the operator: a link already lying there under one of those names
     // is replaced, not followed, as `zvolfiles extract` replaces one. A
     // link to some file outside the tree got the image, and then the
     // manifest, written into it. One that is how the run names an input
     // or a log stays, and the run is refused.
+    //
+    // Before the guard looks: it followed the link, and one to a member
+    // refused the run (exit 5) over a file it would never have touched.
     if opts.recursive {
         for w in &writes {
             if !std::fs::symlink_metadata(w).is_ok_and(|m| m.file_type().is_symlink()) {
@@ -802,6 +810,11 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 eprintln!("zvolrescue: {}: {e}", w.display());
                 return zvol_common::end_early(g, "zvolrescue", spec, exit::USAGE);
             }
+        }
+    }
+    for w in &writes {
+        if let Err(code) = guard.refuse("zvolrescue", "to write", w) {
+            return zvol_common::end_early(g, "zvolrescue", spec, code);
         }
     }
 
