@@ -151,6 +151,71 @@ impl<'r, 'a> ObjectReader<'r, 'a> {
         Ok(out)
     }
 
+    /// How many level-0 blocks the object has up to and including the
+    /// last one that is not a hole, found from its pointers: `None` when
+    /// that is not known — an indirect block on the way did not read, or
+    /// was not the size its dnode gives, or the search took more than
+    /// [`MAX_TAIL_READS`] of them.
+    ///
+    /// Past it the object is a hole whatever `dn_maxblkid` says, and
+    /// [`locate`](Self::locate) finds nothing there. A forged
+    /// `dn_maxblkid` of 2^40 over a file of one block had every one of
+    /// those blocks located, through no pointer at all, for days and
+    /// without a word.
+    pub fn data_blocks(&self) -> Option<u64> {
+        let levels = u32::from(self.dnode.nlevels);
+        if levels == 0 {
+            return Some(0);
+        }
+        let mut reads = 0;
+        let last = self.last_in(&self.dnode.blkptr, levels - 1, 0, &mut reads)?;
+        Some(last.map_or(0, |b| b.saturating_add(1)))
+    }
+
+    /// The last level-0 block id under `ptrs`, the pointers of one
+    /// level whose first starts at block `base`: `Some(None)` when all
+    /// of it is holes, `None` when that is not known.
+    fn last_in(
+        &self,
+        ptrs: &[BlkPtr],
+        level: u32,
+        base: u64,
+        reads: &mut u32,
+    ) -> Option<Option<u64>> {
+        let epbs = self.epbs();
+        let span = 1u64.checked_shl(epbs.checked_mul(level)?)?;
+        for (i, bp) in ptrs.iter().enumerate().rev() {
+            if bp.is_hole() {
+                continue;
+            }
+            let start = base.checked_add((i as u64).checked_mul(span)?)?;
+            if level == 0 {
+                return Some(Some(start));
+            }
+            *reads += 1;
+            if *reads > MAX_TAIL_READS {
+                return None;
+            }
+            let block = self.reader.read_block(bp, false).ok()?;
+            // `locate` takes an index into exactly 2^epbs pointers: an
+            // indirect block of another size is not one this answers for.
+            let count = 1usize.checked_shl(epbs)?;
+            if block.data.len() != count.checked_mul(blkptr::SIZE)? {
+                return None;
+            }
+            let children = block
+                .data
+                .chunks_exact(blkptr::SIZE)
+                .map(|c| BlkPtr::parse(c, bp.endian))
+                .collect::<Result<Vec<_>, _>>()
+                .ok()?;
+            if let Some(found) = self.last_in(&children, level - 1, start, reads)? {
+                return Some(Some(found));
+            }
+        }
+        Some(None)
+    }
+
     /// Bytes this object logically spans (`(maxblkid + 1) * datablksz`).
     ///
     /// `dn_maxblkid` is whatever the dnode says, and a hostile one makes
@@ -164,6 +229,11 @@ impl<'r, 'a> ObjectReader<'r, 'a> {
             .saturating_mul(self.dnode.datablksz())
     }
 }
+
+/// The most indirect blocks [`ObjectReader::data_blocks`] reads: the
+/// last path down is one per level, and an indirect block that is all
+/// holes underneath, which sends the search back one pointer, is rare.
+pub const MAX_TAIL_READS: u32 = 64;
 
 /// The most [`ObjectReader::read_range`] reads in one call: 1 GiB, far
 /// above any object read whole and far below what a hostile length asks.
@@ -387,6 +457,45 @@ mod tests {
             // A small read of the same object still works.
             assert_eq!(obj.read_range(0, 16).unwrap(), pattern(0, 4096)[..16]);
         }
+    }
+
+    /// The last block that holds data is found from the pointers, not
+    /// from `dn_maxblkid`: a forged one of 2^40 over six blocks says
+    /// six, and so does an honest one. Where the way down does not read,
+    /// it is not known, and not taken as "nothing".
+    #[test]
+    fn the_last_block_with_data_is_found_from_the_pointers() {
+        for (levels, present, want) in [
+            (2u8, &[0u64, 1, 5][..], 6u64),
+            (3, &[0, 63, 17], 64),
+            (3, &[2], 3),
+        ] {
+            let (sources, assembly, mut dnode) = build(|a, m| object(a, m, levels, present));
+            let dyns = dyn_sources(&sources);
+            let reader = PoolReader::new(&assembly, dyns);
+            for maxblkid in [dnode.maxblkid, 1 << 40] {
+                dnode.maxblkid = maxblkid;
+                let obj = ObjectReader::new(&reader, dnode.clone(), Endian::Little);
+                assert_eq!(
+                    obj.data_blocks(),
+                    Some(want),
+                    "{levels} {present:?} {maxblkid}"
+                );
+                assert!(obj.locate(want).unwrap().is_none());
+            }
+        }
+        let (sources, assembly, dnode) = build(|a, m| {
+            let d = object(a, m, 2, &[0, 1]);
+            let off = (zfs_ondisk::blkptr::LABEL_START_SIZE + d.blkptr[0].dva[0].offset) as usize;
+            for img in m.iter_mut() {
+                img[off + 3] ^= 0xff;
+            }
+            d
+        });
+        let dyns = dyn_sources(&sources);
+        let reader = PoolReader::new(&assembly, dyns);
+        let obj = ObjectReader::new(&reader, dnode, Endian::Little);
+        assert_eq!(obj.data_blocks(), None);
     }
 
     #[test]

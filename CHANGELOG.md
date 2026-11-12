@@ -348,11 +348,14 @@ tagged. `v0.7.1` is the release that carries those six.
   (`error`, `recorded`, `xattr_errors`), and a file whose attributes
   could not be read is not whole (exit 4).
 * **A file whose size runs far past its blocks hashed without a word.**
-  A forged size of a petabyte hashes its zeros for days. A file whose
-  size runs more than 1 GiB past its last block is now said on standard
-  error, with how far, and that SIGINT stops the run; the zeros past the
-  last block are no longer read block by block. `zvolfiles` also no
-  longer prints `entr(y|ies)`.
+  A forged size of a petabyte hashes its zeros for days, and so does a
+  forged block count (`dn_maxblkid` of 2^40 over a file of one block),
+  in `extract` and in `objects`. The last block with data is now found
+  from the block pointers, not taken from the block count; a file or
+  object that runs more than 1 GiB past it is said on standard error,
+  with how far, and that SIGINT stops the run, and the zeros past it are
+  no longer read block by block. `zvolfiles` also no longer prints
+  `entr(y|ies)`.
 * **A carve's extraction was invisible to the report.** `zvolcarve dump`
   printed a flat document with no `volumes` and no unreadable ranges, so
   `zvolreport build` saw no extraction at all and listed its zeroed

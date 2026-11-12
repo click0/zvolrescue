@@ -26,6 +26,22 @@ pub fn os_bytes(s: &std::ffi::OsStr) -> Vec<u8> {
     s.to_string_lossy().as_bytes().to_vec()
 }
 
+/// A file or object whose size runs this far past its last block with
+/// data is said to on standard error: the rest is a hole, hashed as
+/// zeros without a read, and a forged size or block count of a petabyte
+/// hashes for days.
+pub const TAIL_NOTE: u64 = 1 << 30;
+
+/// Where an object's last block with data ends, in bytes of `bs`: from
+/// its pointers where they say, and from `dn_maxblkid` where they do
+/// not — never past it, since a read there is of nothing.
+pub fn data_end(obj: &zfs_read::dmu::ObjectReader<'_, '_>, bs: u64) -> u64 {
+    let claimed = obj.dnode().maxblkid.saturating_add(1);
+    obj.data_blocks()
+        .map_or(claimed, |n| n.min(claimed))
+        .saturating_mul(bs)
+}
+
 /// Bytes of a file or object written as zeros because the block that
 /// held them could not be read whole (Z-06, SPEC F-33): which block,
 /// where in the file, how much, and why. A count alone said that

@@ -19,7 +19,7 @@ use zvol_common::evidence::FileRef;
 use zvol_common::timefmt::iso8601_ns;
 use zvol_common::{exit, Format, Global, PoolSpec};
 
-use crate::common::{resolve_path, with_dataset, AtArgs, Zeroed};
+use crate::common::{resolve_path, with_dataset, AtArgs, Zeroed, TAIL_NOTE};
 use crate::out::{OutError, OutTree};
 
 /// Options of an `extract` run.
@@ -405,11 +405,6 @@ struct Copied {
     zeroed: Vec<Zeroed>,
 }
 
-/// A file whose size runs this far past its last block is said to on
-/// standard error: the rest is a hole, hashed as zeros without a read,
-/// and a forged size of a petabyte hashes for days.
-const TAIL_NOTE: u64 = 1 << 30;
-
 /// Record `length` bytes at `offset` as zeros, merged into the run
 /// before when it is the same failure going on: a forged size over a
 /// block size of nothing is one entry, not one per block.
@@ -444,10 +439,13 @@ fn copy_file(
     let obj = fs.object(object).map_err(|e| fail(e.to_string()))?;
     let bs = obj.dnode().datablksz().max(512);
     // Past its last block a file is a hole, and its zeros need no read.
-    let blocks_end = obj.dnode().maxblkid.saturating_add(1).saturating_mul(bs);
+    // The last block is the last one its pointers have, where they say:
+    // a forged block count of 2^40 was 2^40 blocks located through no
+    // pointer at all, for days and without a word.
+    let blocks_end = crate::common::data_end(&obj, bs);
     if size.saturating_sub(blocks_end) > TAIL_NOTE {
         eprintln!(
-            "zvolfiles: {shown}: {size} bytes, and its blocks end at byte {blocks_end}: the rest is a hole, hashed as zeros (a sparse file, or a damaged size; SIGINT stops the run)"
+            "zvolfiles: {shown}: {size} bytes, and its last block with data ends at byte {blocks_end}: the rest is a hole, hashed as zeros (a sparse file, or a damaged size or block count; SIGINT stops the run)"
         );
     }
     let mut file = tree.create(to)?;
