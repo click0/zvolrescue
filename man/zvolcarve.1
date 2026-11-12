@@ -160,6 +160,15 @@ Metadata is lz4 on any modern pool and lzjb on one made before the
 .Ql lz4_compress
 feature; each one costs a pass, and dropping the wrong one finds
 nothing.
+The offsets are counted from where the vdev starts; on a member no
+label, uberblock or
+.Fl -hints
+places, that start is found from its block pointers, as
+.Cm zeropoint
+finds it, said, and recorded in the index
+.Pq Li starts_by_pointers .
+Reading a candidate from such a member needs the same start in
+.Fl -hints .
 .El
 .Ss list
 .Nm Cm list

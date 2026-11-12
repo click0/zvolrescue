@@ -526,6 +526,15 @@ tagged. `v0.7.1` is the release that carries those six.
   (exit 5) — and the record of that left in `new.img`, the file asked
   for the image. A log is now compared with what the command line names
   by name as well as by file, and refused before either is made.
+* **`zvolcarve scan` on a member no label places tried no compressed
+  block.** Compressed blocks are looked for every 2^ashift bytes from
+  where the vdev starts, and with no label, uberblock or `--hints` that
+  was taken to be byte 0: a vdev on a partition at sector 63 had none of
+  its blocks tried, and `--compressed lz4` found nothing (2644
+  plaintext candidates, no lz4) without a word, while `zeropoint` found
+  the start in a second. The scan now asks the member's block pointers
+  the same way, uses a start they agree on, says so and records it
+  (`starts_by_pointers`): 43 441 lz4 candidates on the same member.
 
 ## v0.9.12 — 2026-11-07
 

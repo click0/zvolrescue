@@ -160,7 +160,22 @@ pub struct Index {
     /// What the disk actually holds, when `--sample` asked (C-19).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub histograms: Option<Histograms>,
+    /// Where a member's vdev starts, by its block pointers, when no
+    /// label, uberblock or `--hints` said: the compressed pass steps
+    /// from there (SPEC F-63).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub starts_by_pointers: Vec<StartByPointers>,
     pub candidates: Vec<Candidate>,
+}
+
+/// A member's vdev start found from its block pointers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartByPointers {
+    pub member: PathBuf,
+    pub base: u64,
+    /// Probes whose checksum agreed at this base, of those read.
+    pub confirmed: usize,
+    pub tried: usize,
 }
 
 /// What a sample of the hits looks like, so a profile can be picked from

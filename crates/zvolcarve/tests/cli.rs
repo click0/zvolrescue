@@ -823,3 +823,43 @@ fn the_scan_state_is_kept_and_a_bad_one_stops_a_resume() {
     assert!(err.contains("not a scan state"), "{err}");
     assert_eq!(std::fs::read(&state).unwrap(), bad);
 }
+
+/// A member no label places is searched for its start by its block
+/// pointers, as `zeropoint` does, and the compressed pass steps from
+/// there: a vdev on a partition at sector 63 had none of its blocks
+/// tried, and `--compressed lz4` found nothing without a word. The start
+/// is said and recorded; a member that starts at 0 gets neither.
+#[test]
+fn a_member_no_label_places_is_placed_by_its_pointers() {
+    let dir = scratch("by-pointers");
+    let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1)]);
+    let mut bare = carved_zvol_members(&mut pool, SIZE).swap_remove(0);
+    let (n, labels) = (bare.len(), 2 * LABEL_SIZE as usize);
+    bare[..labels].fill(0);
+    bare[n - labels..].fill(0);
+    let mut shifted = vec![0u8; 63 * 512];
+    shifted.extend_from_slice(&bare);
+    for (name, bytes, start) in [("shifted", &shifted, Some(32256)), ("bare", &bare, None)] {
+        let img = dir.join(format!("{name}.img"));
+        std::fs::write(&img, bytes).unwrap();
+        let ws = dir.join(format!("ws-{name}"));
+        let (code, _, err) = run(&[
+            "-q",
+            "scan",
+            img.to_str().unwrap(),
+            "-o",
+            ws.to_str().unwrap(),
+        ]);
+        assert_eq!(code, 0, "{name}: {err}");
+        let index: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(ws.join("candidates.json")).unwrap()).unwrap();
+        let recorded = index["starts_by_pointers"][0]["base"].as_u64();
+        assert_eq!(recorded, start, "{name}: {err}");
+        assert_eq!(
+            err.contains("its block pointers put it at byte 32256"),
+            start.is_some(),
+            "{name}: {err}"
+        );
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}

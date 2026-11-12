@@ -19,7 +19,7 @@ use zvolrescue_io::BlockSource;
 
 use crate::model::{
     to_hex, AssessmentOut, Bucket, Candidate, ContentsOut, Histograms, Index, ProfileOut,
-    Rejection, SpaceOut, State, INDEX, INDEX_VERSION, STATE,
+    Rejection, SpaceOut, StartByPointers, State, INDEX, INDEX_VERSION, STATE,
 };
 
 /// The search profile, on the command line (C-13, C-16, C-17, C-18).
@@ -527,6 +527,42 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         }
     }
     let mut mirror_duplicates = earlier.as_ref().map_or(0, |i| i.mirror_duplicates);
+    // A member no label, uberblock or hint places is read from byte 0,
+    // and a compressed block is looked for every 2^ashift bytes from
+    // there: a vdev on a partition at sector 63 had none of its blocks
+    // tried, and `--compressed lz4` found nothing — with no word, while
+    // `zeropoint` found the start in a second. Its block pointers are
+    // asked the same way here, and a start they agree on is used.
+    let mut starts: Vec<u64> = (0..members.paths.len()).map(base_of).collect();
+    let mut by_pointers: Vec<StartByPointers> = Vec::new();
+    if spec.hints.is_none() && !codecs.is_empty() {
+        for (i, src) in members.sources.iter().enumerate() {
+            let placed = members
+                .scans
+                .get(i)
+                .and_then(Option::as_ref)
+                .is_none_or(|s| s.config_verified() || s.newest_txg().is_some());
+            let Some(src) = src.as_ref().filter(|_| starts[i] == 0 && !placed) else {
+                continue;
+            };
+            if let Some(b) = start_by_pointers(src, i, &codecs, &interrupt) {
+                eprintln!(
+                    "zvolcarve: {}: no label says where the vdev starts; its block pointers put it at byte {} ({} of {} probes agree, as `zvolcarve zeropoint` would say), and compressed blocks are looked for from there. Reading a candidate needs the same base in --hints",
+                    members.paths[i].display(),
+                    b.base,
+                    b.confirmed,
+                    b.tried
+                );
+                starts[i] = b.base;
+                by_pointers.push(StartByPointers {
+                    member: members.paths[i].clone(),
+                    base: b.base,
+                    confirmed: b.confirmed,
+                    tried: b.tried,
+                });
+            }
+        }
+    }
 
     for (i, src) in members.sources.iter().enumerate() {
         let Some(src) = src else {
@@ -577,7 +613,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 codecs: codecs.clone(),
                 max_hits: opts.sample.unwrap_or(opts.max_hits),
                 stop: Some(interrupt.clone()),
-                vdev_start: base_of(i),
+                vdev_start: starts[i],
                 count_from,
                 ..ScanOptions::default()
             },
@@ -793,6 +829,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             may_lag: s.may_lag,
         }),
         histograms,
+        starts_by_pointers: by_pointers,
         candidates,
     };
 
@@ -1055,4 +1092,36 @@ fn contents_of(obj: &ObjectReader<'_, '_>) -> Vec<ContentsOut> {
             label: f.label,
         })
         .collect()
+}
+
+/// Where a member's vdev starts by its own block pointers (SPEC F-63),
+/// as `zvolcarve zeropoint` finds it: every sector tried, a few
+/// thousand pointers read, and each candidate start tested by whether
+/// the blocks they name hash right there. Only a start the probes agree
+/// on — enough of them, and twice as many as on any other — and one
+/// that is not 0, which is what was assumed already.
+fn start_by_pointers(
+    src: &dyn BlockSource,
+    device: usize,
+    codecs: &[Codec],
+    stop: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Option<zfs_read::pointers::Base> {
+    let scan = scan_member(
+        src,
+        device,
+        9,
+        &ScanOptions {
+            codecs: codecs.to_vec(),
+            max_hits: 4096,
+            stop: Some(stop.clone()),
+            ..ScanOptions::default()
+        },
+    )
+    .ok()?;
+    let probes = zfs_read::pointers::anchors(&scan);
+    let found =
+        zfs_read::pointers::search(src, &probes, &zfs_read::pointers::Options::default()).ok()?;
+    let best = found.first()?;
+    let next = found.get(1).map_or(0, |b| b.confirmed);
+    (best.base != 0 && best.confirmed >= 8 && best.confirmed >= 2 * next).then(|| best.clone())
 }
