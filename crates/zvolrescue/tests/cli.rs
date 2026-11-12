@@ -342,11 +342,10 @@ fn dump_never_writes_over_what_it_reads() {
         &both,
     ]);
     assert_eq!(code, 5, "{err}");
-    assert!(err.contains("--evidence-log"), "{err}");
-    // What is there is the log of the refused run, not an image with a
-    // record on its end.
-    let text = std::fs::read_to_string(&both).unwrap();
-    assert!(text.starts_with('{'), "{text}");
+    assert!(err.contains("refusing --evidence-log"), "{err}");
+    // Refused before either is made: the log of the refused run was
+    // left in the file asked for the image.
+    assert!(!dir.join("both.img").exists(), "the log was made");
 }
 
 /// Neither log may be written over a member: `--debug-log` truncated

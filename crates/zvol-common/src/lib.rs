@@ -499,8 +499,12 @@ impl Global {
             // The very file a word names — an input, or the run's own
             // output — said as that: the check below called the log the
             // output and every word an input, "output out.img is the same
-            // file as input out.img" for a log given as the image.
-            if let Some(file) = named.iter().find(|n| same_existing(log, n)) {
+            // file as input out.img" for a log given as the image. And by
+            // name too, before either exists: a log given as an output
+            // still to be made was created there, the output then refused
+            // as where the log goes (exit 5), and the record of that
+            // written into the file the operator asked for the image in.
+            if let Some(file) = named.iter().find(|n| same_file(log, n)) {
                 eprintln!(
                     "{tool}: refusing {flag} {}: it is {}, which this run reads or writes",
                     log.display(),
@@ -632,15 +636,6 @@ impl Global {
         }
         status
     }
-}
-
-/// Whether `a` and `b` both exist and are one file.
-fn same_existing(a: &Path, b: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    matches!(
-        (std::fs::metadata(a), std::fs::metadata(b)),
-        (Ok(x), Ok(y)) if x.dev() == y.dev() && x.ino() == y.ino()
-    )
 }
 
 /// Whether `a` and `b` are one file: the same inode when both exist, the

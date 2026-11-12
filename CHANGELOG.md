@@ -520,6 +520,12 @@ tagged. `v0.7.1` is the release that carries those six.
   the first and names the second, but `list` showed both at one path,
   the second directory's contents under the first's, exit 0. The second
   entry, and what is listed under it, now say so (exit 4).
+* **A refused run left its log where the output was to be.** With
+  `--evidence-log new.img … -o new.img` and neither there yet, the log
+  was opened first, the output then refused as where the log goes
+  (exit 5) — and the record of that left in `new.img`, the file asked
+  for the image. A log is now compared with what the command line names
+  by name as well as by file, and refused before either is made.
 
 ## v0.9.12 — 2026-11-07
 
