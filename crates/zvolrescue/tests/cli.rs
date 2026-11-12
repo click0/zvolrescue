@@ -2046,3 +2046,34 @@ fn a_bulk_dump_writes_only_its_own_files() {
         "{err}"
     );
 }
+
+/// An image sent to `/dev/null` is hashed on the way and kept nowhere:
+/// the record carries its hash in the result and no output to check it
+/// against. It was an output of 0 bytes over the image's hash, which
+/// `zvolreport verify` called changed as soon as it was made.
+#[test]
+fn an_image_sent_to_dev_null_is_no_output_on_the_record() {
+    if !std::path::Path::new("/dev/null").exists() {
+        return;
+    }
+    let dir = scratch("dev-null-record");
+    let m = write_members(&dir, &plain_members());
+    let log = dir.join("ev.jsonl").to_string_lossy().into_owned();
+    let (code, _, err) = run(&[
+        "-q",
+        "--evidence-log",
+        &log,
+        "dump",
+        "tank/vm/disk0",
+        &m[0],
+        &m[1],
+        "-o",
+        "/dev/null",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let record: serde_json::Value =
+        serde_json::from_str(std::fs::read_to_string(&log).unwrap().trim()).unwrap();
+    assert_eq!(record["outputs"], serde_json::json!([]), "{record}");
+    assert_eq!(record["result"]["volumes"][0]["output"], "/dev/null");
+    assert!(record["result"]["volumes"][0]["sha256"].is_string());
+}

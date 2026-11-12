@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use zvol_common::evidence::{digests_of, Extra};
+use zvol_common::evidence::{digests_of_prefix, Extra};
 use zvol_common::{exit, Format, Global};
 
 use crate::model::{Report, REPORT_VERSION};
@@ -155,6 +155,9 @@ struct Recorded<'a> {
     /// Its size, where the report has one: all there is to check when
     /// no hash was taken.
     size: Option<u64>,
+    /// Hash only this many bytes from the start: an image written to a
+    /// device is the device's first bytes, not the whole device.
+    prefix: Option<u64>,
 }
 
 /// Check a file against every digest the report recorded for it.
@@ -216,7 +219,7 @@ fn check(kind: &'static str, path: &Path, recorded: &Recorded<'_>) -> Vec<Checke
         sha1: recorded.sha1.is_some(),
         md5: recorded.md5.is_some(),
     };
-    let got = match digests_of(path, extra) {
+    let got = match digests_of_prefix(path, extra, recorded.prefix) {
         Err(e) => {
             return want
                 .into_iter()
@@ -477,6 +480,7 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
                 sha1: None,
                 md5: None,
                 size: None,
+                prefix: None,
             },
         );
         if rows.iter().all(|c| c.status == Status::Pass) {
@@ -515,6 +519,7 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
                 sha1: e.file.sha1.as_ref(),
                 md5: e.file.md5.as_ref(),
                 size: Some(e.file.size),
+                prefix: None,
             },
         ));
     }
@@ -528,6 +533,10 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
                 sha1: o.sha1.as_ref(),
                 md5: o.md5.as_ref(),
                 size: Some(o.size),
+                prefix: o
+                    .kind
+                    .is_some_and(zvol_common::evidence::Kind::is_device)
+                    .then_some(o.size),
             },
         ));
     }
@@ -628,6 +637,7 @@ mod check_tests {
     use super::*;
     use std::fs;
     use std::path::PathBuf;
+    use zvol_common::evidence::digests_of;
 
     fn scratch(name: &str) -> PathBuf {
         let dir =
@@ -672,6 +682,7 @@ mod check_tests {
                 sha1: Some(&h1),
                 md5: Some(&h5),
                 size: None,
+                prefix: None,
             },
         );
         assert_eq!(algorithms(&rows), vec!["sha256", "sha1", "md5"]);
@@ -695,6 +706,7 @@ mod check_tests {
                 sha1: Some(&h1),
                 md5: Some(&h5),
                 size: None,
+                prefix: None,
             },
         );
         assert_eq!(rows.len(), 3);
@@ -718,6 +730,7 @@ mod check_tests {
                 sha1: Some(&h1),
                 md5: Some(&h5),
                 size: None,
+                prefix: None,
             },
         );
         assert_eq!(rows.len(), 3);
@@ -739,6 +752,7 @@ mod check_tests {
                 sha1: None,
                 md5: None,
                 size: Some(fs::metadata(&p).unwrap().len()),
+                prefix: None,
             },
         );
         assert_eq!(rows.len(), 1);
@@ -759,6 +773,7 @@ mod check_tests {
             sha1: None,
             md5: None,
             size,
+            prefix: None,
         };
         fs::write(&p, b"").unwrap();
         let rows = check("evidence", &p, &none(Some(size)));
@@ -767,6 +782,31 @@ mod check_tests {
         fs::remove_file(&p).unwrap();
         let rows = check("evidence", &p, &none(Some(size)));
         assert!(rows[0].status == Status::Missing, "{rows:?}");
+    }
+
+    /// An image on a device is the device's first bytes: only that many
+    /// are hashed, and what lies past them on the device is no change.
+    #[test]
+    fn an_image_on_a_device_is_checked_over_its_own_bytes() {
+        let dir = scratch("prefix");
+        let p = dir.join("dev.raw");
+        let mut bytes = b"the bytes of a volume, such as they are".to_vec();
+        let image = bytes.len() as u64;
+        fs::write(dir.join("img"), &bytes).unwrap();
+        let (h256, _, _) = all_three(&dir.join("img"));
+        bytes.extend_from_slice(&[0xaa; 4096]);
+        fs::write(&p, &bytes).unwrap();
+        let recorded = |prefix| Recorded {
+            sha256: Some(&h256),
+            sha1: None,
+            md5: None,
+            size: Some(image),
+            prefix,
+        };
+        let rows = check("output", &p, &recorded(Some(image)));
+        assert!(rows[0].status == Status::Pass, "{rows:?}");
+        let rows = check("output", &p, &recorded(None));
+        assert!(rows[0].status == Status::Fail, "{rows:?}");
     }
 
     /// Only what was recorded is checked: a record with SHA-256 and MD5
@@ -784,6 +824,7 @@ mod check_tests {
                 sha1: None,
                 md5: Some(&h5),
                 size: None,
+                prefix: None,
             },
         );
         assert_eq!(algorithms(&rows), vec!["sha256", "md5"]);

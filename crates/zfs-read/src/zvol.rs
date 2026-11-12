@@ -70,6 +70,11 @@ pub struct Report {
     /// block before it is in the image, and a resume starts here. `None`
     /// when nothing asked.
     pub interrupted_at: Option<u64>,
+    /// How long the image is: the bytes the digests cover, which the
+    /// output was finished to — `volsize`, or the prefix before the
+    /// block an abort or a signal stopped at. A file is that long; a
+    /// device holds the image in its first that many bytes.
+    pub image_bytes: u64,
     /// SHA-256 of the full `volsize` image (holes as zeros), lowercase hex.
     pub sha256: String,
     /// SHA-1 of the same image, when it was asked for (SPEC F-53).
@@ -215,6 +220,7 @@ pub fn extract_from(
         aborted: false,
         stopped_by_medium: None,
         interrupted_at: None,
+        image_bytes: 0,
         sha256: String::new(),
         sha1: None,
         md5: None,
@@ -386,6 +392,7 @@ pub fn extract_from(
         if report.interrupted_at.is_none() {
             sink.finish(volsize)
                 .map_err(|e| ReadError::Io(e.to_string()))?;
+            report.image_bytes = volsize;
         }
     }
     if report.aborted {
@@ -397,13 +404,15 @@ pub fn extract_from(
         // no file there is, a `verify` FAIL on an image nobody touched.
         sink.finish(hashed_to)
             .map_err(|e| ReadError::Io(e.to_string()))?;
+        report.image_bytes = hashed_to;
     }
     if let Some(at) = report.interrupted_at {
         // The image holds the blocks before `at` and is exactly that
         // long, holes included, so a resume can read them back to hash
         // them; finishing it to the whole volume would have claimed
         // bytes nobody wrote.
-        sink.finish(at.saturating_mul(bs).min(volsize))
+        report.image_bytes = at.saturating_mul(bs).min(volsize);
+        sink.finish(report.image_bytes)
             .map_err(|e| ReadError::Io(e.to_string()))?;
     }
     let done = digests.finish();

@@ -81,6 +81,9 @@ struct DumpOut {
     sha1: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     md5: Option<String>,
+    /// How long the image is: what a device holds of it.
+    #[serde(skip)]
+    image_bytes: u64,
     seconds: f64,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     bad: Vec<BadOut>,
@@ -481,6 +484,7 @@ fn dump_one(
         sha256: report.sha256.clone(),
         sha1: report.sha1.clone(),
         md5: report.md5.clone(),
+        image_bytes: report.image_bytes,
         seconds: started.elapsed().as_secs_f64(),
         bad: report
             .bad
@@ -931,11 +935,16 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     // over it — there is no reason to read a 32 GiB image back to hash
     // what was just hashed on the way out. The manifest of a bulk run is
     // small enough to hash here.
+    // An image sent to a device is the device's first so many bytes,
+    // and one sent to /dev/null is kept nowhere: its hash is in the
+    // result, and there is no output to check it against.
     let mut written: Vec<evidence::FileRef> = out
         .volumes
         .iter()
+        .filter(|v| !evidence::keeps_nothing(&v.output))
         .map(|v| {
             evidence::FileRef::known_with(&v.output, &v.sha256, v.sha1.as_deref(), v.md5.as_deref())
+                .image(v.image_bytes)
         })
         .collect();
     if opts.recursive {

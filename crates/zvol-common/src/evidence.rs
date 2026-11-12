@@ -125,6 +125,18 @@ impl FileRef {
         }
     }
 
+    /// What a run that wrote an image of `len` bytes to `path` records
+    /// of it: a device holds the image in its first `len` bytes, and its
+    /// own size — which a stat gives as nothing — is not the image's. A
+    /// record of 0 bytes over a hash of the image made `verify` hash the
+    /// whole device and call the image changed the moment it was made.
+    pub fn image(mut self, len: u64) -> FileRef {
+        if self.kind == Some(Kind::Device) {
+            self.size = len;
+        }
+        self
+    }
+
     /// Describe a file and read it through to hash it.
     pub fn hashed(path: &Path) -> io::Result<FileRef> {
         Ok(FileRef {
@@ -138,17 +150,46 @@ impl FileRef {
 /// in 1 MiB chunks so a large image never has to fit in memory
 /// (SPEC F-53).
 pub fn digests_of(path: &Path, extra: Extra) -> io::Result<DigestSet> {
+    digests_of_prefix(path, extra, None)
+}
+
+/// The same, of the first `limit` bytes only when one is given: what an
+/// image written to a device is.
+pub fn digests_of_prefix(path: &Path, extra: Extra, limit: Option<u64>) -> io::Result<DigestSet> {
     let mut f = std::fs::File::open(path)?;
     let mut digests = Digests::new(extra);
     let mut buf = vec![0u8; 1 << 20];
-    loop {
-        let n = f.read(&mut buf)?;
+    let mut left = limit.unwrap_or(u64::MAX);
+    while left > 0 {
+        let want = buf.len().min(usize::try_from(left).unwrap_or(usize::MAX));
+        let n = f.read(&mut buf[..want])?;
         if n == 0 {
             break;
         }
         digests.update(&buf[..n]);
+        left -= n as u64;
     }
     Ok(digests.finish())
+}
+
+/// Whether writing to `path` keeps nothing: `/dev/null`, `/dev/zero`.
+/// An image sent there was hashed on the way and is in the record's
+/// result; as an output it is nothing anyone can check.
+#[cfg(unix)]
+pub fn keeps_nothing(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    ["/dev/null", "/dev/zero"].iter().any(|d| {
+        match (std::fs::metadata(path), std::fs::metadata(d)) {
+            (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+            _ => false,
+        }
+    })
+}
+
+/// Whether writing to `path` keeps nothing.
+#[cfg(not(unix))]
+pub fn keeps_nothing(_path: &Path) -> bool {
+    false
 }
 
 /// Hex SHA-256 of bytes already in memory.

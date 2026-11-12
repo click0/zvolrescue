@@ -426,6 +426,14 @@ tagged. `v0.7.1` is the release that carries those six.
   device node is on that device. A ZFS dataset names no device, and is
   not traced; the manual says so. An output's own message names it a
   file or a directory, as it is.
+* **An image written to a device failed `verify` at once.** The record
+  took the output's size from a stat, which is 0 for a device, under the
+  hash of the image; `zvolreport verify` then hashed the whole device
+  — or nothing, for `/dev/null` — and called the image changed straight
+  after a clean run (exit 4). A device output is now recorded with the
+  bytes the image took on it, and checked over those; `/dev/null` keeps
+  nothing and is no output on the record, the image's hash staying in
+  the result. The same for `zvolcarve dump`.
 
 ## v0.9.12 — 2026-11-07
 

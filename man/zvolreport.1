@@ -100,6 +100,10 @@ Recompute the hashes a report recorded and say what still matches:
 of the logs it was built from, of the evidence, and of the outputs.
 A file read without a hash is still looked for, and its size compared
 with the one recorded.
+An image written to a device is checked over the bytes it took there,
+not over the whole device; one sent to
+.Pa /dev/null
+is no output, and its hash is only in the record's result.
 A log not where it was recorded is looked for beside the report.
 When every log still hashes as recorded, the report is built from them
 again and compared with the one given: its logs, commands, evidence,

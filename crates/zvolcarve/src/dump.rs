@@ -343,12 +343,17 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     } else {
         code
     };
-    let written = vec![FileRef::known_with(
-        &opts.output,
-        &report.sha256,
-        report.sha1.as_deref(),
-        report.md5.as_deref(),
-    )];
+    let written: Vec<FileRef> = if zvol_common::evidence::keeps_nothing(&opts.output) {
+        Vec::new()
+    } else {
+        vec![FileRef::known_with(
+            &opts.output,
+            &report.sha256,
+            report.sha1.as_deref(),
+            report.md5.as_deref(),
+        )
+        .image(report.image_bytes)]
+    };
     // A device refused a read: every incident on stderr, and the stop —
     // when one stopped the run — as the exit code (SPEC F-33, N-10).
     let code = zvol_common::report_medium(&members.ledger).unwrap_or(code);
