@@ -309,12 +309,18 @@ fn loop_files(dev: u64) -> Vec<LoopFile> {
             if out.iter().any(|f| f.node == node) {
                 continue;
             }
-            todo.push(m.dev());
-            out.push(LoopFile {
-                path,
-                node,
-                on: m.dev(),
-            });
+            // A loop over a device — another loop, a partition — reads
+            // that device, not the filesystem its node in /dev is on:
+            // taken as a file, a loop over a loop over F was followed to
+            // devtmpfs, and F was missed both ways (an output F truncated
+            // its own input; an output to the outer loop overwrote F).
+            let on = if disks::is_device(&m) {
+                m.rdev()
+            } else {
+                m.dev()
+            };
+            todo.push(on);
+            out.push(LoopFile { path, node, on });
         }
     }
     out

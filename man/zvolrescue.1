@@ -364,6 +364,11 @@ directory under the device's path instead,
 for
 .Pa /dev/da1 ,
 and the run that resumes it is run from there.
+The state holds the SHA-256 of the blocks it counts;
+.Fl -resume
+reads them back from the output and starts over, saying so, when they
+no longer come to it: another disk under the device's name, or an image
+written since.
 .It Pa manifest.json
 Under the output directory of
 .Cm dump Fl r :

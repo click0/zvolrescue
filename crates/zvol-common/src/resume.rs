@@ -40,15 +40,24 @@ pub struct State {
     /// earlier version wrote.
     #[serde(default, skip_serializing_if = "Lost::is_empty")]
     pub lost: Lost,
+    /// SHA-256 of the image's first `blocks_done` blocks as the run
+    /// wrote them. A resume reads them back to hash them, and takes the
+    /// state up only when they still come to this: a state for
+    /// `/dev/sdb` was taken up on whatever disk had that name the next
+    /// time, and an image written over since was hashed as the volume.
+    /// Absent in a state an earlier version wrote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix_sha256: Option<String>,
 }
 
 impl State {
     /// What has to agree for a state to belong to an image: everything
-    /// but how far it got and what it lost on the way.
+    /// but how far it got, what it lost on the way and what that came to.
     pub fn key(&self) -> State {
         State {
             blocks_done: 0,
             lost: Lost::default(),
+            prefix_sha256: None,
             ..self.clone()
         }
     }
@@ -240,6 +249,7 @@ pub fn write(
     expected: &State,
     blocks_done: u64,
     lost: &Lost,
+    prefix_sha256: Option<&str>,
 ) -> Result<(), Unwritten> {
     use std::io::Write;
     let state_err = |e: std::io::Error| Unwritten::State(format!("{}: {e}", state_path.display()));
@@ -248,6 +258,17 @@ pub fn write(
         .open(image)
         .and_then(|f| {
             let dense = !f.metadata()?.is_file();
+            // The blocks counted end where the state says, holes and
+            // zeroed blocks included; a sparse file ends at the last
+            // block written. Left short, the state outlived a crash and
+            // the resume found the image "shorter than the bytes the
+            // resume state claims", and started over.
+            let prefix = blocks_done
+                .saturating_mul(expected.blocksize)
+                .min(expected.volsize);
+            if !dense && f.metadata()?.len() < prefix {
+                f.set_len(prefix)?;
+            }
             match f.sync_data() {
                 // A character device has nothing to flush, as
                 // `SparseFile::finish` knows.
@@ -259,6 +280,7 @@ pub fn write(
     let s = State {
         blocks_done,
         lost: lost.clone(),
+        prefix_sha256: prefix_sha256.map(str::to_owned),
         ..expected.key()
     };
     let json = serde_json::to_vec(&s).map_err(|e| Unwritten::State(e.to_string()))?;
@@ -343,17 +365,25 @@ impl<'a> Saver<'a> {
         &self.path
     }
 
-    /// Record blocks `0..blocks_done` and what they lost. `false` when
-    /// the image could not be flushed, now or before: the run is to
-    /// stop, as nothing it writes from here on can be counted.
-    pub fn save(&mut self, blocks_done: u64, lost: &Lost) -> bool {
+    /// Record blocks `0..blocks_done`, what they lost and the SHA-256
+    /// they came to. `false` when the image could not be flushed, now or
+    /// before: the run is to stop, as nothing it writes from here on can
+    /// be counted.
+    pub fn save(&mut self, blocks_done: u64, lost: &Lost, prefix_sha256: &str) -> bool {
         if self.unflushed.is_some() {
             return false;
         }
         if self.kept_nowhere {
             return true;
         }
-        match write(self.image, &self.path, self.expected, blocks_done, lost) {
+        match write(
+            self.image,
+            &self.path,
+            self.expected,
+            blocks_done,
+            lost,
+            Some(prefix_sha256),
+        ) {
             Ok(()) => {
                 self.saved = blocks_done;
                 self.unwritten = None;
@@ -403,7 +433,9 @@ impl<'a> Saver<'a> {
             .interrupted_at
             .or_else(|| report.bad.last().map(|b| b.blkid))
             .unwrap_or(start_block);
-        self.save(done, &earlier.and(report, done));
+        // The run stopped at `done` and its digests at the same block:
+        // the report's hash is that of the image it leaves.
+        self.save(done, &earlier.and(report, done), &report.sha256);
         Some(self.saved)
     }
 
@@ -526,7 +558,17 @@ pub fn open(
         match state {
             Ok(s) if s.key() == expected.key() => {
                 start_block = s.blocks_done;
-                let prefix = start_block * expected.blocksize;
+                let blocks = expected.volsize.div_ceil(expected.blocksize.max(1));
+                if start_block > blocks {
+                    eprintln!(
+                        "{tool}: {} counts {start_block} blocks done of a volume of {blocks}; starting over",
+                        state_path.display()
+                    );
+                    start_block = 0;
+                }
+                let prefix = start_block
+                    .saturating_mul(expected.blocksize)
+                    .min(expected.volsize);
                 match std::fs::File::open(output) {
                     Ok(mut f) => {
                         let mut left = prefix;
@@ -545,6 +587,17 @@ pub fn open(
                             digests.update(&buf[..n]);
                             left -= n as u64;
                         }
+                        let read_back = digests.clone().finish().sha256;
+                        if let Some(was) = s.prefix_sha256.as_ref().filter(|_| start_block > 0) {
+                            if *was != read_back {
+                                eprintln!(
+                                    "{tool}: {}: its first {prefix} bytes are not the ones the resume state counted (another disk under that name, or written since); starting over",
+                                    output.display()
+                                );
+                                start_block = 0;
+                                digests = Digests::new(extra);
+                            }
+                        }
                     }
                     Err(e) => {
                         eprintln!(
@@ -559,7 +612,7 @@ pub fn open(
                 }
                 if start_block > 0 {
                     lost = s.lost;
-                    SparseFile::open_existing(output, start_block * expected.blocksize)
+                    SparseFile::open_existing(output, prefix)
                 } else {
                     SparseFile::create(output)
                 }
@@ -664,7 +717,90 @@ mod tests {
             blocksize: 4096,
             blocks_done: 0,
             lost: Lost::default(),
+            prefix_sha256: None,
         }
+    }
+
+    /// A state remembers what its blocks came to, and a resume takes it
+    /// up only on an image whose first blocks still come to that: the
+    /// state of an image written to `/dev/sdb` was taken up on whatever
+    /// disk had that name the next time, and the disk's bytes hashed as
+    /// the volume's.
+    #[test]
+    fn a_state_is_taken_up_only_on_the_bytes_it_counted() {
+        let dir = scratch("prefix-hash");
+        let out = dir.join("out.img");
+        let exp = expected();
+        let prefix: Vec<u8> = (0..8192u32).map(|i| (i % 249) as u8).collect();
+        std::fs::write(&out, &prefix).unwrap();
+        let mut d = Digests::new(Extra::none());
+        d.update(&prefix);
+        let counted = d.finish().sha256;
+        write(&out, &path(&out), &exp, 2, &Lost::default(), Some(&counted)).unwrap();
+        let resume = |out: &Path| {
+            open(
+                "test",
+                "tank/vm/disk0",
+                out,
+                &exp,
+                Extra::none(),
+                true,
+                true,
+            )
+            .unwrap()
+            .0
+        };
+        assert_eq!(resume(&out), 2);
+
+        // Another medium under the name: the same length, other bytes.
+        write(&out, &path(&out), &exp, 2, &Lost::default(), Some(&counted)).unwrap();
+        let mut other = prefix.clone();
+        other[4096] ^= 1;
+        std::fs::write(&out, &other).unwrap();
+        assert_eq!(resume(&out), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A state counts the blocks before it, holes at the end of them
+    /// included, and the sparse image is made that long before the state
+    /// is written: it ended at the last block written, and a resume after
+    /// a crash found it "shorter than the bytes the resume state claims"
+    /// and started over. A state counting more blocks than the volume
+    /// has starts over too.
+    #[test]
+    fn a_state_makes_the_image_as_long_as_the_blocks_it_counts() {
+        let dir = scratch("holes-at-end");
+        let out = dir.join("out.img");
+        let exp = expected();
+        std::fs::write(&out, [9u8; 4096]).unwrap();
+        write(&out, &path(&out), &exp, 3, &Lost::default(), None).unwrap();
+        assert_eq!(std::fs::metadata(&out).unwrap().len(), 3 * 4096);
+        let (start, ..) = open(
+            "test",
+            "tank/vm/disk0",
+            &out,
+            &exp,
+            Extra::none(),
+            true,
+            true,
+        )
+        .unwrap();
+        assert_eq!(start, 3);
+
+        write(&out, &path(&out), &exp, 99, &Lost::default(), None).unwrap();
+        assert_eq!(std::fs::metadata(&out).unwrap().len(), exp.volsize);
+        let (start, ..) = open(
+            "test",
+            "tank/vm/disk0",
+            &out,
+            &exp,
+            Extra::none(),
+            true,
+            true,
+        )
+        .unwrap();
+        assert_eq!(start, 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A state that names this image resumes it: the prefix is hashed
@@ -678,7 +814,7 @@ mod tests {
         // Two blocks of a four-block image, then a state that says so.
         let prefix: Vec<u8> = (0..8192u32).map(|i| (i % 251) as u8).collect();
         std::fs::write(&out, &prefix).unwrap();
-        write(&out, &path(&out), &exp, 2, &Lost::default()).unwrap();
+        write(&out, &path(&out), &exp, 2, &Lost::default(), None).unwrap();
 
         let (start, digests, mut sink, lost) = open(
             "test",
@@ -713,7 +849,7 @@ mod tests {
         assert_eq!(std::fs::metadata(&out).unwrap().len(), 0);
 
         // Not asked to resume: from the start, whatever the state says.
-        write(&out, &path(&out), &exp, 2, &Lost::default()).unwrap();
+        write(&out, &path(&out), &exp, 2, &Lost::default(), None).unwrap();
         let (start, _, _, _) = open(
             "test",
             "tank/vm/disk0",
@@ -728,8 +864,8 @@ mod tests {
 
         // A state whose prefix the image no longer holds starts over
         // rather than hashing bytes that are not there.
+        write(&out, &path(&out), &exp, 2, &Lost::default(), None).unwrap();
         std::fs::write(&out, &prefix[..100]).unwrap();
-        write(&out, &path(&out), &exp, 2, &Lost::default()).unwrap();
         let (start, _, _, _) = open(
             "test",
             "tank/vm/disk0",
@@ -755,7 +891,7 @@ mod tests {
         let out = dir.join("out.img");
         let exp = expected();
         assert!(matches!(
-            write(&out, &path(&out), &exp, 1, &Lost::default()),
+            write(&out, &path(&out), &exp, 1, &Lost::default(), None),
             Err(Unwritten::Flush(_))
         ));
         assert!(
@@ -763,7 +899,7 @@ mod tests {
             "a state for an image that is not there"
         );
         std::fs::write(&out, [9u8; 4096]).unwrap();
-        write(&out, &path(&out), &exp, 1, &Lost::default()).unwrap();
+        write(&out, &path(&out), &exp, 1, &Lost::default(), None).unwrap();
         let back: State = serde_json::from_slice(&std::fs::read(path(&out)).unwrap()).unwrap();
         assert_eq!(back.blocks_done, 1);
         assert_eq!(back.key(), exp.key());
@@ -788,7 +924,7 @@ mod tests {
         std::fs::write(&victim, b"# Mapfile\n0x0 0x1000 +\n").unwrap();
         let state = path(&out);
         std::os::unix::fs::symlink(&victim, tmp_path(&state)).unwrap();
-        write(&out, &state, &expected(), 1, &Lost::default()).unwrap();
+        write(&out, &state, &expected(), 1, &Lost::default(), None).unwrap();
         assert_eq!(
             std::fs::read(&victim).unwrap(),
             b"# Mapfile\n0x0 0x1000 +\n"
@@ -843,7 +979,7 @@ mod tests {
         let dir = scratch("lost");
         let out = dir.join("out.img");
         std::fs::write(&out, [0u8; 8192]).unwrap();
-        write(&out, &path(&out), &expected(), 2, &lost).unwrap();
+        write(&out, &path(&out), &expected(), 2, &lost, None).unwrap();
         let (start, _, _, back) = open(
             "test",
             "tank/vm/disk0",
@@ -866,7 +1002,7 @@ mod tests {
         assert_eq!(second.bad[0].reason, "checksum");
 
         // A state with nothing lost says nothing of it, as before.
-        write(&out, &path(&out), &expected(), 2, &Lost::default()).unwrap();
+        write(&out, &path(&out), &expected(), 2, &Lost::default(), None).unwrap();
         let text = std::fs::read_to_string(path(&out)).unwrap();
         assert!(!text.contains("lost"), "{text}");
     }
@@ -916,7 +1052,7 @@ mod tests {
 
         // Written: the block it stopped at.
         let mut saver = Saver::new(&out, &exp, 0);
-        assert!(saver.save(1, &Lost::default()));
+        assert!(saver.save(1, &Lost::default(), "x"));
         assert_eq!(saver.conclude(&report, &Lost::default(), 0), Some(3));
         assert_eq!(
             saver.words("--resume continues there"),
@@ -927,7 +1063,7 @@ mod tests {
         // there, and the run says from where a resume will go on.
         std::fs::create_dir(tmp_path(&path(&out))).unwrap();
         let mut saver = Saver::new(&out, &exp, 0);
-        assert!(saver.save(2, &Lost::default()), "the image is flushed");
+        assert!(saver.save(2, &Lost::default(), "x"), "the image is flushed");
         assert_eq!(saver.conclude(&report, &Lost::default(), 0), Some(0));
         let words = saver.words("--resume continues there");
         assert!(
@@ -937,7 +1073,7 @@ mod tests {
         );
         std::fs::remove_dir(tmp_path(&path(&out))).unwrap();
         let mut saver = Saver::new(&out, &exp, 0);
-        assert!(saver.save(2, &Lost::default()));
+        assert!(saver.save(2, &Lost::default(), "x"));
         std::fs::create_dir(tmp_path(&path(&out))).unwrap();
         assert_eq!(saver.conclude(&report, &Lost::default(), 0), Some(2));
         assert!(
@@ -963,9 +1099,12 @@ mod tests {
         // An image that is not there to flush stops the saving.
         let gone = dir.join("gone.img");
         let mut saver = Saver::new(&gone, &exp, 0);
-        assert!(!saver.save(1, &Lost::default()));
+        assert!(!saver.save(1, &Lost::default(), "x"));
         assert!(saver.unflushed().is_some());
-        assert!(!saver.save(2, &Lost::default()), "and nothing after it");
+        assert!(
+            !saver.save(2, &Lost::default(), "x"),
+            "and nothing after it"
+        );
         assert!(!path(&gone).exists());
 
         // A whole image: no state, and nothing to say.

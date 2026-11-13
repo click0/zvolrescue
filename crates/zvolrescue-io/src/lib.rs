@@ -1043,6 +1043,16 @@ pub trait BlockSink {
     /// output sparse; the final length is fixed by [`BlockSink::finish`].
     fn write_at(&mut self, offset: u64, buf: &[u8]) -> io::Result<()>;
 
+    /// `len` bytes at `offset` are zeros in the image: a hole of the
+    /// volume, or a block that could not be read. A sparse file leaves
+    /// them a hole; a sink where nothing reads back as zeros by itself
+    /// writes them now, so that every block a resume state counts is in
+    /// the output as the hash took it. The default does nothing.
+    fn zeros(&mut self, offset: u64, len: u64) -> io::Result<()> {
+        let _ = (offset, len);
+        Ok(())
+    }
+
     /// Set the final length and flush.
     fn finish(&mut self, len: u64) -> io::Result<()>;
 }
@@ -1136,10 +1146,31 @@ impl BlockSink for SparseFile {
         Ok(())
     }
 
+    fn zeros(&mut self, offset: u64, len: u64) -> io::Result<()> {
+        if !self.dense {
+            return Ok(());
+        }
+        // A device keeps what it held before under a hole that waits for
+        // `finish`: a run that stopped before it, after a state counted
+        // the blocks around the hole, left the disk's old bytes in the
+        // prefix a resume took as the image — and hashed as zeros.
+        let zeros = vec![0u8; len.min(1 << 20) as usize];
+        let mut at = offset;
+        let end = offset.saturating_add(len);
+        while at < end {
+            let n = (end - at).min(zeros.len() as u64) as usize;
+            self.file.write_all_at(&zeros[..n], at)?;
+            at += n as u64;
+        }
+        self.written += len;
+        self.cover(offset, end);
+        Ok(())
+    }
+
     fn finish(&mut self, len: u64) -> io::Result<()> {
         if self.dense {
-            // Zeros wherever nothing was written: the holes of the volume,
-            // and its tail past the last block.
+            // Zeros wherever nothing was written: the volume's tail past
+            // its last block, and any hole no one said.
             let zeros = vec![0u8; 1 << 20];
             let mut at = 0u64;
             let gaps: Vec<(u64, u64)> = self
@@ -1189,6 +1220,15 @@ impl BlockSink for MemSink {
         }
         self.data[offset as usize..end].copy_from_slice(buf);
         self.writes.push((offset, buf.len()));
+        Ok(())
+    }
+
+    fn zeros(&mut self, offset: u64, len: u64) -> io::Result<()> {
+        let end = (offset + len) as usize;
+        if self.data.len() < end {
+            self.data.resize(end, 0);
+        }
+        self.data[offset as usize..end].fill(0);
         Ok(())
     }
 

@@ -168,7 +168,7 @@ pub fn extract(
         0,
         Digests::new(Extra::none()),
         None,
-        |done, total, _: &Report| progress(done, total),
+        |done, total, _: &Report, _: &Digests| progress(done, total),
     )
 }
 
@@ -190,7 +190,7 @@ pub fn extract_hashing(
         0,
         Digests::new(extra),
         None,
-        |done, total, _: &Report| progress(done, total),
+        |done, total, _: &Report, _: &Digests| progress(done, total),
     )
 }
 
@@ -205,7 +205,9 @@ pub fn extract_hashing(
 /// resumed instead of killing one that cannot.
 ///
 /// `progress` is also given the report so far, for a caller that records
-/// what the blocks done have lost along with how many are done.
+/// what the blocks done have lost along with how many are done, and the
+/// digests of the image so far — of exactly the blocks done — for one
+/// that records what they came to.
 #[allow(clippy::too_many_arguments)]
 pub fn extract_from(
     obj: &ObjectReader<'_, '_>,
@@ -215,7 +217,7 @@ pub fn extract_from(
     start_block: u64,
     mut digests: Digests,
     stop: Option<&AtomicBool>,
-    mut progress: impl FnMut(u64, u64, &Report),
+    mut progress: impl FnMut(u64, u64, &Report, &Digests),
 ) -> Result<Report, ReadError> {
     let bs = obj.dnode().datablksz();
     if bs == 0 {
@@ -281,6 +283,10 @@ pub fn extract_from(
         };
         match result {
             Ok(None) => {
+                if let Err(e) = sink.zeros(offset, take as u64) {
+                    refused(&mut report, blkid, offset, &e);
+                    break;
+                }
                 report.blocks_holes += 1;
                 digests.update(&zeros[..take]);
             }
@@ -351,6 +357,10 @@ pub fn extract_from(
                             // Every sector refused: nothing was kept, so the
                             // block is zeroed, not salvaged — and no "rest of
                             // the block was read".
+                            if let Err(e) = sink.zeros(offset, take as u64) {
+                                refused(&mut report, blkid, offset, &e);
+                                break;
+                            }
                             report.bad.push(BadRange {
                                 offset,
                                 len: take as u64,
@@ -386,6 +396,10 @@ pub fn extract_from(
                         }
                     }
                     None => {
+                        if let Err(e) = sink.zeros(offset, take as u64) {
+                            refused(&mut report, blkid, offset, &e);
+                            break;
+                        }
                         report.bad.push(BadRange {
                             offset,
                             len: take as u64,
@@ -404,7 +418,7 @@ pub fn extract_from(
             }
         }
         hashed_to = offset + take as u64;
-        progress(blkid + 1, blocks_total, &report);
+        progress(blkid + 1, blocks_total, &report, &digests);
     }
     if !report.aborted && report.interrupted_at.is_none() {
         // Everything past the last block is implicit zeros — which for a
@@ -414,6 +428,9 @@ pub fn extract_from(
         // the tail.
         let mut rest = volsize - hashed_to;
         let mut chunks = 0u32;
+        // Stopped in the tail, the digests are those of the blocks, not
+        // of some of the zeros after them: the image ends at the blocks.
+        let at_tail = digests.clone();
         while rest > 0 {
             chunks = chunks.wrapping_add(1);
             if chunks % 64 == 0 && stop.is_some_and(|s| s.load(Ordering::Relaxed)) {
@@ -422,6 +439,7 @@ pub fn extract_from(
                     "interrupted while hashing the zeros after block {blocks_total}"
                 );
                 report.interrupted_at = Some(blocks_total);
+                digests = at_tail;
                 break;
             }
             let n = rest.min(bs) as usize;
@@ -598,6 +616,35 @@ mod tests {
         img[..8192].copy_from_slice(&zvol_pattern(0));
         img[16384..24576].copy_from_slice(&zvol_pattern(2));
         img
+    }
+
+    /// Holes go out as zeros as the run reaches them, for a sink where
+    /// nothing reads back as zeros by itself. A device written densely
+    /// got them only at the end, and a run that died before it, after a
+    /// state had counted the blocks around them, left the disk's old
+    /// bytes in the prefix a resume took as the image.
+    #[test]
+    fn holes_reach_a_dense_sink_as_the_run_goes() {
+        let (s, a, ub, _) = build();
+        let reader = PoolReader::new(&a, vec![Some(&s[0] as &dyn BlockSource)]);
+        let mos = open_mos(&reader, &ub).unwrap();
+        let tree = walk(&mos, "tank").unwrap();
+        let ds = tree.get("tank/vm/disk0").unwrap();
+        let (obj, _) = open_volume(&reader, ds).unwrap();
+        // What the disk held before: no hole of it reads as zeros.
+        let mut sink = MemSink {
+            data: vec![0xaa; 32768],
+            writes: Vec::new(),
+        };
+        extract(
+            &obj,
+            ds.volsize.unwrap(),
+            &mut sink,
+            OnError::Zero,
+            |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(&sink.data[..32768], &expected_image()[..32768]);
     }
 
     #[test]
@@ -1465,7 +1512,7 @@ mod tests {
             2,
             h,
             None,
-            |_, _, _: &Report| {},
+            |_, _, _: &Report, _: &Digests| {},
         )
         .unwrap();
         assert_eq!(partial.data, full.data);
@@ -1507,7 +1554,7 @@ mod tests {
             0,
             Digests::new(Extra::none()),
             Some(&flag),
-            |done, _, _: &Report| {
+            |done, _, _: &Report, _: &Digests| {
                 if done == 1 {
                     flag.store(true, Ordering::Relaxed);
                 }
@@ -1529,7 +1576,7 @@ mod tests {
             0,
             Digests::new(Extra::none()),
             Some(&flag),
-            |_, _, _: &Report| {},
+            |_, _, _: &Report, _: &Digests| {},
         )
         .unwrap();
         assert_eq!(at_once.interrupted_at, Some(0));
@@ -1547,7 +1594,7 @@ mod tests {
             stopped.interrupted_at.unwrap(),
             h,
             None,
-            |_, _, _: &Report| {},
+            |_, _, _: &Report, _: &Digests| {},
         )
         .unwrap();
         assert_eq!(rest.interrupted_at, None);
@@ -1570,7 +1617,7 @@ mod tests {
             0,
             Digests::new(Extra::none()),
             Some(&flag),
-            |done, total, _: &Report| {
+            |done, total, _: &Report, _: &Digests| {
                 if done == total {
                     flag.store(true, Ordering::Relaxed);
                 }

@@ -8,7 +8,7 @@ use std::time::Instant;
 use serde::Serialize;
 use zfs_read::crypt::{unwrap_keys, wrapping_key, DatasetKeys, KeyMaterial};
 use zfs_read::dsl::{open_mos, walk, Dataset, DatasetTree, Encryption};
-use zfs_read::hash::Extra;
+use zfs_read::hash::{Digests, Extra};
 use zfs_read::pool::{select_uberblock, uberblock_candidates, Candidate, TxgSelect};
 use zfs_read::zio::{PoolReader, ReadError};
 use zfs_read::zvol::{extract_from, open_volume, volume_facts, OnError, Report};
@@ -399,6 +399,7 @@ fn dump_one(
         blocksize,
         blocks_done: 0,
         lost: resume::Lost::default(),
+        prefix_sha256: None,
     };
     // Where to start, the hash of what is already there, and what that
     // lost.
@@ -422,7 +423,7 @@ fn dump_one(
     let mut last_state = Instant::now();
     let mut saver = resume::Saver::new(output, &expected_state, start_block);
     let interrupt = zvol_common::interrupt_flag();
-    let progress = |done: u64, total: u64, so_far: &Report| {
+    let progress = |done: u64, total: u64, so_far: &Report, digests: &Digests| {
         if !quiet && (last_report.elapsed().as_secs() >= 2 || done == total) {
             eprint!("\r  {} {done}/{total} blocks", ds.name);
             let _ = std::io::stderr().flush();
@@ -430,7 +431,10 @@ fn dump_one(
         }
         if last_state.elapsed().as_secs() >= 5 && done < total {
             let lost = earlier.and(so_far, done);
-            if !saver.save(done, &lost) {
+            // The digests have taken exactly the blocks done: what a
+            // resume has to read back from the image to go on.
+            let prefix = digests.clone().finish().sha256;
+            if !saver.save(done, &lost, &prefix) {
                 // The image could not be flushed: nothing written to it
                 // from here on can be counted. The run stops as a signal
                 // stops it, and says why below.

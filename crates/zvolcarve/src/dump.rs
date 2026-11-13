@@ -12,7 +12,7 @@ use std::time::Instant;
 use zfs_ondisk::dmu::DnodePhys;
 use zfs_ondisk::Endian;
 use zfs_read::dmu::ObjectReader;
-use zfs_read::hash::Extra;
+use zfs_read::hash::{Digests, Extra};
 use zfs_read::zio::PoolReader;
 use zfs_read::zvol::{extract_from, OnError, Report};
 use zvol_common::evidence::FileRef;
@@ -196,6 +196,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         blocksize: obj.dnode().datablksz(),
         blocks_done: 0,
         lost: resume::Lost::default(),
+        prefix_sha256: None,
     };
     let (start_block, digests, mut sink, earlier) = match resume::open(
         "zvolcarve",
@@ -219,10 +220,13 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     };
     let mut last_state = Instant::now();
     let mut saver = resume::Saver::new(&opts.output, &expected_state, start_block);
-    let progress = |done: u64, total: u64, so_far: &Report| {
+    let progress = |done: u64, total: u64, so_far: &Report, digests: &Digests| {
         if last_state.elapsed().as_secs() >= 5 && done < total {
             let lost = earlier.and(so_far, done);
-            if !saver.save(done, &lost) {
+            // The digests have taken exactly the blocks done: what a
+            // resume has to read back from the image to go on.
+            let prefix = digests.clone().finish().sha256;
+            if !saver.save(done, &lost, &prefix) {
                 // The image could not be flushed: nothing written to it
                 // from here on can be counted. The run stops as a signal
                 // stops it, and says why below.

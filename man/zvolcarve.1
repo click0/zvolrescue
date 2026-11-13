@@ -303,6 +303,10 @@ The state of an interrupted
 for a device,
 .Pa dev_da1.resume.json
 in the current directory.
+As in
+.Xr zvolrescue 1 ,
+a resume goes on only from blocks that still hash to what the state
+recorded.
 .El
 .Sh EXIT STATUS
 As in
