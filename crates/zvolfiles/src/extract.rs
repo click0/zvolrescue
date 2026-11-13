@@ -440,14 +440,18 @@ fn copy_file(
     if unplaced && strict {
         return Err(CopyError::Strict(NO_BLOCK_SIZE.to_string()));
     }
-    let blocks_end = if unplaced {
-        0
+    let (blocks_end, known) = if unplaced {
+        (0, true)
     } else {
         crate::common::data_end(&obj, bs)
     };
     if size.saturating_sub(blocks_end) > TAIL_NOTE {
         eprintln!(
             "zvolfiles: {shown}: {size} bytes, and its last block with data ends at byte {blocks_end}: the rest is a hole, hashed as zeros (a sparse file, or a damaged size or block count; SIGINT stops the run)"
+        );
+    } else if !known && size.min(blocks_end) > TAIL_NOTE {
+        eprintln!(
+            "zvolfiles: {shown}: {size} bytes, and its block pointers could not say where its last block with data is: every block to its size is looked for (SIGINT stops the run)"
         );
     }
     let mut file = tree.create(to)?;
@@ -643,7 +647,17 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
                 Ok(z) => (Some(z), None),
                 Err(e) => (None, Some(e.to_string())),
             };
-            let is_dir = znode.as_ref().map(Znode::file_type) == Some(FileType::Dir);
+            // A directory whose own metadata did not decode is still one
+            // by its object's type, and its entries are read from that
+            // object, not from the metadata: a full extraction walked it
+            // by the type its parent's entry gives, and `--path` naming
+            // it wrote nothing under it and named nothing either.
+            let is_dir = match &znode {
+                Some(z) => z.file_type() == FileType::Dir,
+                None => fs.object(obj).is_ok_and(|o| {
+                    o.dnode().object_type == zfs_ondisk::dmu::ot::DIRECTORY_CONTENTS
+                }),
+            };
             // The path itself, a file or a directory: the directory a
             // `--path` named was made with the extraction's time and mode
             // and recorded nowhere, and an empty one not made at all.

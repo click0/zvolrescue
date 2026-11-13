@@ -34,12 +34,17 @@ pub const TAIL_NOTE: u64 = 1 << 30;
 
 /// Where an object's last block with data ends, in bytes of `bs`: from
 /// its pointers where they say, and from `dn_maxblkid` where they do
-/// not — never past it, since a read there is of nothing.
-pub fn data_end(obj: &zfs_read::dmu::ObjectReader<'_, '_>, bs: u64) -> u64 {
+/// not — never past it, since a read there is of nothing. The second
+/// value says which: `false` when the pointers could not say, an
+/// indirect block on the way unreadable, and the end is only what the
+/// dnode claims.
+pub fn data_end(obj: &zfs_read::dmu::ObjectReader<'_, '_>, bs: u64) -> (u64, bool) {
     let claimed = obj.dnode().maxblkid.saturating_add(1);
-    obj.data_blocks()
-        .map_or(claimed, |n| n.min(claimed))
-        .saturating_mul(bs)
+    let found = obj.data_blocks();
+    (
+        found.map_or(claimed, |n| n.min(claimed)).saturating_mul(bs),
+        found.is_some(),
+    )
 }
 
 /// Bytes of a file or object written as zeros because the block that

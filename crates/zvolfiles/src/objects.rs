@@ -300,10 +300,14 @@ fn write_object(
     // Past its last block with data the object is a hole: its zeros
     // need no read, and a run of them that long is said — a forged
     // block count of 2^40 hashed for weeks without a word.
-    let data_end = crate::common::data_end(&obj, bs);
+    let (data_end, known) = crate::common::data_end(&obj, bs);
     if size.saturating_sub(data_end) > crate::common::TAIL_NOTE {
         eprintln!(
             "zvolfiles: object {object}: {size} bytes by its block count, and its last block with data ends at byte {data_end}: the rest is a hole, hashed as zeros (a sparse object, or a damaged block count; SIGINT stops the run)"
+        );
+    } else if !known && size.min(data_end) > crate::common::TAIL_NOTE {
+        eprintln!(
+            "zvolfiles: object {object}: {size} bytes by its block count, and its block pointers could not say where its last block with data is: every block is looked for (SIGINT stops the run)"
         );
     }
     let mut file = tree.create(&path)?;

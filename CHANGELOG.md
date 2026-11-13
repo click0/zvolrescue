@@ -677,6 +677,20 @@ tagged. `v0.7.1` is the release that carries those six.
   `--evidence-log`. A pipe, a socket or a character device is not read
   back now, by any tool: what went into one is no output anyone can
   check again, and `/dev/zero` never ended.
+* **zvolfiles took a block of the wrong size for a whole one, and a tree
+  too tall to count for one to read to its claimed end.** A data block
+  whose size is not its object's was padded with zeros the file never
+  had, or cut short of bytes it did, and the file recorded whole, exit
+  0; `zvolrescue dump` did the same with a volume's block. It is now
+  unreadable, zeroed and said (exit 4). An object of 8 levels has more
+  blocks under each top-level pointer than a block id counts: where its
+  data ends was "not known", and `dn_maxblkid` of 2^40 was taken
+  instead — 56 days of reading, without a word. What no block id can
+  name is passed over, and where the end is still not known it is said.
+  A directory whose own metadata does not decode was walked by its
+  entries in a whole extraction but not when `--path` named it: nothing
+  under it was written or named. It is a directory by its object's type
+  either way.
 
 ## v0.9.12 — 2026-11-07
 

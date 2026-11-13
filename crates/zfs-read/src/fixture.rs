@@ -1285,8 +1285,10 @@ pub fn build_sample_mos_variant(
     // by the labels already, and writing a second, unchecked account of
     // them here would be inventing evidence rather than providing it.
     if let Some(vdev) = a.removed_vdev {
-        let entries = a.mapping_entries();
+        let mut entries = a.mapping_entries();
         let bonus = a.mapping_phys();
+        // A whole block of the object, its entries first.
+        entries.resize(entries.len().next_multiple_of(4096), 0);
         let blk = a.put(m, &entries, MAPPING_OT, 0, 100);
         put(
             MAPPING_OBJECT,
@@ -1320,7 +1322,11 @@ pub fn build_sample_mos_variant(
             config.len() <= 4096,
             "fixture config object outgrew a block"
         );
-        let blk = a.put(m, &config, ot::PACKED_NVLIST, 0, 100);
+        // A whole block, as `dmu_write` leaves one: the nvlist and zeros
+        // after it, its length in the bonus.
+        let mut block = config.clone();
+        block.resize(4096, 0);
+        let blk = a.put(m, &block, ot::PACKED_NVLIST, 0, 100);
         put(
             CONFIG_OBJECT,
             DnodeSpec {
@@ -1850,6 +1856,26 @@ pub enum Matching {
     NormalizedFormD,
 }
 
+/// One thing wrong with the ZPL fixture, written so that every checksum
+/// still agrees: damage a reader has to see from what the blocks say,
+/// not from whether they arrived.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZplDamage {
+    /// `sub`'s system attributes name layout 99, which the dataset does
+    /// not have: its own metadata does not decode, and its entries — a
+    /// ZAP of their own — are whole.
+    SubLayout,
+    /// `sub/deep.txt`'s dnode says 8 KiB blocks and its size 8 KiB; its
+    /// one block is 4 KiB.
+    DeepShort,
+    /// `sub/deep.txt`'s dnode says 1 KiB blocks; its one block is 4 KiB.
+    DeepLong,
+    /// `link`'s dnode, whose one pointer is a hole, claims 2^40 blocks
+    /// under 8 levels: more blocks per top-level pointer than a block id
+    /// can count.
+    LinkTall,
+}
+
 /// What the ZPL fixture's spill block holds (Z-10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Spill {
@@ -1876,6 +1902,7 @@ fn build_zpl_objset(
     a: &mut Alloc,
     matching: Matching,
     spill: Spill,
+    damage: Option<ZplDamage>,
 ) -> [u8; blkptr::SIZE] {
     let mut dnodes = vec![0u8; 16384];
     let mut put = |obj: u64, bytes: Vec<u8>| {
@@ -2067,7 +2094,15 @@ fn build_zpl_objset(
             object_type: ot::DIRECTORY_CONTENTS,
             datablksz: 4096,
             bonus_type: ot::SA,
-            bonus: sa_bonus(2, &meta(0o40755, 1, 3, 2), &[]),
+            bonus: sa_bonus(
+                if damage == Some(ZplDamage::SubLayout) {
+                    99
+                } else {
+                    2
+                },
+                &meta(0o40755, 1, 3, 2),
+                &[],
+            ),
             blkptrs: vec![sub_blk],
             ..DnodeSpec::default()
         }
@@ -2094,15 +2129,36 @@ fn build_zpl_objset(
             bonus_type: ot::SA,
             bonus: sa_bonus(8, &symlink_fields, &[zpl_attr::SYMLINK, zpl_attr::DXATTR]),
             blkptrs: vec![[0u8; blkptr::SIZE]],
+            nlevels: if damage == Some(ZplDamage::LinkTall) {
+                8
+            } else {
+                1
+            },
+            maxblkid: if damage == Some(ZplDamage::LinkTall) {
+                1 << 40
+            } else {
+                0
+            },
             ..DnodeSpec::default()
         }
         .build(),
     );
     // 9: a file under the subdirectory.
     let deep = zpl_deep();
-    let mut deep_fields = meta(0o100600, deep.len() as u64, 7, 1);
+    let deep_size = match damage {
+        Some(ZplDamage::DeepShort) => 8192,
+        _ => deep.len() as u64,
+    };
+    let mut deep_fields = meta(0o100600, deep_size, 7, 1);
     deep_fields.push((zpl_attr::PROJID, sa_u64(ZPL_DEEP_PROJID)));
-    put(9, file(a, m, &deep, sa_bonus(7, &deep_fields, &[])));
+    let mut deep_dnode = file(a, m, &deep, sa_bonus(7, &deep_fields, &[]));
+    // `dn_datablkszsec`, in 512-byte sectors, at byte 8 of the dnode.
+    match damage {
+        Some(ZplDamage::DeepShort) => deep_dnode[8..10].copy_from_slice(&16u16.to_le_bytes()),
+        Some(ZplDamage::DeepLong) => deep_dnode[8..10].copy_from_slice(&2u16.to_le_bytes()),
+        _ => {}
+    }
+    put(9, deep_dnode);
     // 10: the file whose name is not text.
     let latin1 = zpl_latin1();
     put(
@@ -2277,14 +2333,26 @@ pub fn zpl_members_with(
     matching: Matching,
     spill: Spill,
 ) -> Vec<Vec<u8>> {
-    zpl_members_inner(pool, size, matching, spill, 8)
+    zpl_members_inner(pool, size, matching, spill, 8, None)
+}
+
+/// The ZPL fixture with one thing wrong with it ([`ZplDamage`]).
+pub fn zpl_members_damaged(pool: &mut Pool, size: u64, damage: ZplDamage) -> Vec<Vec<u8>> {
+    zpl_members_inner(
+        pool,
+        size,
+        Matching::Exact,
+        Spill::Attributes,
+        8,
+        Some(damage),
+    )
 }
 
 /// The ZPL fixture with `tank/fs`'s deadlist naming `entry` instead of
 /// its block-pointer object: an object number nothing is at, for the
 /// case of a deadlist whose entries do not read.
 pub fn zpl_members_deadlist_naming(pool: &mut Pool, size: u64, entry: u64) -> Vec<Vec<u8>> {
-    zpl_members_inner(pool, size, Matching::Exact, Spill::Attributes, entry)
+    zpl_members_inner(pool, size, Matching::Exact, Spill::Attributes, entry, None)
 }
 
 fn zpl_members_inner(
@@ -2293,6 +2361,7 @@ fn zpl_members_inner(
     matching: Matching,
     spill: Spill,
     deadlist_entry: u64,
+    damage: Option<ZplDamage>,
 ) -> Vec<Vec<u8>> {
     let n = pool.members.len();
     let mut members: Vec<Vec<u8>> = (0..n).map(|_| vec![0u8; size as usize]).collect();
@@ -2305,7 +2374,7 @@ fn zpl_members_inner(
     };
     let mut a = Alloc::with_layout(0x20_0000, layout);
     let m = &mut members[..];
-    let os_zpl = build_zpl_objset(m, &mut a, matching, spill);
+    let os_zpl = build_zpl_objset(m, &mut a, matching, spill, damage);
     let empty_meta = DnodeSpec {
         object_type: ot::DNODE,
         ..DnodeSpec::default()

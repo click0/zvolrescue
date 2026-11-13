@@ -246,7 +246,19 @@ pub fn extract_from(
         let located = obj.locate(blkid);
         let result = match &located {
             Ok(None) => Ok(None),
-            Ok(Some(bp)) => obj.reader().read_block(bp, false).map(|b| Some(b.data)),
+            // A block of another size than the volume's is not one of
+            // its blocks: padded or cut to fit, it was written into the
+            // image as read, and nothing said so.
+            Ok(Some(bp)) => obj.reader().read_block(bp, false).and_then(|b| {
+                if b.data.len() == bs as usize {
+                    Ok(Some(b.data))
+                } else {
+                    Err(ReadError::Io(format!(
+                        "block {blkid} is {} bytes, and the volume's blocks are {bs}",
+                        b.data.len()
+                    )))
+                }
+            }),
             Err(e) => Err(e.clone()),
         };
         match result {

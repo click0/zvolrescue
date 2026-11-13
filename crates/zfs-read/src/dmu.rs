@@ -93,6 +93,11 @@ impl<'r, 'a> ObjectReader<'r, 'a> {
     }
 
     /// Read data block `blkid`: exactly `datablksz` bytes, zeros for a hole.
+    ///
+    /// A block of any other size is an error, not a block: every data
+    /// block of an object is `datablksz` long, and one that is not was
+    /// padded with zeros the object never had, or cut short of bytes it
+    /// did, and read as whole.
     pub fn read_blkid(&self, blkid: u64) -> Result<Vec<u8>, ReadError> {
         self.read_blkid_ext(blkid).map(|(d, _)| d)
     }
@@ -105,8 +110,13 @@ impl<'r, 'a> ObjectReader<'r, 'a> {
         match self.locate(blkid)? {
             None => Ok((vec![0; size], self.endian)),
             Some(bp) => {
-                let mut data = self.reader.read_block(&bp, false)?.data;
-                data.resize(size, 0);
+                let data = self.reader.read_block(&bp, false)?.data;
+                if data.len() != size {
+                    return Err(ReadError::Io(format!(
+                        "block {blkid} is {} bytes, and the object's blocks are {size}",
+                        data.len()
+                    )));
+                }
                 Ok((data, bp.endian))
             }
         }
@@ -183,12 +193,28 @@ impl<'r, 'a> ObjectReader<'r, 'a> {
         reads: &mut u32,
     ) -> Option<Option<u64>> {
         let epbs = self.epbs();
-        let span = 1u64.checked_shl(epbs.checked_mul(level)?)?;
+        // How many blocks one pointer at this level spans; more than a
+        // block id can count at the top of a tall tree.
+        let span = epbs
+            .checked_mul(level)
+            .and_then(|shift| 1u64.checked_shl(shift));
         for (i, bp) in ptrs.iter().enumerate().rev() {
             if bp.is_hole() {
                 continue;
             }
-            let start = base.checked_add((i as u64).checked_mul(span)?)?;
+            // A pointer whose first block no block id can name holds no
+            // block a reader could ask for; it is passed over. That it
+            // could not be counted made the answer "not known", and the
+            // caller fell back on `dn_maxblkid` — a tree of 8 levels
+            // claiming 2^40 blocks read them all, 56 days, without a word.
+            let Some(start) = (if i == 0 {
+                Some(base)
+            } else {
+                span.and_then(|s| (i as u64).checked_mul(s))
+                    .and_then(|o| base.checked_add(o))
+            }) else {
+                continue;
+            };
             if level == 0 {
                 return Some(Some(start));
             }
@@ -496,6 +522,44 @@ mod tests {
         let reader = PoolReader::new(&assembly, dyns);
         let obj = ObjectReader::new(&reader, dnode, Endian::Little);
         assert_eq!(obj.data_blocks(), None);
+    }
+
+    /// A tree of 8 levels has more blocks under each top-level pointer
+    /// than a block id counts. Its answer was "not known", and the caller
+    /// took `dn_maxblkid` for it — 2^40 blocks of a file whose one
+    /// pointer is a hole, read for 56 days. What no block id can name is
+    /// passed over; what one can is counted as ever.
+    #[test]
+    fn a_tree_too_tall_to_count_is_counted_where_it_can_be() {
+        let (sources, assembly, mut dnode) = build(|a, m| object(a, m, 2, &[0, 1]));
+        let dyns = dyn_sources(&sources);
+        let reader = PoolReader::new(&assembly, dyns);
+        dnode.nlevels = 8;
+        dnode.maxblkid = 1 << 40;
+        dnode.blkptr[0] = BlkPtr::parse(&[0u8; blkptr::SIZE], Endian::Little).unwrap();
+        let obj = ObjectReader::new(&reader, dnode, Endian::Little);
+        assert_eq!(obj.data_blocks(), Some(0));
+    }
+
+    /// A data block of another size than the object's is no block of it:
+    /// padded with zeros or cut to fit, it was read as whole.
+    #[test]
+    fn a_block_of_another_size_is_an_error() {
+        let (sources, assembly, mut dnode) = build(|a, m| object(a, m, 2, &[0, 1]));
+        let dyns = dyn_sources(&sources);
+        let reader = PoolReader::new(&assembly, dyns);
+        for sectors in [16u16, 2] {
+            dnode.datablkszsec = sectors;
+            let obj = ObjectReader::new(&reader, dnode.clone(), Endian::Little);
+            let e = obj.read_blkid(0).unwrap_err().to_string();
+            assert!(
+                e.contains(&format!(
+                    "block 0 is 4096 bytes, and the object's blocks are {}",
+                    u64::from(sectors) * 512
+                )),
+                "{e}"
+            );
+        }
     }
 
     #[test]

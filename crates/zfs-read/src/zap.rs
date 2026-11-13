@@ -405,6 +405,8 @@ mod tests {
                 let mut hdr = fat_header(4096, 1, 0);
                 hdr[16..24].copy_from_slice(&1u64.to_le_bytes());
                 hdr[24..32].copy_from_slice(&numblks.to_le_bytes());
+                // The header block is a block of the object, its size.
+                hdr.resize(datablksz as usize, 0);
                 let bp = al.put(m, &hdr, ot::OBJECT_DIRECTORY, 0, 100);
                 let raw = DnodeSpec {
                     object_type: ot::OBJECT_DIRECTORY,
@@ -426,7 +428,8 @@ mod tests {
             let r = read_zap(&obj).map(|e| e.len());
             (r, t.elapsed())
         };
-        let (r, took) = run(1 << 20, (32 << 20) - 512);
+        // 2^20 blocks of 128 KiB: 128 GiB of table, past the bound.
+        let (r, took) = run(1 << 20, 128 << 10);
         let e = r.unwrap_err().to_string();
         assert!(e.contains("larger than any directory"), "{e}");
         assert!(took.as_secs() < 2, "{took:?}");

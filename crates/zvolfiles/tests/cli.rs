@@ -3,7 +3,10 @@
 use std::path::Path;
 use std::process::Command;
 
-use zfs_read::fixture::{zpl_members, zpl_members_with, zpl_spilled, Matching, Pool, Spill};
+use zfs_read::fixture::{
+    zpl_members, zpl_members_damaged, zpl_members_with, zpl_spilled, Matching, Pool, Spill,
+    ZplDamage,
+};
 use zvol_common::scratch::Scratch;
 
 /// A directory for one test, removed when the test ends.
@@ -734,4 +737,153 @@ fn a_map_is_on_the_record_and_a_disk_is_given_once() {
     ]);
     assert_eq!(code, 1, "{err}");
     assert!(err.contains("are the same disk of pool tank"), "{err}");
+}
+
+/// The fixture with one thing wrong with it, written to `dir`.
+fn damaged(dir: &Path, damage: ZplDamage) -> Vec<String> {
+    let mut pool = Pool::mirror("tank", 0x5eed_0000_0000_0004, 12)
+        .txgs(&[(4816228, 1757100000), (4816229, 1757100005)]);
+    zpl_members_damaged(&mut pool, 64 * 1024 * 1024, damage)
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let p = dir.join(format!("member{i}.img"));
+            std::fs::write(&p, m).expect("write member");
+            p.to_string_lossy().into_owned()
+        })
+        .collect()
+}
+
+fn manifest_record(out: &Path, path: &str) -> serde_json::Value {
+    let m: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(out.join("manifest.json")).unwrap()).unwrap();
+    m["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["path"] == path)
+        .unwrap_or_else(|| panic!("no {path} in {m}"))
+        .clone()
+}
+
+/// A directory whose own metadata does not decode is still walked by
+/// its entries, whole, when `--path` names it as when the whole dataset
+/// is extracted: named on its own, it had nothing under it written, and
+/// nothing said what was missing.
+#[test]
+fn a_directory_whose_metadata_does_not_decode_is_walked_by_its_entries() {
+    let dir = scratch("dmg-sub");
+    let m = damaged(&dir, ZplDamage::SubLayout);
+    for (name, extra) in [("whole", vec![]), ("path", vec!["--path", "sub"])] {
+        let out = dir.join(name);
+        let mut args = vec![
+            "-q",
+            "extract",
+            "tank/fs",
+            &m[0],
+            &m[1],
+            "-o",
+            out.to_str().unwrap(),
+        ];
+        args.extend(extra.iter().copied());
+        let (code, err) = run(&args);
+        assert_eq!(code, 4, "{name}: {err}");
+        assert_eq!(
+            std::fs::read(out.join("sub/deep.txt")).unwrap(),
+            zfs_read::fixture::zpl_deep(),
+            "{name}"
+        );
+        let sub = manifest_record(&out, "sub");
+        assert!(sub["error"].is_string(), "{name}: {sub}");
+    }
+}
+
+/// A block of another size than its file's is no block of the file:
+/// it was padded with zeros the file never had, or cut short, and the
+/// file recorded whole, exit 0. It is zeroed and said now, exit 4.
+#[test]
+fn a_block_of_another_size_than_its_files_is_said() {
+    let dir = scratch("dmg-bsz");
+    for (damage, blocks) in [(ZplDamage::DeepShort, 8192), (ZplDamage::DeepLong, 1024)] {
+        let m = damaged(&dir, damage);
+        let out = dir.join(format!("out-{blocks}"));
+        let (code, err) = run(&[
+            "-q",
+            "extract",
+            "tank/fs",
+            &m[0],
+            &m[1],
+            "-o",
+            out.to_str().unwrap(),
+        ]);
+        assert_eq!(code, 4, "{damage:?}: {err}");
+        let rec = manifest_record(&out, "sub/deep.txt");
+        let said = rec.to_string();
+        assert!(
+            said.contains(&format!(
+                "block 0 is 4096 bytes, and the object's blocks are {blocks}"
+            )),
+            "{damage:?}: {rec}"
+        );
+    }
+}
+
+/// A tree of 8 levels claiming 2^40 blocks over a pointer that is a
+/// hole: its blocks could not be counted, and `objects` looked for all
+/// of them, 56 days, without a word. It knows now that none hold data,
+/// says the rest is a hole at once, and a SIGINT ends the run.
+#[cfg(unix)]
+#[test]
+fn a_tree_too_tall_to_count_is_said_at_once() {
+    use std::io::{BufRead, BufReader};
+    let dir = scratch("dmg-tall");
+    let m = damaged(&dir, ZplDamage::LinkTall);
+    let out = dir.join("objs");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_zvolfiles"))
+        .args([
+            "objects",
+            "tank/fs",
+            &m[0],
+            &m[1],
+            "-o",
+            out.to_str().unwrap(),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("run zvolfiles");
+    let stderr = child.stderr.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let said = loop {
+        match rx.recv_timeout(std::time::Duration::from_secs(60)) {
+            Ok(l) if l.contains("object 8:") => break l,
+            Ok(_) => {}
+            Err(_) => {
+                child.kill().ok();
+                panic!("nothing said of object 8 within a minute");
+            }
+        }
+    };
+    assert!(
+        said.contains("the rest is a hole, hashed as zeros"),
+        "{said}"
+    );
+    assert!(
+        said.contains("its last block with data ends at byte 0"),
+        "{said}"
+    );
+    let killed = Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(killed.success());
+    let status = child.wait().unwrap();
+    assert_eq!(status.code(), Some(6), "{said}");
 }
