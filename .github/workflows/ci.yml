@@ -371,6 +371,60 @@ jobs:
           ./target/release/zvolcarve -f json dump /tmp/sigint/carve-tail "$id" /tmp/sigint/member0.img /tmp/sigint/member1.img -o /tmp/sigint/carved.img --resume | python3 -c 'import json,sys; v=json.load(sys.stdin); assert v["resumed_from_block"] == int(open("/tmp/sigint/cat").read()), v; assert v["interrupted_at"] is None, v; assert v["sha256"] == open("/tmp/sigint/ref.sha").read(), v'
           cmp /tmp/sigint/carved.img /tmp/sigint/ref.img
           test ! -e /tmp/sigint/carved.img.resume.json
+          # A damaged volume, interrupted: the block written as zeros
+          # before the signal is in the state (lost), and the run that
+          # finishes the image reports it with its own — exit 4, the
+          # range listed, the image and hash those of a run that never
+          # stopped. A resume used to forget it and end 0.
+          rm -f /tmp/sigint/cut.img /tmp/sigint/carved.img
+          python3 - <<'EOF'
+          import mmap
+          bs = 131072
+          with open("/tmp/sigint/ref.img", "rb") as f:
+              f.seek(5 * bs)
+              block = f.read(bs)
+          for m in ("/tmp/sigint/member0.img", "/tmp/sigint/member1.img"):
+              with open(m, "r+b") as f, mmap.mmap(f.fileno(), 0) as mm:
+                  at = mm.find(block)
+                  assert at >= 0 and mm.find(block, at + 1) < 0, m
+                  mm[at + 100] ^= 0xff
+          EOF
+          set +e
+          ./target/release/zvolrescue -q -f json dump tank/vm/disk0 /tmp/sigint/member0.img /tmp/sigint/member1.img -o /tmp/sigint/dref.img > /tmp/sigint/dref.json
+          code=$?; set -e; test "$code" = 4
+          set -m
+          ./target/release/zvolrescue -f json dump tank/vm/disk0 /tmp/sigint/member0.img /tmp/sigint/member1.img -o /tmp/sigint/dcut.img > /tmp/sigint/d1.json 2>/tmp/sigint/d1.err &
+          pid=$!
+          set +m
+          for _ in $(seq 1 6000); do
+            sz=$(stat -c %s /tmp/sigint/dcut.img 2>/dev/null || echo 0)
+            [ "$sz" -ge $((128 * 1048576)) ] && break
+            kill -0 $pid 2>/dev/null || { echo "::error::the damaged dump finished before 128 MiB were on disk"; exit 1; }
+            sleep 0.005
+          done
+          kill -INT $pid
+          set +e; wait $pid; code=$?; set -e
+          cat /tmp/sigint/d1.err
+          test "$code" = 6
+          python3 - <<'EOF'
+          import json
+          v = json.load(open("/tmp/sigint/d1.json"))["volumes"][0]
+          s = json.load(open("/tmp/sigint/dcut.img.resume.json"))
+          assert s["blocks_done"] == v["interrupted_at"] > 5, (s, v)
+          assert [b["blkid"] for b in s["lost"]["bad"]] == [5] and s["lost"]["blocks_zeroed"] == 1, s
+          EOF
+          set +e
+          ./target/release/zvolrescue -q -f json dump tank/vm/disk0 /tmp/sigint/member0.img /tmp/sigint/member1.img -o /tmp/sigint/dcut.img --resume > /tmp/sigint/d2.json
+          code=$?; set -e; test "$code" = 4
+          python3 - <<'EOF'
+          import json
+          ref = json.load(open("/tmp/sigint/dref.json"))["volumes"][0]
+          v = json.load(open("/tmp/sigint/d2.json"))["volumes"][0]
+          assert v["resumed_from_block"] > 5 and v["blocks_zeroed"] == 1, v
+          assert v["bad"] == ref["bad"] and v["sha256"] == ref["sha256"], (v, ref)
+          EOF
+          cmp /tmp/sigint/dcut.img /tmp/sigint/dref.img
+          test ! -e /tmp/sigint/dcut.img.resume.json
       - name: The pool's history from its transaction groups (COMPANIONS T-01…T-05, T-10)
         run: |
           ./target/release/zvoltimeline --version

@@ -504,3 +504,94 @@ fn a_relative_path_is_taken_from_where_its_run_started() {
     assert_eq!(out.status.code(), Some(0), "{text}");
     assert!(text.contains("PASS") && text.contains("out.img"), "{text}");
 }
+
+/// A tree `zvolfiles extract` wrote is an extraction in the report —
+/// its manifest and how many files — and every file of it is checked
+/// back: one changed since fails `verify`. Only the manifest was.
+#[test]
+fn every_file_of_an_extracted_tree_is_checked_back() {
+    let dir = scratch("tree");
+    let out = dir.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let hello = out.join("hello.txt");
+    std::fs::write(&hello, b"hello, world\n").unwrap();
+    let manifest = out.join("manifest.json");
+    std::fs::write(&manifest, b"{\"files\": []}").unwrap();
+    let sha = |p: &Path| zvol_common::evidence::sha256_hex(&std::fs::read(p).unwrap());
+    let size = |p: &Path| std::fs::metadata(p).unwrap().len();
+    let member = dir.join("member0.img");
+    std::fs::write(&member, b"the pool member").unwrap();
+    let record = serde_json::json!({
+        "v": FORMAT_VERSION, "ts": 1_757_100_000u64, "tool": "zvolfiles", "version": "0.9.12",
+        "argv": ["zvolfiles", "extract", "tank/fs", "-o", out],
+        "inputs": [{"path": member, "kind": "file", "size": 15}],
+        "outputs": [
+            {"path": manifest, "kind": "file", "size": size(&manifest), "sha256": sha(&manifest)},
+            {"path": hello, "kind": "file", "size": size(&hello), "sha256": sha(&hello)},
+        ],
+        "result": {"dataset": "tank/fs", "txg": 100, "output": out,
+                   "files": [{"path": "hello.txt", "size": size(&hello), "sha256": sha(&hello)},
+                             {"path": "sub", "type": "d"}],
+                   "incomplete": 0, "failed": 0, "stopped": null},
+        "status": 0,
+    });
+    let log = dir.join("case.jsonl");
+    std::fs::write(&log, format!("{record}\n")).unwrap();
+    let report = dir.join("report.json").to_string_lossy().into_owned();
+    let (code, _, err) = run(&["-q", "build", &log.to_string_lossy(), "-o", &report]);
+    assert_eq!(code, 0, "{err}");
+    let r: serde_json::Value = serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
+    let e = &r["extractions"][0];
+    assert_eq!(e["dataset"], "tank/fs", "{r}");
+    assert_eq!(e["files"], 1, "one file written: {e}");
+    assert_eq!(e["output"], manifest.to_string_lossy().as_ref(), "{e}");
+    let (code, out_text, _) = run(&["-q", "verify", &report]);
+    assert_eq!(code, 0, "{out_text}");
+
+    std::fs::write(&hello, b"hello, world!\n").unwrap();
+    let (code, out_text, _) = run(&["-q", "verify", &report]);
+    assert_eq!(code, 4, "{out_text}");
+    assert!(
+        out_text
+            .lines()
+            .any(|l| l.contains("FAIL") && l.contains("hello.txt")),
+        "{out_text}"
+    );
+}
+
+/// A log cut short since the report was built is not "appended to":
+/// the bytes the report was built from are no longer there, and every
+/// check of it fails. Evidence that is a FIFO now is not present at its
+/// size either. A report built again over the one an earlier build
+/// wrote is no evidence of the case, and is allowed.
+#[cfg(unix)]
+#[test]
+fn a_log_cut_short_and_evidence_that_became_a_fifo_fail() {
+    let dir = scratch("short");
+    let img = dir.join("vol.img");
+    std::fs::write(&img, b"the bytes of a volume").unwrap();
+    let log = evidence_log(&dir, &img);
+    let l = log.to_string_lossy().into_owned();
+    let report = dir.join("report.json").to_string_lossy().into_owned();
+    let (code, _, err) = run(&["-q", "build", &l, "-o", &report]);
+    assert_eq!(code, 0, "{err}");
+    let (code, _, err) = run(&["-q", "build", &l, "-o", &report]);
+    assert_eq!(code, 0, "built again in place: {err}");
+
+    let text = std::fs::read(&log).unwrap();
+    std::fs::write(&log, &text[..text.len() - 10]).unwrap();
+    let (code, out, _) = run(&["-q", "verify", &report]);
+    assert_eq!(code, 4, "{out}");
+    assert!(out.contains("shorter than the"), "{out}");
+    std::fs::write(&log, &text).unwrap();
+    let (code, out, _) = run(&["-q", "verify", &report]);
+    assert_eq!(code, 0, "{out}");
+
+    let member = dir.join("evidence.img");
+    std::fs::remove_file(&member).unwrap();
+    let made = Command::new("mkfifo").arg(&member).status().unwrap();
+    assert!(made.success());
+    let (code, out, _) = run(&["-q", "verify", &report]);
+    assert_eq!(code, 4, "{out}");
+    assert!(out.contains("FAIL      kind"), "{out}");
+}

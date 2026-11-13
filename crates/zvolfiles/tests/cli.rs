@@ -680,3 +680,58 @@ fn the_evidence_record_lists_every_file_written() {
         "{outputs:?}"
     );
 }
+
+/// What a run read besides the members is on its record: an imager's
+/// map, which `extract`, `list` and `objects` named nowhere (SPEC F-72).
+/// A member and a copy of it are one disk given twice, and refused.
+#[test]
+fn a_map_is_on_the_record_and_a_disk_is_given_once() {
+    let dir = scratch("record-map");
+    let m = members(&dir, ["member0.img", "member1.img"]);
+    let map = dir.join("m0.map");
+    std::fs::write(&map, format!("0x0 +\n0x0 {:#x} +\n", 64u64 << 20)).unwrap();
+    let map_arg = format!("{}={}", m[0], map.display());
+    let log = dir.join("ev.jsonl");
+    let out = dir.join("out").to_string_lossy().into_owned();
+    let objs = dir.join("objs").to_string_lossy().into_owned();
+    for args in [
+        vec![
+            "extract", "tank/fs", &m[0], &m[1], "--map", &map_arg, "-o", &out,
+        ],
+        vec!["list", "tank/fs", &m[0], &m[1], "--map", &map_arg],
+        vec![
+            "objects", "tank/fs", &m[0], &m[1], "--map", &map_arg, "-o", &objs,
+        ],
+    ] {
+        let mut all = vec!["-q", "--evidence-log", log.to_str().unwrap()];
+        all.extend_from_slice(&args);
+        let (code, err) = run(&all);
+        assert_eq!(code, 0, "{args:?}: {err}");
+        let text = std::fs::read_to_string(&log).unwrap();
+        let rec: serde_json::Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+        let inputs: Vec<&str> = rec["inputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["path"].as_str().unwrap())
+            .collect();
+        assert!(
+            inputs.contains(&map.to_str().unwrap()),
+            "{}: {inputs:?}",
+            args[0]
+        );
+    }
+
+    let copy = dir.join("member0-copy.img");
+    std::fs::copy(&m[0], &copy).unwrap();
+    let (code, err) = run(&[
+        "-q",
+        "list",
+        "tank/fs",
+        &m[0],
+        copy.to_str().unwrap(),
+        &m[1],
+    ]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("are the same disk of pool tank"), "{err}");
+}

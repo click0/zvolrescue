@@ -10,7 +10,7 @@ use zfs_ondisk::checksum::seal_label;
 use zfs_ondisk::label::{label_offsets, LABEL_SIZE, UBERBLOCK_RING_OFFSET, UBERBLOCK_RING_SIZE};
 use zfs_read::fixture::{
     build_sample_mos, destroyed_zvol_members, objset_reused_members, removed_vdev_members,
-    two_top_mirror_members, zpl_members, Alloc, Pool, SAMPLE_ZVOL_BLOCK0_OFFSET,
+    two_top_mirror_members, zpl_members, zvol_pattern, Alloc, Pool, SAMPLE_ZVOL_BLOCK0_OFFSET,
 };
 use zfs_read::hash::{Digests, Extra};
 use zvol_common::scratch::Scratch;
@@ -226,6 +226,29 @@ fn the_layout_a_run_read_through_is_on_its_record() {
         serde_json::json!([&paths[0], &paths[1]])
     );
 
+    // A run that ends before it reads anything still names the hints
+    // among what it was given to read.
+    let missing = dir.join("absent.img").to_string_lossy().into_owned();
+    let (code, _, _) = run(&[
+        "-q",
+        "--evidence-log",
+        &log.to_string_lossy(),
+        "list",
+        &missing,
+        "--hints",
+        &hints,
+    ]);
+    assert_ne!(code, 0);
+    let text = std::fs::read_to_string(&log).unwrap();
+    let rec: serde_json::Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+    let inputs: Vec<&str> = rec["inputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["path"].as_str().unwrap())
+        .collect();
+    assert!(inputs.contains(&hints.as_str()), "{rec}");
+
     // Read through the labels, a run has no layout to record.
     let (code, _, err) = run(&[
         "-q",
@@ -239,6 +262,56 @@ fn the_layout_a_run_read_through_is_on_its_record() {
     let text = std::fs::read_to_string(&log).unwrap();
     let rec: serde_json::Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
     assert!(rec.get("layout").is_none(), "{rec}");
+}
+
+/// `--search-order` settles on a member order no argument names: the
+/// record keeps the one the run read through, and that order, written
+/// back as hints without the search, reads the pool again. The order
+/// the hints gave does not.
+#[test]
+fn the_order_a_search_settled_on_is_on_the_record() {
+    let dir = scratch("search-order-record");
+    let mut pool = Pool::raidz("tank", 0x1000, 12, 4, 2).txgs(&[(100, 1), (200, 2)]);
+    let (members, _, _) = destroyed_zvol_members(&mut pool, SIZE);
+    let paths = write_members(&dir, &members);
+    let hints_for = |order: &serde_json::Value| {
+        let h = dir.join("layout.hints");
+        std::fs::write(
+            &h,
+            serde_json::json!({"name": "tank", "ashift": 12,
+                "tops": [{"kind": "raidz", "nparity": 2, "members": order}]})
+            .to_string(),
+        )
+        .unwrap();
+        h.to_string_lossy().into_owned()
+    };
+    let given = serde_json::json!([&paths[3], &paths[1], &paths[0], &paths[2]]);
+    let hints = hints_for(&given);
+    let log = dir.join("case.jsonl").to_string_lossy().into_owned();
+    let list = |hints: &str, extra: &[&str]| {
+        let mut args = vec!["-q", "-f", "json", "--evidence-log", &log, "list", "-r"];
+        args.extend(paths.iter().map(String::as_str));
+        args.extend(["--hints", hints]);
+        args.extend_from_slice(extra);
+        run(&args)
+    };
+    let (code, searched, err) = list(&hints, &["--search-order"]);
+    assert_eq!(code, 0, "{err}");
+    let text = std::fs::read_to_string(&log).unwrap();
+    let rec: serde_json::Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+    let layout = &rec["layout"];
+    assert_eq!(layout["search_order"], true, "{rec}");
+    let found = layout["tops"][0]["members"].clone();
+    assert_eq!(found.as_array().map(Vec::len), Some(4), "{layout}");
+    assert_ne!(found, given, "the order the hints gave read nothing");
+    assert_eq!(layout["tops"][0]["nparity"], 2);
+
+    // The recorded order alone reads what the search read.
+    let (code, again, err) = list(&hints_for(&found), &[]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(json(&again)["datasets"], json(&searched)["datasets"]);
+    let (code, _, _) = list(&hints_for(&given), &[]);
+    assert_ne!(code, 0, "the order as given reads the pool");
 }
 
 /// An image is written at offsets with its holes left out, which a pipe
@@ -847,6 +920,52 @@ fn two_images_of_one_disk_are_not_read_as_one() {
     assert_eq!(code, 0, "one file by two names: {err}");
 }
 
+/// The case as it comes: the same disk imaged at two times, its labels
+/// and uberblocks at different transaction groups. Whichever was named
+/// first was read; both orders are refused now, and the message gives
+/// each its transaction groups, which is what the operator chooses by.
+#[test]
+fn a_disk_imaged_at_two_times_is_not_read_as_whichever_came_first() {
+    let dir = scratch("twin-txgs");
+    let early = write_members(&dir, &plain_members());
+    let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1), (140, 2)]);
+    let mut later = vec![vec![0u8; SIZE as usize], vec![0u8; SIZE as usize]];
+    let mut a = Alloc::new(0x20_0000);
+    build_sample_mos(&mut pool, &mut later, &mut a);
+    for (i, m) in later.iter_mut().enumerate() {
+        pool.write_labels(i, m);
+    }
+    let later0 = dir.join("member0-later.img");
+    std::fs::write(&later0, &later[0]).unwrap();
+    let later0 = later0.to_string_lossy().into_owned();
+    let img = dir.join("vol.img").to_string_lossy().into_owned();
+    for (first, second, txgs) in [
+        (
+            &early[0],
+            &later0,
+            "labels at txg 100 and 140, newest uberblock txg 100 and 140",
+        ),
+        (
+            &later0,
+            &early[0],
+            "labels at txg 140 and 100, newest uberblock txg 140 and 100",
+        ),
+    ] {
+        let (code, out, err) = run(&["-q", "list", first, second, &early[1]]);
+        assert_eq!(code, 1, "{out}{err}");
+        assert!(err.contains(txgs), "{err}");
+        let (code, _, err) = run(&["-q", "dump", "tank/vm/disk0", first, second, "-o", &img]);
+        assert_eq!(code, 1, "{err}");
+        assert!(
+            !Path::new(&img).exists(),
+            "refused before anything is written"
+        );
+    }
+    // `scan` reads no pool through them: it reports each as it is.
+    let (code, _, err) = run(&["-q", "scan", &early[0], &later0, &early[1]]);
+    assert_eq!(code, 0, "{err}");
+}
+
 /// A resumed dump reports what the run before it lost: the blocks it
 /// wrote as zeros are in the image, and they used to be in no summary,
 /// a resumed dump of a damaged volume exiting 0 with none listed.
@@ -931,6 +1050,91 @@ fn the_runs_standard_output_is_not_taken_for_an_image() {
         assert!(err.contains("standard output of the run"), "{name}: {err}");
         assert_eq!(std::fs::metadata(&img).unwrap().len(), 0, "{name}");
     }
+    // Standard error the same: what the run says there would land on
+    // the image. The refusal itself goes into the file, and nothing else.
+    let mut names = vec![img.to_string_lossy().into_owned()];
+    if Path::new("/dev/stderr").exists() {
+        names.push("/dev/stderr".into());
+    }
+    for name in &names {
+        let sink = std::fs::File::create(&img).unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_zvolrescue"))
+            .args(["-q", "dump", "tank/vm/disk0", &members[0], "-o", name])
+            .stderr(sink)
+            .output()
+            .expect("run zvolrescue");
+        assert_eq!(out.status.code(), Some(1), "{name}");
+        let said = std::fs::read_to_string(&img).unwrap();
+        assert!(said.contains("standard error of the run"), "{name}: {said}");
+        assert!(said.lines().all(|l| l.starts_with("zvolrescue:")), "{said}");
+    }
+}
+
+/// A `--strict` dump stops at the first unreadable block, and its state
+/// says to go on from that very block; a run without `--strict` that
+/// takes it up writes the block as zeros and says so, exit 4, the image
+/// that of a run that never stopped.
+#[test]
+fn a_strict_dump_is_resumed_at_the_block_it_stopped_at() {
+    let dir = scratch("dump-strict-resume");
+    let mut members = plain_members();
+    // Block 2, the volume's second data block, after block 0.
+    let block2 = (LABEL_START_SIZE + SAMPLE_ZVOL_BLOCK0_OFFSET + 8192) as usize;
+    for m in &mut members {
+        assert_eq!(
+            m[block2..block2 + 8192],
+            zvol_pattern(2)[..],
+            "the layout moved"
+        );
+        m[block2 + 5] ^= 0xff;
+    }
+    let paths = write_members(&dir, &members);
+    let dump = |out: &Path, extra: &[&str]| {
+        let o = out.to_string_lossy().into_owned();
+        let mut args = vec![
+            "-q",
+            "-f",
+            "json",
+            "dump",
+            "tank/vm/disk0",
+            &paths[0],
+            &paths[1],
+            "-o",
+            &o,
+        ];
+        args.extend_from_slice(extra);
+        let (code, stdout, err) = run(&args);
+        (code, json(&stdout)["volumes"][0].clone(), err)
+    };
+    let (code, whole, _) = dump(&dir.join("whole.img"), &[]);
+    assert_eq!(code, 4);
+    assert_eq!(whole["bad"][0]["blkid"], 2, "{whole}");
+
+    let img = dir.join("vol.img");
+    let (code, v, err) = dump(&img, &["--strict"]);
+    assert_eq!(code, 4, "{err}");
+    assert_eq!(v["aborted"], true, "{v}");
+    assert_eq!(v["bad"][0]["blkid"], 2, "{v}");
+    let state_path = dir.join("vol.img.resume.json");
+    let state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    assert_eq!(state["blocks_done"], 2, "{state}");
+    assert!(
+        state.get("lost").is_none(),
+        "block 2 is read again: {state}"
+    );
+
+    let (code, v, err) = dump(&img, &["--resume"]);
+    assert_eq!(code, 4, "{err}");
+    assert_eq!(v["resumed_from_block"], 2, "{v}");
+    assert_eq!(v["blocks_zeroed"], 1, "{v}");
+    assert_eq!(v["bad"][0]["blkid"], 2, "{v}");
+    assert_eq!(v["sha256"], whole["sha256"]);
+    assert!(!state_path.exists());
+    assert_eq!(
+        std::fs::read(&img).unwrap(),
+        std::fs::read(dir.join("whole.img")).unwrap()
+    );
 }
 
 /// `--diff` names what one transaction group has that the other does
@@ -2203,25 +2407,41 @@ fn a_refused_bulk_dump_changes_nothing() {
     let (code, _, err) = run(&["-q", "dump", "-r", "tank", &paths[0], &paths[1], "-o", &o]);
     assert_eq!(code, 0, "{err}");
     let image = std::fs::read(&link).unwrap();
-    for log in [link.clone(), out.join("not-yet.img")] {
-        let l = log.to_string_lossy().into_owned();
-        let (code, _, err) = run(&[
-            "-q",
-            "--debug-log",
-            &l,
-            "dump",
-            "-r",
-            "tank",
-            &paths[0],
-            &paths[1],
-            "-o",
-            &o,
-        ]);
-        assert_eq!(code, 5, "{l}: {err}");
-        assert!(err.contains("refusing --debug-log"), "{err}");
+    let names = [
+        link.clone(),
+        out.join("not-yet.img"),
+        out.join("not-yet.img.resume.json"),
+        out.join("manifest.json"),
+    ];
+    for flag in ["--debug-log", "--evidence-log"] {
+        for log in &names {
+            let l = log.to_string_lossy().into_owned();
+            let (code, _, err) = run(&[
+                "-q", flag, &l, "dump", "-r", "tank", &paths[0], &paths[1], "-o", &o,
+            ]);
+            assert_eq!(code, 5, "{flag} {l}: {err}");
+            assert!(err.contains(&format!("refusing {flag}")), "{err}");
+        }
     }
     assert_eq!(std::fs::read(&link).unwrap(), image);
     assert!(!out.join("not-yet.img").exists());
+    assert!(!out.join("not-yet.img.resume.json").exists());
+    // A log of another name in that directory is no image, and is kept.
+    let log = out.join("case.jsonl").to_string_lossy().into_owned();
+    let (code, _, err) = run(&[
+        "-q",
+        "--evidence-log",
+        &log,
+        "dump",
+        "-r",
+        "tank",
+        &paths[0],
+        &paths[1],
+        "-o",
+        &o,
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(Path::new(&log).exists());
 }
 
 /// `dump -r` replaces a link already lying in its directory under a name

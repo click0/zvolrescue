@@ -437,6 +437,39 @@ fn a_carved_dump_resumes_from_its_state_file() {
     assert_eq!(std::fs::read(&cut).expect("image"), image);
     assert!(!dir.join("cut.img.resume.json").exists());
 
+    // A state that says the blocks before it lost one, written as zeros:
+    // the run that finishes the image reports it with its own, exit 4,
+    // as zvolrescue's does. It used to end 0 with no range listed.
+    std::fs::write(&cut, &image[..2 * blocksize as usize]).expect("prefix");
+    let lost = serde_json::json!({
+        "bad": [{"blkid": 1, "offset": blocksize, "len": blocksize,
+                 "reason": "checksum mismatch, before the interruption"}],
+        "blocks_zeroed": 1,
+    });
+    let mut with_lost = state.clone();
+    with_lost["lost"] = lost.clone();
+    std::fs::write(dir.join("cut.img.resume.json"), with_lost.to_string()).expect("state");
+    let (code, out, err) = run(&[
+        "-q",
+        "-f",
+        "json",
+        "dump",
+        &carve_s,
+        &id,
+        &members[0],
+        &members[1],
+        "-o",
+        &cut.to_string_lossy(),
+        "--resume",
+    ]);
+    assert_eq!(code, 4, "{out}{err}");
+    let v = json(&out);
+    assert_eq!(v["resumed_from_block"], 2, "{v}");
+    assert_eq!(v["blocks_zeroed"], 1, "{v}");
+    assert_eq!(v["bad"], lost["bad"], "{v}");
+    assert_eq!(v["volumes"][0]["bad"], lost["bad"], "{v}");
+    assert!(!dir.join("cut.img.resume.json").exists());
+
     // The same state against another candidate id starts over; so does
     // one of the same id and size whose dnode is another — `c0001` of
     // another scan.
@@ -468,6 +501,124 @@ fn a_carved_dump_resumes_from_its_state_file() {
         );
         assert_eq!(json(&out)["resumed_from_block"], 0);
     }
+}
+
+/// A carve dump's `-o` that is the run's own standard output is refused
+/// before anything is read: the summary went into the file over the
+/// image's first bytes. The pool given twice — a member and a copy of
+/// it — is refused as it is for zvolrescue, and the record of a dump
+/// read through an imager's map names the map.
+#[cfg(unix)]
+#[test]
+fn a_carved_dump_is_held_to_what_zvolrescue_dump_is() {
+    let dir = scratch("dump-like-rescue");
+    let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1)]);
+    let members: Vec<String> = carved_zvol_members(&mut pool, SIZE)
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let p = dir.join(format!("member{i}.img"));
+            std::fs::write(&p, m).expect("write member");
+            p.to_string_lossy().into_owned()
+        })
+        .collect();
+    let carve = dir.join("carve");
+    let carve_s = carve.to_string_lossy().into_owned();
+    let (code, _, err) = run(&["-q", "scan", &members[0], &members[1], "-o", &carve_s]);
+    assert_eq!(code, 0, "{err}");
+    let index: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(carve.join("candidates.json")).expect("index"))
+            .expect("index");
+    let id = index["candidates"][0]["id"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+
+    let img = dir.join("vol.img");
+    let mut names = vec![img.to_string_lossy().into_owned()];
+    if std::path::Path::new("/dev/stdout").exists() {
+        names.push("/dev/stdout".into());
+    }
+    for name in &names {
+        let sink = std::fs::File::create(&img).unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_zvolcarve"))
+            .args([
+                "-q",
+                "dump",
+                &carve_s,
+                &id,
+                &members[0],
+                &members[1],
+                "-o",
+                name,
+            ])
+            .stdout(sink)
+            .output()
+            .expect("run zvolcarve");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{name}: {err}");
+        assert!(err.contains("standard output of the run"), "{name}: {err}");
+        assert_eq!(std::fs::metadata(&img).unwrap().len(), 0, "{name}");
+    }
+
+    let copy = dir.join("member0-copy.img");
+    std::fs::copy(&members[0], &copy).unwrap();
+    let copy = copy.to_string_lossy().into_owned();
+    let o = dir.join("twin.img").to_string_lossy().into_owned();
+    let (code, _, err) = run(&[
+        "-q",
+        "dump",
+        &carve_s,
+        &id,
+        &members[0],
+        &copy,
+        &members[1],
+        "-o",
+        &o,
+    ]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("are the same disk of pool tank"), "{err}");
+    let (code, _, err) = run(&[
+        "-q",
+        "scan",
+        &members[0],
+        &copy,
+        "-o",
+        &dir.join("c2").to_string_lossy(),
+    ]);
+    assert_eq!(code, 1, "{err}");
+
+    let map = dir.join("m0.map");
+    std::fs::write(&map, format!("0x0 +\n0x0 {SIZE:#x} +\n")).unwrap();
+    let log = dir.join("case.jsonl");
+    let o = dir.join("mapped.img").to_string_lossy().into_owned();
+    let (code, _, err) = run(&[
+        "-q",
+        "--evidence-log",
+        &log.to_string_lossy(),
+        "dump",
+        &carve_s,
+        &id,
+        &members[0],
+        &members[1],
+        "--map",
+        &format!("{}={}", members[0], map.display()),
+        "-o",
+        &o,
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let text = std::fs::read_to_string(&log).unwrap();
+    let rec: serde_json::Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+    let inputs: Vec<&str> = rec["inputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["path"].as_str().unwrap())
+        .collect();
+    assert!(
+        inputs.contains(&map.to_string_lossy().as_ref()),
+        "{inputs:?}"
+    );
 }
 
 /// `-o` cannot name a member the scan read, as its index names it, even
