@@ -70,6 +70,16 @@ struct TimelineOut {
     #[serde(skip_serializing_if = "Option::is_none")]
     dataset: Option<String>,
     events: Vec<EventOut>,
+    /// Property changes left out: they are reported at `-v` (T-09).
+    #[serde(skip_serializing_if = "is_none_left_out")]
+    properties_not_shown: usize,
+    /// `-q`: the text says nothing it need not.
+    #[serde(skip)]
+    quiet: bool,
+}
+
+fn is_none_left_out(n: &usize) -> bool {
+    *n == 0
 }
 
 /// The command that recovers a destroyed object (T-05): `zvolrescue
@@ -140,7 +150,13 @@ fn print_text(out: &TimelineOut, w: &mut dyn Write) -> std::io::Result<()> {
             return Ok(());
         }
     } else if out.events.is_empty() {
-        writeln!(w, "no change between them")?;
+        match out.properties_not_shown {
+            0 => writeln!(w, "no change between them")?,
+            n => writeln!(
+                w,
+                "no change between them but {n} change(s) of a property; -v shows them"
+            )?,
+        }
         return Ok(());
     }
     // What was destroyed says when it was last there: the TXG to read it
@@ -169,6 +185,13 @@ fn print_text(out: &TimelineOut, w: &mut dyn Write) -> std::io::Result<()> {
             writeln!(w, "{:<12} {:<22} {:<18} -> {cmd}", "", "", "")?;
         }
     }
+    if out.properties_not_shown > 0 && !out.quiet {
+        writeln!(
+            w,
+            "{} change(s) of a property not shown; -v shows them",
+            out.properties_not_shown
+        )?;
+    }
     Ok(())
 }
 
@@ -187,9 +210,14 @@ fn about(events: Vec<Event>, want: &str) -> Vec<Event> {
         .filter(|e| e.object.as_deref() == Some(want))
         .map(|e| e.guid)
         .collect();
+    // In hex as this tool prints it, or in decimal as `zfs get guid`
+    // does: given that way, it matched nothing (exit 3). A name is never
+    // all digits — a pool's begins with a letter, and the rest are
+    // under it — so a number is a GUID.
     if let Some(g) = want
         .strip_prefix("0x")
         .and_then(|h| u64::from_str_radix(h, 16).ok())
+        .or_else(|| want.parse::<u64>().ok())
     {
         guids.insert(g);
     }
@@ -494,6 +522,13 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             none_about = Some(want.clone());
         }
     }
+    // Property changes are reported at `-v` (T-09): they were printed
+    // whatever was asked, and `-v` did nothing.
+    let before = events.len();
+    if g.verbose == 0 {
+        events.retain(|e| e.kind != Kind::Property);
+    }
+    let properties_not_shown = before - events.len();
     sort(&mut events);
 
     let out = TimelineOut {
@@ -525,6 +560,8 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 },
             })
             .collect(),
+        properties_not_shown,
+        quiet: g.quiet,
     };
 
     let json = serde_json::to_value(&out).expect("serialisable");

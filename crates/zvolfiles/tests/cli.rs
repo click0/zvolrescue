@@ -101,10 +101,30 @@ fn objects_never_writes_through_what_is_in_its_way() {
         before,
         "a member was written"
     );
-    assert!(!std::fs::symlink_metadata(out.join("objects.json"))
+    // The link is something there already: left as it is, and the index
+    // goes under a name nothing has, as a second run's does.
+    assert!(std::fs::symlink_metadata(out.join("objects.json"))
         .unwrap()
         .file_type()
         .is_symlink());
+    let first: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(out.join("objects.1.json")).unwrap()).unwrap();
+    assert!(first["objects"].as_array().is_some_and(|o| !o.is_empty()));
+    let (code, err) = run(&["-q", "objects", "tank/fs", &m[0], &m[1], "-o", &o]);
+    assert!(code == 0 || code == 4, "{code}: {err}");
+    let again: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(out.join("objects.2.json")).unwrap()).unwrap();
+    assert_eq!(again["objects"], first["objects"]);
+    assert_eq!(
+        std::fs::read(out.join("objects.1.json")).unwrap(),
+        serde_json::to_vec_pretty(&first)
+            .map(|mut v| {
+                v.push(b'\n');
+                v
+            })
+            .unwrap(),
+        "the first run's index is as it wrote it"
+    );
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -630,6 +650,77 @@ fn zeroed_bytes_are_named_and_strict_stops() {
     assert_eq!(last["path"], "sub/deep.txt", "nothing after it: {manifest}");
     assert!(last["error"].as_str().unwrap().contains("--strict"));
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The second name of a file with bytes written as zeros has them too:
+/// it is the same file, and its record said `errors 0`. `-v` names each
+/// entry the summary counts.
+#[test]
+fn a_hard_link_to_a_damaged_file_is_as_damaged() {
+    let dir = scratch("link-zeros");
+    let m = members(&dir, ["member0.img", "member1.img"]);
+    let hello = zfs_read::fixture::zpl_hello();
+    for p in &m {
+        let mut b = std::fs::read(p).unwrap();
+        let at = b
+            .windows(hello.len())
+            .position(|w| w == hello.as_slice())
+            .expect("hello.txt is on the member");
+        b[at + 3] ^= 0xff;
+        std::fs::write(p, b).unwrap();
+    }
+    let out = dir.join("out");
+    let o = out.to_string_lossy().into_owned();
+    let made = Command::new(env!("CARGO_BIN_EXE_zvolfiles"))
+        .args(["-v", "extract", "tank/fs", &m[0], &m[1], "-o", &o])
+        .output()
+        .unwrap();
+    assert_eq!(made.status.code(), Some(4));
+    let first = manifest_record(&out, "hardlink.txt");
+    let second = manifest_record(&out, "hello.txt");
+    assert_eq!(second["hardlink_to"], "hardlink.txt", "{second}");
+    assert_eq!(first["errors"], 1, "{first}");
+    assert_eq!(second["errors"], 1, "{second}");
+    assert_eq!(second["zeroed"], first["zeroed"]);
+    let text = String::from_utf8_lossy(&made.stdout);
+    assert!(
+        text.contains("    hardlink.txt: 1 block(s) written as zeros")
+            && text.contains("    hello.txt: 1 block(s) written as zeros"),
+        "{text}"
+    );
+}
+
+/// `--strict` stops at a directory whose metadata does not decode, as at
+/// a file's block: it went on past it, to exit 4 at the end.
+#[test]
+fn strict_stops_at_what_is_not_a_files_block() {
+    let dir = scratch("strict-dir");
+    let m = damaged(&dir, ZplDamage::SubLayout);
+    let out = dir.join("out");
+    let (code, err) = run(&[
+        "-q",
+        "extract",
+        "tank/fs",
+        &m[0],
+        &m[1],
+        "-o",
+        out.to_str().unwrap(),
+        "--strict",
+    ]);
+    assert_eq!(code, 4, "{err}");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(out.join("manifest.json")).unwrap()).unwrap();
+    assert!(
+        manifest["stopped"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("sub: ")),
+        "{manifest}"
+    );
+    assert_eq!(
+        manifest["files"].as_array().unwrap().last().unwrap()["path"],
+        "sub",
+        "nothing after it: {manifest}"
+    );
 }
 
 /// Every file written is among the record's outputs, with the hash it

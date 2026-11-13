@@ -160,6 +160,36 @@ fn a_destroyed_snapshot_says_how_to_get_it_back() {
     assert!(err.contains("no dataset or snapshot of that name"), "{err}");
 }
 
+/// A GUID as `zfs get guid` prints it, in decimal, names the object as
+/// the hex this tool prints does: given that way, it matched nothing
+/// (exit 3).
+#[test]
+fn a_guid_in_decimal_names_its_dataset() {
+    let dir = scratch("guid-decimal");
+    let m = members(&dir);
+    let events = |want: &str| {
+        let out = Command::new(env!("CARGO_BIN_EXE_zvoltimeline"))
+            .args(["-f", "json", "--dataset", want, &m[0], &m[1]])
+            .output()
+            .expect("run");
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{want}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        v["events"].clone()
+    };
+    let by_name = events("tank/vm/disk0");
+    let hex = by_name[0]["guid"].as_str().unwrap().to_owned();
+    let decimal = u64::from_str_radix(hex.trim_start_matches("0x"), 16)
+        .unwrap()
+        .to_string();
+    assert_eq!(events(&hex), by_name);
+    assert_eq!(events(&decimal), by_name);
+}
+
 /// `-o /dev/stdout` into a pipe ends: the report was read back from it to
 /// be hashed for the record, and the run waited for ever on the pipe it
 /// had written into — `| cat` hung, with or without `--evidence-log`.

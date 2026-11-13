@@ -235,16 +235,31 @@ pub fn with_dataset<T>(
         return Err(exit::UNRECOVERABLE);
     }
 
-    let mut last = None;
+    // Why each transaction group was passed over, said as it is: a MOS
+    // that could not be read was left out of the reasons, and a run that
+    // read none ended "no dataset" — as if the dataset had not been
+    // there — and one that read an older one did so without a word.
+    let mut passed: Vec<String> = Vec::new();
+    let older = wanted.len();
+    let mut pass = |why: String| {
+        if passed.len() + 1 < older {
+            eprintln!("zvolfiles: {why}; passed over for an older one");
+        }
+        passed.push(why);
+    };
     for c in &wanted {
-        let Ok(mos) = open_mos(&reader, &c.ub) else {
-            continue;
-        };
-        let Ok(tree) = walk(&mos, &pool.name) else {
-            continue;
+        let tree = match open_mos(&reader, &c.ub).and_then(|mos| walk(&mos, &pool.name)) {
+            Ok(t) => t,
+            Err(e) => {
+                pass(format!(
+                    "txg {}: the pool's metadata does not read: {e}",
+                    c.ub.txg
+                ));
+                continue;
+            }
         };
         let Some(ds) = tree.datasets.iter().find(|d| d.name == name) else {
-            last = Some(format!("txg {}: no dataset {name}", c.ub.txg));
+            pass(format!("txg {}: no dataset {name}", c.ub.txg));
             continue;
         };
         // A dataset of another kind is the wrong command, not damage: it
@@ -276,8 +291,7 @@ pub fn with_dataset<T>(
         let fs = match opened {
             Ok(fs) => fs,
             Err(e) => {
-                eprintln!("zvolfiles: {name} at txg {}: {e}", c.ub.txg);
-                last = Some(format!("txg {}: {e}", c.ub.txg));
+                pass(format!("{name} at txg {}: {e}", c.ub.txg));
                 continue;
             }
         };
@@ -293,7 +307,7 @@ pub fn with_dataset<T>(
     eprintln!(
         "zvolfiles: {name} is in none of the {} transaction group(s) read{}",
         wanted.len(),
-        last.map(|e| format!(" ({e})")).unwrap_or_default()
+        passed.last().map(|e| format!(" ({e})")).unwrap_or_default()
     );
     Err(exit::UNRECOVERABLE)
 }

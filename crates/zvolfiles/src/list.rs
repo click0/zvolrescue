@@ -186,15 +186,18 @@ pub fn run(
         let files: Vec<FileOut> = entries
             .iter()
             .map(|e| {
-                let target = e
+                // A target that does not read is said, and counted: it
+                // was dropped, the link listed with no target, exit 0.
+                let read_target = e
                     .znode
                     .as_ref()
                     .filter(|z| z.symlink.is_some())
-                    .and_then(|z| {
-                        fs.symlink_target(e.object, z)
-                            .ok()
-                            .map(|t| String::from_utf8_lossy(&t).into_owned())
-                    });
+                    .map(|z| fs.symlink_target(e.object, z));
+                let (target, target_error) = match read_target {
+                    Some(Ok(t)) => (Some(String::from_utf8_lossy(&t).into_owned()), None),
+                    Some(Err(err)) => (None, Some(format!("its target could not be read: {err}"))),
+                    None => (None, None),
+                };
                 let read = e.znode.as_ref().map(|z| fs.xattrs(z)).unwrap_or_default();
                 let mut xattr_errors = read.errors;
                 xattr_errors.extend(
@@ -203,7 +206,11 @@ pub fn run(
                         .filter_map(|x| x.error.as_ref().map(|err| format!("{}: {err}", x.name))),
                 );
                 let xattrs = read.values.into_iter().map(|x| x.name).collect();
-                describe(e, target, xattrs, xattr_errors)
+                let mut f = describe(e, target, xattrs, xattr_errors);
+                if f.error.is_none() {
+                    f.error = target_error;
+                }
+                f
             })
             .collect();
         let mut files = files;

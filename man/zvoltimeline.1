@@ -50,7 +50,9 @@ Oldest transaction group to read; default the oldest that verifies.
 Newest transaction group to read; default the newest that verifies.
 .It Fl -dataset Ar name | guid
 Only events about this object: a dataset or snapshot name it had at
-any TXG, or its GUID.
+any TXG, or its GUID, in hex as this tool prints it or in decimal as
+.Ql zfs get guid
+does.
 It is followed through its renames by GUID.
 What is about the pool rather than one object stays: what
 .Fl -pending
@@ -74,9 +76,14 @@ is on, or the path a log goes to.
 .It Fl f , Fl -format Ar text | json
 Output format; text is the default.
 .It Fl v , Fl -verbose
-Increase verbosity; repeatable.
+Also report changes of a property \(em
+.Ql volsize ,
+.Ql volblocksize ,
+the encryption suite \(em as
+.Ql property
+events; without it they are counted and not shown.
 .It Fl q , Fl -quiet
-Suppress non-essential output.
+Leave out the count of property changes not shown.
 .It Fl -evidence-log Ar file
 Append a JSON Lines evidence log to
 .Ar file .

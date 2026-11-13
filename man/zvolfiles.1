@@ -159,9 +159,23 @@ A path not in the dataset at that TXG is named, in the manifest too
 and the others are written (exit 3); when none is there, nothing is
 made.
 .It Fl -strict
-Stop the run at the first block that cannot be read: the file it is in
-is named as failed, holding the bytes before it, and nothing after it
-is looked at (exit 4).
+Stop the run at the first thing that cannot be read \(em a file's
+block, an entry's metadata, a directory's entries, an extended
+attribute: the entry it is in is named as failed, a file holding
+exactly the bytes before it, and nothing after it is looked at (exit
+4).
+A file a signal cuts short holds exactly the bytes before the cut too.
+.It Fl v , Fl -verbose
+With
+.Cm extract ,
+name each entry the summary counts as not read whole or not written,
+and why.
+.It Fl q , Fl -quiet
+With
+.Cm extract ,
+leave out the notes of what
+.Fl -preserve
+could not put back; the manifest has them.
 .It Fl -preserve Ar list
 Metadata to put back, comma-separated:
 .Ql times
@@ -197,6 +211,11 @@ Only the object set has to be readable: a master node or system
 attribute table that is not is said on standard error and in
 .Pa objects.json ,
 and the objects are written all the same.
+The index is
+.Pa objects.json ,
+or
+.Pa objects.1.json
+and so on when an earlier run left one there.
 A transaction group at which the dataset does not open is passed over
 for an older one, by every subcommand.
 .Bl -tag -width Ds

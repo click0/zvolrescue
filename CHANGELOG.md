@@ -747,6 +747,32 @@ tagged. `v0.7.1` is the release that carries those six.
   Markdown showed a right-to-left override, a zero-width space, a space
   that is not one and a space at either end of a name as nothing at
   all; each is shown as its code.
+* **zvoltimeline and zvolfiles: a GUID in decimal, `-v` and `-q` that do
+  something, and what was cut, damaged or passed over said.** A GUID
+  given to `zvoltimeline --dataset` in decimal, as `zfs get guid`
+  prints it, matched nothing (exit 3); it names its dataset. Property
+  events, which the companion spec reports at `-v`, were printed
+  whatever was asked and `-v` did nothing: they are shown at `-v`, and
+  otherwise counted. In `zvolfiles extract`, `-v` names each entry the
+  summary counts and why, and `-q` leaves out the notes of what
+  `--preserve` could not put back. A second `objects` run into the same
+  directory replaced the first run's `objects.json`; it is written as
+  `objects.1.json` and so on, as manifests are. A pool whose metadata
+  did not read at a transaction group was "no dataset", and an older
+  group was taken without a word; each one passed over is said, and
+  why. `list` dropped a symbolic link's target that did not read, exit
+  0; it is said and counted. The second name of a hard link to a file
+  with blocks written as zeros said `errors 0`; it has the first name's
+  zeroed runs. A file cut short by a signal or by `--strict` ended at
+  its last block with data, shorter than the bytes the manifest said it
+  held; it is made exactly that long. `--strict` went on past an entry
+  whose metadata did not decode, a directory whose entries did not all
+  read and an extended attribute that did not; it stops there. A
+  manifest or index that could not be written was said with its path
+  twice, and the run ended before its evidence record, with the files
+  it wrote on record nowhere; it is said once and the record is
+  written. A dataset root that is not a directory was "not one a file
+  can have here"; it is said for what it is.
 
 ## v0.9.12 — 2026-11-07
 

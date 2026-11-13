@@ -194,19 +194,32 @@ pub fn run(
     };
 
     let json = serde_json::to_value(&out).expect("serialisable");
-    let index = output.join("objects.json");
+    // Under a name no earlier run took, as `extract` names its manifest:
+    // a second run into the same directory — another TXG, `--strict`
+    // after one without — replaced the first run's index, the one record
+    // of what that run wrote.
+    let index = std::iter::once("objects.json".to_string())
+        .chain((1..).map(|n| format!("objects.{n}.json")))
+        .map(|name| output.join(name))
+        .find(|p| std::fs::symlink_metadata(p).is_err())
+        .expect("an unbounded supply of names");
     let wrote = tree.create(&index).and_then(|mut f| {
         f.write_all((serde_json::to_string_pretty(&json).expect("serialisable") + "\n").as_bytes())
             .map_err(|e| OutError::Failed(format!("{}: {e}", index.display())))
     });
-    if let Err(e) = wrote {
-        eprintln!("zvolfiles: {}: {e}", index.display());
-        return if matches!(e, OutError::Refused(_)) {
-            exit::REFUSED
-        } else {
-            exit::USAGE
-        };
-    }
+    // Said once, and the run still ends on the record with every object
+    // it wrote.
+    let index_failed = match wrote {
+        Ok(()) => None,
+        Err(e) => {
+            eprintln!("zvolfiles: the index was not written: {e}");
+            Some(if matches!(e, OutError::Refused(_)) {
+                exit::REFUSED
+            } else {
+                exit::USAGE
+            })
+        }
+    };
     match g.format {
         Format::Json => println!(
             "{}",
@@ -232,7 +245,11 @@ pub fn run(
                         .map_or(String::new(), |e| format!("  ({e})"))
                 );
             }
-            println!("  index: {}", index.display());
+            if index_failed.is_some() {
+                println!("  index: NOT WRITTEN ({})", index.display());
+            } else {
+                println!("  index: {}", index.display());
+            }
         }
     }
     let refused = out.objects.iter().filter(|o| o.refused).count();
@@ -247,7 +264,9 @@ pub fn run(
     if let Some(at) = &out.stopped {
         eprintln!("zvolfiles: --strict: {at}; the run stops here, and the index lists the objects written (exit 4)");
     }
-    let code = if out.interrupted {
+    let code = if let Some(c) = index_failed {
+        c
+    } else if out.interrupted {
         exit::INTERRUPTED
     } else if refused > 0 {
         exit::REFUSED
@@ -258,7 +277,11 @@ pub fn run(
     };
     // Every object written, with its hash, beside the index (COMPANIONS
     // §1.3): the index alone was the record's output.
-    let mut written: Vec<FileRef> = FileRef::hashed(&index).into_iter().collect();
+    let mut written: Vec<FileRef> = if index_failed.is_none() {
+        FileRef::hashed(&index).into_iter().collect()
+    } else {
+        Vec::new()
+    };
     written.extend(
         out.objects
             .iter()

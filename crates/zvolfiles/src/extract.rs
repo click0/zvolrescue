@@ -165,6 +165,8 @@ struct Written {
     path: String,
     raw_path: Vec<u8>,
     sha256: Option<String>,
+    /// What of it was written as zeros: the same bytes under every name.
+    zeroed: Vec<Zeroed>,
 }
 
 type WrittenObjects = std::collections::BTreeMap<u64, Written>;
@@ -462,9 +464,24 @@ fn copy_file(
         zero(&mut zeroed, 0, 0, size, NO_BLOCK_SIZE.to_string());
     }
     let zeros = vec![0u8; bs as usize];
+    // A file cut short — by a signal or by `--strict` — holds the bytes
+    // before the cut, holes among them, and is made exactly that long:
+    // it ended at the last block with data, shorter than the bytes the
+    // manifest said it held.
+    let cut = |file: &std::fs::File, at: u64, why: String| -> String {
+        match file.set_len(at) {
+            Ok(()) => why,
+            Err(e) => format!("{why}; and it could not be made {at} bytes long: {e}"),
+        }
+    };
     while written < size {
         if stop.load(Ordering::Relaxed) {
-            return Err(fail(format!("interrupted after {written} of {size} bytes")).into());
+            return Err(fail(cut(
+                &file,
+                written,
+                format!("interrupted after {written} of {size} bytes, which the file holds"),
+            ))
+            .into());
         }
         let want = (size - written).min(bs) as usize;
         let blkid = written / bs;
@@ -485,7 +502,11 @@ fn copy_file(
                     chunk.len()
                 );
                 if strict {
-                    return Err(CopyError::Strict(format!("block {blkid}: {reason}")));
+                    return Err(CopyError::Strict(cut(
+                        &file,
+                        written,
+                        format!("block {blkid}: {reason}"),
+                    )));
                 }
                 let had = chunk.len() as u64;
                 zero(&mut zeroed, blkid, written + had, want as u64 - had, reason);
@@ -498,9 +519,13 @@ fn copy_file(
             }
             Err(e) => {
                 if strict {
-                    return Err(CopyError::Strict(format!(
-                        "block {blkid} (bytes {written}–{}): {e}",
-                        written + want as u64
+                    return Err(CopyError::Strict(cut(
+                        &file,
+                        written,
+                        format!(
+                            "block {blkid} (bytes {written}–{}): {e}",
+                            written + want as u64
+                        ),
                     )));
                 }
                 zero(&mut zeroed, blkid, written, want as u64, e.to_string());
@@ -662,6 +687,35 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
             // `--path` named was made with the extraction's time and mode
             // and recorded nowhere, and an empty one not made at all.
             // The dataset's root is the output directory, and is not.
+            if raw_prefix.is_empty() && !is_dir {
+                // The dataset's root, which is the output directory, is
+                // not one: nothing is under it to write. It was handed on
+                // as a file to write, and its path — none — was "not one
+                // a file can have here".
+                let why = match (&znode, &error) {
+                    (Some(z), _) => format!("its metadata says {:?}", z.file_type()),
+                    (None, Some(e)) => e.clone(),
+                    (None, None) => "its metadata is unreadable".into(),
+                };
+                let e = Entry {
+                    raw_path: Vec::new(),
+                    path: String::new(),
+                    object: obj,
+                    znode: None,
+                    error: None,
+                    walked_at: None,
+                    contents_errors: Vec::new(),
+                };
+                let note = format!(
+                    "the dataset's root, object {obj}, does not read as a directory ({why}); its objects come out with zvolfiles objects"
+                );
+                eprintln!("zvolfiles: {note}");
+                run.files.push(failed(&e, &note));
+                if opts.strict {
+                    run.stopped = Some(note);
+                }
+                continue;
+            }
             if !raw_prefix.is_empty() || !is_dir {
                 let e = Entry {
                     raw_path: raw_prefix.clone(),
@@ -686,7 +740,7 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
                     if e.object == obj && e.raw_path == raw_prefix {
                         match run.files.last_mut() {
                             Some(r) if !raw_prefix.is_empty() && r.object == obj => {
-                                r.contents_errors.extend(e.contents_errors)
+                                r.contents_errors.extend(e.contents_errors.iter().cloned())
                             }
                             _ => run.files.push(match &e.znode {
                                 Some(z) => record_of(fs, &e, z),
@@ -694,6 +748,9 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
                                     failed(&e, e.error.as_deref().unwrap_or("metadata unreadable"))
                                 }
                             }),
+                        }
+                        if opts.strict {
+                            stop_if_unread(&e, &mut run);
                         }
                         continue;
                     }
@@ -705,7 +762,9 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
         for m in run.dirs.iter().rev() {
             m.restore(preserve, &mut run.not_restored);
         }
-        for n in &run.not_restored {
+        // What `--preserve` could not restore is in the manifest; `-q`
+        // leaves the notes out.
+        for n in run.not_restored.iter().filter(|_| !g.quiet) {
             eprintln!("zvolfiles: --preserve: {n} (the manifest records what each file had)");
         }
         let interrupted = interrupt.load(Ordering::Relaxed);
@@ -787,14 +846,21 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
         f.write_all((serde_json::to_string_pretty(&json).expect("serialisable") + "\n").as_bytes())
             .map_err(|e| OutError::Failed(format!("{}: {e}", manifest.display())))
     });
-    if let Err(e) = wrote {
-        eprintln!("zvolfiles: {}: {e}", manifest.display());
-        return if matches!(e, OutError::Refused(_)) {
-            exit::REFUSED
-        } else {
-            exit::USAGE
-        };
-    }
+    // A manifest that could not be written is said once — its path was
+    // in the message twice — and the run still ends on the record, with
+    // every file it did write: it returned before the record, and the
+    // files were on record nowhere.
+    let manifest_failed = match wrote {
+        Ok(()) => None,
+        Err(e) => {
+            eprintln!("zvolfiles: the manifest was not written: {e}");
+            Some(if matches!(e, OutError::Refused(_)) {
+                exit::REFUSED
+            } else {
+                exit::USAGE
+            })
+        }
+    };
     match g.format {
         Format::Json => println!(
             "{}",
@@ -845,10 +911,24 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
             for n in &out.not_found {
                 println!("  NOT FOUND (exit 3): {n}");
             }
-            println!("  manifest: {}", manifest.display());
+            // `-v` names each entry the counts above are of.
+            if g.verbose > 0 {
+                for f in &out.files {
+                    if let Some(why) = not_whole(f) {
+                        println!("    {}: {why}", f.path);
+                    }
+                }
+            }
+            if manifest_failed.is_some() {
+                println!("  manifest: NOT WRITTEN ({})", manifest.display());
+            } else {
+                println!("  manifest: {}", manifest.display());
+            }
         }
     }
-    let code = if out.interrupted {
+    let code = if let Some(c) = manifest_failed {
+        c
+    } else if out.interrupted {
         exit::INTERRUPTED
     } else if refused > 0 {
         exit::REFUSED
@@ -865,7 +945,11 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
     // verify` passed a tree whose files had been changed or deleted.
     // A name that is not text cannot be in a JSON record; the manifest
     // has it, under `path_hex`.
-    let mut written: Vec<FileRef> = FileRef::hashed(&manifest).into_iter().collect();
+    let mut written: Vec<FileRef> = if manifest_failed.is_none() {
+        FileRef::hashed(&manifest).into_iter().collect()
+    } else {
+        Vec::new()
+    };
     written.extend(
         out.files
             .iter()
@@ -888,6 +972,36 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
         written,
         &ledger.incidents(),
     )
+}
+
+/// Why an entry is not in the tree whole, for `-v`: what could not be
+/// written, or what of it could not be read.
+fn not_whole(f: &Extracted) -> Option<String> {
+    if let Some(e) = &f.error {
+        return Some(format!("not written: {e}"));
+    }
+    let mut why = Vec::new();
+    if f.errors > 0 {
+        why.push(format!("{} block(s) written as zeros", f.errors));
+    }
+    why.extend(
+        f.contents_errors
+            .iter()
+            .map(|e| format!("entries missing: {e}")),
+    );
+    why.extend(
+        f.xattr_errors
+            .iter()
+            .map(|e| format!("extended attributes: {e}")),
+    );
+    why.extend(f.xattrs.iter().filter_map(|x| {
+        Some(format!(
+            "extended attribute {}: {}",
+            x.name,
+            x.error.as_ref()?
+        ))
+    }));
+    (!why.is_empty()).then(|| why.join("; "))
 }
 
 /// What the manifest records of an entry whose metadata was read.
@@ -922,6 +1036,60 @@ fn record_of(fs: &Filesystem<'_, '_>, e: &Entry, z: &Znode) -> Extracted {
 
 /// Write one entry out and record what happened to it.
 fn extract_entry(
+    fs: &Filesystem<'_, '_>,
+    tree: &OutTree,
+    e: &Entry,
+    opts: &Options,
+    preserve: Preserve,
+    run: &mut Run,
+    stop: &AtomicBool,
+) {
+    let before = run.files.len();
+    write_entry(fs, tree, e, opts, preserve, run, stop);
+    if opts.strict && run.files.len() > before {
+        stop_if_unread(e, run);
+    }
+}
+
+/// `--strict` stops at the first thing that cannot be read, not only at
+/// a file's block: an entry whose metadata does not decode, a directory
+/// whose entries do not all read, an extended attribute that does not.
+/// It went on past each of them, to exit 4 at the end.
+fn stop_if_unread(e: &Entry, run: &mut Run) {
+    if run.stopped.is_some() {
+        return;
+    }
+    let Some(f) = run.files.last() else {
+        return;
+    };
+    let why = if e.znode.is_none() {
+        f.error.clone()
+    } else {
+        f.contents_errors
+            .first()
+            .map(|c| format!("entries not read: {c}"))
+            .or_else(|| {
+                f.xattr_errors
+                    .first()
+                    .map(|x| format!("extended attributes not read: {x}"))
+            })
+            .or_else(|| {
+                f.xattrs.iter().find_map(|x| {
+                    Some(format!(
+                        "extended attribute {} not read: {}",
+                        x.name,
+                        x.error.as_ref()?
+                    ))
+                })
+            })
+    };
+    if let Some(why) = why {
+        run.stopped = Some(format!("{}: {why}", f.path));
+    }
+}
+
+/// [`extract_entry`], before `--strict` has its say.
+fn write_entry(
     fs: &Filesystem<'_, '_>,
     tree: &OutTree,
     e: &Entry,
@@ -1034,8 +1202,13 @@ fn extract_entry(
                     .and_then(|from| tree.hard_link(&from, &to))
                 {
                     Ok(()) => {
+                        // The same bytes, zeros and all: the second name
+                        // said `errors 0` for a file the first name said
+                        // had blocks written as zeros.
                         record.hardlink_to = Some(first.path.clone());
                         record.sha256 = first.sha256.clone();
+                        record.errors = first.zeroed.len() as u64;
+                        record.zeroed = first.zeroed;
                     }
                     Err(err) => fail(&mut record, err),
                 }
@@ -1056,7 +1229,7 @@ fn extract_entry(
                     }
                     record.sha256 = Some(copied.sha256.clone());
                     record.errors = copied.zeroed.len() as u64;
-                    record.zeroed = copied.zeroed;
+                    record.zeroed = copied.zeroed.clone();
                     // Only now, and only for an object that has more
                     // names to come: the hash is what a later link
                     // records, and reading the blocks again would prove
@@ -1068,6 +1241,7 @@ fn extract_entry(
                                 path: e.path.clone(),
                                 raw_path: e.raw_path.clone(),
                                 sha256: Some(copied.sha256),
+                                zeroed: copied.zeroed,
                             },
                         );
                     }
