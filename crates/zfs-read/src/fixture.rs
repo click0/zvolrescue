@@ -731,9 +731,16 @@ impl Alloc {
                 )
             }
             Layout::Raidz { ashift, nparity } => {
+                // The block is as long as what was written, in 512-byte
+                // sectors, as ZFS records it; on the disks it is padded to
+                // whole sectors of the vdev, as `zio_vdev_io_start` pads
+                // it. Recorded as the padded size, a 4 KiB block of a
+                // 4 KiB object at ashift 13 claimed 8 KiB, and its object
+                // was no longer what its dnode said.
                 let unit = 1usize << ashift;
+                let psize = data.len().div_ceil(512) * 512;
                 let size = data.len().div_ceil(unit) * unit;
-                let lsize = if comp == 2 { size as u64 } else { lsize };
+                let lsize = if comp == 2 { psize as u64 } else { lsize };
                 let mut padded = data.to_vec();
                 padded.resize(size, 0);
                 let offset = self.next;
@@ -767,10 +774,10 @@ impl Alloc {
                 self.bp(
                     offset,
                     m.asize,
-                    size as u64,
+                    psize as u64,
                     lsize,
                     comp,
-                    &padded,
+                    &padded[..psize],
                     otype,
                     level,
                     txg,
