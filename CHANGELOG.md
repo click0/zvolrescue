@@ -13,7 +13,22 @@ development milestone that names what changed when — the sections below
 are their record — and ships inside the next version that does get
 tagged. `v0.7.1` is the release that carries those six.
 
-## Unreleased
+## v0.9.15 — 2026-11-13
+
+**Real OpenZFS file systems read, the record holds, and what a run could
+not do is said.** `zvolfiles` reads datasets OpenZFS itself wrote: its
+system-attribute layouts and its legacy inodes were decoded wrong, and
+on a real pool it extracted nothing. The chain of evidence holds:
+`zvolreport verify` checks a report against its logs, every extracted
+file against its hash and nothing past what was recorded; two runs, or
+a run killed half way, no longer break a shared log; and no output goes
+over what a run reads, through a loop device, a link or `/dev/stdout`.
+A forged pool no longer hangs a reader — a ZAP, a gang tree, a space
+map, a block of the wrong size. A dump stopped by a signal, a bad block
+or a full disk resumes with what it lost, and says where a resume will
+start. And the exit codes are the manuals': an argument that does not
+parse is 1, a member that did not open is 2 in `zvolcarve` too, and
+`zvoltimeline` shows property changes at `-v`.
 
 ### Fixed
 

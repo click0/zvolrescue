@@ -1,6 +1,6 @@
 # zvolrescue — Technical Specification (ТЗ)
 
-**Status:** living document, revised 2026-11-07 (tool at v0.9.12) · **Owner:** Vladyslav V. Prodan
+**Status:** living document, revised 2026-11-13 (tool at v0.9.15) · **Owner:** Vladyslav V. Prodan
 
 **Ukrainian version:** [SPEC.uk.md](SPEC.uk.md) · **Companion tools:** [COMPANIONS.md](COMPANIONS.md)
 
@@ -679,6 +679,11 @@ over a verified TXG with nothing behind it the way `dump` does (F-10).
 writes is checked against everything it reads, a forged geometry, dnode
 or file name no longer takes a tool down, and what a run could not do
 is said rather than left out (§8.3, N-03).
+`v0.9.15` reads the file systems OpenZFS itself writes (Z-02), holds a
+report to its logs and every extracted file to its hash (R-02, R-04),
+resumes a dump stopped by a full disk with what it lost (F-32), and
+exits with the codes §7 names, an argument that does not parse among
+them.
 `1.0.0` is the full release, and waits for what no CI can supply: three real-world incidents with
 documented outcomes ([REALWORLD-TESTS.md](REALWORLD-TESTS.md)). The
 packaging it also waited for — a FreeBSD port, a `.deb`, an AUR
