@@ -124,6 +124,8 @@ between two 512-byte slots is taken down to the slot it is in, and a
 dnode that starts before
 .Ar end
 is read whole.
+A scan done in parts, each resumed to the end of a longer range, is
+the scan done in one, wherever the parts end.
 A range that starts past the end of every member is a usage error.
 .It Fl -resume
 Continue a scan that was interrupted; a SIGINT or SIGTERM ends a scan
@@ -144,12 +146,21 @@ sample.
 Slow, and rarely worth it before a
 .Cm dump .
 .It Fl -max-hits Ar n
-Stop each member's scan after this many hits; default 100000.
+Stop each member's scan once it has this many hits; default 100000.
+The first
+.Ar n
+are listed, the scan says where it got to and exits with status 6, and
+.Fl -resume
+goes on from the first hit not listed, with the same limit or another.
 .It Fl -sample Ar n
 Report what the first
 .Ar n
 hits look like instead of filtering, so a profile can be picked from
 the disk.
+A sample that reached its size exits with status 0.
+A limit of 0 keeps nothing and is a usage error, as is
+.Fl -max-roots
+0.
 .It Fl -compressed Ar list
 Compressions to try at each allocation-aligned offset:
 .Ql lz4,lzjb,gzip,zstd
@@ -294,8 +305,9 @@ with no candidate) or the candidate unreadable, 4 a partial image or a scan that
 every byte of the range (what lay in the bytes it could not read was not
 searched, and
 .Pa candidates.json
-says how many), 5 refused, 6 interrupted with the state written, 7 the
-medium refused a read.
+says how many), 5 refused, 6 interrupted, or stopped at
+.Fl -max-hits ,
+with the state written, 7 the medium refused a read.
 .Sh EXAMPLES
 A volume made like its surviving neighbour, found and extracted from
 images of two mirror members:

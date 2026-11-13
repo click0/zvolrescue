@@ -2,6 +2,7 @@
 //! the scan finds it, the dump gets it out, and the legacy digests are
 //! taken in the same pass, only when asked (SPEC F-53).
 
+use std::path::Path;
 use std::process::Command;
 
 use zfs_ondisk::label::LABEL_SIZE;
@@ -536,7 +537,7 @@ fn a_carved_dump_is_held_to_what_zvolrescue_dump_is() {
 
     let img = dir.join("vol.img");
     let mut names = vec![img.to_string_lossy().into_owned()];
-    if std::path::Path::new("/dev/stdout").exists() {
+    if Path::new("/dev/stdout").exists() {
         names.push("/dev/stdout".into());
     }
     for name in &names {
@@ -1089,6 +1090,121 @@ fn a_member_no_label_places_is_placed_by_its_pointers() {
             start.is_some(),
             "{name}: {err}"
         );
+        // A resume goes on with the start the scan found: it was looked
+        // for again, over the whole member, on every resume.
+        let (code, _, err) = run(&[
+            "-q",
+            "scan",
+            img.to_str().unwrap(),
+            "-o",
+            ws.to_str().unwrap(),
+            "--resume",
+        ]);
+        assert_eq!(code, 0, "{name}: {err}");
+        assert!(!err.contains("its block pointers put it"), "{name}: {err}");
+        let index: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(ws.join("candidates.json")).unwrap()).unwrap();
+        assert_eq!(index["starts_by_pointers"][0]["base"].as_u64(), start);
     }
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `--max-hits` ends a member's scan after the chunk it was reached in,
+/// says so, and exits 6; `--resume` with the same limit goes on from the
+/// first hit not listed, and a scan resumed to its end lists what one
+/// pass does. The resume went on from the chunk's start, met the same
+/// hits and the same limit, and never got further; nothing said why the
+/// run ended 6. A sample that reached its size did what it was asked,
+/// exit 0, and a limit of 0 is refused.
+#[test]
+fn a_limited_scan_resumes_to_the_scan_in_one_pass() {
+    let dir = scratch("limited");
+    let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1)]);
+    let members: Vec<String> = carved_zvol_members(&mut pool, SIZE)
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let p = dir.join(format!("member{i}.img"));
+            std::fs::write(&p, m).expect("write member");
+            p.to_string_lossy().into_owned()
+        })
+        .collect();
+    let one = dir.join("one").to_string_lossy().into_owned();
+    let (code, _, err) = run(&["-q", "scan", &members[0], "-o", &one, "--dnode-type", "any"]);
+    assert_eq!(code, 0, "{err}");
+    let keys = |ws: &str| {
+        let index: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(Path::new(ws).join("candidates.json")).unwrap())
+                .unwrap();
+        let mut k: Vec<(u64, u64)> = index["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| (c["offset"].as_u64().unwrap(), c["slot"].as_u64().unwrap()))
+            .collect();
+        k.sort();
+        (
+            k,
+            index["slots_examined"].clone(),
+            index["rejected"].clone(),
+        )
+    };
+    let want = keys(&one);
+    assert!(want.0.len() > 2, "{:?}", want.0);
+
+    let parts = dir.join("parts").to_string_lossy().into_owned();
+    let mut runs = 0;
+    loop {
+        let mut args = vec![
+            "-q",
+            "scan",
+            &members[0],
+            "-o",
+            &parts,
+            "--dnode-type",
+            "any",
+            "--max-hits",
+            "1",
+        ];
+        if runs > 0 {
+            args.push("--resume");
+        }
+        let (code, _, err) = run(&args);
+        runs += 1;
+        if code == 0 {
+            break;
+        }
+        assert_eq!(code, 6, "{err}");
+        assert!(err.contains("the --max-hits limit"), "{err}");
+        assert!(runs <= want.0.len() + 1, "no progress after {runs} runs");
+    }
+    assert_eq!(keys(&parts), want);
+    assert!(runs > 2, "the limit was reached: {runs} run(s)");
+
+    let sample = dir.join("sample").to_string_lossy().into_owned();
+    let (code, out, err) = run(&[
+        "-f",
+        "json",
+        "scan",
+        &members[0],
+        "-o",
+        &sample,
+        "--sample",
+        "2",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(err.contains("a sample of the first 2 hit(s)"), "{err}");
+    assert_eq!(json(&out)["histograms"]["sampled"], 2, "{out}");
+
+    for (cmd, flag) in [
+        ("scan", "--max-hits"),
+        ("scan", "--sample"),
+        ("roots", "--max-roots"),
+    ] {
+        let ws = dir.join("zero").to_string_lossy().into_owned();
+        let (code, _, err) = run(&["-q", cmd, &members[0], "-o", &ws, flag, "0"]);
+        assert_eq!(code, 1, "{flag}: {err}");
+        assert!(err.contains(&format!("{flag} 0 keeps nothing")), "{err}");
+        assert!(!Path::new(&ws).exists());
+    }
 }

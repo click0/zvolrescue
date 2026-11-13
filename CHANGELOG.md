@@ -636,6 +636,27 @@ tagged. `v0.7.1` is the release that carries those six.
   now lists the maps and the hints among its inputs, and a run read
   through hints carries `layout`: the vdevs and their members by name,
   in the order read.
+* **A carve scan done in parts lost candidates, and a limited one never
+  finished.** `zvolcarve scan` resumed from the end of a `--range` that
+  was no multiple of 512 and read every slot after it off by the
+  difference: 1717 candidates instead of 2644, and the state said
+  complete. A range now ends at the first slot boundary at or past its
+  end, and a scan in parts is the scan in one. `--max-hits` stopped in
+  the middle of a chunk, ended 6 without a word, and its `--resume` met
+  the same hits and the same limit again: it now finishes the chunk,
+  lists the first *n* hits, says where it got to, and the resume goes
+  on from the first hit not listed. A `--sample` that reached its size
+  exits 0. `--max-hits 0`, `--sample 0` and `roots --max-roots 0` are
+  usage errors; the last said no header was found (exit 3).
+* **Where a bare member begins was looked for over and over.** A member
+  no label places was searched for its start by its block pointers
+  over the whole member, whatever `--range` said, and again on every
+  `--resume`. The probes are looked for in the range, and a resume
+  takes the start the scan it resumes found. The base search itself —
+  `zvolcarve zeropoint` and the scan's — read every probe again at each
+  step and for each shift: 3.4 GB for the first 64 MiB of a 96 MiB
+  member. Each probe is now read once for a run of bases and checked
+  from memory, at the finest step only: 0.39 GB, the same bases found.
 
 ## v0.9.12 — 2026-11-07
 

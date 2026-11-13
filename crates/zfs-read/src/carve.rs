@@ -201,7 +201,13 @@ pub struct Options {
     pub codecs: Vec<Codec>,
     /// Block sizes to try when decompressing, largest first.
     pub block_sizes: Vec<u64>,
-    /// Stop after this many hits, so a wide search can be bounded.
+    /// Stop after the chunk in which this many hits have been found, so
+    /// a wide search can be bounded. The chunk is finished first: a scan
+    /// stopped in the middle of one had looked at part of it, and the
+    /// resume that went on from the chunk's start met the same hits,
+    /// reached the same bound, and never got further. A caller that
+    /// wants exactly this many takes the first of them by offset and
+    /// goes on from the one after (see [`Scan::capped`]).
     pub max_hits: usize,
     /// Collect dnode candidates at all.
     ///
@@ -280,6 +286,11 @@ pub struct Scan {
     pub resume_at: u64,
     /// The scan stopped before the end of the range.
     pub stopped_early: bool,
+    /// It stopped because it held `max_hits` hits, not because it was
+    /// asked to: every slot of the chunks it read was looked at and every
+    /// hit is in `hits` — possibly more than `max_hits` — and
+    /// `resume_at` is past the last of those chunks.
+    pub capped: bool,
     /// Bytes of the range that could not be read, and so were not
     /// searched: sectors an imager's map refuses, chunks a device did.
     pub unreadable_bytes: u64,
@@ -404,10 +415,6 @@ fn consider(
         }
     }
     if opts.strict_profile && !misses.is_empty() {
-        return;
-    }
-    if scan.hits.len() >= opts.max_hits {
-        scan.stopped_early = true;
         return;
     }
     trace!(
@@ -561,7 +568,14 @@ pub fn scan_member(
 ) -> std::io::Result<Scan> {
     let size = src.size();
     let (start, end) = opts.range.unwrap_or((0, size));
-    let end = end.min(size);
+    // Dnodes sit on 512-byte slots, and a range is the slots that start
+    // in it: it is read from the slot its start is in to the first slot
+    // boundary at or past its end. Ended where it was asked, a scan done
+    // in parts went on from a byte that is no boundary, and read every
+    // slot after it off by the difference — the dnodes there were never
+    // seen, and the scan said it was complete.
+    let start = start / 512 * 512;
+    let end = end.next_multiple_of(512).min(size);
     let step = 1u64 << ashift.clamp(9, 17);
     let mut scan = Scan {
         resume_at: start,
@@ -651,16 +665,13 @@ pub fn scan_member(
                 off += step as usize;
             }
         }
-        if scan.stopped_early {
-            // Stop where this chunk began. The rest of it was never
-            // looked at, and a resume that started after it would lose
-            // whatever is there; seeing a few candidates twice is the
-            // cheaper mistake.
-            scan.resume_at = at;
-            break;
-        }
         at += opts.chunk as u64;
         scan.resume_at = at.min(end);
+        if opts.collect_hits && scan.hits.len() >= opts.max_hits {
+            scan.capped = true;
+            scan.stopped_early = at < end;
+            break;
+        }
     }
     Ok(scan)
 }
@@ -1084,6 +1095,73 @@ mod tests {
             short.hits.iter().map(|h| h.offset).collect::<Vec<_>>(),
             [at]
         );
+    }
+
+    /// A scan done in parts is the scan done in one: each part ends at
+    /// an offset that is no slot boundary, and the next goes on from
+    /// where the last stopped. The resume used to start at the end
+    /// itself and read every slot after it off by the difference.
+    #[test]
+    fn a_scan_in_parts_is_the_scan_in_one() {
+        let members = carved();
+        let src = MemSource::new(members[0].clone());
+        let key = |s: &Scan| {
+            s.hits
+                .iter()
+                .map(|h| (h.offset, h.slot))
+                .collect::<Vec<_>>()
+        };
+        let whole = scan_member(&src, 0, 12, &Options::default()).expect("scan");
+        let mut hits = Vec::new();
+        let (mut slots, mut bytes, mut at) = (0, 0, 0u64);
+        for end in [1_000_003u64, 5_000_001, 9_999_999, SIZE] {
+            let part = scan_member(
+                &src,
+                0,
+                12,
+                &Options {
+                    range: Some((at, end)),
+                    ..Options::default()
+                },
+            )
+            .expect("scan");
+            assert_eq!(part.resume_at % 512, 0, "a resume starts on a slot");
+            hits.extend(key(&part));
+            slots += part.slots_examined;
+            bytes += part.bytes_read;
+            at = part.resume_at;
+        }
+        assert_eq!(hits, key(&whole));
+        assert_eq!((slots, bytes), (whole.slots_examined, whole.bytes_read));
+    }
+
+    /// The hit limit ends the scan after the chunk it was reached in, with
+    /// every hit of that chunk kept and the resume point past it: one that
+    /// stopped inside the chunk went on from the chunk's start, met the
+    /// same hits, and never got further.
+    #[test]
+    fn the_hit_limit_stops_after_a_whole_chunk() {
+        let members = carved();
+        let src = MemSource::new(members[0].clone());
+        let whole = scan_member(&src, 0, 12, &Options::default()).expect("scan");
+        let chunk = 1 << 20;
+        let capped = scan_member(
+            &src,
+            0,
+            12,
+            &Options {
+                max_hits: 1,
+                chunk,
+                ..Options::default()
+            },
+        )
+        .expect("scan");
+        assert!(capped.capped && capped.stopped_early);
+        let first = whole.hits.iter().map(|h| h.offset).min().expect("a hit");
+        let chunk_end = (first / chunk as u64 + 1) * chunk as u64;
+        assert_eq!(capped.resume_at, chunk_end);
+        let in_chunk = whole.hits.iter().filter(|h| h.offset < chunk_end).count();
+        assert_eq!(capped.hits.len(), in_chunk, "every hit of that chunk");
     }
 
     /// The compressed pass steps from where the vdev starts. On a

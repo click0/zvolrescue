@@ -545,7 +545,19 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             let Some(src) = src.as_ref().filter(|_| starts[i] == 0 && !placed) else {
                 continue;
             };
-            if let Some(b) = start_by_pointers(src, i, &codecs, &interrupt) {
+            // A resume goes on with the start the scan it resumes found:
+            // asked again, the pointers were looked for over the whole
+            // member each time, gigabytes for a range of megabytes.
+            if let Some(b) = earlier.as_ref().and_then(|e| {
+                e.starts_by_pointers
+                    .iter()
+                    .find(|b| b.member == members.paths[i])
+            }) {
+                starts[i] = b.base;
+                by_pointers.push(b.clone());
+                continue;
+            }
+            if let Some(b) = start_by_pointers(src, i, &codecs, range, &interrupt) {
                 eprintln!(
                     "zvolcarve: {}: no label says where the vdev starts; its block pointers put it at byte {} ({} of {} probes agree, as `zvolcarve zeropoint` would say), and compressed blocks are looked for from there. Reading a candidate needs the same base in --hints",
                     members.paths[i].display(),
@@ -666,7 +678,45 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         // each was a candidate with nothing walked, scored as nothing,
         // and a resume — which starts past them — never looked again.
         let mut cut_at: Option<[u64; 2]> = None;
+        // The limit was met in the chunk the scan stopped after: the
+        // first `limit` hits past what an earlier run listed are this
+        // run's, and a resume goes on from the one after them. The scan
+        // used to stop inside the chunk, and its resume — from the
+        // chunk's start — met the same hits, reached the same limit, and
+        // never got further; the run ended 6 and said nothing.
+        let limit = opts.sample.unwrap_or(opts.max_hits);
+        let mut limited_at: Option<[u64; 2]> = None;
+        if scan.capped {
+            let listed = |h: &&zfs_read::carve::Hit| {
+                cut_before.is_some_and(|[o, s]| (h.offset, h.slot) < (o, s))
+            };
+            limited_at = scan
+                .hits
+                .iter()
+                .filter(|h| !listed(h))
+                .nth(limit)
+                .map(|h| [h.offset, h.slot]);
+            if limited_at.is_some() || scan.stopped_early {
+                let by = limited_at.map_or(scan.resume_at, |[o, _]| o);
+                if opts.sample.is_some() {
+                    if !g.quiet {
+                        eprintln!(
+                            "zvolcarve: {}: a sample of the first {limit} hit(s), to byte {by}",
+                            members.paths[i].display()
+                        );
+                    }
+                } else {
+                    eprintln!(
+                        "zvolcarve: {}: {limit} hit(s), the --max-hits limit, by byte {by}; the rest of it was not scanned, and --resume continues there (exit 6)",
+                        members.paths[i].display()
+                    );
+                }
+            }
+        }
         for hit in &scan.hits {
+            if limited_at.is_some_and(|[o, s]| (hit.offset, hit.slot) >= (o, s)) {
+                break;
+            }
             // Before where an earlier run's walk was cut: listed by it.
             if cut_before.is_some_and(|[o, s]| (hit.offset, hit.slot) < (o, s)) {
                 continue;
@@ -766,7 +816,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 dnode_hex: hex,
             });
         }
-        if let Some([at, slot]) = cut_at {
+        if let Some([at, slot]) = cut_at.or(limited_at) {
             reached[i] = reached[i].min(at / 512 * 512);
             cuts[i] = Some([at, slot]);
             complete = false;
@@ -880,7 +930,10 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     // every byte — what lay in the unreadable ones was not searched.
     // Exit 3: nothing found, as the manual has always said; a scan that
     // turned up no candidate exited 0.
-    let code = if !complete {
+    // A sample that reached its size did what it was asked: it is a
+    // look at the disk, not a search left half done.
+    let sampled = opts.sample.is_some() && !interrupt.load(Ordering::Relaxed);
+    let code = if !complete && !sampled {
         exit::INTERRUPTED
     } else if index.candidates.is_empty() {
         exit::UNRECOVERABLE
@@ -1104,8 +1157,12 @@ fn start_by_pointers(
     src: &dyn BlockSource,
     device: usize,
     codecs: &[Codec],
+    range: Option<(u64, u64)>,
     stop: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Option<zfs_read::pointers::Base> {
+    // Within the range the scan was asked for: the probes are looked for
+    // where the candidates will be, and a scan of 4 MiB read the whole
+    // member — 3.4 GB — to find them.
     let scan = scan_member(
         src,
         device,
@@ -1113,6 +1170,7 @@ fn start_by_pointers(
         &ScanOptions {
             codecs: codecs.to_vec(),
             max_hits: 4096,
+            range,
             stop: Some(stop.clone()),
             ..ScanOptions::default()
         },

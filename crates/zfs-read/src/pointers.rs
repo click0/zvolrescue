@@ -193,6 +193,89 @@ pub fn confirm(
     (ok, tried)
 }
 
+/// Bases from `start` to `end`, `step` apart, at which one of the first
+/// `at_most` probes that fit agrees — what [`confirm`] would say of each
+/// with `at_most` probes, without asking it base by base.
+///
+/// Asked base by base, every probe's block was read again at each step:
+/// a 128 KiB block 256 times over for every 512 bytes of window, and a
+/// search of the first 64 MiB read 3.4 GB. Here each probe is read once
+/// for a run of bases, as one span from where its block lies at the
+/// first base of the run to where it ends at the last, and every base is
+/// checked from memory. A span that cannot be read is asked base by
+/// base, as before, so that one bad sector costs only the bases it is
+/// under.
+fn screen(
+    dev: &dyn BlockSource,
+    start: u64,
+    end: u64,
+    step: u64,
+    anchors: &[Anchor],
+    at_most: usize,
+) -> Vec<u64> {
+    const RUN: u64 = 16 << 20;
+    let size = dev.size();
+    let mut out = Vec::new();
+    let per_run = (RUN / step).max(1);
+    let mut first = start;
+    while first < end {
+        let n = per_run.min((end - first).div_ceil(step)) as usize;
+        let base = |k: usize| first + k as u64 * step;
+        let mut tried = vec![0usize; n];
+        let mut ok = vec![false; n];
+        let mut buf = Vec::new();
+        for a in anchors {
+            if tried.iter().all(|t| *t >= at_most) {
+                break;
+            }
+            // Where this probe's block lies at a base, if the device has
+            // all of it there.
+            let place = |b: u64| {
+                b.checked_add(LABEL_START_SIZE)
+                    .and_then(|p| p.checked_add(a.offset))
+                    .filter(|at| at.saturating_add(a.psize) <= size)
+            };
+            let wanted: Vec<usize> = (0..n)
+                .filter(|&k| tried[k] < at_most && place(base(k)).is_some())
+                .collect();
+            let (Some(&lo), Some(&hi)) = (wanted.first(), wanted.last()) else {
+                continue;
+            };
+            let from = place(base(lo)).expect("placed");
+            let to = place(base(hi)).expect("placed") + a.psize;
+            let psize = a.psize as usize;
+            buf.clear();
+            buf.resize((to - from) as usize, 0);
+            let whole = dev.read_at(from, &mut buf).is_ok();
+            let mut one = Vec::new();
+            for k in wanted {
+                let at = place(base(k)).expect("placed");
+                let block = if whole {
+                    let o = (at - from) as usize;
+                    &buf[o..o + psize]
+                } else {
+                    one.clear();
+                    one.resize(psize, 0);
+                    if dev.read_at(at, &mut one).is_err() {
+                        continue;
+                    }
+                    &one[..]
+                };
+                tried[k] += 1;
+                if !ok[k]
+                    && verify_block(a.checksum, block, a.endian, &a.cksum, None, a.encrypted)
+                        == Verify::Ok
+                {
+                    ok[k] = true;
+                }
+            }
+        }
+        out.extend((0..n).filter(|&k| ok[k]).map(base));
+        first = first.saturating_add(per_run * step);
+    }
+    out
+}
+
 /// How the search is bounded.
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -236,28 +319,30 @@ pub fn search(dev: &dyn BlockSource, anchors: &[Anchor], opts: &Options) -> io::
         opts.shifts.clone()
     };
     let mut seen: std::collections::BTreeMap<u64, Base> = std::collections::BTreeMap::new();
+    // Screening is where the time goes, so it is the smallest question
+    // that can be asked: did even one probe agree? It is asked once, at
+    // the finest step: what a base answers does not depend on the step
+    // it was reached by, and every coarser step's bases are among the
+    // finest one's. Asked again for each shift, the same spans were read
+    // four times over.
+    let finest = shifts.iter().copied().min().unwrap_or(9);
+    trace!(
+        "pointers",
+        "base search: window {start:#x}..{end:#x} step {} ({} probe(s))",
+        1u64 << finest,
+        anchors.len()
+    );
+    let screened = screen(dev, start, end, 1u64 << finest, anchors, opts.screen);
     for shift in shifts {
         let step = 1u64 << shift;
-        trace!(
-            "pointers",
-            "base search: window {start:#x}..{end:#x} step {step} ({} probe(s))",
-            anchors.len()
-        );
-        let mut at = start;
-        while at < end {
-            // Screening is where the time goes, so it is the smallest
-            // question that can be asked: did even one probe agree?
-            let (ok, _) = confirm(dev, at, anchors, opts.screen);
-            if ok > 0 {
-                let (ok, tried) = confirm(dev, at, anchors, opts.confirm);
-                trace!("pointers", "base {at:#x}: {ok} of {tried} probe(s) agreed");
-                seen.entry(at).or_insert(Base {
-                    base: at,
-                    confirmed: ok,
-                    tried,
-                });
-            }
-            at = at.saturating_add(step);
+        for at in screened.iter().copied().filter(|b| (b - start) % step == 0) {
+            let (ok, tried) = confirm(dev, at, anchors, opts.confirm);
+            trace!("pointers", "base {at:#x}: {ok} of {tried} probe(s) agreed");
+            seen.entry(at).or_insert(Base {
+                base: at,
+                confirmed: ok,
+                tried,
+            });
         }
         // A coarser shift finds the same bases a finer one does, so once
         // anything has been found there is nothing left for the finer
@@ -296,6 +381,26 @@ mod tests {
         disk.extend_from_slice(&m);
         disk.extend_from_slice(&vec![0u8; 2 << 20]);
         (disk, at as u64)
+    }
+
+    /// Screening reads each probe once for a run of bases, and answers
+    /// for every base what asking it alone does: the same bases, at the
+    /// boundary of a run and at the end of the device too.
+    #[test]
+    fn screening_in_runs_is_screening_base_by_base() {
+        let (disk, _) = bare(63 * 512);
+        let src = MemSource::new(disk);
+        let scan = scan_member(&src, 0, 9, &ScanOptions::default()).expect("scan");
+        let probes = anchors(&scan);
+        assert!(!probes.is_empty());
+        let size = src.size();
+        for (start, end, step) in [(0, 64 << 20, 512), (size - (3 << 20), size, 4096)] {
+            let one_by_one: Vec<u64> = (start..end)
+                .step_by(step as usize)
+                .filter(|&b| confirm(&src, b, &probes, 4).0 > 0)
+                .collect();
+            assert_eq!(screen(&src, start, end, step, &probes, 4), one_by_one);
+        }
     }
 
     /// SPEC F-63: the base comes out of the pointers alone.

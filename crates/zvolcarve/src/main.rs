@@ -150,6 +150,23 @@ fn main() -> ExitCode {
     zvol_common::set_tool("zvolcarve");
     zvol_common::quiet_broken_pipe();
     let cli = Cli::parse();
+    // A limit of 0 keeps nothing: a scan bounded by it read nothing and
+    // ended 6, and `roots --max-roots 0` said no header was found (exit
+    // 3), as though the disk held none.
+    let zero = match &cli.command {
+        Command::Scan { max_hits: 0, .. } | Command::Zeropoint { max_hits: 0, .. } => {
+            Some("--max-hits")
+        }
+        Command::Scan {
+            sample: Some(0), ..
+        } => Some("--sample"),
+        Command::Roots { max_roots: 0, .. } => Some("--max-roots"),
+        _ => None,
+    };
+    if let Some(flag) = zero {
+        eprintln!("zvolcarve: {flag} 0 keeps nothing; give at least 1");
+        return ExitCode::from(exit::USAGE);
+    }
     // The files a carve reads and writes in its workspace are named by no
     // word of the command line: a debug log given as one of them was
     // created over it at the start — the index of an earlier scan
