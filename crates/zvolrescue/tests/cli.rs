@@ -314,6 +314,89 @@ fn the_order_a_search_settled_on_is_on_the_record() {
     assert_ne!(code, 0, "the order as given reads the pool");
 }
 
+/// A member that begins 100 MiB into its image, past where a search for
+/// its start looks, is read from where the hints say it begins: its
+/// labels and uberblocks too, not only its blocks. The labels were read
+/// where the search had left it, none found, and the pool had no
+/// transaction group to be read at (exit 3).
+#[cfg(unix)]
+#[test]
+fn a_member_the_hints_place_is_read_from_there() {
+    use std::os::unix::fs::FileExt;
+    let dir = scratch("hints-far");
+    let members = plain_members();
+    let far = dir.join("far.img");
+    let at = 100u64 << 20;
+    let f = std::fs::File::create(&far).unwrap();
+    f.write_all_at(&members[0], at).unwrap();
+    drop(f);
+    let far = far.to_string_lossy().into_owned();
+    let hints = dir.join("far.hints");
+    std::fs::write(
+        &hints,
+        serde_json::json!({"ashift": 12, "name": "tank",
+            "tops": [{"kind": "mirror", "members": [{"path": &far, "base": at}, null]}]})
+        .to_string(),
+    )
+    .unwrap();
+    let (code, out, err) = run(&[
+        "-q",
+        "-f",
+        "json",
+        "list",
+        &far,
+        "--hints",
+        &hints.to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let listed = json(&out);
+    let names: Vec<&str> = listed["datasets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"tank/vm/disk0"), "{names:?}");
+}
+
+/// A pipe given as a member is refused at once: opening one to read waits
+/// for a writer, and the run waited for ever, deaf to the first signal.
+#[cfg(unix)]
+#[test]
+fn a_pipe_is_no_member() {
+    let dir = scratch("fifo-member");
+    let fifo = dir.join("member.fifo");
+    assert!(Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap()
+        .success());
+    let mut child = Command::new(env!("CARGO_BIN_EXE_zvolrescue"))
+        .args(["-q", "list", fifo.to_str().unwrap()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("run zvolrescue");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let status = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break s;
+        }
+        if std::time::Instant::now() > deadline {
+            child.kill().ok();
+            panic!("still waiting on the pipe after 30 seconds");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let mut err = String::new();
+    std::io::Read::read_to_string(child.stderr.as_mut().unwrap(), &mut err).ok();
+    assert_eq!(status.code(), Some(2), "{err}");
+    assert!(
+        err.contains("a pipe or a socket, not a device or an image"),
+        "{err}"
+    );
+}
+
 /// An image is written at offsets with its holes left out, which a pipe
 /// cannot take: `-o /dev/stdout` into a pipe is a usage error up front,
 /// where it failed on the first seek as exit 3, "unrecoverable". Where

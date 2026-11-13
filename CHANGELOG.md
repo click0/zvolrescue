@@ -691,6 +691,25 @@ tagged. `v0.7.1` is the release that carries those six.
   entries in a whole extraction but not when `--path` named it: nothing
   under it was written or named. It is a directory by its object's type
   either way.
+* **Members as the hints place them, every order searched, and a disk
+  not searched behind the operator's back.** A member `--hints` placed
+  had its labels and uberblocks read where the search for its start had
+  left it, or had not: one 100 MiB into its image offered no uberblock,
+  and the pool had no transaction group to be read at (exit 3). They are
+  read at the base the hints give. `--search-order` searched the
+  top-level vdevs only, and a raidz group under a mirror — the shape
+  ztest lays out — was read in the order written without a word; every
+  raidz or draid group is searched now, and a layout with none to search
+  says so. `--assume-member` on a block device whose surface was not to
+  be searched (SPEC N-10) looked for where its vdev begins over the
+  whole disk: 98 404 reads of a 2 GiB device, 13 798 of them twice. It
+  is tried where it is, and the run says why. Combinatorial repair of a
+  dRAID block shared one budget of tries among its rows in turn, and a
+  wide first row could use it all before the damaged row was tried;
+  each row takes its part of what is left. A pipe given as a member was
+  opened to be read, which waits for a writer: the run hung, and the
+  first signal set a flag nothing looked at yet. It is refused before
+  it is opened (exit 2).
 
 ## v0.9.12 — 2026-11-07
 

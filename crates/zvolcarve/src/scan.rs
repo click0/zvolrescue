@@ -217,7 +217,9 @@ fn build_profile(
 /// Run `scan`.
 pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     // From here a SIGINT ends the scan at the next chunk with the state
-    // file saying where; before that it is the default action still.
+    // file saying where. One that comes while the members are still being
+    // opened is acted on when the scan begins, at its first chunk; a
+    // second is the default action, for a run that never gets there.
     let interrupt = zvol_common::interrupt_flag();
     // A surface scan is what a disk with defects survives least: a
     // block device is refused unless the operator allowed it (SPEC

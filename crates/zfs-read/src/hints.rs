@@ -297,19 +297,55 @@ pub fn try_layout(
 }
 
 /// Every ordering of the members of one top-level vdev, as layouts.
-fn permutations(layout: &LayoutHints, top: usize) -> Vec<LayoutHints> {
-    let members = layout.tops[top].members.clone();
-    debug_assert!(
-        layout.tops[top].children.is_empty(),
-        "nested groups are permuted per group, not per top"
-    );
+fn permutations(layout: &LayoutHints, group: &[usize]) -> Vec<LayoutHints> {
+    let Some(members) = group_at(layout, group).map(|g| g.members.clone()) else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
     let mut order: Vec<usize> = (0..members.len()).collect();
     permute(&mut order, 0, &mut |o| {
         let mut l = layout.clone();
-        l.tops[top].members = o.iter().map(|&i| members[i]).collect();
+        if let Some(g) = group_at_mut(&mut l, group) {
+            g.members = o.iter().map(|&i| members[i]).collect();
+        }
         out.push(l);
     });
+    out
+}
+
+/// The group a path names: a top-level vdev by its index, then a child
+/// of it by its index, and so on — `[0]` the first top, `[0, 1]` the
+/// second group inside it, as a raidz under a mirror is.
+pub fn group_at<'l>(layout: &'l LayoutHints, group: &[usize]) -> Option<&'l TopHint> {
+    let (first, rest) = group.split_first()?;
+    rest.iter()
+        .try_fold(layout.tops.get(*first)?, |g, &i| g.children.get(i))
+}
+
+fn group_at_mut<'l>(layout: &'l mut LayoutHints, group: &[usize]) -> Option<&'l mut TopHint> {
+    let (first, rest) = group.split_first()?;
+    rest.iter()
+        .try_fold(layout.tops.get_mut(*first)?, |g, &i| g.children.get_mut(i))
+}
+
+/// Every group whose member order a layout leaves open: each raidz or
+/// draid of two members or more, at the top or inside a mirror, by its
+/// path (see [`group_at`]).
+pub fn ordered_groups(layout: &LayoutHints) -> Vec<Vec<usize>> {
+    fn walk(g: &TopHint, path: Vec<usize>, out: &mut Vec<Vec<usize>>) {
+        if matches!(g.kind.as_str(), "raidz" | "draid") && g.members.len() >= 2 {
+            out.push(path.clone());
+        }
+        for (i, c) in g.children.iter().enumerate() {
+            let mut p = path.clone();
+            p.push(i);
+            walk(c, p, out);
+        }
+    }
+    let mut out = Vec::new();
+    for (i, t) in layout.tops.iter().enumerate() {
+        walk(t, vec![i], &mut out);
+    }
     out
 }
 
@@ -342,26 +378,26 @@ pub const MAX_SEARCHED_MEMBERS: usize = 7;
 /// to judge: on a mirror every order is equally right.
 pub fn search_order(
     layout: &LayoutHints,
-    top: usize,
+    group: &[usize],
     scans: &[Option<DeviceScan>],
     devices: &[Option<&dyn BlockSource>],
     bases: &[u64],
 ) -> Result<Vec<Trial>, String> {
-    let n = layout.tops.get(top).map_or(0, |t| t.members.len());
+    let n = group_at(layout, group).map_or(0, |t| t.members.len());
     if n > MAX_SEARCHED_MEMBERS {
         return Err(format!(
             "{n} members is {}! orderings — name the order in the layout, or split the search",
             n
         ));
     }
-    let mut trials: Vec<Trial> = permutations(layout, top)
+    let mut trials: Vec<Trial> = permutations(layout, group)
         .iter()
         .map(|l| {
             let t = try_layout(l, scans, devices, bases);
             trace!(
                 "pool",
                 "order {:?}: {} datasets, {} mismatch(es)",
-                l.tops[top].members,
+                group_at(l, group).map(|g| &g.members),
                 t.datasets.map_or("no".to_string(), |d| d.to_string()),
                 t.mismatches
             );
@@ -607,7 +643,7 @@ mod tests {
         assert!(swapped.read(), "raidz2 reconstructs around two bad columns");
         assert!(swapped.mismatches > 0);
 
-        let trials = search_order(&layout(&[0, 2, 1, 3]), 0, &scans, &devices, &bases)
+        let trials = search_order(&layout(&[0, 2, 1, 3]), &[0], &scans, &devices, &bases)
             .expect("4 members is a small search");
         let best = trials.first().expect("some order reads");
         assert_eq!(best.mismatches, 0);
@@ -616,5 +652,28 @@ mod tests {
             vec![Some(0), Some(1), Some(2), Some(3)]
         );
         assert_eq!(trials.iter().filter(|t| t.mismatches == 0).count(), 1);
+
+        // The same group under a mirror, as ztest lays raidz groups out:
+        // only the top-level vdevs were searched, and this one was read
+        // in the order written. It is a group of its own now.
+        let mut nested = layout(&[0, 2, 1, 3]);
+        let group = nested.tops.remove(0);
+        nested.tops.push(TopHint {
+            kind: "mirror".into(),
+            nparity: None,
+            draid_ndata: None,
+            draid_nspares: None,
+            draid_ngroups: None,
+            members: Vec::new(),
+            children: vec![group],
+        });
+        assert_eq!(ordered_groups(&nested), vec![vec![0, 0]]);
+        let trials = search_order(&nested, &[0, 0], &scans, &devices, &bases).expect("search");
+        let best = trials.first().expect("some order reads");
+        assert_eq!(best.mismatches, 0);
+        assert_eq!(
+            group_at(&best.layout, &[0, 0]).map(|g| g.members.clone()),
+            Some(vec![Some(0), Some(1), Some(2), Some(3)])
+        );
     }
 }

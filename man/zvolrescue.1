@@ -108,7 +108,9 @@ is still verified by its checksum.
 .It Fl -search-order
 Try every member order the layout leaves open and keep the one the
 checksums accept.
-Only for raidz and draid, where order is what a DVA addresses.
+Only for raidz and draid, where order is what a DVA addresses: each such
+group is searched, at the top or inside a mirror, and the order kept is
+in the evidence record.
 .It Fl -pool-guid Ar guid
 Select a pool by GUID when several are found on the members.
 .It Fl -assume-member Ar path Ns Op = Ns Ar guid

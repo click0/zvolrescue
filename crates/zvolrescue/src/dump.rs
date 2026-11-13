@@ -651,7 +651,9 @@ fn image_file_names(datasets: &[(&str, u64)]) -> Vec<String> {
 
 pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     // From here a SIGINT sets the flag the extraction looks at between
-    // blocks; before the first block it is the default action still.
+    // blocks: one that comes while the members are still being opened is
+    // acted on at the first block, and a second is the default action,
+    // for a run that never gets there.
     let _ = zvol_common::interrupt_flag();
     let members = match open_members(spec) {
         Ok(m) => m,

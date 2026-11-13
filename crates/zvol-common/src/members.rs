@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use zfs_read::bind::{bind_by_reading, Verdict};
 use zfs_read::dsl::removed_tops_of;
-use zfs_read::hints::{search_order, LayoutHints};
+use zfs_read::hints::{group_at, ordered_groups, search_order, LayoutHints};
 use zfs_read::pool::{assemble, PoolAssembly};
 use zfs_read::vdev::DeviceScan;
 use zfs_read::zeropoint::scan_with_recovered_base_opts;
@@ -80,20 +80,36 @@ fn search_layout(
     bases: &[u64],
 ) -> Result<LayoutHints, u8> {
     let mut out = layout.clone();
-    for (top, hint) in layout.tops.iter().enumerate() {
-        if !matches!(hint.kind.as_str(), "raidz" | "draid") || hint.members.len() < 2 {
-            continue;
-        }
-        let trials = search_order(&out, top, scans, devices, bases).map_err(|e| {
-            say!("--search-order: {e}");
+    // Every group whose order is open, a raidz inside a mirror too: only
+    // the top-level vdevs were looked at, and a layout of the shape
+    // ztest makes — raidz groups under a mirror — was read in the order
+    // written, wrong or not, without a word.
+    let groups = ordered_groups(layout);
+    if groups.is_empty() {
+        say!("--search-order: no raidz or draid group in the layout leaves an order to search");
+    }
+    for group in groups {
+        let n = group_at(layout, &group).map_or(0, |g| g.members.len());
+        // Which group, where there is more than one or it is not a top.
+        let which = if group.len() > 1 {
+            format!(
+                " (group {})",
+                group
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("/")
+            )
+        } else {
+            String::new()
+        };
+        let trials = search_order(&out, &group, scans, devices, bases).map_err(|e| {
+            say!("--search-order{which}: {e}");
             exit::USAGE
         })?;
         match trials.split_first() {
             None => {
-                say!(
-                    "--search-order: no order of {} members reads this pool at all",
-                    hint.members.len()
-                );
+                say!("--search-order{which}: no order of {n} members reads this pool at all");
                 return Err(exit::UNRECOVERABLE);
             }
             Some((best, rest)) => {
@@ -102,7 +118,7 @@ fn search_layout(
                     .filter(|t| t.mismatches == best.mismatches)
                     .count();
                 say!(
-                    "--search-order: {} order(s) read, best has {} checksum mismatch(es){}",
+                    "--search-order{which}: {} order(s) read, best has {} checksum mismatch(es){}",
                     trials.len(),
                     best.mismatches,
                     if ties > 0 {
@@ -250,6 +266,17 @@ fn bind_assumed(
         // given — every block read through it is checksum-verified all
         // the same.
         if guid.is_none() {
+            if scans
+                .get(device)
+                .and_then(Option::as_ref)
+                .is_some_and(|s| s.surface_scan_refused)
+            {
+                say!(
+                    "--assume-member {}: a block device is not searched for where its vdev begins (SPEC N-10); it is tried at byte {} only. Image it, or --surface-scan-on-device",
+                    path.display(),
+                    bases[device]
+                );
+            }
             match bind_by_reading(&mut pools[pool], scans, devices, bases, device) {
                 Verdict::Bound(b, fitting) => {
                     say!(
@@ -499,6 +526,19 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
             for (i, b) in hints.bases.iter().enumerate() {
                 if *b != 0 {
                     bases[i] = *b;
+                    // Its labels and uberblocks are where the vdev starts,
+                    // which the hints say: read where the search of the
+                    // member had placed it — or had not, a vdev 100 MiB
+                    // into its image — a member the hints placed offered
+                    // no uberblock, and the pool had no transaction group
+                    // to be read at (exit 3).
+                    let elsewhere = scans[i].as_ref().is_none_or(|s| s.base != *b);
+                    if let (true, Some(src)) = (elsewhere, sources[i].as_ref()) {
+                        if let Ok(mut s) = zfs_read::vdev::scan_device_at(src, *b) {
+                            s.base_source = Some("hints");
+                            scans[i] = Some(s);
+                        }
+                    }
                 }
             }
             let mut layout = hints.layout;

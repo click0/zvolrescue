@@ -116,13 +116,21 @@ pub fn candidates_for(
         !s.config_verified() && s.newest_txg().is_none() && s.base_source.is_none()
     });
     let own_base = bases.get(device).copied().unwrap_or(0);
+    // A block device is not searched for where it begins (SPEC N-10):
+    // its scan said so, and the bases were tried over its surface all
+    // the same — 98 404 reads of a 2 GiB disk, 13 798 of them a second
+    // time. It is tried where it is.
+    let surface_refused = scans
+        .get(device)
+        .and_then(Option::as_ref)
+        .is_some_and(|s| s.surface_scan_refused);
     for (top, leaf) in pool.vacant_leaves() {
         let guid = pool.tops[top].members[leaf].guid;
         let mut trial = pool.clone();
         if trial.bind_member(device, Some(guid)).is_err() {
             continue;
         }
-        let trial_bases: Vec<u64> = if unanchored && own_base == 0 {
+        let trial_bases: Vec<u64> = if unanchored && own_base == 0 && !surface_refused {
             let size = devices
                 .get(device)
                 .copied()
@@ -466,6 +474,18 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+
+        // The same member on a block device whose surface was not to be
+        // searched (SPEC N-10): it is tried where it is, and every other
+        // base is left alone — they were read through all the same.
+        let mut scans = scans;
+        scans[0].as_mut().expect("scanned").surface_scan_refused = true;
+        let mut fresh = assemble(&scans).into_iter().next().expect("one pool");
+        assert!(candidates_for(&fresh, &scans, &devices, &bases, 0).is_empty());
+        assert!(matches!(
+            bind_by_reading(&mut fresh, &scans, &devices, &bases, 0),
+            Verdict::Nothing
+        ));
     }
 
     /// The candidate list is bounded whatever the disk's size: a huge

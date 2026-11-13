@@ -58,7 +58,9 @@ fn spelled_as(asked: &str, candidates: &[crate::model::Candidate]) -> Option<Str
 /// Run `dump`.
 pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     // From here a SIGINT ends the extraction at the next block with its
-    // state written; before the first block it is the default action.
+    // state written. One that comes while the members are still being
+    // opened is acted on when the extraction begins, at its first block;
+    // a second is the default action, for a run that never gets there.
     let interrupt = zvol_common::interrupt_flag();
     let index = match load_index(&opts.dir) {
         Ok(i) => i,

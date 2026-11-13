@@ -286,6 +286,18 @@ impl FileSource {
     /// taken from seeking to the end instead.
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
+        // A pipe is not opened at all: opening one to read waits for a
+        // writer, and a run given one as a member waited for ever, deaf
+        // to the first signal. A socket cannot be opened as a file.
+        {
+            use std::os::unix::fs::FileTypeExt;
+            let ft = std::fs::metadata(&path)?.file_type();
+            if ft.is_fifo() || ft.is_socket() {
+                return Err(io::Error::other(
+                    "a pipe or a socket, not a device or an image: it has no bytes to read twice, nor an offset to read them at",
+                ));
+            }
+        }
         let file = OpenOptions::new().read(true).write(false).open(&path)?;
         let meta = file.metadata()?;
         let ft = meta.file_type();

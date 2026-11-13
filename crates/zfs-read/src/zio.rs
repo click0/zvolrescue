@@ -218,6 +218,13 @@ const MAX_COMBREC_TRIES: usize = 10_000;
 /// subset of up to three columns of a 12-wide raidz3 at 16 MiB.
 const MAX_COMBREC_BYTES: u64 = 16 << 30;
 
+/// How far a row's combinatorial tries may go, `spent` of `max` gone and
+/// `rows_left` rows to try, this one among them: its part of what is
+/// left, and what the rows before it did not use.
+fn row_share(spent: usize, max: usize, rows_left: usize) -> usize {
+    spent + max.saturating_sub(spent) / rows_left.max(1)
+}
+
 const ASHIFT_MIN: u32 = 9;
 const ASHIFT_MAX: u32 = 16;
 
@@ -1116,11 +1123,16 @@ impl<'a> PoolReader<'a> {
             self.read_parity(row, children, cfg);
         }
         // One budget for the block. Counted per row it started again for
-        // each row of a dRAID: sixteen rows, sixteen times the tries.
+        // each row of a dRAID: sixteen rows, sixteen times the tries. And
+        // shared among the rows, each taking its part of what is left:
+        // taken whole by the first, a wide row 0 used it all and the row
+        // that was damaged was never tried.
         let max_tries =
             MAX_COMBREC_TRIES.min((MAX_COMBREC_BYTES / (psize.max(1) as u64)).max(1) as usize);
         let mut tries = 0usize;
+        let mut cut_short = false;
         for r in 0..rows.len() {
+            let row_limit = row_share(tries, max_tries, rows.len() - r);
             let (parity, data, lost, _) = &rows[r];
             let available = parity.iter().filter(|p| p.is_some()).count();
             let budget = available - lost.len();
@@ -1132,16 +1144,13 @@ impl<'a> PoolReader<'a> {
                 .map(|&i| (true, i))
                 .chain(readable_data.iter().map(|&i| (false, i)))
                 .collect();
-            for k in 1..=budget.min(columns.len()) {
+            'row: for k in 1..=budget.min(columns.len()) {
                 for combo in Combinations::new(columns.len(), k) {
-                    tries += 1;
-                    if tries > max_tries {
-                        trace!(
-                            "raidz",
-                            "    combinatorial reconstruction gave up after {max_tries} tries"
-                        );
-                        return Err(ReadError::AllCopiesBad);
+                    if tries >= row_limit {
+                        cut_short = true;
+                        break 'row;
                     }
+                    tries += 1;
                     let mut bad_parity: Vec<usize> = Vec::new();
                     let mut missing = lost.clone();
                     for &j in &combo {
@@ -1191,10 +1200,18 @@ impl<'a> PoolReader<'a> {
                 }
             }
         }
-        trace!(
-            "raidz",
-            "    no reconstruction produced a block matching its checksum"
-        );
+        if cut_short {
+            trace!(
+                "raidz",
+                "    combinatorial reconstruction gave up after {tries} of {max_tries} tries, shared among {} row(s)",
+                rows.len()
+            );
+        } else {
+            trace!(
+                "raidz",
+                "    no reconstruction produced a block matching its checksum"
+            );
+        }
         Err(ReadError::AllCopiesBad)
     }
 
@@ -2655,6 +2672,19 @@ mod tests {
 
         /// Three members gone is past raidz2's budget: a clean error
         /// from the header read, not a panic and not zeros.
+        /// The tries a block gets are shared by its rows: the first of a
+        /// dRAID's sixteen gets a sixteenth, not all of them, and what a row
+        /// does not use passes on to the rows after it.
+        #[test]
+        fn the_rows_of_a_block_share_its_tries() {
+            assert_eq!(super::row_share(0, 10_000, 16), 625);
+            // Row 0 found nothing in 10 tries: row 1 gets its part of the rest.
+            assert_eq!(super::row_share(10, 10_000, 15), 10 + 9_990 / 15);
+            // The last row gets whatever is left.
+            assert_eq!(super::row_share(9_000, 10_000, 1), 10_000);
+            assert_eq!(super::row_share(10_000, 10_000, 3), 10_000);
+        }
+
         #[test]
         fn gang_block_past_the_parity_budget_fails_cleanly() {
             let (s, bp) = build_raidz2();
