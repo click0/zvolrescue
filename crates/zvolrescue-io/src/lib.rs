@@ -150,6 +150,10 @@ pub mod ddrescue {
         pub by_status: BTreeMap<char, u64>,
         /// One past the last byte the map describes.
         pub extent: u64,
+        /// Bytes it does not describe — between its lines, or past its
+        /// end — which are refused as the unfinished ones are: what the
+        /// imager says nothing of, it is not known to have read.
+        pub undescribed: u64,
     }
 
     impl Map {
@@ -189,6 +193,11 @@ pub mod ddrescue {
                 if pos < last_end {
                     return Err(format!("line {}: blocks out of order at {pos:#x}", n + 1));
                 }
+                // A gap between two lines is bytes the map says nothing
+                // of: they were trusted as read.
+                if pos > last_end {
+                    map.refuse(last_end, pos - last_end);
+                }
                 // A block that runs past the end of a 64-bit offset is
                 // no block: wrapped, it merged with one at the start of
                 // the disk, and the sectors there were not refused.
@@ -215,6 +224,27 @@ pub mod ddrescue {
         /// Ranges the imager did not finish, merged and in order.
         pub fn unreadable(&self) -> &[(u64, u64)] {
             &self.unreadable
+        }
+
+        /// Refuse `[pos, pos + len)`, which the map does not describe.
+        fn refuse(&mut self, pos: u64, len: u64) {
+            self.undescribed = self.undescribed.saturating_add(len);
+            match self.unreadable.last_mut() {
+                Some((s, l)) if *s + *l == pos => *l += len,
+                _ => self.unreadable.push((pos, len)),
+            }
+        }
+
+        /// The map of an image of `size` bytes: what lies past the map's
+        /// end is refused. A map shorter than its image — 1 MiB of map for
+        /// 64 MiB of image — said "0 bytes never read", and the rest was
+        /// trusted as read.
+        pub fn for_size(mut self, size: u64) -> Map {
+            if self.extent < size {
+                self.refuse(self.extent, size - self.extent);
+                self.extent = size;
+            }
+            self
         }
 
         /// Bytes the imager did not finish, in total.
@@ -372,7 +402,7 @@ impl FileSource {
     /// Refuse, before reading, every sector the imager's map says the
     /// disk did not give (SPEC F-72).
     pub fn with_map(mut self, map: ddrescue::Map) -> Self {
-        self.map = Some(map);
+        self.map = Some(map.for_size(self.size));
         self
     }
 

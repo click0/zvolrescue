@@ -99,12 +99,24 @@ Each disk of the pool is given once: two files that are the same disk
 \(em a disk and its image, or a disk imaged twice \(em are refused with
 exit status 1, both named with the transaction groups of their labels
 and uberblocks, since which of them to read is the operator's choice.
-The same file under two names is one disk.
+The same file under two names is one disk, read once, and said.
 .It Fl -hints Ar file
 Describe the layout by hand when the labels cannot: a JSON file with
 the ashift, the top-level vdevs and their members in vdev order.
 It is used exactly as a label would be; every block read through it
 is still verified by its checksum.
+The pool's
+.Ql name ,
+the first part of every dataset's, may be left out: a member's label
+gives it, or else the pool's own configuration in its MOS.
+A dRAID needs
+.Ql draid_ndata ,
+.Ql nparity ,
+.Ql draid_nspares
+and
+.Ql draid_ngroups
+as the pool was made; numbers no dRAID has are refused with exit
+status 1.
 .It Fl -search-order
 Try every member order the layout leaves open and keep the one the
 checksums accept.
@@ -130,10 +142,13 @@ With it the pool is read as though the features were not there, which
 can be wrong in a way no checksum objects to: a reflowed raidz hands
 back the checksums of other blocks, and they agree.
 .It Fl -map Ar member Ns = Ns Ar mapfile
-The GNU ddrescue mapfile an image was made with; repeatable.
+The GNU ddrescue mapfile an image was made with; repeatable, one to a
+member.
 Sectors the imager could not read are refused before they are read, so
 a block that crosses them is kept as far as the imager did read it and
 the rest is zeros with the reason, not a checksum failure with none.
+Bytes the map says nothing of \(em between its lines, or past its end
+in an image longer than it \(em are refused the same way.
 .It Fl -device-may-fail
 Go on after a device refuses a read.
 Without this the first refused read on a device stops the run with
@@ -199,7 +214,12 @@ Which member of the layout the emitted label belongs to; default
 .It Fl -emit-label-index Ar n
 Which of the four label positions to seal the emitted label for;
 default 0.
-A label verifies only at the offset it was sealed for.
+A label verifies only at the offset it was sealed for, and a rear one
+only for the size of its vdev: the bytes from where the vdev begins
+\(em the hints'
+.Ql base ,
+or where the scan found it \(em to the end of its partition or of the
+device.
 .It Fl -map , Fl -device-may-fail , Fl -surface-scan-on-device
 As under
 .Sx POOL MEMBER OPTIONS .

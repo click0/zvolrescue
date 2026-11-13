@@ -475,16 +475,48 @@ pub fn geom_metadata(dev: &dyn BlockSource, end: u64) -> io::Result<Option<GeomM
 fn scan_from_anchors(dev: &dyn BlockSource, zero: &ZeroPoint) -> crate::vdev::DeviceScan {
     use crate::vdev::{LabelScan, UberblockSlot};
     use zfs_ondisk::checksum::ChecksumStatus;
-    use zfs_ondisk::label::UBERBLOCK_RING_OFFSET;
+    use zfs_ondisk::label::{LABEL_SIZE, UBERBLOCK_RING_OFFSET};
 
+    let ring = |a: &zfs_ondisk::zeropoint::Anchor| {
+        a.vdev_offset - UBERBLOCK_RING_OFFSET - (a.slot as u64) * (1 << a.shift)
+    };
+    // An anchor whose label is not known is one of the rear two, whose
+    // place depends on a vdev size nothing said. They were all taken for
+    // L0: its ring then held each slot two or three times, and "9/32
+    // valid" was said of a ring of 32 with 3 in it. Each rear ring is a
+    // label of its own: L3 when it ends where the device does, L2 when
+    // the label after it would, and otherwise the nearer to the front of
+    // two is L2.
+    let mut rear: Vec<u64> = zero
+        .anchors
+        .iter()
+        .filter(|a| a.label.is_none())
+        .map(ring)
+        .collect();
+    rear.sort_unstable();
+    rear.dedup();
+    let end = dev.size().saturating_sub(zero.base) / LABEL_SIZE * LABEL_SIZE;
+    let rear_index = |at: u64| -> usize {
+        if at + LABEL_SIZE == end {
+            3
+        } else if at + 2 * LABEL_SIZE == end {
+            2
+        } else if rear.len() == 2 && rear[0] + LABEL_SIZE == rear[1] && at == rear[1] {
+            3
+        } else {
+            2
+        }
+    };
     let mut labels: Vec<LabelScan> = Vec::new();
     for anchor in &zero.anchors {
-        let index = anchor.label.unwrap_or(0);
         let shift = anchor.shift;
         let slots = zfs_ondisk::zeropoint::slots_per_ring(shift);
-        let offset =
-            anchor.vdev_offset - UBERBLOCK_RING_OFFSET - (anchor.slot as u64) * (1 << shift);
-        let label = match labels.iter_mut().find(|l| l.index == index) {
+        let offset = ring(anchor);
+        let index = anchor.label.unwrap_or_else(|| rear_index(offset));
+        let label = match labels
+            .iter_mut()
+            .find(|l| l.index == index && l.offset == offset)
+        {
             Some(l) => l,
             None => {
                 labels.push(LabelScan {
@@ -524,7 +556,7 @@ fn scan_from_anchors(dev: &dyn BlockSource, zero: &ZeroPoint) -> crate::vdev::De
 mod tests {
     use super::*;
     use crate::fixture::Pool;
-    use zfs_ondisk::label::{label_offsets, VDEV_PHYS_OFFSET, VDEV_PHYS_SIZE};
+    use zfs_ondisk::label::{label_offsets, LABEL_SIZE, VDEV_PHYS_OFFSET, VDEV_PHYS_SIZE};
     use zvolrescue_io::MemSource;
 
     fn member(size: u64) -> Vec<u8> {
@@ -605,6 +637,52 @@ mod tests {
             .anchors
             .iter()
             .all(|a| matches!(a.label, Some(2) | Some(3))));
+    }
+
+    /// A vdev that does not end where its image does, its configurations
+    /// gone: the rear rings' uberblocks are known only by where they are,
+    /// and each ring is a label of its own. They were all put in L0, which
+    /// then held every slot three times.
+    #[test]
+    fn rear_rings_of_unknown_size_are_labels_of_their_own() {
+        let base = 3 * 1024 * 1024;
+        let psize = 16 * 1024 * 1024;
+        let mut img = vec![0x5au8; base as usize];
+        img.extend_from_slice(&member(psize));
+        img.extend_from_slice(&vec![0u8; 2 * 1024 * 1024]);
+        wipe_configs(&mut img[..(base + psize) as usize], base);
+        let dev = MemSource::new(img);
+        let scan = scan_with_recovered_base(&dev).expect("scan");
+        assert_eq!(scan.base, base);
+        for l in &scan.labels {
+            let mut slots: Vec<usize> = l.uberblocks.iter().map(|u| u.slot).collect();
+            slots.sort_unstable();
+            slots.dedup();
+            assert_eq!(
+                slots.len(),
+                l.uberblocks.len(),
+                "L{}: a slot twice",
+                l.index
+            );
+            assert!(
+                l.uberblocks.len() <= 2,
+                "L{}: {} uberblocks",
+                l.index,
+                l.uberblocks.len()
+            );
+        }
+        let l0 = scan.labels.iter().find(|l| l.index == 0).expect("L0");
+        assert_eq!(l0.uberblocks.len(), 2);
+        let rear: Vec<(usize, u64)> = scan
+            .labels
+            .iter()
+            .filter(|l| l.index >= 2)
+            .map(|l| (l.index, l.offset))
+            .collect();
+        assert!(
+            rear == [(2, psize - 2 * LABEL_SIZE), (3, psize - LABEL_SIZE)],
+            "{rear:?}"
+        );
     }
 
     #[test]

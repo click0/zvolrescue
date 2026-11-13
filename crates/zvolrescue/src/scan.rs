@@ -1145,6 +1145,20 @@ pub fn run(
     zp: &ZeroPointOpts,
     emit: &EmitOpts,
 ) -> u8 {
+    // A device named twice — its path and a link to it — is scanned once,
+    // as every other command reads it once.
+    let mut once: Vec<PathBuf> = Vec::with_capacity(devices.len());
+    for p in devices {
+        match once.iter().find(|k| zvol_common::same_file(k, p)) {
+            Some(first) => eprintln!(
+                "zvolrescue: {} is {} again; read once",
+                p.display(),
+                first.display()
+            ),
+            None => once.push(p.clone()),
+        }
+    }
+    let devices = &once[..];
     for (member, file) in &open.maps {
         if !devices.contains(member) {
             eprintln!(
@@ -1309,10 +1323,44 @@ pub fn run(
                 return code;
             }
         }
-        // Seal it for a vdev the size of the smallest member scanned: the
-        // rear labels' position depends on it, and a label sealed for the
-        // wrong size verifies nowhere.
-        let psize = out.devices.iter().map(|d| d.size).min().unwrap_or(0);
+        // Seal it for the size of the vdev on each member, the smallest of
+        // them: the rear labels' position depends on it, and a label
+        // sealed for the wrong size verifies nowhere. That is the bytes
+        // from where the vdev begins — where the hints place it, or the
+        // scan found it — to the end of its partition or of the device:
+        // a member 1 MiB into a whole-disk image had its labels sealed for
+        // the whole image, and the rear ones verified at neither end.
+        let bases = emit
+            .hints
+            .as_ref()
+            .and_then(|f| zvol_common::hints::load(f, devices).ok())
+            .map(|h| h.bases)
+            .unwrap_or_default();
+        let psize = out
+            .devices
+            .iter()
+            .enumerate()
+            .map(|(i, d)| {
+                let base = bases
+                    .get(i)
+                    .copied()
+                    .filter(|b| *b != 0)
+                    .or(d.vdev_base)
+                    .unwrap_or(0);
+                let partition = d.partitions.as_ref().and_then(|t| {
+                    t.partitions
+                        .iter()
+                        .find(|p| p.start == base)
+                        .map(|p| p.length)
+                });
+                match (partition, d.vdev_size) {
+                    (Some(len), _) => len,
+                    (None, Some(len)) if Some(base) == d.vdev_base.or(Some(0)) => len,
+                    _ => d.size.saturating_sub(base),
+                }
+            })
+            .min()
+            .unwrap_or(0);
         // The TXG the labels would have carried: the newest any member
         // verified, whether that came from a ring inside a label or from
         // an anchor found without one.

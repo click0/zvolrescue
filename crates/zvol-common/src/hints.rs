@@ -189,21 +189,46 @@ fn top_hint(
             ));
         }
     }
+    let draid_ndata = t
+        .get("draid_ndata")
+        .map(|v| as_u64(v, "draid_ndata"))
+        .transpose()?;
+    let draid_nspares = t
+        .get("draid_nspares")
+        .map(|v| as_u64(v, "draid_nspares"))
+        .transpose()?;
+    let draid_ngroups = t
+        .get("draid_ngroups")
+        .map(|v| as_u64(v, "draid_ngroups"))
+        .transpose()?;
+    // A dRAID the numbers cannot make is the layout file's mistake, said
+    // with the fields it is in (exit 1): it was taken, and every read
+    // then failed "top-level vdev type draid (…) not supported yet",
+    // exit 3, as if this build could not read what the file described.
+    if kind == "draid" {
+        let width = (members.len() + children.len()) as u64;
+        if let Err(e) = zfs_ondisk::draid::Config::new(
+            draid_ndata.unwrap_or(0),
+            nparity.unwrap_or(0),
+            draid_nspares.unwrap_or(0),
+            width,
+            draid_ngroups.unwrap_or(0),
+        ) {
+            return Err(format!(
+                "hints: {what}: no dRAID of {width} member(s) has draid_ndata {}, nparity {}, draid_nspares {}, draid_ngroups {} ({e}); give the four as the pool was made",
+                draid_ndata.map_or("absent".into(), |n| n.to_string()),
+                nparity.map_or("absent".into(), |n| n.to_string()),
+                draid_nspares.map_or("absent".into(), |n| n.to_string()),
+                draid_ngroups.map_or("absent".into(), |n| n.to_string()),
+            ));
+        }
+    }
     Ok(TopHint {
         kind,
         nparity,
-        draid_ndata: t
-            .get("draid_ndata")
-            .map(|v| as_u64(v, "draid_ndata"))
-            .transpose()?,
-        draid_nspares: t
-            .get("draid_nspares")
-            .map(|v| as_u64(v, "draid_nspares"))
-            .transpose()?,
-        draid_ngroups: t
-            .get("draid_ngroups")
-            .map(|v| as_u64(v, "draid_ngroups"))
-            .transpose()?,
+        draid_ndata,
+        draid_nspares,
+        draid_ngroups,
         members,
         children,
     })

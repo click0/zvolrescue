@@ -124,7 +124,11 @@ fn dnode_type_code(name: &str) -> Result<Option<u8>, String> {
 }
 
 /// The profile as a JSON document, for `--profile` (C-16).
+///
+/// A key it does not know is refused, not passed over: `"volblocksize"`
+/// misspelt searched for every block size, and said nothing.
 #[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ProfileFile {
     volblocksize: Option<u64>,
     levels: Option<u8>,
@@ -167,6 +171,19 @@ fn build_profile(
         let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let f: ProfileFile = serde_json::from_str(&text)
             .map_err(|e| format!("{}: not a search profile: {e}", path.display()))?;
+        // A range whose start is past its end holds nothing, and a search
+        // for it found nothing, exit 3, as though there were nothing to
+        // find.
+        for (key, range) in [("txg", f.txg), ("size", f.size)] {
+            if let Some([lo, hi]) = range {
+                if lo > hi {
+                    return Err(format!(
+                        "{}: {key} [{lo}, {hi}]: the range is empty, its start is past its end",
+                        path.display()
+                    ));
+                }
+            }
+        }
         p.volblocksize = f.volblocksize;
         p.levels = f.levels;
         p.txg = f.txg.map(|t| (t[0], t[1]));
@@ -957,6 +974,14 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         .collect();
     // A device refused a read: every incident on stderr, and the stop —
     // when one stopped the run — as the exit code (SPEC F-33, N-10).
+    // A member that did not open is said, and so is the code: the run
+    // is of the members that did, as `zvolrescue` says it (exit 2); it
+    // ended 0.
+    let code = if code == 0 && members.any_failed() {
+        exit::EVIDENCE
+    } else {
+        code
+    };
     let code = zvol_common::report_medium(&members.ledger).unwrap_or(code);
     g.log_evidence_with_incidents(
         "zvolcarve",

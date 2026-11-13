@@ -1051,7 +1051,24 @@ impl OpenOpts {
                 }
                 _ => Err(format!("--map {spec}: want MEMBER=MAPFILE")),
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<(PathBuf, PathBuf)>, _>>()?;
+        // One map to a member: a second was passed over for the first,
+        // without a word, and the two in the other order read the image
+        // another way.
+        for (i, (member, file)) in maps.iter().enumerate() {
+            if let Some((_, first)) = maps[..i]
+                .iter()
+                .find(|(m, _)| m == member || same_file(m, member))
+            {
+                return Err(format!(
+                    "--map {}={}: {} has a map already, {}; give one",
+                    member.display(),
+                    file.display(),
+                    member.display(),
+                    first.display()
+                ));
+            }
+        }
         Ok(OpenOpts {
             ledger,
             surface_scan_on_device,

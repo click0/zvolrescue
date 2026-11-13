@@ -57,7 +57,9 @@ impl TopHint {
 /// A whole pool described by hand.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayoutHints {
-    /// Pool name, if known; only used for reporting.
+    /// Pool name, if known: the first part of every dataset's name. When
+    /// it is not, the pool's configuration in its MOS gives it, where
+    /// that reads ([`crate::dsl::walk`]), and `?` stands for it otherwise.
     pub name: Option<String>,
     /// Pool GUID, if known.
     pub guid: Option<u64>,

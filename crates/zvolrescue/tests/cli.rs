@@ -115,6 +115,14 @@ fn hints_with_an_impossible_geometry_are_refused() {
         ("raidz", 2, 12, "nparity 2 over 2"),
         ("raidz", 4, 12, "nparity 4 over 2"),
         ("draid", 9, 12, "nparity 9"),
+        // A dRAID no numbers make: refused with them, exit 1, where it
+        // was "not supported yet" at every read, exit 3.
+        (
+            "draid",
+            1,
+            12,
+            "no dRAID of 2 member(s) has draid_ndata absent",
+        ),
         ("mirror", 0, 63, "ashift 63"),
         ("mirror", 0, 0, "ashift 0"),
     ] {
@@ -177,6 +185,104 @@ fn hints_with_an_impossible_geometry_are_refused() {
         assert_eq!(code, 1, "{want}: {err}");
         assert!(err.contains(want), "{want}: {err}");
     }
+}
+
+/// A layout without the pool's name takes it from a label that has it:
+/// the datasets were all `?/…`, and `dump tank/vm/disk0` found none.
+#[test]
+fn hints_without_a_name_take_the_pools() {
+    let dir = scratch("hints-no-name");
+    let paths = write_members(&dir, &plain_members());
+    let hints = dir.join("layout.hints");
+    std::fs::write(
+        &hints,
+        serde_json::json!({"ashift": 12,
+            "tops": [{"kind": "mirror", "members": [&paths[0], &paths[1]]}]})
+        .to_string(),
+    )
+    .unwrap();
+    let (code, out, err) = run(&[
+        "-q",
+        "-f",
+        "json",
+        "dump",
+        "tank/vm/disk0",
+        &paths[0],
+        &paths[1],
+        "--hints",
+        &hints.to_string_lossy(),
+        "-o",
+        &dir.join("vol.img").to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(json(&out)["volumes"][0]["dataset"], "tank/vm/disk0");
+}
+
+/// A member given twice — by its path and by a link to it — is read
+/// once, and said; and a member given two maps is refused, where the
+/// second was passed over for the first without a word.
+#[test]
+fn a_member_twice_is_read_once_and_given_one_map() {
+    let dir = scratch("member-twice");
+    let paths = write_members(&dir, &plain_members());
+    let link = dir.join("again.img");
+    std::os::unix::fs::symlink(&paths[0], &link).unwrap();
+    let (code, out, err) = run(&[
+        "-q",
+        "-f",
+        "json",
+        "scan",
+        &paths[0],
+        &link.to_string_lossy(),
+        &paths[1],
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        err.contains("again.img is ") && err.contains("again; read once"),
+        "{err}"
+    );
+    assert_eq!(json(&out)["devices"].as_array().unwrap().len(), 2, "{out}");
+
+    let (a, b) = (dir.join("a.map"), dir.join("b.map"));
+    std::fs::write(&a, "0x0 +\n0x0 0x100000 +\n").unwrap();
+    std::fs::write(&b, "0x0 +\n0x0 0x100000 -\n").unwrap();
+    let (code, _, err) = run(&[
+        "-q",
+        "scan",
+        &paths[0],
+        &paths[1],
+        "--map",
+        &format!("{}={}", paths[0], a.display()),
+        "--map",
+        &format!("{}={}", paths[0], b.display()),
+    ]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("has a map already"), "{err}");
+}
+
+/// A map shorter than its image says nothing of the rest, which is not
+/// trusted as read: 1 MiB of map for a whole member said "0 bytes never
+/// read", and every byte past it was taken as the imager's.
+#[test]
+fn what_a_map_does_not_describe_is_not_trusted() {
+    let dir = scratch("short-map");
+    let paths = write_members(&dir, &plain_members());
+    let map = dir.join("m0.map");
+    std::fs::write(&map, "0x0 +\n0x0 0x100000 +\n").unwrap();
+    let (_, _, err) = run(&[
+        "-q",
+        "list",
+        &paths[0],
+        "--map",
+        &format!("{}={}", paths[0], map.display()),
+    ]);
+    let rest = SIZE - 0x10_0000;
+    assert!(
+        err.contains(&format!(
+            "the imager's map says 0 byte(s) in 1 range(s) were never read, and says nothing of {rest} byte(s) more"
+        )),
+        "{err}"
+    );
 }
 
 /// A run read through `--hints` says so on its record: the hints file is
@@ -701,6 +807,52 @@ fn emit_label_is_never_written_over_the_evidence() {
         std::fs::read_to_string(dir.join("L0.json")).unwrap(),
         "not the label's"
     );
+}
+
+/// A label emitted for a member the hints place 1 MiB into its image is
+/// sealed for the vdev — the bytes from that base on — and not for the
+/// whole image: sealed for the image, a rear label verified at neither
+/// end.
+#[test]
+fn an_emitted_label_is_sealed_for_the_vdev_the_hints_place() {
+    let dir = scratch("emit-label-base");
+    let base = 1u64 << 20;
+    let paths: Vec<String> = plain_members()
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let p = dir.join(format!("disk{i}.img"));
+            let mut img = vec![0u8; base as usize];
+            img.extend_from_slice(m);
+            std::fs::write(&p, img).unwrap();
+            p.to_string_lossy().into_owned()
+        })
+        .collect();
+    let hints = dir.join("layout.hints");
+    std::fs::write(
+        &hints,
+        serde_json::json!({"name": "tank", "ashift": 12, "tops": [{"kind": "mirror", "members": [
+            {"path": &paths[0], "base": base}, {"path": &paths[1], "base": base}]}]})
+        .to_string(),
+    )
+    .unwrap();
+    let label = dir.join("L2.bin").to_string_lossy().into_owned();
+    let (code, _, err) = run(&[
+        "-q",
+        "scan",
+        &paths[0],
+        &paths[1],
+        "--hints",
+        &hints.to_string_lossy(),
+        "--emit-label",
+        &label,
+        "--emit-label-index",
+        "2",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let geometry: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("L2.bin.json")).unwrap()).unwrap();
+    assert_eq!(geometry["sealed_for_vdev_size"], SIZE, "{geometry}");
 }
 
 #[test]

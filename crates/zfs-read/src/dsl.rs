@@ -680,6 +680,18 @@ pub fn walk(mos: &DnodeArray<'_, '_>, pool_name: &str) -> Result<DatasetTree, Re
         .find(|(n, _)| n == "root_dataset")
         .map(|(_, v)| *v)
         .ok_or_else(|| ReadError::Io("object directory has no root_dataset".into()))?;
+    // A pool whose name nothing gave — a hand-written layout without one,
+    // no label to read it from — is named by its own configuration, kept
+    // in the MOS: every dataset was `?/…`, and none could be asked for by
+    // the name it has.
+    let from_config = (pool_name == "?")
+        .then(|| {
+            let config = dir.iter().find(|(n, _)| n == CONFIG).map(|(_, v)| *v)?;
+            let nv = read_packed_nvlist(mos, config).ok()?;
+            nv.str("name").map(str::to_string)
+        })
+        .flatten();
+    let pool_name = from_config.as_deref().unwrap_or(pool_name);
     let mut tree = DatasetTree {
         pool_name: pool_name.to_string(),
         ..Default::default()
@@ -1588,6 +1600,33 @@ mod removed_tops_tests {
         assembly.note_removed_tops(removed);
         assert_eq!(assembly.missing_tops(), Vec::<u64>::new());
         assert!(assembly.readable());
+    }
+
+    /// A pool whose name nothing gave is named by its configuration in
+    /// the MOS: its datasets were `?/…`, and none could be asked for by
+    /// the name it has.
+    #[test]
+    fn a_pool_of_no_given_name_is_named_by_its_configuration() {
+        let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1)]);
+        let members = removed_vdev_members(&mut pool, SIZE);
+        let (sources, scans) = scan_all(members);
+        let mut assembly = assemble(&scans).into_iter().next().expect("one pool");
+        assembly.note_removed_tops(ask(&sources, &scans, &assembly));
+        let devices: Vec<Option<&dyn BlockSource>> = sources
+            .iter()
+            .map(|s| Some(s as &dyn BlockSource))
+            .collect();
+        let reader = PoolReader::new(&assembly, devices);
+        let ub = scans[0].as_ref().unwrap().labels[0]
+            .best()
+            .unwrap()
+            .ub
+            .clone();
+        let mos = open_mos(&reader, &ub).unwrap();
+        let tree = walk(&mos, "?").unwrap();
+        assert_eq!(tree.pool_name, "tank");
+        assert!(tree.datasets.iter().any(|d| d.name == "tank/vm/disk0"));
+        assert!(tree.datasets.iter().all(|d| !d.name.starts_with('?')));
     }
 
     /// With the MOS unreachable the question has no answer, and the

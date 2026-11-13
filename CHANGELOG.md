@@ -773,6 +773,29 @@ tagged. `v0.7.1` is the release that carries those six.
   it wrote on record nowhere; it is said once and the record is
   written. A dataset root that is not a directory was "not one a file
   can have here"; it is said for what it is.
+* **Members, maps, hints and labels: each said for what it is.**
+  `zvolcarve scan`, `dump`, `roots` and `zeropoint` exited 0 when a
+  member did not open; they exit 2, as `zvolrescue` does. A member
+  given twice — its path and a link to it — was searched twice, and
+  `zvolcarve scan` listed every candidate on it twice; every command
+  reads it once and says so. A `--profile` file with a key it did not
+  know searched as though the key were absent, and one with a range
+  whose start was past its end found nothing (exit 3); both are refused
+  (exit 1). A member whose configurations were gone and whose vdev did
+  not end where its image did had its rear rings' uberblocks put in L0,
+  "9/32 valid" with each slot three times; each rear ring is a label of
+  its own. `--emit-label` for a rear label of a member the hints placed
+  1 MiB into its image sealed it for the whole image, and it verified at
+  neither end; it is sealed for the vdev, from its base to the end of
+  its partition or device. A ddrescue map shorter than its image, or
+  with gaps between its lines, had the bytes it said nothing of trusted
+  as read; they are refused as the unfinished ones are, and said. A
+  second `--map` for a member was passed over for the first; it is
+  refused (exit 1). A layout without the pool's name gave every dataset
+  as `?/…`, and `dump tank/…` found none; the name comes from a
+  member's label, or else from the pool's configuration in its MOS. A
+  dRAID layout no numbers make was taken, and every read failed "not
+  supported yet" (exit 3); it is refused with its fields (exit 1).
 
 ## v0.9.12 — 2026-11-07
 

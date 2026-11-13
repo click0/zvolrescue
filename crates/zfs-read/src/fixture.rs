@@ -1309,22 +1309,25 @@ pub fn build_sample_mos_variant(
             }
             .build(),
         );
-        let config = pack(&list(vec![(
-            "vdev_tree",
-            Value::List(list(vec![
-                ("type", Value::String("root".into())),
-                ("id", Value::Uint64(0)),
-                (
-                    "children",
-                    Value::ListArray(vec![list(vec![
-                        ("type", Value::String("indirect".into())),
-                        ("id", Value::Uint64(u64::from(vdev))),
-                        ("guid", Value::Uint64(0x1de_0000 + u64::from(vdev))),
-                        ("com.delphix:indirect_object", Value::Uint64(MAPPING_OBJECT)),
-                    ])]),
-                ),
-            ])),
-        )]));
+        let config = pack(&list(vec![
+            ("name", Value::String("tank".into())),
+            (
+                "vdev_tree",
+                Value::List(list(vec![
+                    ("type", Value::String("root".into())),
+                    ("id", Value::Uint64(0)),
+                    (
+                        "children",
+                        Value::ListArray(vec![list(vec![
+                            ("type", Value::String("indirect".into())),
+                            ("id", Value::Uint64(u64::from(vdev))),
+                            ("guid", Value::Uint64(0x1de_0000 + u64::from(vdev))),
+                            ("com.delphix:indirect_object", Value::Uint64(MAPPING_OBJECT)),
+                        ])]),
+                    ),
+                ])),
+            ),
+        ]));
         assert!(
             config.len() <= 4096,
             "fixture config object outgrew a block"

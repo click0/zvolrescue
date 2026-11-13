@@ -1303,3 +1303,85 @@ fn a_limited_scan_resumes_to_the_scan_in_one_pass() {
         assert!(!Path::new(&ws).exists());
     }
 }
+
+/// A member that did not open is said, and the exit code says it too
+/// (2), as `zvolrescue` says it; a scan of the members that did was
+/// exit 0. A member given twice is searched once: every candidate on it
+/// was listed twice, without a word.
+#[test]
+fn a_member_missing_or_twice_is_said() {
+    let dir = scratch("members-said");
+    let m = carved_members(&dir, 0x4242, "member");
+    let once = dir.join("once");
+    let (code, _, err) = run(&["-q", "scan", &m[0], &m[1], "-o", &once.to_string_lossy()]);
+    assert_eq!(code, 0, "{err}");
+    let count = |d: &Path| {
+        let index: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(d.join("candidates.json")).unwrap()).unwrap();
+        index["candidates"].as_array().unwrap().len()
+    };
+    let twice = dir.join("twice");
+    let (code, _, err) = run(&[
+        "-q",
+        "scan",
+        &m[0],
+        &m[1],
+        &m[0],
+        "-o",
+        &twice.to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(err.contains("again; read once"), "{err}");
+    assert_eq!(count(&twice), count(&once));
+
+    let gone = dir.join("gone.img").to_string_lossy().into_owned();
+    let (code, _, err) = run(&[
+        "-q",
+        "scan",
+        &m[0],
+        &m[1],
+        &gone,
+        "-o",
+        &dir.join("gone").to_string_lossy(),
+    ]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("gone.img"), "{err}");
+}
+
+/// A search profile is held to its keys and its ranges: a misspelt key
+/// searched as though it were absent, and a range whose start is past
+/// its end found nothing, exit 3, as if nothing were there.
+#[test]
+fn a_profile_says_only_what_it_can() {
+    let dir = scratch("profile");
+    let m = carved_members(&dir, 0x4242, "member");
+    for (profile, want) in [
+        (
+            serde_json::json!({"volblocksise": 8192}),
+            "unknown field `volblocksise`",
+        ),
+        (
+            serde_json::json!({"size": [33554432, 1048576]}),
+            "size [33554432, 1048576]: the range is empty",
+        ),
+        (
+            serde_json::json!({"txg": [200, 100]}),
+            "txg [200, 100]: the range is empty",
+        ),
+    ] {
+        let file = dir.join("profile.json");
+        std::fs::write(&file, profile.to_string()).unwrap();
+        let (code, _, err) = run(&[
+            "-q",
+            "scan",
+            &m[0],
+            &m[1],
+            "-o",
+            &dir.join("out").to_string_lossy(),
+            "--profile",
+            &file.to_string_lossy(),
+        ]);
+        assert_eq!(code, 1, "{profile}: {err}");
+        assert!(err.contains(want), "{want}: {err}");
+    }
+}

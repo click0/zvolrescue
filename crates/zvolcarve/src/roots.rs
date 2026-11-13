@@ -348,6 +348,14 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         0
     };
     // A device refused a read (SPEC F-33, N-10): said, and the exit code.
+    // A member that did not open is said, and so is the code: the run
+    // is of the members that did, as `zvolrescue` says it (exit 2); it
+    // ended 0.
+    let code = if code == 0 && members.any_failed() {
+        exit::EVIDENCE
+    } else {
+        code
+    };
     let code = zvol_common::report_medium(&members.ledger).unwrap_or(code);
     // On the record like every other run: `--evidence-log` was taken
     // and nothing was written to it.

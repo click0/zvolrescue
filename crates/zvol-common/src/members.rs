@@ -421,10 +421,21 @@ fn refuse_unaccounted_features(
 
 /// Open every member named in `spec`, scan it, and assemble pools.
 pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
-    let paths = spec.members().map_err(|e| {
+    let named = spec.members().map_err(|e| {
         say!("{e}");
         exit::USAGE
     })?;
+    // The same file named twice — the same path, or a link to it — is
+    // one member, read once: `zvolcarve scan` searched it twice and
+    // listed every candidate on it twice, without a word.
+    let mut paths: Vec<PathBuf> = Vec::with_capacity(named.len());
+    for p in named {
+        if let Some(first) = paths.iter().find(|k| crate::same_file(k, &p)) {
+            say!("{} is {} again; read once", p.display(), first.display());
+            continue;
+        }
+        paths.push(p);
+    }
     // F-68: this tool reads a device and a copy of one the same way,
     // and writes to neither. The next tool the operator reaches for —
     // `zpool import -F`, a filesystem repair — does write, so it is
@@ -461,10 +472,18 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
         let opened = open.open(p).and_then(|src| {
             if let Some(m) = src.map() {
                 say!(
-                    "{}: the imager's map says {} byte(s) in {} range(s) were never read; they are refused, not trusted (SPEC F-72)",
+                    "{}: the imager's map says {} byte(s) in {} range(s) were never read{}; they are refused, not trusted (SPEC F-72)",
                     p.display(),
-                    m.unreadable_bytes(),
-                    m.unreadable().len()
+                    m.unreadable_bytes() - m.undescribed,
+                    m.unreadable().len(),
+                    if m.undescribed > 0 {
+                        format!(
+                            ", and says nothing of {} byte(s) more, between its lines or past its end",
+                            m.undescribed
+                        )
+                    } else {
+                        String::new()
+                    }
                 );
             }
             let scan = scan_with_recovered_base_opts(&src, open.surface_scan_on_device)?;
@@ -542,6 +561,14 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
                 }
             }
             let mut layout = hints.layout;
+            // The pool's name is the first part of every dataset's: one
+            // the hints do not give is the labels', where any member's
+            // verifies, and else the pool's own configuration in its MOS
+            // (`walk` reads it). Left as "?", `dump tank/vm/disk0` found
+            // no dataset of that name — they were all `?/…`.
+            if layout.name.is_none() {
+                layout.name = scans.iter().flatten().find_map(|s| s.config()?.name);
+            }
             if spec.search_order {
                 let devices: Vec<Option<&dyn BlockSource>> = sources
                     .iter()
