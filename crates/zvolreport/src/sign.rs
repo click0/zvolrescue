@@ -224,18 +224,53 @@ pub fn keygen(private: &Path, public: &Path) -> Result<VerifyingKey, String> {
     let seed = os_random_32()?;
     let key = SigningKey::from_bytes(&seed);
     let pubkey = key.verifying_key();
-    // A pair or nothing. The private half went first, and a public half
-    // that could not be written left a private key with no pair — which
-    // the next run then refused to replace, as a key that exists. The
-    // public half goes first now, and is taken back if the private one
-    // fails.
-    std::fs::write(public, public_pem(&pubkey))
-        .map_err(|e| format!("{}: {e}", public.display()))?;
-    if let Err(e) = write_private(private, &private_pem(&key)) {
-        let _ = std::fs::remove_file(public);
-        return Err(e);
+    // A pair or nothing, and nothing lost on the way. The private half
+    // went first, and a public half that could not be written left a
+    // private key with no pair; then the public half went first and was
+    // taken back when the private one failed — and with `--force` what
+    // it was taken back from was the key that had been there, gone.
+    // Both halves are written beside their places first, and only then
+    // put there.
+    let private_tmp = beside_new(private);
+    let public_tmp = beside_new(public);
+    let written = write_private(&private_tmp, &private_pem(&key)).and_then(|()| {
+        write_new(&public_tmp, public_pem(&pubkey).as_bytes())
+            .map_err(|e| format!("{}: {e}", public.display()))
+    });
+    let placed = written.and_then(|()| {
+        std::fs::rename(&private_tmp, private)
+            .map_err(|e| format!("{}: {e}", private.display()))?;
+        std::fs::rename(&public_tmp, public).map_err(|e| format!("{}: {e}", public.display()))
+    });
+    if placed.is_err() {
+        let _ = std::fs::remove_file(&private_tmp);
+        let _ = std::fs::remove_file(&public_tmp);
     }
-    Ok(pubkey)
+    placed.map(|()| pubkey)
+}
+
+/// Where a key is written before it is put in place: beside it.
+fn beside_new(path: &Path) -> PathBuf {
+    let mut p = path.as_os_str().to_owned();
+    p.push(".new");
+    PathBuf::from(p)
+}
+
+/// Write a file that is new: whatever was at its name — one a run that
+/// died left there, or a link — goes first, so nothing is written
+/// through it.
+fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Err(e) = std::fs::remove_file(path) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return Err(e);
+        }
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?
+        .write_all(bytes)
 }
 
 /// Write the private key so that only its owner can read it.
@@ -243,10 +278,14 @@ pub fn keygen(private: &Path, public: &Path) -> Result<VerifyingKey, String> {
 fn write_private(path: &Path, pem: &str) -> Result<(), String> {
     use std::io::Write;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    if let Err(e) = std::fs::remove_file(path) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return Err(format!("{}: {e}", path.display()));
+        }
+    }
     let mut f = std::fs::OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .mode(0o600)
         .open(path)
         .map_err(|e| format!("{}: {e}", path.display()))?;

@@ -103,6 +103,13 @@ pub(crate) fn read_log_prefix(path: &Path, limit: Option<u64>) -> Result<ReadLog
                 path.display()
             ));
         }
+        // Nothing at all — an empty file, `/dev/null` — is no log of a
+        // case: a report built from it said every log hashed as recorded
+        // over no record, and `verify` passed it.
+        return Err(format!(
+            "{}: empty; no evidence record in it",
+            path.display()
+        ));
     }
     Ok(ReadLog {
         records,
@@ -668,6 +675,24 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
     } else {
         0
     };
+    // The key is read before anything is written: one that could not be
+    // read failed the run after the report and its Markdown had been
+    // written over, with the signature beside them now of another
+    // report.
+    let key = match &opts.sign {
+        Some(keyfile) => match crate::sign::read_private(keyfile) {
+            Ok(k) => Some(k),
+            Err(e) => {
+                eprintln!("zvolreport: {e}");
+                return exit::USAGE;
+            }
+        },
+        None if opts.signature.is_some() => {
+            eprintln!("zvolreport: --signature says where to write one; --sign says what with");
+            return exit::USAGE;
+        }
+        None => None,
+    };
     let report = assemble(&logs, opts);
 
     let json = serde_json::to_string_pretty(&report).expect("serialisable") + "\n";
@@ -685,26 +710,12 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
     // is a rendering of it, not a second document to be trusted on its
     // own, and R-03 is what lets a doubter re-render it themselves.
     let mut signed = None;
-    if let Some(keyfile) = &opts.sign {
-        let key = match crate::sign::read_private(keyfile) {
-            Ok(k) => k,
-            Err(e) => {
-                eprintln!("zvolreport: {e}");
-                return exit::USAGE;
-            }
-        };
-        let to = opts
-            .signature
-            .clone()
-            .unwrap_or_else(|| crate::sign::beside(&opts.output));
-        if let Err(e) = crate::sign::write_signature(&key, json.as_bytes(), &to) {
+    if let (Some(key), Some(to)) = (&key, &signature) {
+        if let Err(e) = crate::sign::write_signature(key, json.as_bytes(), to) {
             eprintln!("zvolreport: {e}");
             return exit::USAGE;
         }
-        signed = Some(to);
-    } else if opts.signature.is_some() {
-        eprintln!("zvolreport: --signature says where to write one; --sign says what with");
-        return exit::USAGE;
+        signed = Some(to.clone());
     }
     match g.format {
         Format::Json => print!("{json}"),

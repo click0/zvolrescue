@@ -523,6 +523,20 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
     let parsed = std::str::from_utf8(&bytes)
         .map_err(|e| format!("not text: {e}"))
         .and_then(|t| serde_json::from_str::<Report>(t).map_err(|e| e.to_string()));
+    // A signature that does not hold is the answer, whatever else is
+    // wrong with the document: a signed report with its format version
+    // changed was "format version 2", exit 2, and the signature that
+    // said it had been tampered with went unsaid.
+    let parsed = parsed.and_then(|r: Report| {
+        if r.report_version == REPORT_VERSION {
+            Ok(r)
+        } else {
+            Err(format!(
+                "report format version {}; this build reads version {REPORT_VERSION}",
+                r.report_version
+            ))
+        }
+    });
     let report: Report = match parsed {
         Ok(r) => r,
         Err(e) => {
@@ -537,22 +551,18 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
                     return exit::PARTIAL;
                 }
                 eprintln!(
-                    "zvolreport: {}: the signature matches, but the document is not a report",
+                    "zvolreport: {}: the signature matches, but the document is not one this build reads",
                     opts.report.display()
                 );
             }
-            eprintln!("zvolreport: {}: not a report: {e}", opts.report.display());
+            if e.starts_with("report format version") {
+                eprintln!("zvolreport: {}: {e}", opts.report.display());
+            } else {
+                eprintln!("zvolreport: {}: not a report: {e}", opts.report.display());
+            }
             return exit::EVIDENCE;
         }
     };
-    if report.report_version != REPORT_VERSION {
-        eprintln!(
-            "zvolreport: {}: report format version {}; this build reads version {REPORT_VERSION}",
-            opts.report.display(),
-            report.report_version
-        );
-        return exit::EVIDENCE;
-    }
 
     let mut checked = Vec::new();
     // Unsigned, a report is checked against its logs and nothing else: a

@@ -15,16 +15,50 @@ use crate::model::Report;
 /// its code, `\u{a}`, instead of being one. A dataset name is whatever
 /// the pool says, and the pool may be forged: a name with a newline in
 /// it ended the table row and began whatever Markdown came next.
+///
+/// So are the characters that change how text reads without being seen
+/// — a right-to-left override, a zero-width space, a space that is not
+/// one — and a space at either end, which a table cell drops: `tank/vm`
+/// and `tank/vm ` rendered alike, and a name with an override in it read
+/// backwards.
 fn visible(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
+    let lead = s.len() - s.trim_start_matches(' ').len();
+    let tail = s.len() - s.trim_end_matches(' ').len();
+    for (i, c) in s.char_indices() {
+        let edge = c == ' ' && (i < lead || i >= s.len() - tail);
+        if edge || c.is_control() || unseen(c) {
             let _ = write!(out, "\\u{{{:x}}}", u32::from(c));
         } else {
             out.push(c);
         }
     }
     out
+}
+
+/// A character that is not seen as itself: a line or paragraph
+/// separator, a Unicode format character (bidirectional overrides and
+/// isolates, zero-width spaces and joiners, the byte-order mark, tags),
+/// or whitespace other than the plain space.
+fn unseen(c: char) -> bool {
+    matches!(
+        c,
+        '\u{ad}'
+            | '\u{34f}'
+            | '\u{61c}'
+            | '\u{115f}'..='\u{1160}'
+            | '\u{17b4}'..='\u{17b5}'
+            | '\u{180b}'..='\u{180f}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{2028}'..='\u{202e}'
+            | '\u{2060}'..='\u{206f}'
+            | '\u{3164}'
+            | '\u{fe00}'..='\u{fe0f}'
+            | '\u{feff}'
+            | '\u{ffa0}'
+            | '\u{fff9}'..='\u{fffb}'
+            | '\u{e0000}'..='\u{e0fff}'
+    ) || (c.is_whitespace() && c != ' ')
 }
 
 /// Text from the logs or the pool, as text: nothing in it can open a
@@ -245,6 +279,23 @@ pub fn render(r: &Report) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What changes how a name reads without being seen is shown as its
+    /// code: an override that reverses it, a space of no width, a space
+    /// that is not one, and a space at either end, which a cell drops.
+    #[test]
+    fn what_is_not_seen_is_shown() {
+        assert_eq!(visible("tank/vm"), "tank/vm");
+        assert_eq!(visible("tank/vm a"), "tank/vm a");
+        assert_eq!(visible(" tank/vm  "), "\\u{20}tank/vm\\u{20}\\u{20}");
+        assert_eq!(visible("tank/\u{202e}gpj.exe"), "tank/\\u{202e}gpj.exe");
+        assert_eq!(visible("ta\u{200b}nk"), "ta\\u{200b}nk");
+        assert_eq!(visible("tank\u{a0}vm"), "tank\\u{a0}vm");
+        assert_eq!(visible("\u{feff}tank"), "\\u{feff}tank");
+        assert_eq!(visible("тека/том"), "тека/том");
+        assert_eq!(visible("   "), "\\u{20}\\u{20}\\u{20}");
+        assert_eq!(cell(" a"), "\\\\u{20}a");
+    }
 
     /// Nothing the pool or a log says can make Markdown of its own.
     #[test]

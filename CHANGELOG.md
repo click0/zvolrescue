@@ -732,6 +732,21 @@ tagged. `v0.7.1` is the release that carries those six.
   after the report's signature or logs had already failed. A device is
   read no further than its recorded size, a pipe not at all, and a
   report that did not hold has nothing it names hashed on its word.
+* **zvolreport: a key read before anything is written, a pair kept, a
+  version change is a broken signature, an empty log is no log, and
+  what is not seen is shown.** `build --sign` with a key it could not
+  read wrote the report and its Markdown first, beside a signature of
+  the report they replaced; the key is read first now. `keygen --force`
+  whose private half could not be written took back the public half it
+  had written — over the key that had been there, gone; both halves are
+  written beside their places first and only then put there. A signed
+  report with its format version changed was "format version", exit 2,
+  without a word of the signature that no longer held; it is the
+  signature, exit 4. An empty file or `/dev/null` was an evidence log
+  of no record, built and verified; it is refused (exit 2). The
+  Markdown showed a right-to-left override, a zero-width space, a space
+  that is not one and a space at either end of a name as nothing at
+  all; each is shown as its code.
 
 ## v0.9.12 — 2026-11-07
 

@@ -394,6 +394,127 @@ fn keygen_writes_a_whole_pair_and_never_through_a_link() {
     assert!(!lone.exists());
 }
 
+/// `keygen --force` whose private half cannot be written keeps the
+/// pair that was there: the public half it had written over was taken
+/// back, which left no public key at all.
+#[test]
+fn a_keygen_that_fails_keeps_the_keys_that_were_there() {
+    let dir = scratch("keygen-keep");
+    let keep = dir.join("keep.pub");
+    std::fs::write(&keep, "the key everyone has").unwrap();
+    let (code, _, err) = run(&[
+        "-q",
+        "keygen",
+        "-o",
+        &dir.join("no/such/dir/new.key").to_string_lossy(),
+        "--public",
+        &keep.to_string_lossy(),
+        "--force",
+    ]);
+    assert_eq!(code, 1, "{err}");
+    assert_eq!(
+        std::fs::read_to_string(&keep).unwrap(),
+        "the key everyone has"
+    );
+    let left: Vec<_> = std::fs::read_dir(&*dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name())
+        .collect();
+    assert_eq!(left, [std::ffi::OsString::from("keep.pub")], "{left:?}");
+}
+
+/// A key that cannot be read stops `build --sign` before it writes
+/// anything: it used to write the report and its Markdown first, beside
+/// a signature of the report they replaced.
+#[test]
+fn a_build_whose_key_cannot_be_read_writes_nothing() {
+    let dir = scratch("sign-bad-key");
+    let img = dir.join("vol.img");
+    std::fs::write(&img, b"the bytes of a volume, such as they are").unwrap();
+    let log = evidence_log(&dir, &img);
+    let report = dir.join("report.json");
+    let md = dir.join("report.md");
+    std::fs::write(&report, "the report there was").unwrap();
+    std::fs::write(&md, "its rendering").unwrap();
+    let bad = dir.join("bad.key");
+    std::fs::write(&bad, "not a key").unwrap();
+    let (code, _, err) = run(&[
+        "-q",
+        "build",
+        &log.to_string_lossy(),
+        "-o",
+        &report.to_string_lossy(),
+        "--md",
+        &md.to_string_lossy(),
+        "--sign",
+        &bad.to_string_lossy(),
+    ]);
+    assert_eq!(code, 1, "{err}");
+    assert_eq!(
+        std::fs::read_to_string(&report).unwrap(),
+        "the report there was"
+    );
+    assert_eq!(std::fs::read_to_string(&md).unwrap(), "its rendering");
+}
+
+/// A signed report whose format version was changed is a signature that
+/// does not hold (exit 4), and says so; it was "format version 2", exit
+/// 2, with not a word of the signature.
+#[test]
+fn a_signed_report_of_another_version_is_a_broken_signature() {
+    let dir = scratch("sign-version");
+    let img = dir.join("vol.img");
+    std::fs::write(&img, b"the bytes of a volume, such as they are").unwrap();
+    let log = evidence_log(&dir, &img);
+    let key = dir.join("k").to_string_lossy().into_owned();
+    let (code, _, err) = run(&["-q", "keygen", "-o", &key]);
+    assert_eq!(code, 0, "{err}");
+    let r = dir.join("report.json").to_string_lossy().into_owned();
+    let (code, _, err) = run(&[
+        "-q",
+        "build",
+        &log.to_string_lossy(),
+        "-o",
+        &r,
+        "--sign",
+        &key,
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let text = std::fs::read_to_string(&r).unwrap();
+    let mut v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    v["report_version"] = 2.into();
+    std::fs::write(&r, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+    let (code, _, err) = run(&["-q", "verify", &r, "--key", &format!("{key}.pub")]);
+    assert_eq!(code, 4, "{err}");
+    assert!(err.contains("signature FAIL"), "{err}");
+    // Unsigned, it is a version this build does not read.
+    let (code, _, err) = run(&["-q", "verify", &r]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("report format version 2"), "{err}");
+}
+
+/// An empty file, or `/dev/null`, is not a log of a case: a report built
+/// from it held to nothing, and `verify` passed it.
+#[test]
+fn an_empty_log_is_no_evidence_log() {
+    let dir = scratch("empty-log");
+    let empty = dir.join("empty.jsonl");
+    std::fs::write(&empty, "").unwrap();
+    for log in [empty.to_string_lossy().into_owned(), "/dev/null".into()] {
+        let (code, _, err) = run(&[
+            "-q",
+            "build",
+            &log,
+            "-o",
+            &dir.join("report.json").to_string_lossy(),
+        ]);
+        assert_eq!(code, 2, "{err}");
+        assert!(err.contains("empty; no evidence record in it"), "{err}");
+    }
+    assert!(!dir.join("report.json").exists());
+}
+
 /// What a report is held to, and what it is not: no build writes over a
 /// file its logs name; a record appended to a log after the build is not
 /// held against the report; a file the report recorded that is now a
