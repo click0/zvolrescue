@@ -32,6 +32,26 @@ use zvolrescue_io::medium::{Incident, Ledger};
 pub use zvolrescue_io::refuse_if_evidence;
 use zvolrescue_io::{ddrescue, FileSource};
 
+/// The command line, parsed, or the run ended: help and the version
+/// with 0, as asked, and anything else with [`exit::USAGE`].
+///
+/// clap ends a run it cannot parse with 2, which here is "evidence
+/// unreadable": a misspelt flag read, to a script, as a disk that would
+/// not open, and the manuals said 1.
+pub fn parse_args<C: clap::Parser>() -> C {
+    use clap::error::ErrorKind;
+    match C::try_parse() {
+        Ok(c) => c,
+        Err(e) if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) => {
+            e.exit()
+        }
+        Err(e) => {
+            let _ = e.print();
+            std::process::exit(i32::from(exit::USAGE))
+        }
+    }
+}
+
 /// Exit codes from SPEC §7.
 pub mod exit {
     /// Usage error.

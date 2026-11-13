@@ -102,7 +102,7 @@ enum Command {
 fn main() -> ExitCode {
     zvol_common::set_tool("zvolreport");
     zvol_common::quiet_broken_pipe();
-    let cli = Cli::parse();
+    let cli: Cli = zvol_common::parse_args();
     // `verify` reads and hashes every file the report names; a log
     // written over one destroyed it and was then reported as tampering.
     let named = match &cli.command {

@@ -204,7 +204,7 @@ fn dump_sidecars(cmd: &Cmd, global: &Global) -> Vec<PathBuf> {
 fn main() -> ExitCode {
     zvol_common::set_tool("zvolrescue");
     zvol_common::quiet_broken_pipe();
-    let cli = Cli::parse();
+    let cli: Cli = zvol_common::parse_args();
     if let Err(code) = cli
         .global
         .refuse_logs_over("zvolrescue", &dump_sidecars(&cli.cmd, &cli.global))

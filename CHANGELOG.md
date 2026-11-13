@@ -796,6 +796,15 @@ tagged. `v0.7.1` is the release that carries those six.
   member's label, or else from the pool's configuration in its MOS. A
   dRAID layout no numbers make was taken, and every read failed "not
   supported yet" (exit 3); it is refused with its fields (exit 1).
+* **A command line that does not parse is a usage error, and the fuzz
+  lockfile is at the workspace's version.** All five programs ended an
+  argument they could not take — a misspelt flag, a missing one, a
+  value of the wrong kind — with clap's own exit status 2, which here
+  means evidence unreadable; the manuals and the spec say 1, and it is
+  1. Help and the version still end with 0. `fuzz/Cargo.lock` named the
+  workspace crates at 0.8.5 through 0.9.12, and every fuzz build
+  rewrote it; it names them at the workspace's version, CI holds it
+  there, and the release steps say how to keep it.
 
 ## v0.9.12 — 2026-11-07
 

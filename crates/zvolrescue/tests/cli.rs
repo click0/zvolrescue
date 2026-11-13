@@ -2646,10 +2646,11 @@ fn retries_are_no_longer_an_option() {
         "-o",
         "/nonexistent/x.img",
     ]);
-    assert_eq!(code, 2, "{err}");
+    // A flag the command line does not take is a usage error, exit 1.
+    assert_eq!(code, 1, "{err}");
     assert!(err.contains("--retries"), "{err}");
     let (code, _out, err) = run(&["scan", "/dev/null", "--retries", "3"]);
-    assert_eq!(code, 2, "{err}");
+    assert_eq!(code, 1, "{err}");
     assert!(err.contains("--retries"), "{err}");
 }
 
@@ -2935,4 +2936,26 @@ fn an_image_sent_to_dev_null_is_no_output_on_the_record() {
     assert_eq!(record["outputs"], serde_json::json!([]), "{record}");
     assert_eq!(record["result"]["volumes"][0]["output"], "/dev/null");
     assert!(record["result"]["volumes"][0]["sha256"].is_string());
+}
+
+/// An argument the command line cannot take is a usage error, exit 1,
+/// as the manual says: clap's own 2 is "evidence unreadable" here, and a
+/// misspelt flag read to a script as a disk that would not open. Help
+/// and the version still end with 0.
+#[test]
+fn a_command_line_that_does_not_parse_is_a_usage_error() {
+    for args in [
+        &["--no-such-flag"][..],
+        &["dump"],
+        &["scan", "--txg", "x"],
+        &[],
+    ] {
+        let (code, _, err) = run(args);
+        assert_eq!(code, 1, "{args:?}: {err}");
+    }
+    for args in [&["--help"][..], &["--version"], &["dump", "--help"]] {
+        let (code, out, _) = run(args);
+        assert_eq!(code, 0, "{args:?}");
+        assert!(!out.is_empty(), "{args:?}");
+    }
 }

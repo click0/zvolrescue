@@ -102,7 +102,7 @@ enum Command {
 fn main() -> ExitCode {
     zvol_common::set_tool("zvolfiles");
     zvol_common::quiet_broken_pipe();
-    let cli = Cli::parse();
+    let cli: Cli = zvol_common::parse_args();
     // The records an earlier run left in -o — its manifest, the index of
     // `objects` — are what says what that run wrote; a debug log given as
     // one was created over it before anything checked it.

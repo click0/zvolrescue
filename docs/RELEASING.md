@@ -23,7 +23,10 @@ moment of tagging, and everything below follows from that:
    refuses a page at another version), in `pkgver` of
    `packaging/aur/PKGBUILD` (then `packaging/aur/srcinfo.sh >
    packaging/aur/.SRCINFO`) and in `DISTVERSION` of
-   `packaging/freebsd/sysutils/zvolrescue/Makefile`; `SPEC.md`'s header
+   `packaging/freebsd/sysutils/zvolrescue/Makefile`, and in
+   `fuzz/Cargo.lock` (`cargo metadata --manifest-path fuzz/Cargo.toml
+   --format-version 1 >/dev/null` puts the workspace crates there at the
+   new version and changes nothing else); `SPEC.md`'s header
    and §10 and the README status line say which version the documents
    describe. Leave the PKGBUILD's `sha256sums` at `SKIP` and the port's
    `distinfo` as it is: both hash the tag's tarball, which does not exist

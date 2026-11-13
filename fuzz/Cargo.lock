@@ -115,7 +115,7 @@ dependencies = [
 
 [[package]]
 name = "edonr"
-version = "0.8.5"
+version = "0.9.12"
 
 [[package]]
 name = "find-msvc-tools"
@@ -254,7 +254,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "zfs-ondisk"
-version = "0.8.5"
+version = "0.9.12"
 dependencies = [
  "blake3",
  "edonr",

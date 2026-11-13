@@ -85,6 +85,13 @@ jobs:
           # after v0.7.1 shipped, and then v0.7.0 stopped existing at all.
           grep -q "\*\*Status:\*\* v$v " README.md || { echo "::error::README.md's status line is not v$v"; exit 1; }
           grep -q "\*\*Статус:\*\* v$v " README_UK.md || { echo "::error::README_UK.md's status line is not v$v"; exit 1; }
+          # The fuzz crate's lockfile names the workspace crates at their
+          # version too: it kept 0.8.5 through 0.9.12, and every fuzz build
+          # rewrote it.
+          for c in zfs-ondisk edonr; do
+            got=$(awk -v c="$c" '$0 == "name = \"" c "\"" { getline; gsub(/version = |"/, ""); print; exit }' fuzz/Cargo.lock)
+            test "$got" = "$v" || { echo "::error::fuzz/Cargo.lock has $c at $got, not $v; cargo metadata --manifest-path fuzz/Cargo.toml --format-version 1 >/dev/null refreshes it"; exit 1; }
+          done
           # Exactly one open section, and every version named once. The
           # release notes carry whatever the open section still holds by
           # reading from its heading to the next `## `, so a second

@@ -149,7 +149,7 @@ enum Command {
 fn main() -> ExitCode {
     zvol_common::set_tool("zvolcarve");
     zvol_common::quiet_broken_pipe();
-    let cli = Cli::parse();
+    let cli: Cli = zvol_common::parse_args();
     // A limit of 0 keeps nothing: a scan bounded by it read nothing and
     // ended 6, and `roots --max-roots 0` said no header was found (exit
     // 3), as though the disk held none.
