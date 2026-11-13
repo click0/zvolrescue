@@ -115,6 +115,12 @@ An image written to a device is checked over the bytes it took there,
 not over the whole device; one sent to
 .Pa /dev/null
 is no output, and its hash is only in the record's result.
+A device is read no further than the size recorded for it, and not at
+all when it is another size now or none was recorded; a pipe or a
+socket is not read.
+When the signature or the logs say the report is not the one that was
+written, nothing it names is hashed on its word: its evidence and
+outputs are listed as not read.
 A log not where it was recorded is looked for beside the report.
 When every log still hashes as recorded, the report is built from them
 again and compared with the one given: every section of it \(em logs,

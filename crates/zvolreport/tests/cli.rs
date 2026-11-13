@@ -595,3 +595,61 @@ fn a_log_cut_short_and_evidence_that_became_a_fifo_fail() {
     assert_eq!(code, 4, "{out}");
     assert!(out.contains("FAIL      kind"), "{out}");
 }
+
+/// What `verify` reads is bounded by what was recorded: a device named
+/// as evidence is read to its recorded size, once its own size is that
+/// size, and `/dev/zero` — which `verify` read without end — fails at
+/// once. A report that does not hold to its logs is not taken at its
+/// word for what to read: what it names is said, not hashed.
+#[cfg(unix)]
+#[test]
+fn verify_reads_no_more_than_was_recorded() {
+    if !Path::new("/dev/zero").exists() {
+        return;
+    }
+    let dir = scratch("dev-zero");
+    let record = serde_json::json!({
+        "v": FORMAT_VERSION, "ts": 1_757_100_000u64, "tool": "zvolrescue", "version": "0.9.12",
+        "argv": ["zvolrescue", "scan", "/dev/zero"],
+        "inputs": [{"path": "/dev/zero", "kind": "device", "size": 1u64 << 40,
+                    "sha256": "00".repeat(32)}],
+        "outputs": [],
+        "result": {},
+        "status": 0,
+    });
+    let log = dir.join("case.jsonl");
+    std::fs::write(&log, format!("{record}\n")).unwrap();
+    let report = dir.join("r.json").to_string_lossy().into_owned();
+    let (code, _, err) = run(&["-q", "build", &log.to_string_lossy(), "-o", &report]);
+    assert_eq!(code, 0, "{err}");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_zvolreport"))
+        .args(["verify", &report])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let status = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break s;
+        }
+        if std::time::Instant::now() > deadline {
+            child.kill().ok();
+            panic!("verify was still reading /dev/zero after 30 seconds");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let mut out = String::new();
+    std::io::Read::read_to_string(child.stdout.as_mut().unwrap(), &mut out).ok();
+    assert_eq!(status.code(), Some(4), "{out}");
+    assert!(out.contains("not read"), "{out}");
+
+    // An edited report: its evidence is not read on its word.
+    let mut r: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
+    r["summary"] = "all good".into();
+    let edited = dir.join("edited.json");
+    std::fs::write(&edited, serde_json::to_vec(&r).unwrap()).unwrap();
+    let (code, out, _) = run(&["-q", "verify", &edited.to_string_lossy()]);
+    assert_eq!(code, 4, "{out}");
+    assert!(out.contains("not read: the report did not hold"), "{out}");
+}

@@ -75,6 +75,20 @@ struct DumpOut {
     /// starts here.
     #[serde(skip_serializing_if = "Option::is_none")]
     interrupted_at: Option<u64>,
+    /// The output refused the image — a write, or finishing it — and the
+    /// run stopped there (exit 6): what it said.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_failed: Option<String>,
+    /// Where a `--resume` starts, for an image that stopped short: the
+    /// block the state on disk names.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resume_at: Option<u64>,
+    /// What the run says of the image and of a resume of it.
+    #[serde(skip)]
+    resume_words: String,
+    /// The image was finished and flushed: its hash is the file's.
+    #[serde(skip)]
+    finished: bool,
     sha256: String,
     /// SHA-1 and MD5, when `--hash` asked for them (SPEC F-53).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -376,7 +390,6 @@ fn dump_one(
         }
     };
     let blocksize = obj.dnode().datablksz();
-    let state_path = resume::path(output);
     let expected_state = resume::State {
         version: 1,
         dataset: ds.name.clone(),
@@ -407,7 +420,8 @@ fn dump_one(
     let quiet = g.quiet;
     let mut last_report = Instant::now();
     let mut last_state = Instant::now();
-    let state_file = state_path.clone();
+    let mut saver = resume::Saver::new(output, &expected_state, start_block);
+    let interrupt = zvol_common::interrupt_flag();
     let progress = |done: u64, total: u64, so_far: &Report| {
         if !quiet && (last_report.elapsed().as_secs() >= 2 || done == total) {
             eprint!("\r  {} {done}/{total} blocks", ds.name);
@@ -416,7 +430,12 @@ fn dump_one(
         }
         if last_state.elapsed().as_secs() >= 5 && done < total {
             let lost = earlier.and(so_far, done);
-            resume::write(output, &state_file, &expected_state, done, &lost);
+            if !saver.save(done, &lost) {
+                // The image could not be flushed: nothing written to it
+                // from here on can be counted. The run stops as a signal
+                // stops it, and says why below.
+                interrupt.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             last_state = Instant::now();
         }
     };
@@ -425,7 +444,6 @@ fn dump_one(
     } else {
         OnError::Zero
     };
-    let interrupt = zvol_common::interrupt_flag();
     let mut report: Report = match extract_from(
         &obj,
         volsize,
@@ -448,24 +466,31 @@ fn dump_one(
     if !quiet {
         eprintln!();
     }
-    if let Some(at) = report.interrupted_at {
+    if let Some(e) = saver.unflushed() {
+        report
+            .output_failed
+            .get_or_insert_with(|| format!("the image could not be flushed: {e}"));
+    }
+    // A state so --resume can continue past the fix — at the block the
+    // abort stopped at, the last range listed — or, after an interrupt or
+    // an output that refused, from the block that was next; none for a
+    // whole image. What the run says of it is what the state on disk
+    // bears out.
+    let resume_at = saver.conclude(&report, &earlier, start_block);
+    let resume_words = if report.output_failed.is_some() {
+        saver.words("and --resume continues there once the output has room")
+    } else if report.interrupted_at.is_some() || !report.aborted {
+        saver.words("--resume continues there")
+    } else {
+        saver.words("--resume continues after a repair")
+    };
+    if let Some(why) = &report.output_failed {
+        eprintln!("zvolrescue: {}: {why}; {resume_words} (exit 6)", ds.name);
+    } else if let Some(at) = report.interrupted_at {
         eprintln!(
-            "zvolrescue: {}: interrupted at block {at} of {}; the image holds the blocks before it, --resume continues there (exit 6)",
+            "zvolrescue: {}: interrupted at block {at} of {}; {resume_words} (exit 6)",
             ds.name, report.blocks_total
         );
-    }
-    if report.aborted || report.interrupted_at.is_some() {
-        // Leave a state file so --resume can continue past the fix — at
-        // the block the abort stopped at, the last range listed — or,
-        // after an interrupt, from the block that was next.
-        let done = report
-            .interrupted_at
-            .or_else(|| report.bad.last().map(|b| b.blkid))
-            .unwrap_or(start_block);
-        let lost = earlier.and(&report, done);
-        resume::write(output, &state_path, &expected_state, done, &lost);
-    } else {
-        resume::clear(&state_path);
     }
     // What the run that was resumed lost is this image's too.
     earlier.into_report(&mut report);
@@ -488,6 +513,10 @@ fn dump_one(
         aborted: report.aborted,
         stopped_by_medium: report.stopped_by_medium.clone(),
         interrupted_at: report.interrupted_at,
+        output_failed: report.output_failed.clone(),
+        resume_at,
+        resume_words,
+        finished: report.finished,
         sha256: report.sha256.clone(),
         sha1: report.sha1.clone(),
         md5: report.md5.clone(),
@@ -562,12 +591,23 @@ fn print_text(out: &RunOut) {
                 b.blkid, b.offset, b.len, b.reason
             );
         }
-        if v.stopped_by_medium.is_some() {
+        if let Some(why) = &v.output_failed {
+            println!(
+                "  OUTPUT FAILED (exit 6): {why}; the image is incomplete: {}",
+                v.resume_words
+            );
+        } else if v.stopped_by_medium.is_some() {
             println!("  STOPPED: a device refused a read (exit 7); the image is incomplete. Image the disk with a map, then --map and --resume continue on the image (SPEC F-33, N-10)");
         } else if let Some(at) = v.interrupted_at {
-            println!("  INTERRUPTED at block {at} (exit 6); the image is incomplete, --resume continues there");
+            println!(
+                "  INTERRUPTED at block {at} (exit 6); the image is incomplete: {}",
+                v.resume_words
+            );
         } else if v.aborted {
-            println!("  ABORTED at the first unreadable block (--strict); the image is incomplete, --resume continues after a repair");
+            println!(
+                "  ABORTED at the first unreadable block (--strict); the image is incomplete: {}",
+                v.resume_words
+            );
         } else if !v.bad.is_empty() {
             println!(
                 "  WARNING: {} unreadable range(s) were written as zeros (exit 4); rerun with --strict to refuse partial output",
@@ -923,7 +963,9 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 // An interrupt ends the run, not just the volume: the
                 // operator asked for it to stop, and a bulk run that went
                 // on to the next volume would not have stopped.
-                let interrupted = v.interrupted_at.is_some();
+                // An output that refused ends it too: the next volume
+                // would go to the same place.
+                let interrupted = v.interrupted_at.is_some() || v.output_failed.is_some();
                 out.volumes.push(v);
                 if interrupted {
                     code = code.max(exit::INTERRUPTED);
@@ -975,8 +1017,19 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         .iter()
         .filter(|v| !evidence::keeps_nothing(&v.output))
         .map(|v| {
-            evidence::FileRef::known_with(&v.output, &v.sha256, v.sha1.as_deref(), v.md5.as_deref())
+            if v.finished {
+                evidence::FileRef::known_with(
+                    &v.output,
+                    &v.sha256,
+                    v.sha1.as_deref(),
+                    v.md5.as_deref(),
+                )
                 .image(v.image_bytes)
+            } else {
+                // Not finished: what the file holds is not what was
+                // hashed on the way, and the record does not say it is.
+                evidence::FileRef::stat(&v.output)
+            }
         })
         .collect();
     if opts.recursive {

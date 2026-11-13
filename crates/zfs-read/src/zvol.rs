@@ -75,6 +75,21 @@ pub struct Report {
     /// block an abort or a signal stopped at. A file is that long; a
     /// device holds the image in its first that many bytes.
     pub image_bytes: u64,
+    /// The output refused the image: a write, or finishing it to its
+    /// length — a full disk, a quota, the end of a device. What it said.
+    ///
+    /// A refused write stops the run as a signal does: `interrupted_at`
+    /// is the block the output would not take, the image holds the
+    /// blocks before it, and a resume — once there is room — starts
+    /// there. It used to end the run as an error of the pool's, exit 3
+    /// "unrecoverable", with no state to resume from and a record that
+    /// named no output, while the image lay half written on the disk.
+    pub output_failed: Option<String>,
+    /// The image was finished: made `image_bytes` long and flushed to
+    /// the medium. When it was not — the output refused that too —
+    /// nothing says which of the blocks it was given are on it, and no
+    /// resume state may count them.
+    pub finished: bool,
     /// SHA-256 of the full `volsize` image (holes as zeros), lowercase hex.
     pub sha256: String,
     /// SHA-1 of the same image, when it was asked for (SPEC F-53).
@@ -224,6 +239,8 @@ pub fn extract_from(
         stopped_by_medium: None,
         interrupted_at: None,
         image_bytes: 0,
+        output_failed: None,
+        finished: false,
         sha256: String::new(),
         sha1: None,
         md5: None,
@@ -268,8 +285,10 @@ pub fn extract_from(
             }
             Ok(Some(mut data)) => {
                 data.resize(bs as usize, 0);
-                sink.write_at(offset, &data[..take])
-                    .map_err(|e| ReadError::Io(e.to_string()))?;
+                if let Err(e) = sink.write_at(offset, &data[..take]) {
+                    refused(&mut report, blkid, offset, &e);
+                    break;
+                }
                 report.blocks_read += 1;
                 report.bytes_written += take as u64;
                 digests.update(&data[..take]);
@@ -311,8 +330,10 @@ pub fn extract_from(
                         // agrees: a transient failure, and a whole block.
                         trace!("zvol", "blkid {blkid}: read whole on retry, verified");
                         data.resize(bs as usize, 0);
-                        sink.write_at(offset, &data[..take])
-                            .map_err(|e| ReadError::Io(e.to_string()))?;
+                        if let Err(e) = sink.write_at(offset, &data[..take]) {
+                            refused(&mut report, blkid, offset, &e);
+                            break;
+                        }
                         report.blocks_read += 1;
                         report.bytes_written += take as u64;
                         digests.update(&data[..take]);
@@ -340,8 +361,10 @@ pub fn extract_from(
                             report.blocks_zeroed += 1;
                             digests.update(&zeros[..take]);
                         } else {
-                            sink.write_at(offset, &data[..take])
-                                .map_err(|e| ReadError::Io(e.to_string()))?;
+                            if let Err(e) = sink.write_at(offset, &data[..take]) {
+                                refused(&mut report, blkid, offset, &e);
+                                break;
+                            }
                             for (start, len) in within {
                                 report.bad.push(BadRange {
                                     offset: offset + start,
@@ -405,9 +428,8 @@ pub fn extract_from(
             rest -= n as u64;
         }
         if report.interrupted_at.is_none() {
-            sink.finish(volsize)
-                .map_err(|e| ReadError::Io(e.to_string()))?;
             report.image_bytes = volsize;
+            finish(sink, &mut report);
         }
     }
     if report.aborted {
@@ -417,9 +439,8 @@ pub fn extract_from(
         // was, it ended at the last block written — short of a trailing
         // hole the hash had counted — and its recorded hash was that of
         // no file there is, a `verify` FAIL on an image nobody touched.
-        sink.finish(hashed_to)
-            .map_err(|e| ReadError::Io(e.to_string()))?;
         report.image_bytes = hashed_to;
+        finish(sink, &mut report);
     }
     if let Some(at) = report.interrupted_at {
         // The image holds the blocks before `at` and is exactly that
@@ -427,14 +448,45 @@ pub fn extract_from(
         // them; finishing it to the whole volume would have claimed
         // bytes nobody wrote.
         report.image_bytes = at.saturating_mul(bs).min(volsize);
-        sink.finish(report.image_bytes)
-            .map_err(|e| ReadError::Io(e.to_string()))?;
+        finish(sink, &mut report);
     }
     let done = digests.finish();
     report.sha256 = done.sha256;
     report.sha1 = done.sha1;
     report.md5 = done.md5;
     Ok(report)
+}
+
+/// The output would not take block `blkid`: the run stops there, as a
+/// signal would stop it, and the image is the blocks before it.
+fn refused(report: &mut Report, blkid: u64, offset: u64, e: &std::io::Error) {
+    trace!(
+        "zvol",
+        "blkid {blkid} @ {offset}: the output refused it: {e}"
+    );
+    report.output_failed = Some(format!(
+        "the output refused block {blkid}, at byte {offset}: {e}"
+    ));
+    report.interrupted_at = Some(blkid);
+}
+
+/// Make the image `report.image_bytes` long and flush it. An output that
+/// refuses this too leaves the image unfinished, and says so: what it
+/// was given before is not known to be on it.
+fn finish(sink: &mut dyn BlockSink, report: &mut Report) {
+    match sink.finish(report.image_bytes) {
+        Ok(()) => report.finished = true,
+        Err(e) => {
+            let unfinished = format!(
+                "the output could not be finished to {} bytes: {e}",
+                report.image_bytes
+            );
+            report.output_failed = Some(match report.output_failed.take() {
+                Some(first) => format!("{first}; and {unfinished}"),
+                None => unfinished,
+            });
+        }
+    }
 }
 
 /// What a salvage of a block that could not be read whole came to.
@@ -667,6 +719,83 @@ mod tests {
             .map(|b| format!("{b:02x}"))
             .collect();
         assert_eq!(r.sha256, hex);
+    }
+
+    /// An output that will not take a block stops the run there as a
+    /// signal does — the report names the block and why, the image is the
+    /// blocks before it, made that long — and one that will not finish
+    /// says so too: an error of the pool's, exit 3, it was not.
+    #[test]
+    fn an_output_that_refuses_stops_the_run_at_that_block() {
+        struct Full {
+            inner: MemSink,
+            room: u64,
+            finishes: bool,
+        }
+        impl BlockSink for Full {
+            fn write_at(&mut self, offset: u64, buf: &[u8]) -> std::io::Result<()> {
+                if offset + buf.len() as u64 > self.room {
+                    return Err(std::io::Error::other("no space left"));
+                }
+                self.inner.write_at(offset, buf)
+            }
+            fn finish(&mut self, len: u64) -> std::io::Result<()> {
+                if !self.finishes {
+                    return Err(std::io::Error::other("cannot flush"));
+                }
+                self.inner.finish(len)
+            }
+        }
+        let (s, a, ub, _) = build();
+        let reader = PoolReader::new(&a, vec![Some(&s[0] as &dyn BlockSource)]);
+        let mos = open_mos(&reader, &ub).unwrap();
+        let tree = walk(&mos, "tank").unwrap();
+        let ds = tree.get("tank/vm/disk0").unwrap();
+        let (obj, _) = open_volume(&reader, ds).unwrap();
+        let mut sink = Full {
+            inner: MemSink::default(),
+            room: 8192,
+            finishes: true,
+        };
+        let r = extract(
+            &obj,
+            ds.volsize.unwrap(),
+            &mut sink,
+            OnError::Zero,
+            |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(r.interrupted_at, Some(2));
+        assert_eq!(
+            r.output_failed.as_deref(),
+            Some("the output refused block 2, at byte 16384: no space left")
+        );
+        assert!(r.finished && !r.aborted);
+        assert_eq!((r.blocks_read, r.blocks_holes), (1, 1));
+        assert_eq!(r.image_bytes, 16384);
+        let mut want = Digests::new(Extra::none());
+        want.update(&expected_image()[..16384]);
+        assert_eq!(r.sha256, want.finish().sha256);
+
+        let mut sink = Full {
+            inner: MemSink::default(),
+            room: u64::MAX,
+            finishes: false,
+        };
+        let r = extract(
+            &obj,
+            ds.volsize.unwrap(),
+            &mut sink,
+            OnError::Zero,
+            |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(r.interrupted_at, None);
+        assert!(!r.finished);
+        assert_eq!(
+            r.output_failed.as_deref(),
+            Some("the output could not be finished to 33554432 bytes: cannot flush")
+        );
     }
 
     /// `extract_hashing` is `extract` with the legacy digests taken in

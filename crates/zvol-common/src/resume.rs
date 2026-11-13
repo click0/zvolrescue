@@ -147,11 +147,46 @@ impl Lost {
     }
 }
 
-/// Where the state of `output` lives: `OUT.img.resume.json`.
+/// Where the state of `output` lives: `OUT.img.resume.json`, or, for an
+/// image written to a device, `dev_da1.resume.json` in the current
+/// directory (see [`device_state`]).
 pub fn path(output: &Path) -> PathBuf {
+    if let Some(p) = device_state(output) {
+        return p;
+    }
     let mut p = output.as_os_str().to_owned();
     p.push(".resume.json");
     PathBuf::from(p)
+}
+
+/// The state of an image written to a device, kept in the current
+/// directory under the device's path: `/dev/da1` gives
+/// `dev_da1.resume.json`, and `/dev/disk/by-id/…`, a link, the name of
+/// the disk it leads to.
+///
+/// Next to the device it was nowhere a state can be kept: FreeBSD's
+/// devfs takes no file, so none was written and the run promised a
+/// resume it had no state for, and a Linux `/dev` is memory that the
+/// next boot empties. `None` for anything that is not a device.
+#[cfg(unix)]
+fn device_state(output: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::FileTypeExt;
+    let ft = std::fs::metadata(output).ok()?.file_type();
+    if !(ft.is_block_device() || ft.is_char_device()) {
+        return None;
+    }
+    let real = std::fs::canonicalize(output).unwrap_or_else(|_| output.to_path_buf());
+    let flat = real
+        .to_string_lossy()
+        .trim_start_matches('/')
+        .replace('/', "_");
+    Some(PathBuf::from(format!("{flat}.resume.json")))
+}
+
+/// Not a device anywhere this is built without `unix`.
+#[cfg(not(unix))]
+fn device_state(_output: &Path) -> Option<PathBuf> {
+    None
 }
 
 /// The name a state is written under before it is renamed into place:
@@ -172,6 +207,20 @@ pub fn sidecars(output: &Path) -> [PathBuf; 2] {
     [state, tmp]
 }
 
+/// Why [`write`] wrote no state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unwritten {
+    /// The image could not be flushed: the blocks given to it are not
+    /// known to be on the medium. No state may count them — not this
+    /// one, nor a later one, as a flush that failed once can succeed the
+    /// next time with the blocks it failed on gone — and the run that
+    /// gave them has nothing more to give it.
+    Flush(String),
+    /// The image is on the medium, and the state could not be put where
+    /// it goes.
+    State(String),
+}
+
 /// Record that blocks `0..blocks_done` of `image` are complete — once
 /// they are on stable storage — and what they lost.
 ///
@@ -181,26 +230,38 @@ pub fn sidecars(output: &Path) -> [PathBuf; 2] {
 /// image is sparse, the missing blocks read back as zeros, and a resume
 /// would hash them and carry on as though they were the volume. Without
 /// the rename a crash could leave half a state. A flush that fails
-/// writes no state — the next resume starts earlier, never wrong — and
-/// otherwise this is best effort: a state that cannot be written costs
-/// a resume, not the run.
-pub fn write(image: &Path, state_path: &Path, expected: &State, blocks_done: u64, lost: &Lost) {
+/// writes no state — the next resume starts earlier, never wrong. What
+/// was not written is said, for the run to say: it used to be passed
+/// over, and a run whose state was never written ended with "--resume
+/// continues there" all the same.
+pub fn write(
+    image: &Path,
+    state_path: &Path,
+    expected: &State,
+    blocks_done: u64,
+    lost: &Lost,
+) -> Result<(), Unwritten> {
     use std::io::Write;
-    let flushed = std::fs::OpenOptions::new()
+    let state_err = |e: std::io::Error| Unwritten::State(format!("{}: {e}", state_path.display()));
+    std::fs::OpenOptions::new()
         .write(true)
         .open(image)
-        .and_then(|f| f.sync_data());
-    if flushed.is_err() {
-        return;
-    }
+        .and_then(|f| {
+            let dense = !f.metadata()?.is_file();
+            match f.sync_data() {
+                // A character device has nothing to flush, as
+                // `SparseFile::finish` knows.
+                Err(e) if dense && e.kind() == std::io::ErrorKind::InvalidInput => Ok(()),
+                other => other,
+            }
+        })
+        .map_err(|e| Unwritten::Flush(format!("{}: {e}", image.display())))?;
     let s = State {
         blocks_done,
         lost: lost.clone(),
         ..expected.key()
     };
-    let Ok(json) = serde_json::to_vec(&s) else {
-        return;
-    };
+    let json = serde_json::to_vec(&s).map_err(|e| Unwritten::State(e.to_string()))?;
     // Whatever is at the temporary name goes first — a stale one from a
     // run that died, or a link — and the file is made new: `create`
     // would follow a link there, and a link to a mapfile, a key or a
@@ -208,7 +269,7 @@ pub fn write(image: &Path, state_path: &Path, expected: &State, blocks_done: u64
     let tmp = tmp_path(state_path);
     if let Err(e) = std::fs::remove_file(&tmp) {
         if e.kind() != std::io::ErrorKind::NotFound {
-            return;
+            return Err(state_err(e));
         }
     }
     let written = std::fs::OpenOptions::new()
@@ -218,10 +279,11 @@ pub fn write(image: &Path, state_path: &Path, expected: &State, blocks_done: u64
         .and_then(|mut f| {
             f.write_all(&json)?;
             f.sync_all()
-        });
-    if written.is_err() || std::fs::rename(&tmp, state_path).is_err() {
+        })
+        .and_then(|()| std::fs::rename(&tmp, state_path));
+    if let Err(e) = written {
         let _ = std::fs::remove_file(&tmp);
-        return;
+        return Err(state_err(e));
     }
     // The rename is an entry in the directory; flush that too — the
     // current one when the path is relative and has no directory part.
@@ -230,6 +292,157 @@ pub fn write(image: &Path, state_path: &Path, expected: &State, blocks_done: u64
         _ => Path::new("."),
     };
     let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
+    Ok(())
+}
+
+/// The states one extraction writes, and what a resume of its image can
+/// rely on when it ends.
+///
+/// `zvolrescue dump` and `zvolcarve dump` keep one each: the progress
+/// callback saves through it, the end of the run concludes through it,
+/// and what the run then says of a resume is what the states on disk
+/// will bear out — the block the last state written names, not the
+/// block the run would have liked to name.
+pub struct Saver<'a> {
+    image: &'a Path,
+    path: PathBuf,
+    expected: &'a State,
+    /// The blocks the state on disk counts: where a resume starts.
+    saved: u64,
+    /// Why the last state was not written, when the image was on the
+    /// medium and the state could not be put beside it.
+    unwritten: Option<String>,
+    /// A flush of the image failed: no state may be written after it.
+    unflushed: Option<String>,
+    /// Which blocks reached the output is not known — a flush failed, or
+    /// the image could not be finished — past the state on disk.
+    unknown: bool,
+    /// The image went where nothing is kept (`/dev/null`): there is no
+    /// state to write and nothing to resume.
+    kept_nowhere: bool,
+}
+
+impl<'a> Saver<'a> {
+    /// The saver of an extraction to `image` that starts at block
+    /// `start_block`, as [`open`] found it.
+    pub fn new(image: &'a Path, expected: &'a State, start_block: u64) -> Saver<'a> {
+        Saver {
+            image,
+            path: path(image),
+            expected,
+            saved: start_block,
+            unwritten: None,
+            unflushed: None,
+            unknown: false,
+            kept_nowhere: crate::evidence::keeps_nothing(image),
+        }
+    }
+
+    /// Where the state goes.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Record blocks `0..blocks_done` and what they lost. `false` when
+    /// the image could not be flushed, now or before: the run is to
+    /// stop, as nothing it writes from here on can be counted.
+    pub fn save(&mut self, blocks_done: u64, lost: &Lost) -> bool {
+        if self.unflushed.is_some() {
+            return false;
+        }
+        if self.kept_nowhere {
+            return true;
+        }
+        match write(self.image, &self.path, self.expected, blocks_done, lost) {
+            Ok(()) => {
+                self.saved = blocks_done;
+                self.unwritten = None;
+                true
+            }
+            Err(Unwritten::State(e)) => {
+                self.unwritten = Some(e);
+                true
+            }
+            Err(Unwritten::Flush(e)) => {
+                self.unflushed = Some(e);
+                self.unknown = true;
+                false
+            }
+        }
+    }
+
+    /// Why the image could not be flushed, when it could not.
+    pub fn unflushed(&self) -> Option<&str> {
+        self.unflushed.as_deref()
+    }
+
+    /// The end of the run: a state for an image that stopped short —
+    /// at the block a signal or the output stopped it at, or at the one
+    /// an abort stopped at, which is read again — and none for a whole
+    /// one. `earlier` is what the run that was resumed lost. Returns
+    /// where a resume starts, or `None` for a whole image.
+    pub fn conclude(&mut self, report: &Report, earlier: &Lost, start_block: u64) -> Option<u64> {
+        let stopped = report.aborted
+            || report.interrupted_at.is_some()
+            || report.output_failed.is_some()
+            || self.unflushed.is_some();
+        if !stopped {
+            clear(&self.path);
+            return None;
+        }
+        if self.kept_nowhere {
+            return Some(0);
+        }
+        if !report.finished || self.unknown {
+            // What reached the output is not known: the state on disk,
+            // written after a flush that held, is all a resume can go on.
+            self.unknown = true;
+            return Some(self.saved);
+        }
+        let done = report
+            .interrupted_at
+            .or_else(|| report.bad.last().map(|b| b.blkid))
+            .unwrap_or(start_block);
+        self.save(done, &earlier.and(report, done));
+        Some(self.saved)
+    }
+
+    /// What the run says of the image it left and of a resume of it,
+    /// after [`Saver::conclude`]: that the image holds the blocks before
+    /// the one it stopped at, and `there` — "--resume continues there",
+    /// or "after a repair" — when the state on disk names that block;
+    /// otherwise where a resume will in fact start, and why.
+    pub fn words(&self, there: &str) -> String {
+        let from = |what: &str| {
+            if self.saved > 0 {
+                format!(
+                    "{what}: --resume continues from block {}, where the last state written says",
+                    self.saved
+                )
+            } else {
+                format!("{what}: --resume starts again from block 0")
+            }
+        };
+        if self.kept_nowhere {
+            format!(
+                "the image went to {}, which keeps nothing: there is nothing to resume",
+                self.image.display()
+            )
+        } else if self.unknown {
+            from("which of the blocks given to the output reached it is not known")
+        } else if let Some(why) = &self.unwritten {
+            from(&format!(
+                "the image holds the blocks before it, but its state could not be written ({why})"
+            ))
+        } else if device_state(self.image).is_some() {
+            format!(
+                "the image holds the blocks before it, {there} (its state is {}, in this directory: resume from here)",
+                self.path.display()
+            )
+        } else {
+            format!("the image holds the blocks before it, {there}")
+        }
+    }
 }
 
 /// The image is whole: nothing to resume.
@@ -299,11 +512,19 @@ pub fn open(
     let mut digests = Digests::new(extra);
     let mut lost = Lost::default();
     let sink = if resume {
-        let state: Option<State> = std::fs::read(&state_path)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok());
+        // No state is said: `--resume` used to start from block 0 without
+        // a word when there was none to take up, or none that could be
+        // read, and the operator learnt it from the time it took.
+        let state: Result<State, String> = match std::fs::read(&state_path) {
+            Ok(b) => serde_json::from_slice(&b)
+                .map_err(|e| format!("{} is not a resume state ({e})", state_path.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Err(format!("no resume state at {}", state_path.display()))
+            }
+            Err(e) => Err(format!("cannot read {}: {e}", state_path.display())),
+        };
         match state {
-            Some(s) if s.key() == expected.key() => {
+            Ok(s) if s.key() == expected.key() => {
                 start_block = s.blocks_done;
                 let prefix = start_block * expected.blocksize;
                 match std::fs::File::open(output) {
@@ -343,19 +564,29 @@ pub fn open(
                     SparseFile::create(output)
                 }
             }
-            Some(_) => {
+            Ok(_) => {
                 eprintln!(
                     "{tool}: {} describes a different dataset/txg/size than {name}; starting over",
                     state_path.display()
                 );
                 SparseFile::create(output)
             }
-            None => SparseFile::create(output),
+            Err(why) => {
+                eprintln!("{tool}: {why}; starting from block 0");
+                SparseFile::create(output)
+            }
         }
     } else {
         SparseFile::create(output)
     }
     .map_err(|e| format!("cannot open {}: {e}", output.display()))?;
+    if start_block == 0 {
+        // The image starts over, and a state left from before names
+        // blocks this run has yet to write: were this run to write none
+        // of its own, a resume would take that one up and hash what is
+        // not there.
+        clear(&state_path);
+    }
     Ok((start_block, digests, sink, lost))
 }
 
@@ -447,7 +678,7 @@ mod tests {
         // Two blocks of a four-block image, then a state that says so.
         let prefix: Vec<u8> = (0..8192u32).map(|i| (i % 251) as u8).collect();
         std::fs::write(&out, &prefix).unwrap();
-        write(&out, &path(&out), &exp, 2, &Lost::default());
+        write(&out, &path(&out), &exp, 2, &Lost::default()).unwrap();
 
         let (start, digests, mut sink, lost) = open(
             "test",
@@ -482,7 +713,7 @@ mod tests {
         assert_eq!(std::fs::metadata(&out).unwrap().len(), 0);
 
         // Not asked to resume: from the start, whatever the state says.
-        write(&out, &path(&out), &exp, 2, &Lost::default());
+        write(&out, &path(&out), &exp, 2, &Lost::default()).unwrap();
         let (start, _, _, _) = open(
             "test",
             "tank/vm/disk0",
@@ -498,7 +729,7 @@ mod tests {
         // A state whose prefix the image no longer holds starts over
         // rather than hashing bytes that are not there.
         std::fs::write(&out, &prefix[..100]).unwrap();
-        write(&out, &path(&out), &exp, 2, &Lost::default());
+        write(&out, &path(&out), &exp, 2, &Lost::default()).unwrap();
         let (start, _, _, _) = open(
             "test",
             "tank/vm/disk0",
@@ -523,13 +754,16 @@ mod tests {
         let dir = scratch("durable");
         let out = dir.join("out.img");
         let exp = expected();
-        write(&out, &path(&out), &exp, 1, &Lost::default());
+        assert!(matches!(
+            write(&out, &path(&out), &exp, 1, &Lost::default()),
+            Err(Unwritten::Flush(_))
+        ));
         assert!(
             !path(&out).exists(),
             "a state for an image that is not there"
         );
         std::fs::write(&out, [9u8; 4096]).unwrap();
-        write(&out, &path(&out), &exp, 1, &Lost::default());
+        write(&out, &path(&out), &exp, 1, &Lost::default()).unwrap();
         let back: State = serde_json::from_slice(&std::fs::read(path(&out)).unwrap()).unwrap();
         assert_eq!(back.blocks_done, 1);
         assert_eq!(back.key(), exp.key());
@@ -554,7 +788,7 @@ mod tests {
         std::fs::write(&victim, b"# Mapfile\n0x0 0x1000 +\n").unwrap();
         let state = path(&out);
         std::os::unix::fs::symlink(&victim, tmp_path(&state)).unwrap();
-        write(&out, &state, &expected(), 1, &Lost::default());
+        write(&out, &state, &expected(), 1, &Lost::default()).unwrap();
         assert_eq!(
             std::fs::read(&victim).unwrap(),
             b"# Mapfile\n0x0 0x1000 +\n"
@@ -592,6 +826,8 @@ mod tests {
             stopped_by_medium: None,
             interrupted_at: None,
             image_bytes: 0,
+            output_failed: None,
+            finished: true,
             sha256: String::new(),
             sha1: None,
             md5: None,
@@ -607,7 +843,7 @@ mod tests {
         let dir = scratch("lost");
         let out = dir.join("out.img");
         std::fs::write(&out, [0u8; 8192]).unwrap();
-        write(&out, &path(&out), &expected(), 2, &lost);
+        write(&out, &path(&out), &expected(), 2, &lost).unwrap();
         let (start, _, _, back) = open(
             "test",
             "tank/vm/disk0",
@@ -630,7 +866,7 @@ mod tests {
         assert_eq!(second.bad[0].reason, "checksum");
 
         // A state with nothing lost says nothing of it, as before.
-        write(&out, &path(&out), &expected(), 2, &Lost::default());
+        write(&out, &path(&out), &expected(), 2, &Lost::default()).unwrap();
         let text = std::fs::read_to_string(path(&out)).unwrap();
         assert!(!text.contains("lost"), "{text}");
     }
@@ -645,5 +881,100 @@ mod tests {
         assert_eq!(own_stream(&out), None, "a file of its own");
         assert_eq!(own_stream(&dir.join("absent.img")), None);
         assert_eq!(own_stream(Path::new("/dev/null")), None);
+    }
+
+    /// What a run says of a resume is what the state on disk bears out:
+    /// a state that could not be written is said, with the block the last
+    /// one written names — or block 0 — and not "--resume continues
+    /// there"; an image that could not be flushed stops the saving.
+    #[test]
+    fn a_run_promises_no_resume_its_state_cannot_keep() {
+        let dir = scratch("saver");
+        let out = dir.join("out.img");
+        std::fs::write(&out, [9u8; 16384]).unwrap();
+        let exp = expected();
+        let mut report = Report {
+            volsize: 4096 * 4,
+            blocksize: 4096,
+            blocks_total: 4,
+            blocks_read: 3,
+            blocks_holes: 0,
+            blocks_zeroed: 0,
+            blocks_salvaged: 0,
+            bytes_written: 0,
+            bad: Vec::new(),
+            aborted: false,
+            stopped_by_medium: None,
+            interrupted_at: Some(3),
+            image_bytes: 3 * 4096,
+            output_failed: None,
+            finished: true,
+            sha256: String::new(),
+            sha1: None,
+            md5: None,
+        };
+
+        // Written: the block it stopped at.
+        let mut saver = Saver::new(&out, &exp, 0);
+        assert!(saver.save(1, &Lost::default()));
+        assert_eq!(saver.conclude(&report, &Lost::default(), 0), Some(3));
+        assert_eq!(
+            saver.words("--resume continues there"),
+            "the image holds the blocks before it, --resume continues there"
+        );
+
+        // A directory where the state goes first: nothing can be written
+        // there, and the run says from where a resume will go on.
+        std::fs::create_dir(tmp_path(&path(&out))).unwrap();
+        let mut saver = Saver::new(&out, &exp, 0);
+        assert!(saver.save(2, &Lost::default()), "the image is flushed");
+        assert_eq!(saver.conclude(&report, &Lost::default(), 0), Some(0));
+        let words = saver.words("--resume continues there");
+        assert!(
+            words.contains("but its state could not be written (")
+                && words.ends_with(": --resume starts again from block 0"),
+            "{words}"
+        );
+        std::fs::remove_dir(tmp_path(&path(&out))).unwrap();
+        let mut saver = Saver::new(&out, &exp, 0);
+        assert!(saver.save(2, &Lost::default()));
+        std::fs::create_dir(tmp_path(&path(&out))).unwrap();
+        assert_eq!(saver.conclude(&report, &Lost::default(), 0), Some(2));
+        assert!(
+            saver
+                .words("--resume continues there")
+                .ends_with(": --resume continues from block 2, where the last state written says"),
+            "{}",
+            saver.words("--resume continues there")
+        );
+        std::fs::remove_dir(tmp_path(&path(&out))).unwrap();
+
+        // An image not finished: what reached it is not known, and the
+        // state on disk is all a resume has.
+        report.finished = false;
+        report.output_failed = Some("the output could not be finished".into());
+        let mut saver = Saver::new(&out, &exp, 0);
+        assert_eq!(saver.conclude(&report, &Lost::default(), 0), Some(0));
+        assert_eq!(
+            saver.words("--resume continues there"),
+            "which of the blocks given to the output reached it is not known: --resume starts again from block 0"
+        );
+
+        // An image that is not there to flush stops the saving.
+        let gone = dir.join("gone.img");
+        let mut saver = Saver::new(&gone, &exp, 0);
+        assert!(!saver.save(1, &Lost::default()));
+        assert!(saver.unflushed().is_some());
+        assert!(!saver.save(2, &Lost::default()), "and nothing after it");
+        assert!(!path(&gone).exists());
+
+        // A whole image: no state, and nothing to say.
+        report.finished = true;
+        report.output_failed = None;
+        report.interrupted_at = None;
+        let mut saver = Saver::new(&out, &exp, 0);
+        assert_eq!(saver.conclude(&report, &Lost::default(), 0), None);
+        assert!(!path(&out).exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

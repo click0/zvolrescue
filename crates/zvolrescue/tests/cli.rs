@@ -1626,6 +1626,151 @@ fn a_resume_state_the_output_does_not_back_up_is_set_aside() {
     assert_eq!(v["resumed_from_block"], 0);
     assert_eq!((v["sha256"].clone(), v["md5"].clone()), want);
     assert_eq!(std::fs::metadata(&img).unwrap().len(), 32 << 20);
+
+    // No state at all: from the start, and said — it used to start over
+    // without a word.
+    assert!(!state_path.exists());
+    let (v, err) = dump(&["--resume"]);
+    assert!(
+        err.contains(&format!(
+            "no resume state at {}; starting from block 0",
+            state_path.display()
+        )),
+        "{err}"
+    );
+    assert_eq!(v["resumed_from_block"], 0);
+    assert_eq!((v["sha256"].clone(), v["md5"].clone()), want);
+}
+
+/// An output that will not take a block — a full disk, here a file-size
+/// limit — stops the run there as a signal does: exit 6, a state at that
+/// block, the image of the blocks before it on the record, and a
+/// `--resume` with room finishes the image. It ended as exit 3,
+/// "unrecoverable", with no state and a record of no output.
+#[cfg(unix)]
+#[test]
+fn an_output_that_refuses_a_block_is_resumed_once_it_has_room() {
+    let dir = scratch("dump-output-full");
+    let members = write_members(&dir, &plain_members());
+    let whole = dir.join("whole.img");
+    let (code, out, err) = run(&[
+        "-q",
+        "-f",
+        "json",
+        "dump",
+        "tank/vm/disk0",
+        &members[0],
+        "-o",
+        &whole.to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let want = json(&out)["volumes"][0]["sha256"].clone();
+
+    // 32 blocks of 512 bytes: block 0 fits, block 2 — at byte 16384, the
+    // next with data — does not.
+    let img = dir.join("vol.img");
+    let log = dir.join("ev.jsonl");
+    let script = format!(
+        "trap '' XFSZ; ulimit -f 32; exec \"$0\" -q -f json dump tank/vm/disk0 '{}' -o '{}' --evidence-log '{}'",
+        members[0],
+        img.display(),
+        log.display()
+    );
+    let out = Command::new("/bin/sh")
+        .args(["-c", &script, env!("CARGO_BIN_EXE_zvolrescue")])
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(6), "{err}");
+    assert!(
+        err.contains("the output refused block 2, at byte 16384")
+            && err.contains(
+                "the image holds the blocks before it, and --resume continues there once the output has room (exit 6)"
+            ),
+        "{err}"
+    );
+    let v = json(&String::from_utf8_lossy(&out.stdout))["volumes"][0].clone();
+    assert_eq!(v["interrupted_at"], 2, "{v}");
+    assert_eq!(v["resume_at"], 2, "{v}");
+    assert!(v["output_failed"].as_str().is_some(), "{v}");
+    let state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("vol.img.resume.json")).unwrap()).unwrap();
+    assert_eq!(state["blocks_done"], 2, "{state}");
+    // The record names the image, at the hash of what it holds.
+    let rec: serde_json::Value = serde_json::from_str(
+        std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .last()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(rec["status"], 6, "{rec}");
+    let outputs = rec["outputs"].as_array().unwrap();
+    assert_eq!(outputs.len(), 1, "{rec}");
+    let mut d = Digests::new(Extra::none());
+    d.update(&std::fs::read(&img).unwrap());
+    assert_eq!(std::fs::metadata(&img).unwrap().len(), 16384);
+    assert_eq!(
+        outputs[0]["sha256"].as_str(),
+        Some(d.finish().sha256.as_str())
+    );
+
+    let (code, out, err) = run(&[
+        "-q",
+        "-f",
+        "json",
+        "dump",
+        "tank/vm/disk0",
+        &members[0],
+        "-o",
+        &img.to_string_lossy(),
+        "--resume",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let v = json(&out)["volumes"][0].clone();
+    assert_eq!(v["resumed_from_block"], 2, "{v}");
+    assert_eq!(v["sha256"], want);
+    assert_eq!(std::fs::read(&img).unwrap(), std::fs::read(&whole).unwrap());
+    assert!(!dir.join("vol.img.resume.json").exists());
+}
+
+/// The state of an image written to a device is kept in the directory
+/// the run is in, under the device's path, and the run says where: next
+/// to the device it was written into `/dev` — where FreeBSD's devfs
+/// takes no file, and Linux keeps it in memory until the next boot.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_state_of_an_image_on_a_device_is_kept_here() {
+    let dir = scratch("dump-device-state");
+    let members = write_members(&dir, &plain_members());
+    if std::fs::metadata("/dev/full").is_err() {
+        return;
+    }
+    let out = Command::new(env!("CARGO_BIN_EXE_zvolrescue"))
+        .current_dir(&*dir)
+        .args([
+            "-q",
+            "dump",
+            "tank/vm/disk0",
+            &members[0],
+            "-o",
+            "/dev/full",
+        ])
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(6), "{err}");
+    assert!(
+        err.contains("the output refused block 0, at byte 0")
+            && err.contains(
+                "(its state is dev_full.resume.json, in this directory: resume from here)"
+            ),
+        "{err}"
+    );
+    assert!(dir.join("dev_full.resume.json").exists());
+    assert!(!Path::new("/dev/full.resume.json").exists());
+    let _ = std::fs::remove_file(dir.join("dev_full.resume.json"));
 }
 
 /// The text report prints each legacy digest on its own line, and only

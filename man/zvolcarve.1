@@ -234,7 +234,9 @@ another scan's candidate of the same id is not taken up.
 As with
 .Xr zvolrescue 1 ,
 the ranges an interrupted run lost are reported by the run that
-finishes the image.
+finishes the image, an output that refuses a block ends the run there
+as a signal does (exit status 6), and the state of an image written to
+a device is kept in the current directory under the device's path.
 .El
 .Ss roots
 .Nm Cm roots
@@ -295,7 +297,10 @@ No run writes a log over it, or over
 .Pa dir/candidates.json .
 .It Pa out.img.resume.json
 The state of an interrupted
-.Cm dump .
+.Cm dump ;
+for a device,
+.Pa dev_da1.resume.json
+in the current directory.
 .El
 .Sh EXIT STATUS
 As in
@@ -305,9 +310,9 @@ with no candidate) or the candidate unreadable, 4 a partial image or a scan that
 every byte of the range (what lay in the bytes it could not read was not
 searched, and
 .Pa candidates.json
-says how many), 5 refused, 6 interrupted, or stopped at
+says how many), 5 refused, 6 interrupted, stopped at
 .Fl -max-hits ,
-with the state written, 7 the medium refused a read.
+or stopped by an output that refused the image, with the state written, 7 the medium refused a read.
 .Sh EXAMPLES
 A volume made like its surviving neighbour, found and extracted from
 images of two mirror members:

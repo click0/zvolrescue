@@ -246,11 +246,62 @@ fn check(kind: &'static str, path: &Path, recorded: &Recorded<'_>) -> Vec<Checke
             ),
         };
     }
+    // What is read to be hashed is bounded by what was recorded. A pipe
+    // or a socket is not read at all — it has no bytes to read again —
+    // and a device only to the size recorded, once its own size is that
+    // size: `/dev/zero` named as evidence was read without end.
+    let fail = |algorithm: &'static str, found: Option<String>, detail: String| {
+        vec![Checked {
+            kind,
+            algorithm,
+            path: path.to_path_buf(),
+            status: Status::Fail,
+            recorded: None,
+            found,
+            detail: Some(detail),
+        }]
+    };
+    let mut prefix = recorded.prefix;
+    if std::fs::metadata(path).is_ok_and(|m| {
+        use std::os::unix::fs::FileTypeExt;
+        m.file_type().is_fifo() || m.file_type().is_socket()
+    }) {
+        return fail(
+            "kind",
+            Some("pipe".into()),
+            "a pipe or a socket now, not a file or a device; not read".into(),
+        );
+    }
+    if zvol_common::evidence::Kind::of(path).is_device() {
+        let now = zvol_common::evidence::FileRef::stat(path).size;
+        match recorded.size {
+            Some(size) if size != now && recorded.prefix.is_none_or(|p| p > now) => {
+                return fail(
+                    "size",
+                    Some(now.to_string()),
+                    format!("a device of {now} bytes, where {size} were recorded; not read"),
+                );
+            }
+            Some(size) => prefix = Some(prefix.unwrap_or(size).min(size)),
+            None if prefix.is_none() => {
+                return vec![Checked {
+                    kind,
+                    algorithm: "sha256",
+                    path: path.to_path_buf(),
+                    status: Status::Unhashed,
+                    recorded: None,
+                    found: None,
+                    detail: Some("a device of no recorded size is not read end to end".into()),
+                }];
+            }
+            None => {}
+        }
+    }
     let extra = Extra {
         sha1: recorded.sha1.is_some(),
         md5: recorded.md5.is_some(),
     };
-    let got = match digests_of_prefix(path, extra, recorded.prefix) {
+    let got = match digests_of_prefix(path, extra, prefix) {
         Err(e) => {
             return want
                 .into_iter()
@@ -576,8 +627,15 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
     // report unless the rest is what that log says. An unsigned report
     // with an image's hash edited to match a changed image passed, its
     // log untouched and still holding the old hash.
+    // A report whose signature or whose logs say it is not the one that
+    // was written is not taken at its word for what to read: its
+    // evidence and outputs went on being hashed, gigabytes of whatever
+    // an edited report named, after the answer was already no.
+    let mut held = signature.as_ref().is_none_or(|s| s.status == Status::Pass);
     if found_logs.len() == report.logs.len() {
-        checked.push(against_logs(&opts.report, &report, &found_logs));
+        let against = against_logs(&opts.report, &report, &found_logs);
+        held &= against.status != Status::Fail;
+        checked.push(against);
     } else {
         checked.push(Checked {
             kind: "report",
@@ -592,7 +650,24 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
             ),
         });
     }
-    for e in &report.evidence {
+    let not_read = |kind: &'static str, path: PathBuf| Checked {
+        kind,
+        algorithm: "-",
+        path,
+        status: Status::Unhashed,
+        recorded: None,
+        found: None,
+        detail: Some(
+            "not read: the report did not hold, and what it names is not hashed on its word".into(),
+        ),
+    };
+    for e in report.evidence.iter().filter(|_| !held) {
+        checked.push(not_read("evidence", e.file.path.clone()));
+    }
+    for o in report.outputs.iter().filter(|_| !held) {
+        checked.push(not_read("output", o.path.clone()));
+    }
+    for e in report.evidence.iter().filter(|_| held) {
         let path = locate(&e.file.path, opts.evidence_root.as_ref());
         checked.extend(check(
             "evidence",
@@ -607,7 +682,7 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
             },
         ));
     }
-    for o in &report.outputs {
+    for o in report.outputs.iter().filter(|_| held) {
         let path = locate(&o.path, opts.outputs_root.as_ref());
         checked.extend(check(
             "output",

@@ -710,6 +710,28 @@ tagged. `v0.7.1` is the release that carries those six.
   opened to be read, which waits for a writer: the run hung, and the
   first signal set a flag nothing looked at yet. It is refused before
   it is opened (exit 2).
+* **A full output stops a dump that can be resumed, a state not written
+  is said, and verify reads no more than was recorded.** An output that
+  refused a block — a full disk, a quota, the end of a device — ended
+  `zvolrescue dump` and `zvolcarve dump` as an error of the pool's,
+  exit 3 "unrecoverable", with no state to resume from and a record
+  that named no output, while the image lay half written. The run stops
+  there as a signal stops it (exit 6), the state names that block, the
+  record names the image at the hash of what it holds, and `--resume`
+  finishes it once there is room. A state that could not be written
+  was passed over, and the run still said "--resume continues there":
+  it says why not, and the block a resume will start at; an image that
+  could not be flushed stops the run, as nothing written after it can
+  be counted. `--resume` with no state started from block 0 without a
+  word; it says so. The state of an image written to a device went
+  into `/dev`, where FreeBSD's devfs takes no file and a Linux `/dev`
+  forgets it at the next boot; it is kept in the current directory
+  under the device's path (`dev_da1.resume.json`), and the run says
+  where. `zvolreport verify` read a device named as evidence to its end
+  — `/dev/zero` never ended — and went on hashing evidence and outputs
+  after the report's signature or logs had already failed. A device is
+  read no further than its recorded size, a pipe not at all, and a
+  report that did not hold has nothing it names hashed on its word.
 
 ## v0.9.12 — 2026-11-07
 

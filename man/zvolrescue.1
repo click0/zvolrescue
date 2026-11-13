@@ -298,10 +298,17 @@ written (exit status 6); the state is kept in
 .Pa out.img.resume.json
 while a run is in progress, and a second signal kills the run the
 usual way.
+An output that refuses a block \(em a full disk, a quota, the end of a
+device \(em ends the run there the same way, and
+.Fl -resume
+continues once the output has room.
 The state also keeps the ranges the blocks before it lost, and the run
 that takes it up reports them with its own: a resumed image with
 blocks written as zeros lists every one of them and ends with exit
 status 4, as a run that was never interrupted would.
+A run that could not write its state says so, and names the block a
+resume will start at instead; one that finds no state to take up says
+so and starts from block 0.
 .It Fl r , Fl -recursive
 Extract every volume under
 .Ar dataset
@@ -331,6 +338,12 @@ SHA-256 is always taken.
 The state of an interrupted
 .Cm dump ,
 beside its output; removed when the image is whole.
+For an image written to a device the state is kept in the current
+directory under the device's path instead,
+.Pa dev_da1.resume.json
+for
+.Pa /dev/da1 ,
+and the run that resumes it is run from there.
 .It Pa manifest.json
 Under the output directory of
 .Cm dump Fl r :
@@ -358,7 +371,8 @@ aborted at the first one.
 Refused: the output would land on an input, or a device would have
 been surface-scanned without leave.
 .It 6
-Interrupted by a signal; the state is written and
+Interrupted by a signal, or the output refused the image; the state is
+written and
 .Fl -resume
 continues.
 .It 7

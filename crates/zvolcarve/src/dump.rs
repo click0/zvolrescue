@@ -184,7 +184,6 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     // one with another profile — has the same id and, often, the same
     // size; its state was taken up and the image went on with the other
     // volume's blocks.
-    let state_path = resume::path(&opts.output);
     let expected_state = resume::State {
         version: 1,
         dataset: c.id.clone(),
@@ -219,11 +218,16 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         OnError::Zero
     };
     let mut last_state = Instant::now();
-    let state_file = state_path.clone();
+    let mut saver = resume::Saver::new(&opts.output, &expected_state, start_block);
     let progress = |done: u64, total: u64, so_far: &Report| {
         if last_state.elapsed().as_secs() >= 5 && done < total {
             let lost = earlier.and(so_far, done);
-            resume::write(&opts.output, &state_file, &expected_state, done, &lost);
+            if !saver.save(done, &lost) {
+                // The image could not be flushed: nothing written to it
+                // from here on can be counted. The run stops as a signal
+                // stops it, and says why below.
+                interrupt.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             last_state = Instant::now();
         }
     };
@@ -243,21 +247,26 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             return exit::UNRECOVERABLE;
         }
     };
-    if let Some(at) = report.interrupted_at {
+    if let Some(e) = saver.unflushed() {
+        report
+            .output_failed
+            .get_or_insert_with(|| format!("the image could not be flushed: {e}"));
+    }
+    let resume_at = saver.conclude(&report, &earlier, start_block);
+    let resume_words = if report.output_failed.is_some() {
+        saver.words("and --resume continues there once the output has room")
+    } else if report.interrupted_at.is_some() || !report.aborted {
+        saver.words("--resume continues there")
+    } else {
+        saver.words("--resume continues after a repair")
+    };
+    if let Some(why) = &report.output_failed {
+        eprintln!("zvolcarve: {}: {why}; {resume_words} (exit 6)", c.id);
+    } else if let Some(at) = report.interrupted_at {
         eprintln!(
-            "zvolcarve: {}: interrupted at block {at} of {}; the image holds the blocks before it, --resume continues there (exit 6)",
+            "zvolcarve: {}: interrupted at block {at} of {}; {resume_words} (exit 6)",
             c.id, report.blocks_total
         );
-    }
-    if report.aborted || report.interrupted_at.is_some() {
-        let done = report
-            .interrupted_at
-            .or_else(|| report.bad.last().map(|b| b.blkid))
-            .unwrap_or(start_block);
-        let lost = earlier.and(&report, done);
-        resume::write(&opts.output, &state_path, &expected_state, done, &lost);
-    } else {
-        resume::clear(&state_path);
     }
     // What the run that was resumed lost is this image's too.
     earlier.into_report(&mut report);
@@ -306,6 +315,12 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     if let Some(at) = report.interrupted_at {
         volume["interrupted_at"] = at.into();
     }
+    if let Some(why) = &report.output_failed {
+        volume["output_failed"] = why.clone().into();
+    }
+    if let Some(at) = resume_at {
+        volume["resume_at"] = at.into();
+    }
     if !bad.is_empty() {
         volume["bad"] = bad.clone().into();
     }
@@ -329,6 +344,8 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         "aborted": report.aborted,
         "stopped_by_medium": report.stopped_by_medium,
         "interrupted_at": report.interrupted_at,
+        "output_failed": report.output_failed,
+        "resume_at": resume_at,
         "sha256": report.sha256,
         "sha1": report.sha1,
         "md5": report.md5,
@@ -364,14 +381,19 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                     b.reason
                 );
             }
-            if report.aborted {
-                println!("  ABORTED (--strict, exit 4): the image holds the blocks before the first unreadable one");
+            if let Some(why) = &report.output_failed {
+                println!(
+                    "  OUTPUT FAILED (exit 6): {why}; the image is incomplete: {resume_words}"
+                );
+            } else if let Some(at) = report.interrupted_at {
+                println!(
+                    "  INTERRUPTED at block {at} (exit 6); the image is incomplete: {resume_words}"
+                );
+            } else if report.aborted {
+                println!("  ABORTED (--strict, exit 4): the image is incomplete: {resume_words}");
             }
             if let Some(why) = &report.stopped_by_medium {
                 println!("  STOPPED by the medium: {why}");
-            }
-            if let Some(at) = report.interrupted_at {
-                println!("  INTERRUPTED at block {at} (exit 6); the image is incomplete, --resume continues there");
             }
         }
     }
@@ -382,13 +404,17 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         report.aborted,
         report.blocks_zeroed + report.blocks_salvaged,
     );
-    let code = if report.interrupted_at.is_some() {
+    let code = if report.interrupted_at.is_some() || report.output_failed.is_some() {
         code.max(exit::INTERRUPTED)
     } else {
         code
     };
     let written: Vec<FileRef> = if zvol_common::evidence::keeps_nothing(&opts.output) {
         Vec::new()
+    } else if !report.finished {
+        // Not finished: what the file holds is not what was hashed on
+        // the way, and the record does not say it is.
+        vec![FileRef::stat(&opts.output)]
     } else {
         vec![FileRef::known_with(
             &opts.output,

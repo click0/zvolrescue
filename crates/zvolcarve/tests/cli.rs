@@ -343,6 +343,101 @@ fn a_carved_volume_is_hashed_in_the_same_pass_and_only_when_asked() {
     assert!(err.contains("--hash: unknown digest \"crc32\""), "{err}");
 }
 
+/// An output that will not take a block — here a file-size limit, as a
+/// full disk would — stops a carved dump there as a signal does: exit 6,
+/// a state at that block, and `--resume` finishes the image once there
+/// is room. It ended as exit 3, with no state to resume from.
+#[cfg(unix)]
+#[test]
+fn a_carved_dump_into_a_full_output_resumes_once_there_is_room() {
+    let dir = scratch("dump-full");
+    let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1)]);
+    let members: Vec<String> = carved_zvol_members(&mut pool, SIZE)
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let p = dir.join(format!("member{i}.img"));
+            std::fs::write(&p, m).expect("write member");
+            p.to_string_lossy().into_owned()
+        })
+        .collect();
+    let carve = dir.join("carve");
+    let carve_s = carve.to_string_lossy().into_owned();
+    let (code, _, err) = run(&["-q", "scan", &members[0], &members[1], "-o", &carve_s]);
+    assert_eq!(code, 0, "{err}");
+    let index: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(carve.join("candidates.json")).unwrap()).unwrap();
+    let id = index["candidates"][0]["id"].as_str().unwrap().to_owned();
+    let whole = dir.join("whole.img");
+    let (code, out, err) = run(&[
+        "-q",
+        "-f",
+        "json",
+        "dump",
+        &carve_s,
+        &id,
+        &members[0],
+        &members[1],
+        "-o",
+        &whole.to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let v = json(&out);
+    let bs = v["blocksize"].as_u64().unwrap() as usize;
+    let image = std::fs::read(&whole).unwrap();
+    // Room for every block before the second that holds data.
+    let k = (1..image.len() / bs)
+        .find(|&b| image[b * bs..(b + 1) * bs].iter().any(|&x| x != 0))
+        .expect("a second block with data");
+
+    let img = dir.join("cut.img");
+    let script = format!(
+        "trap '' XFSZ; ulimit -f {}; exec \"$0\" -q -f json dump '{}' '{}' '{}' '{}' -o '{}'",
+        k * bs / 512,
+        carve_s,
+        id,
+        members[0],
+        members[1],
+        img.display()
+    );
+    let out = Command::new("/bin/sh")
+        .args(["-c", &script, env!("CARGO_BIN_EXE_zvolcarve")])
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(6), "{err}");
+    assert!(
+        err.contains(&format!("the output refused block {k}, at byte {}", k * bs))
+            && err.contains("and --resume continues there once the output has room (exit 6)"),
+        "{err}"
+    );
+    let v = json(&String::from_utf8_lossy(&out.stdout));
+    assert_eq!(v["interrupted_at"], k as u64, "{v}");
+    assert_eq!(v["resume_at"], k as u64, "{v}");
+    let state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("cut.img.resume.json")).unwrap()).unwrap();
+    assert_eq!(state["blocks_done"], k as u64, "{state}");
+
+    let (code, out, err) = run(&[
+        "-q",
+        "-f",
+        "json",
+        "dump",
+        &carve_s,
+        &id,
+        &members[0],
+        &members[1],
+        "-o",
+        &img.to_string_lossy(),
+        "--resume",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let v = json(&out);
+    assert_eq!(v["resumed_from_block"], k as u64, "{v}");
+    assert_eq!(std::fs::read(&img).unwrap(), image);
+    assert!(!dir.join("cut.img.resume.json").exists());
+}
+
 /// C-07, SPEC F-32: `dump --resume` takes up the state file `zvolrescue
 /// dump` would have written — the same shape, the candidate id where
 /// the dataset name goes — hashes the prefix already there, and ends
