@@ -148,8 +148,15 @@ anything is opened.
 .It Fl -evidence-root Ar dir
 Look for the evidence under this directory instead of the path
 recorded; the disks are rarely mounted where they were.
+A file is looked for at its path below the deepest directory every
+piece of evidence was under, then at its whole recorded path under
+.Ar dir ,
+then by its name alone when no other piece of evidence has that name.
 .It Fl -outputs-root Ar dir
-Look for the extracted files under this directory.
+Look for the extracted files under this directory, the same way: a
+case copied whole is found as it was laid out, the files of a tree
+.Xr zvolfiles 1
+wrote included.
 .It Fl -key Ar keyfile
 Also check the report's signature against this Ed25519 public key
 (SubjectPublicKeyInfo, the form

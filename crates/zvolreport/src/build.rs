@@ -193,13 +193,18 @@ fn at_cwd(r: &Record, p: &Path) -> PathBuf {
     }
 }
 
-/// The extraction a `zvolfiles extract` record describes: a tree of
-/// files rather than an image, listed in a manifest that is among the
-/// record's outputs with every file it wrote. It was in no section of
-/// the report, and `verify` checked the manifest and none of the files.
+/// The extraction a `zvolfiles extract` or `zvolfiles objects` record
+/// describes: a tree of files rather than an image, listed in a manifest
+/// — `objects.json` for objects — that is among the record's outputs
+/// with every file it wrote. It was in no section of the report, and
+/// `verify` checked the manifest and none of the files; an `objects`
+/// run was in none even after.
 fn tree_extraction(r: &Record) -> Option<Extraction> {
     let result = &r.result;
-    let files = result.get("files")?.as_array()?;
+    let (files, listed_in) = match result.get("files").and_then(serde_json::Value::as_array) {
+        Some(f) => (f, "manifest"),
+        None => (result.get("objects")?.as_array()?, "objects"),
+    };
     let output = at_cwd(r, Path::new(&str_at(result, "output")?));
     let manifest = r
         .outputs
@@ -209,7 +214,7 @@ fn tree_extraction(r: &Record) -> Option<Extraction> {
             p.parent() == Some(output.as_path())
                 && p.file_name()
                     .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("manifest") && n.ends_with(".json"))
+                    .is_some_and(|n| n.starts_with(listed_in) && n.ends_with(".json"))
         });
     let written: Vec<&serde_json::Value> = files
         .iter()
@@ -225,9 +230,15 @@ fn tree_extraction(r: &Record) -> Option<Extraction> {
         sha1: None,
         md5: None,
         errors: count("incomplete").saturating_add(count("failed")),
-        aborted: result.get("stopped").is_some_and(|s| !s.is_null()),
+        // A signal ended it: not every file or object was looked at.
+        aborted: result.get("stopped").is_some_and(|s| !s.is_null())
+            || result
+                .get("interrupted")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true),
         interrupted_at: None,
         stopped_by_medium: None,
+        output_failed: None,
         carved: false,
         pool_guid: None,
         files: Some(written.len() as u64),
@@ -261,6 +272,7 @@ fn extractions_of(result: &serde_json::Value) -> Vec<Extraction> {
                     .unwrap_or(false),
                 interrupted_at: u64_at(v, "interrupted_at"),
                 stopped_by_medium: str_at(v, "stopped_by_medium"),
+                output_failed: str_at(v, "output_failed"),
                 carved: v
                     .get("carved")
                     .and_then(serde_json::Value::as_bool)
@@ -489,6 +501,13 @@ pub fn assemble(records: &[(LogRef, Vec<Record>)], opts: &Options) -> Report {
                     e.output.display()
                 ));
             }
+            if let Some(why) = &e.output_failed {
+                warnings.push(format!(
+                    "{}: {why}; {} is not the whole volume, and the hash recorded is not that of the file",
+                    e.dataset,
+                    e.output.display()
+                ));
+            }
         }
         if e.errors > 0 {
             warnings.push(format!(
@@ -642,16 +661,31 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
     // Nor over anything the logs name: the evidence every run read and
     // what every run wrote. `build case.jsonl -o member0.img` replaced a
     // pool member with the report, exit 0. A report an earlier build
-    // wrote is the one exception: building again over it is the point.
+    // wrote is the one exception: building again over it is the point —
+    // and so is one a `verify` read, with its signature: once the log
+    // held a verify of the report, the next build over it was refused.
     let named: Vec<PathBuf> = logs
         .iter()
         .flat_map(|(_, records)| records)
         .flat_map(|r| {
             let written = (r.tool != "zvolreport").then_some(&r.outputs);
+            let report_files: Vec<PathBuf> = if r.tool == "zvolreport" {
+                [
+                    str_at(&r.result, "report"),
+                    r.result.get("signature").and_then(|s| str_at(s, "path")),
+                ]
+                .into_iter()
+                .flatten()
+                .map(|p| at_cwd(r, Path::new(&p)))
+                .collect()
+            } else {
+                Vec::new()
+            };
             r.inputs
                 .iter()
                 .chain(written.into_iter().flatten())
                 .map(move |f| at_cwd(r, &f.path))
+                .filter(move |p| !report_files.contains(p))
         })
         .collect();
     let mut all = reads.clone();
@@ -935,6 +969,58 @@ mod tests {
         assert_eq!(r.extractions[0].errors, 3);
     }
 
+    /// A `zvolfiles objects` run is an extraction, as an `extract` run
+    /// is: its index and its objects are the tree it wrote.
+    #[test]
+    fn an_objects_run_is_an_extraction() {
+        let mut r = record(
+            "zvolfiles",
+            11,
+            4,
+            serde_json::json!({
+                "dataset": "tank/fs", "txg": 9, "output": "/case/objs",
+                "objects": [
+                    {"object": 2, "type": "plain file contents", "size": 10, "sha256": "aa", "errors": 0},
+                    {"object": 3, "type": "plain file contents", "size": 5, "sha256": "bb", "errors": 1},
+                ],
+                "written": 2, "incomplete": 1, "interrupted": true,
+            }),
+        );
+        r.outputs.push(EvFileRef {
+            path: PathBuf::from("/case/objs/objects.json"),
+            kind: None,
+            size: 300,
+            sha256: Some("cc".into()),
+            sha1: None,
+            md5: None,
+        });
+        let rep = assemble(&log(vec![r]), &opts());
+        assert_eq!(rep.extractions.len(), 1, "{:?}", rep.extractions);
+        let e = &rep.extractions[0];
+        assert_eq!(e.output, PathBuf::from("/case/objs/objects.json"));
+        assert_eq!((e.files, e.size, e.errors), (Some(2), 15, 1));
+        assert!(!e.complete(), "a signal ended it");
+    }
+
+    /// An image its output would not finish is not the whole volume:
+    /// the record said so, and the report showed it complete with the
+    /// hash of the whole volume.
+    #[test]
+    fn an_output_that_failed_is_not_complete() {
+        let mut d = dump(9, 0, false);
+        d["volumes"][0]["output_failed"] =
+            serde_json::json!("the output could not be finished to 1048576 bytes: EIO");
+        let r = assemble(&log(vec![record("zvolrescue", 11, 6, d)]), &opts());
+        assert!(!r.extractions[0].complete());
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("could not be finished") && w.contains("not the whole volume")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
     /// An extraction a signal or a device stopped, or one with blocks
     /// kept only in part, is not the whole volume, and the report says so
     /// — it used to read `errors: 0, aborted: false` for a dump cut at
@@ -1111,6 +1197,63 @@ mod tests {
         };
         assert_eq!(run(&g, &md_over_json), exit::USAGE);
         assert!(!dir.join("r.json").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A report a `verify` read, and its signature, can be built over
+    /// again, as a report a build wrote can; the key it was checked with
+    /// and the files it checked cannot. Once the log held a verify of
+    /// the report, every later build over it was refused.
+    #[test]
+    fn a_verified_report_can_be_built_again() {
+        let dir = std::env::temp_dir().join(format!("zvolreport-again-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let report = dir.join("r.json");
+        let key = dir.join("k.pub");
+        let mut v = record(
+            "zvolreport",
+            5,
+            0,
+            serde_json::json!({
+                "report": report.display().to_string(),
+                "signature": {"key": key.display().to_string(),
+                              "path": dir.join("r.json.sig").display().to_string()},
+                "checked": [],
+            }),
+        );
+        v.inputs = [&report, &dir.join("r.json.sig"), &key]
+            .into_iter()
+            .map(|p| EvFileRef {
+                path: p.clone(),
+                kind: None,
+                size: 1,
+                sha256: None,
+                sha1: None,
+                md5: None,
+            })
+            .collect();
+        let log = dir.join("case.jsonl");
+        std::fs::write(&log, format!("{}\n", serde_json::to_string(&v).unwrap())).unwrap();
+        let g = Global {
+            format: zvol_common::Format::Text,
+            verbose: 0,
+            quiet: true,
+            evidence_log: None,
+            hash_inputs: false,
+            no_color: false,
+            debug: false,
+            debug_log: None,
+        };
+        let to = |output: &Path| Options {
+            logs: vec![log.clone()],
+            output: output.to_path_buf(),
+            ..opts()
+        };
+        assert_eq!(run(&g, &to(&report)), 0);
+        assert!(report.exists());
+        std::fs::write(&key, "key").unwrap();
+        assert_eq!(run(&g, &to(&key)), exit::REFUSED);
+        assert_eq!(std::fs::read(&key).unwrap(), b"key");
         std::fs::remove_dir_all(&dir).ok();
     }
 

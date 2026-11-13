@@ -125,6 +125,7 @@ fn recover_with(
 }
 
 fn print_text(out: &TimelineOut, w: &mut dyn Write) -> std::io::Result<()> {
+    use zvol_common::text::shown;
     // `txgs` is every TXG whose uberblock verified; the readable ones are
     // those whose MOS could also be walked.
     writeln!(
@@ -145,7 +146,7 @@ fn print_text(out: &TimelineOut, w: &mut dyn Write) -> std::io::Result<()> {
         .as_ref()
         .filter(|_| out.events.iter().all(|e| e.object.is_none()))
     {
-        writeln!(w, "nothing in them about {d}")?;
+        writeln!(w, "nothing in them about {}", shown(d))?;
         if out.events.is_empty() {
             return Ok(());
         }
@@ -171,6 +172,9 @@ fn print_text(out: &TimelineOut, w: &mut dyn Write) -> std::io::Result<()> {
         "{:<12} {:<22} {:<18} {:<28} DETAILS",
         "TXG", "TIME", "EVENT", "OBJECT"
     )?;
+    // Names and what is said of them as text: a dataset name is the
+    // pool's, and one with a newline in it printed an event of its own
+    // (`zvol_common::text`).
     for e in &out.events {
         writeln!(
             w,
@@ -178,11 +182,11 @@ fn print_text(out: &TimelineOut, w: &mut dyn Write) -> std::io::Result<()> {
             e.txg,
             e.time.as_deref().unwrap_or("—"),
             e.event,
-            e.object.as_deref().unwrap_or("—"),
-            details(e)
+            shown(e.object.as_deref().unwrap_or("—")),
+            shown(&details(e))
         )?;
         if let Some(cmd) = &e.recover_with {
-            writeln!(w, "{:<12} {:<22} {:<18} -> {cmd}", "", "", "")?;
+            writeln!(w, "{:<12} {:<22} {:<18} -> {}", "", "", "", shown(cmd))?;
         }
     }
     if out.properties_not_shown > 0 && !out.quiet {

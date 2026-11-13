@@ -21,6 +21,7 @@ pub mod hints;
 pub mod members;
 pub mod resume;
 pub mod scratch;
+pub mod text;
 pub mod timefmt;
 
 use std::path::{Path, PathBuf};

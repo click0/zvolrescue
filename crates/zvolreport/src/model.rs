@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use zvol_common::evidence::PathText;
 
 /// Report format this build writes and understands.
 pub const REPORT_VERSION: u32 = 1;
@@ -45,8 +46,11 @@ pub struct ToolRef {
     pub version: String,
 }
 
-/// One file, as the logs recorded it.
+/// One file, as the logs recorded it. A path that is not text is
+/// written with its bytes beside it, as the logs write it
+/// ([`PathText`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "RawFileRef", into = "RawFileRef")]
 pub struct FileRef {
     pub path: PathBuf,
     /// `file` or `device`, as the run that read it recorded (F-68).
@@ -62,6 +66,48 @@ pub struct FileRef {
     pub sha1: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub md5: Option<String>,
+}
+
+/// [`FileRef`] as a report holds it.
+#[derive(Serialize, Deserialize)]
+struct RawFileRef {
+    #[serde(flatten)]
+    path: PathText,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kind: Option<zvol_common::evidence::Kind>,
+    size: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sha1: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    md5: Option<String>,
+}
+
+impl From<RawFileRef> for FileRef {
+    fn from(r: RawFileRef) -> FileRef {
+        FileRef {
+            path: r.path.path(),
+            kind: r.kind,
+            size: r.size,
+            sha256: r.sha256,
+            sha1: r.sha1,
+            md5: r.md5,
+        }
+    }
+}
+
+impl From<FileRef> for RawFileRef {
+    fn from(f: FileRef) -> RawFileRef {
+        RawFileRef {
+            path: PathText::of(&f.path),
+            kind: f.kind,
+            size: f.size,
+            sha256: f.sha256,
+            sha1: f.sha1,
+            md5: f.md5,
+        }
+    }
 }
 
 /// A piece of evidence and what was run against it.
@@ -129,6 +175,10 @@ pub struct Extraction {
     /// A device refused a read and the run stopped there (SPEC F-33).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stopped_by_medium: Option<String>,
+    /// The output refused a block, or could not be finished: the image
+    /// is not the volume the hash describes, whatever else went well.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_failed: Option<String>,
     /// Found by carving (`zvolcarve dump`): `txg` is the TXG its dnode
     /// was born at, which no uberblock need lead to any more.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -143,9 +193,13 @@ pub struct Extraction {
 
 impl Extraction {
     /// Whether the image is the whole volume as it could be read: not
-    /// stopped by `--strict`, by a signal or by a device.
+    /// stopped by `--strict`, by a signal or by a device, and taken whole
+    /// by its output.
     pub fn complete(&self) -> bool {
-        !self.aborted && self.interrupted_at.is_none() && self.stopped_by_medium.is_none()
+        !self.aborted
+            && self.interrupted_at.is_none()
+            && self.stopped_by_medium.is_none()
+            && self.output_failed.is_none()
     }
 
     /// Whether `later` finished what this one left: the same volume, at

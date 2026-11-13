@@ -5,6 +5,7 @@
 //! hashed only when someone asked for it. Anything that no longer
 //! matches is a FAIL and the run exits 4 (R-04).
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -56,7 +57,9 @@ pub struct Checked {
     /// recorded beside its SHA-256 (SPEC F-53) gets a row for each: a
     /// hash that is written down and never checked back is decoration.
     pub algorithm: &'static str,
-    /// Where the file was looked for, after any `--*-root`.
+    /// Where the file was looked for, after any `--*-root`; with
+    /// `path_hex` when it is not text.
+    #[serde(flatten, serialize_with = "zvol_common::evidence::serialize_path_text")]
     pub path: PathBuf,
     pub status: Status,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -73,6 +76,7 @@ pub struct Signed {
     /// The public key it was checked against.
     pub key: PathBuf,
     /// Where the signature was looked for.
+    #[serde(flatten, serialize_with = "zvol_common::evidence::serialize_path_text")]
     pub path: PathBuf,
     pub status: Status,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -91,12 +95,6 @@ struct VerifyOut {
     unhashed: usize,
 }
 
-/// Where to look for a file the report names.
-///
-/// The disks are rarely mounted where they were when the evidence was
-/// taken, so a root re-bases the recorded path onto it: the file name
-/// under the root, and — when the recorded path was absolute — the whole
-/// path joined under it, whichever exists.
 /// Every file a report names, where `verify` will look for it: the logs
 /// it was built from — where they were recorded and beside the report,
 /// where verify looks when they are not — the evidence, the outputs, and
@@ -124,26 +122,79 @@ pub fn named_files(
             v.push(dir.join(name));
         }
     }
-    v.extend(
-        r.evidence
-            .iter()
-            .map(|e| locate(&e.file.path, evidence_root)),
+    let evidence: Vec<&Path> = r.evidence.iter().map(|e| e.file.path.as_path()).collect();
+    let outputs: Vec<&Path> = r.outputs.iter().map(|o| o.path.as_path()).collect();
+    let (on_evidence, on_outputs) = (
+        Rebase::new(&evidence, evidence_root),
+        Rebase::new(&outputs, outputs_root),
     );
-    v.extend(r.outputs.iter().map(|o| locate(&o.path, outputs_root)));
+    v.extend(evidence.iter().map(|p| on_evidence.locate(p)));
+    v.extend(outputs.iter().map(|p| on_outputs.locate(p)));
     v
 }
 
-fn locate(recorded: &Path, root: Option<&PathBuf>) -> PathBuf {
-    let Some(root) = root else {
-        return recorded.to_path_buf();
-    };
-    let joined = root.join(recorded.strip_prefix("/").unwrap_or(recorded));
-    if joined.exists() {
-        return joined;
+/// Where to look for the files a report names of one kind — evidence,
+/// or outputs — when they were moved under `root`.
+///
+/// The disks are rarely mounted where they were when the evidence was
+/// taken, and a case is copied whole: what was under one directory is
+/// under the root, as it was under that directory. A file is looked for
+/// there first — its path below the deepest directory every file of its
+/// kind was under — then at its whole recorded path under the root, then
+/// by its name alone when no other file of its kind has that name. By
+/// its name alone it was always looked for, and a tree `zvolfiles`
+/// wrote was all MISSING once moved, and two pools' `disk0.img` were
+/// both checked against the one under the root.
+struct Rebase<'a> {
+    root: Option<&'a PathBuf>,
+    base: PathBuf,
+    names: BTreeMap<std::ffi::OsString, usize>,
+}
+
+impl<'a> Rebase<'a> {
+    fn new(recorded: &[&Path], root: Option<&'a PathBuf>) -> Rebase<'a> {
+        let mut base: Option<Vec<std::path::Component<'_>>> = None;
+        let mut names = BTreeMap::new();
+        for p in recorded {
+            if let Some(n) = p.file_name() {
+                *names.entry(n.to_os_string()).or_insert(0) += 1;
+            }
+            let dir: Vec<_> = p
+                .parent()
+                .map(|d| d.components().collect())
+                .unwrap_or_default();
+            base = Some(match base {
+                None => dir,
+                Some(b) => b
+                    .into_iter()
+                    .zip(dir)
+                    .take_while(|(a, b)| a == b)
+                    .map(|(a, _)| a)
+                    .collect(),
+            });
+        }
+        Rebase {
+            root,
+            base: base.unwrap_or_default().into_iter().collect(),
+            names,
+        }
     }
-    match recorded.file_name() {
-        Some(name) => root.join(name),
-        None => joined,
+
+    fn locate(&self, recorded: &Path) -> PathBuf {
+        let Some(root) = self.root else {
+            return recorded.to_path_buf();
+        };
+        let below = root.join(recorded.strip_prefix(&self.base).unwrap_or(recorded));
+        let whole = root.join(recorded.strip_prefix("/").unwrap_or(recorded));
+        let by_name = recorded
+            .file_name()
+            .filter(|n| self.names.get(*n) == Some(&1))
+            .map(|n| root.join(n));
+        [Some(below.clone()), Some(whole), by_name]
+            .into_iter()
+            .flatten()
+            .find(|p| p.exists())
+            .unwrap_or(below)
     }
 }
 
@@ -204,16 +255,17 @@ fn check(kind: &'static str, path: &Path, recorded: &Recorded<'_>) -> Vec<Checke
             ),
             // What it is now against what it was: a directory or a fifo
             // where an image was had "the size recorded" by default and
-            // passed.
-            Ok(_) if recorded.kind.is_some_and(|k| k != Kind::Other && k != now) => row(
+            // passed. A file where a device was read, or a device where a
+            // file was, is what it was — an image of the disk is how the
+            // evidence travels — and is held to the size recorded below:
+            // an image under `--evidence-root` of the disk the run read
+            // was FAIL "kind".
+            Ok(_) if recorded.kind.is_some_and(|k| k != Kind::Other) && now == Kind::Other => row(
                 Status::Fail,
                 "kind",
                 recorded.kind.map(|k| format!("{k:?}").to_lowercase()),
                 Some(format!("{now:?}").to_lowercase()),
-                format!(
-                    "no hash was recorded when it was read, and it is not what it was: {}",
-                    if now == Kind::Other { "neither a file nor a device now" } else { "a different kind of file now" }
-                ),
+                "no hash was recorded when it was read, and it is not what it was: neither a file nor a device now".into(),
             ),
             Ok(_) if now == Kind::Device
                 && recorded
@@ -677,8 +729,16 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
     for o in report.outputs.iter().filter(|_| !held) {
         checked.push(not_read("output", o.path.clone()));
     }
+    let evidence: Vec<&Path> = report
+        .evidence
+        .iter()
+        .map(|e| e.file.path.as_path())
+        .collect();
+    let outputs: Vec<&Path> = report.outputs.iter().map(|o| o.path.as_path()).collect();
+    let on_evidence = Rebase::new(&evidence, opts.evidence_root.as_ref());
+    let on_outputs = Rebase::new(&outputs, opts.outputs_root.as_ref());
     for e in report.evidence.iter().filter(|_| held) {
-        let path = locate(&e.file.path, opts.evidence_root.as_ref());
+        let path = on_evidence.locate(&e.file.path);
         checked.extend(check(
             "evidence",
             &path,
@@ -693,7 +753,7 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
         ));
     }
     for o in report.outputs.iter().filter(|_| held) {
-        let path = locate(&o.path, opts.outputs_root.as_ref());
+        let path = on_outputs.locate(&o.path);
         checked.extend(check(
             "output",
             &path,
@@ -727,6 +787,10 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
             serde_json::to_string_pretty(&out).expect("serialisable")
         ),
         Format::Text => {
+            // Every path and reason as text: a name in the report is the
+            // pool's, and one with an escape sequence in it erased the
+            // FAIL printed before it (`zvol_common::text`).
+            use zvol_common::text::{shown, shown_path};
             println!("{:<9} {:<9} {:<7} FILE", "KIND", "RESULT", "DIGEST");
             if let Some(s) = &out.signature {
                 println!(
@@ -734,11 +798,11 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
                     "signature",
                     s.status.as_str(),
                     "ed25519",
-                    s.path.display()
+                    shown_path(&s.path)
                 );
-                println!("{:<9} {:<9} {:<7}   key {}", "", "", "", s.key.display());
+                println!("{:<9} {:<9} {:<7}   key {}", "", "", "", shown_path(&s.key));
                 if let Some(d) = &s.detail {
-                    println!("{:<9} {:<9} {:<7}   {d}", "", "", "");
+                    println!("{:<9} {:<9} {:<7}   {}", "", "", "", shown(d));
                 }
             }
             for c in &out.checked {
@@ -747,10 +811,10 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
                     c.kind,
                     c.status.as_str(),
                     c.algorithm,
-                    c.path.display()
+                    shown_path(&c.path)
                 );
                 if let Some(d) = &c.detail {
-                    println!("{:<9} {:<9} {:<7}   {d}", "", "", "");
+                    println!("{:<9} {:<9} {:<7}   {}", "", "", "", shown(d));
                 }
                 // Only where there is something to show: a report that
                 // no longer matches its logs has no one value of each,
@@ -814,6 +878,62 @@ mod check_tests {
 
     fn scratch(name: &str) -> zvol_common::scratch::Scratch {
         zvol_common::scratch::Scratch::new("zvolreport-verify", name)
+    }
+
+    /// Evidence a run read as a device is checked against an image of it
+    /// under `--evidence-root`, by its size when no hash was taken: it
+    /// was FAIL "kind" for being a file. A directory there still fails.
+    #[test]
+    fn an_image_stands_for_the_device_it_was_taken_of() {
+        let dir = scratch("device-image");
+        let img = dir.join("sda.img");
+        fs::write(&img, [0u8; 4096]).unwrap();
+        let recorded = |size| Recorded {
+            sha256: None,
+            sha1: None,
+            md5: None,
+            size: Some(size),
+            prefix: None,
+            kind: Some(zvol_common::evidence::Kind::Device),
+        };
+        let rows = check("evidence", &img, &recorded(4096));
+        assert_eq!(rows[0].status, Status::Unhashed, "{rows:?}");
+        let rows = check("evidence", &img, &recorded(8192));
+        assert_eq!((rows[0].status, rows[0].algorithm), (Status::Fail, "size"));
+        let rows = check("evidence", &dir, &recorded(4096));
+        assert_eq!((rows[0].status, rows[0].algorithm), (Status::Fail, "kind"));
+    }
+
+    /// A case moved under a root is found as it was laid out: a tree's
+    /// files at their places below the directory every output was under,
+    /// not by their names alone; and two files of one name are never
+    /// taken for the one file of that name under the root.
+    #[test]
+    fn a_moved_case_is_found_as_it_was_laid_out() {
+        let dir = scratch("rebase");
+        let root = dir.join("copy");
+        fs::create_dir_all(root.join("tree/a/b")).unwrap();
+        fs::write(root.join("vol.img"), b"v").unwrap();
+        fs::write(root.join("tree/a/b/f"), b"f").unwrap();
+        fs::write(root.join("disk0.img"), b"d").unwrap();
+        let outputs = [
+            Path::new("/case/out/vol.img"),
+            Path::new("/case/out/tree/a/b/f"),
+            Path::new("/case/out/tree/manifest.json"),
+        ];
+        let on = Rebase::new(&outputs, Some(&root));
+        assert_eq!(on.locate(outputs[0]), root.join("vol.img"));
+        assert_eq!(on.locate(outputs[1]), root.join("tree/a/b/f"));
+        assert_eq!(on.locate(outputs[2]), root.join("tree/manifest.json"));
+
+        let evidence = [Path::new("/p1/disk0.img"), Path::new("/p2/disk0.img")];
+        let on = Rebase::new(&evidence, Some(&root));
+        assert_eq!(on.locate(evidence[0]), root.join("p1/disk0.img"));
+        assert_eq!(on.locate(evidence[1]), root.join("p2/disk0.img"));
+        // One file of its name is still found by it.
+        let one = [Path::new("/elsewhere/disk0.img"), Path::new("/x/y/z.img")];
+        let on = Rebase::new(&one, Some(&root));
+        assert_eq!(on.locate(one[0]), root.join("disk0.img"));
     }
 
     fn image(dir: &Path) -> PathBuf {

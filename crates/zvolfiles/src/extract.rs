@@ -943,8 +943,9 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
     // the manifest (COMPANIONS §1.3: every tool lists what it writes).
     // The manifest alone was the record's one output, and `zvolreport
     // verify` passed a tree whose files had been changed or deleted.
-    // A name that is not text cannot be in a JSON record; the manifest
-    // has it, under `path_hex`.
+    // A name that is not text is recorded with its bytes beside it, as
+    // the manifest has it: such files, and every file under a directory
+    // so named, were left out, and changing them passed `verify`.
     let mut written: Vec<FileRef> = if manifest_failed.is_none() {
         FileRef::hashed(&manifest).into_iter().collect()
     } else {
@@ -953,12 +954,13 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
     written.extend(
         out.files
             .iter()
-            .filter(|f| f.error.is_none() && f.path_hex.is_none())
+            .filter(|f| f.error.is_none())
             .filter_map(|f| {
-                Some(FileRef::known(
-                    &out.output.join(&f.path),
-                    f.sha256.as_ref()?,
-                ))
+                let rel = match &f.path_hex {
+                    Some(h) => zvol_common::evidence::path_from_hex(h)?,
+                    None => std::path::PathBuf::from(&f.path),
+                };
+                Some(FileRef::known(&out.output.join(rel), f.sha256.as_ref()?))
             }),
     );
     // A device refused a read: every incident on stderr, and the stop —

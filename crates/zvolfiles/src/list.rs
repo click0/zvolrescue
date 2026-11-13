@@ -259,9 +259,13 @@ pub fn run(
             serde_json::to_string_pretty(&json).expect("serialisable")
         ),
         Format::Text => {
+            // Names, targets and attribute names as text: a name with a
+            // newline in it printed an entry of its own, and an escape
+            // sequence reached the terminal (`zvol_common::text`).
+            use zvol_common::text::shown;
             println!(
                 "{} at txg {}: {} entr{}",
-                out.dataset,
+                shown(&out.dataset),
                 out.txg,
                 listed,
                 if listed == 1 { "y" } else { "ies" }
@@ -275,25 +279,26 @@ pub fn run(
                     f.gid.map_or("?".to_string(), |v| v.to_string()),
                     f.size.map_or("?".to_string(), |v| v.to_string()),
                     f.mtime.as_deref().unwrap_or("—"),
-                    f.path,
+                    shown(&f.path),
                     f.target
                         .as_ref()
-                        .map_or(String::new(), |t| format!(" -> {t}"))
+                        .map_or(String::new(), |t| format!(" -> {}", shown(t)))
                 );
                 if !f.xattrs.is_empty() {
-                    println!("       xattrs: {}", f.xattrs.join(", "));
+                    let names: Vec<_> = f.xattrs.iter().map(|x| shown(x)).collect();
+                    println!("       xattrs: {}", names.join(", "));
                 }
                 if let Some(r) = &f.rdev {
                     println!("       device {},{}", r.major, r.minor);
                 }
                 for x in &f.xattr_errors {
-                    println!("       xattrs: {x}");
+                    println!("       xattrs: {}", shown(x));
                 }
                 for c in &f.contents_errors {
-                    println!("       {c}");
+                    println!("       {}", shown(c));
                 }
                 if let Some(e) = &f.error {
-                    println!("       {e}");
+                    println!("       {}", shown(e));
                 }
             }
         }

@@ -20,7 +20,10 @@ big-endian host wrote — its small files, its root directory, its dnode
 blocks — read wrong or not at all; a dRAID that had put a distributed
 spare in for a failed disk was called unreadable; a raidz took a block
 it could not check as checked; and the sectors a ddrescue map refused
-were not looked for where the pool kept them twice.
+were not looked for where the pool kept them twice. And the record
+holds where it did not: a dump to a disk resumed after a crash, a
+resume on another disk of the same name, files with names that are
+not text, a case moved before it was verified.
 
 ### Fixed
 
@@ -61,6 +64,70 @@ were not looked for where the pool kept them twice.
   the row's other columns and parity; a block that comes out whole and
   matches its checksum is read, compressed or not, and only what no
   copy holds is zeros (SPEC F-33).
+
+* **A dump to a disk, resumed after a crash, kept the disk's old bytes
+  in its holes.** A disk is written densely, but the zeros of the
+  volume's holes and of blocks that could not be read went out only when
+  the image was finished; a run killed after a periodic state left the
+  disk's old contents under them, and the resume hashed them as zeros,
+  exit 0, and `verify` passed. Those zeros now go out as the run reaches
+  them. A sparse image is made as long as the blocks a state counts, so
+  a resume no longer finds it "shorter than the bytes the resume state
+  claims" and starts over.
+* **A resume took up a state on whatever had the output's name.** The
+  state of an image written to `/dev/sdb` is kept by that name, and was
+  taken up on the next disk to get it. A state now holds the SHA-256 of
+  the blocks it counts, and `--resume` starts over, saying why, when
+  the output no longer gives them back. A state claiming more blocks
+  than the volume has starts over too.
+* **The output guard missed a loop device over a loop device.** The
+  file under the inner loop was not followed: an output to that file
+  truncated a pool member read through the outer loop, and an output to
+  the outer loop overwrote the member given as a file, exit 0. Both are
+  refused (exit 5).
+* **`zvolreport` called an image its output would not finish
+  complete.** The record says when an output refused a block or could
+  not be finished; the report showed the image complete with the hash
+  of the whole volume. It is now not complete, with the reason in the
+  warnings.
+* **Files with names that are not text were outside the record.**
+  `zvolfiles extract` left them, and every file under a directory so
+  named, out of its outputs, so changing or deleting them passed
+  `verify`. A path that is not text is now recorded with its exact bytes
+  as `path_hex` beside it, in the evidence log, the report and `verify`'s
+  own output; `verify` no longer stops on one.
+* **`verify --outputs-root` and `--evidence-root` looked for a file by
+  its name alone.** A tree `zvolfiles` wrote was all MISSING once the
+  case was moved, and two pools' `disk0.img` were both checked against
+  the one under the root. A file is now looked for at its place below
+  the directory all files of its kind were under, then at its whole
+  path, then by its name only when no other file of its kind has it.
+* **A `zvolfiles objects` run was not an extraction in the report.** It
+  is now, with its index and objects, as an `extract` run is; a run a
+  signal ended is not complete.
+* **An image of a disk read as the disk was FAIL "kind".** Evidence a
+  run read as a device, checked under `--evidence-root` against an image
+  of it with no hash recorded, failed for being a file. It is held to
+  its size; a directory or a pipe in its place still fails.
+* **A report a `verify` had read could not be built again.** Once a log
+  held a verify of the report, `build` over it was refused (exit 5) as
+  over evidence. The report and its signature can now be built over;
+  the key and the files it checked cannot.
+* **`keygen` removed files it had not made.** It wrote through fixed
+  names `KEY.new` and `KEY.pub.new`, removing whatever was there first,
+  `--force` or not; and when the public half could not be put in place —
+  a directory at its name — the new private key stayed in place of the
+  old one with no public half. It now writes under names nothing has,
+  and puts the old private key back when the pair cannot be placed.
+* **A signature or a key that was not a file was read without end.**
+  `verify --signature /dev/zero` ran out of memory and a fifo waited for
+  ever. Only a regular file is read as either, and only as far as one
+  can be long.
+* **Names reached the terminal as they were.** `zvolreport verify`,
+  `zvolfiles list` and `zvoltimeline` printed names from the pool as
+  they were: a newline in a file name forged a line of the listing, and
+  an escape sequence erased the FAIL `verify` had just printed. Control
+  and invisible characters are now shown as their codes, `\u{1b}`.
 
 ## v0.9.15 — 2026-11-13
 

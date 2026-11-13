@@ -128,7 +128,7 @@ fn pem(label: &str, der: &[u8]) -> String {
 /// the same 48 bytes underneath, so both are read rather than making the
 /// operator convert one into the other in the middle of a recovery.
 pub fn read_private(path: &Path) -> Result<SigningKey, String> {
-    let raw = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let raw = read_small(path)?;
     let der = match std::str::from_utf8(&raw) {
         Ok(text) if text.contains("-----BEGIN") => {
             if text.contains("-----BEGIN ENCRYPTED PRIVATE KEY-----") {
@@ -155,7 +155,7 @@ pub fn read_private(path: &Path) -> Result<SigningKey, String> {
 
 /// Read an Ed25519 SubjectPublicKeyInfo, in PEM or bare DER.
 pub fn read_public(path: &Path) -> Result<VerifyingKey, String> {
-    let raw = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let raw = read_small(path)?;
     let der = match std::str::from_utf8(&raw) {
         Ok(text) if text.contains("-----BEGIN") => {
             pem_body(text, "PUBLIC KEY").map_err(|e| format!("{}: {e}", path.display()))?
@@ -197,18 +197,56 @@ pub fn write_signature(key: &SigningKey, bytes: &[u8], to: &Path) -> Result<(), 
     std::fs::write(to, sig.to_bytes()).map_err(|e| format!("{}: {e}", to.display()))
 }
 
+/// A key file: a regular file, read up to a size no key comes near.
+/// `--key /dev/zero` was read until memory ran out, and a fifo waited
+/// for a writer.
+fn read_small(path: &Path) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    const MAX: u64 = 64 << 10;
+    let meta = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if !meta.is_file() {
+        return Err(format!(
+            "{}: not a file, so not a key; not read",
+            path.display()
+        ));
+    }
+    let mut raw = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|f| f.take(MAX + 1).read_to_end(&mut raw))
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    if raw.len() as u64 > MAX {
+        return Err(format!(
+            "{}: {} bytes, more than any key is; not read",
+            path.display(),
+            meta.len()
+        ));
+    }
+    Ok(raw)
+}
+
 /// Check a signature file against `bytes`.
 ///
 /// `verify_strict` rather than `verify`: it refuses the small-order
 /// public keys under which one signature can verify for more than one
 /// key, which is exactly the ambiguity a chain of custody must not have.
 pub fn check(key: &VerifyingKey, bytes: &[u8], sig_path: &Path) -> Result<(), String> {
-    let raw = std::fs::read(sig_path).map_err(|e| format!("{}: {e}", sig_path.display()))?;
+    use std::io::Read;
+    let shown = sig_path.display();
+    // A signature is a file of 64 bytes, and nothing else is read as
+    // one: `--signature /dev/zero` was read until memory ran out, and a
+    // fifo waited for ever for a writer.
+    let meta = std::fs::metadata(sig_path).map_err(|e| format!("{shown}: {e}"))?;
+    if !meta.is_file() {
+        return Err(format!("{shown}: not a file, so not a signature; not read"));
+    }
+    let mut raw = Vec::with_capacity(65);
+    std::fs::File::open(sig_path)
+        .and_then(|f| f.take(65).read_to_end(&mut raw))
+        .map_err(|e| format!("{shown}: {e}"))?;
     let bytes64: [u8; 64] = raw.as_slice().try_into().map_err(|_| {
         format!(
-            "{}: a signature is 64 bytes, this file is {}",
-            sig_path.display(),
-            raw.len()
+            "{shown}: a signature is 64 bytes, this file is {}",
+            meta.len()
         )
     })?;
     let sig = Signature::from_bytes(&bytes64);
@@ -229,19 +267,25 @@ pub fn keygen(private: &Path, public: &Path) -> Result<VerifyingKey, String> {
     // private key with no pair; then the public half went first and was
     // taken back when the private one failed — and with `--force` what
     // it was taken back from was the key that had been there, gone.
-    // Both halves are written beside their places first, and only then
-    // put there.
-    let private_tmp = beside_new(private);
-    let public_tmp = beside_new(public);
+    // Both halves are written beside their places first, under names
+    // nothing else has — a fixed `KEY.new` was removed first, whoever's
+    // it was — and only then put there; the key that was there is kept
+    // under another such name until both are, and put back if the
+    // second one cannot be: a directory at the public name left the new
+    // private key in place of the old one and no public half for it.
+    let private_tmp = unused_beside(private, "new")?;
+    let public_tmp = match unused_beside(public, "new") {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = std::fs::remove_file(&private_tmp);
+            return Err(e);
+        }
+    };
     let written = write_private(&private_tmp, &private_pem(&key)).and_then(|()| {
-        write_new(&public_tmp, public_pem(&pubkey).as_bytes())
+        write_over(&public_tmp, public_pem(&pubkey).as_bytes())
             .map_err(|e| format!("{}: {e}", public.display()))
     });
-    let placed = written.and_then(|()| {
-        std::fs::rename(&private_tmp, private)
-            .map_err(|e| format!("{}: {e}", private.display()))?;
-        std::fs::rename(&public_tmp, public).map_err(|e| format!("{}: {e}", public.display()))
-    });
+    let placed = written.and_then(|()| place_pair(&private_tmp, private, &public_tmp, public));
     if placed.is_err() {
         let _ = std::fs::remove_file(&private_tmp);
         let _ = std::fs::remove_file(&public_tmp);
@@ -249,26 +293,79 @@ pub fn keygen(private: &Path, public: &Path) -> Result<VerifyingKey, String> {
     placed.map(|()| pubkey)
 }
 
-/// Where a key is written before it is put in place: beside it.
-fn beside_new(path: &Path) -> PathBuf {
-    let mut p = path.as_os_str().to_owned();
-    p.push(".new");
-    PathBuf::from(p)
+/// Put the private half and then the public half in place, and put the
+/// private key that was there back when the public half cannot follow.
+fn place_pair(
+    private_tmp: &Path,
+    private: &Path,
+    public_tmp: &Path,
+    public: &Path,
+) -> Result<(), String> {
+    let kept = if std::fs::symlink_metadata(private).is_ok() {
+        let keep = unused_name(private, "old")?;
+        std::fs::hard_link(private, &keep).map_err(|e| format!("{}: {e}", private.display()))?;
+        Some(keep)
+    } else {
+        None
+    };
+    let result = std::fs::rename(private_tmp, private)
+        .map_err(|e| format!("{}: {e}", private.display()))
+        .and_then(|()| {
+            std::fs::rename(public_tmp, public).map_err(|e| {
+                // The new private key is not left without its pair: the
+                // old one goes back, or, where there was none, the new
+                // one goes.
+                let undone = match &kept {
+                    Some(keep) => std::fs::rename(keep, private),
+                    None => std::fs::remove_file(private),
+                };
+                match undone {
+                    Ok(()) => format!("{}: {e}", public.display()),
+                    Err(u) => format!(
+                        "{}: {e}; and {} could not be put back as it was: {u}",
+                        public.display(),
+                        private.display()
+                    ),
+                }
+            })
+        });
+    if let Some(keep) = &kept {
+        let _ = std::fs::remove_file(keep);
+    }
+    result
 }
 
-/// Write a file that is new: whatever was at its name — one a run that
-/// died left there, or a link — goes first, so nothing is written
-/// through it.
-fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    if let Err(e) = std::fs::remove_file(path) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            return Err(e);
-        }
-    }
+/// A name beside `path` that nothing has: `KEY.new-PID-N`, made empty
+/// here so that no other run takes it.
+fn unused_beside(path: &Path, what: &str) -> Result<PathBuf, String> {
+    let p = unused_name(path, what)?;
     std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
+        .open(&p)
+        .map_err(|e| format!("{}: {e}", p.display()))?;
+    Ok(p)
+}
+
+/// A name beside `path`, `KEY.WHAT-PID-N`, that is not there now.
+fn unused_name(path: &Path, what: &str) -> Result<PathBuf, String> {
+    for n in 0..1000u32 {
+        let mut p = path.as_os_str().to_owned();
+        p.push(format!(".{what}-{}-{n}", std::process::id()));
+        let p = PathBuf::from(p);
+        if std::fs::symlink_metadata(&p).is_err() {
+            return Ok(p);
+        }
+    }
+    Err(format!("{}: no free name beside it", path.display()))
+}
+
+/// Write a file this run made empty for it (`unused_beside`).
+fn write_over(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
         .open(path)?
         .write_all(bytes)
 }
@@ -459,5 +556,54 @@ mod tests {
         let mode = std::fs::metadata(&priv_path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A key pair is made beside files that are not this run's — a
+    /// `k.new`, a `k.pub.new` — without touching them; and when the
+    /// public half cannot be put in place, the private key that was
+    /// there is put back, and nothing of the run is left.
+    #[test]
+    fn keygen_takes_nothing_it_did_not_make() {
+        let dir = std::env::temp_dir().join(format!("zvolreport-keygen-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (k, k_pub) = (dir.join("k"), dir.join("k.pub"));
+        std::fs::write(dir.join("k.new"), "someone's").unwrap();
+        std::fs::write(dir.join("k.pub.new"), "someone else's").unwrap();
+        keygen(&k, &k_pub).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("k.new")).unwrap(),
+            "someone's"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("k.pub.new")).unwrap(),
+            "someone else's"
+        );
+
+        let old = std::fs::read(&k).unwrap();
+        let blocked = dir.join("blocked.pub");
+        std::fs::create_dir(&blocked).unwrap();
+        std::fs::write(blocked.join("x"), "").unwrap();
+        assert!(keygen(&k, &blocked).is_err());
+        assert_eq!(std::fs::read(&k).unwrap(), old, "the key that was there");
+        let mut left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["blocked.pub", "k", "k.new", "k.pub", "k.pub.new"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Only a regular file is read as a signature or a key, and only so
+    /// far: `/dev/zero` was read until memory ran out.
+    #[cfg(unix)]
+    #[test]
+    fn a_signature_or_key_that_is_not_a_file_is_not_read() {
+        let key = SigningKey::from_bytes(&RFC8032_SEED).verifying_key();
+        let e = check(&key, b"x", Path::new("/dev/zero")).unwrap_err();
+        assert!(e.contains("not a file"), "{e}");
+        let e = read_public(Path::new("/dev/zero")).unwrap_err();
+        assert!(e.contains("not a file"), "{e}");
     }
 }

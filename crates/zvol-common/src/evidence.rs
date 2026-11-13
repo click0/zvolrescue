@@ -21,7 +21,14 @@ pub use zfs_read::hash::{DigestSet, Digests, Extra};
 pub const FORMAT_VERSION: u32 = 1;
 
 /// A file a run read or wrote.
+///
+/// In a record its path is text, and a path that is not — a file
+/// `zvolfiles` extracted under the name the dataset gave it — carries
+/// its exact bytes beside it as `path_hex` ([`PathText`]). Such a file
+/// could not be in a record at all, and a tree's files with such names
+/// were left out of its outputs: changed or deleted, `verify` passed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "RawFileRef", into = "RawFileRef")]
 pub struct FileRef {
     /// Path as the command named it.
     pub path: PathBuf,
@@ -51,6 +58,128 @@ pub struct FileRef {
     /// Hex MD5 of the same file, on the same terms.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub md5: Option<String>,
+}
+
+/// [`FileRef`] as a record holds it.
+#[derive(Serialize, Deserialize)]
+struct RawFileRef {
+    #[serde(flatten)]
+    path: PathText,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kind: Option<Kind>,
+    size: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sha1: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    md5: Option<String>,
+}
+
+impl From<RawFileRef> for FileRef {
+    fn from(r: RawFileRef) -> FileRef {
+        FileRef {
+            path: r.path.path(),
+            kind: r.kind,
+            size: r.size,
+            sha256: r.sha256,
+            sha1: r.sha1,
+            md5: r.md5,
+        }
+    }
+}
+
+impl From<FileRef> for RawFileRef {
+    fn from(f: FileRef) -> RawFileRef {
+        RawFileRef {
+            path: PathText::of(&f.path),
+            kind: f.kind,
+            size: f.size,
+            sha256: f.sha256,
+            sha1: f.sha1,
+            md5: f.md5,
+        }
+    }
+}
+
+/// A path as JSON can hold it: `path`, as text, and — only when that
+/// text lost something — `path_hex`, its exact bytes. Read back, the
+/// bytes win.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PathText {
+    /// The path, with what is not text replaced.
+    pub path: String,
+    /// The exact bytes, in hex, where `path` is not them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_hex: Option<String>,
+}
+
+impl PathText {
+    /// How `p` is written.
+    pub fn of(p: &Path) -> PathText {
+        let bytes = path_bytes(p);
+        match p.to_str() {
+            Some(t) => PathText {
+                path: t.to_string(),
+                path_hex: None,
+            },
+            None => PathText {
+                path: p.to_string_lossy().into_owned(),
+                path_hex: Some(bytes.iter().map(|b| format!("{b:02x}")).collect()),
+            },
+        }
+    }
+
+    /// The path it was written from: the bytes when they are there and
+    /// read as hex, the text otherwise.
+    pub fn path(&self) -> PathBuf {
+        self.path_hex
+            .as_deref()
+            .and_then(path_from_hex)
+            .unwrap_or_else(|| PathBuf::from(&self.path))
+    }
+}
+
+/// Serialise a path as [`PathText`] does — for a field marked
+/// `#[serde(flatten, serialize_with = "...")]`: `path`, and `path_hex`
+/// when the text is not the path. Serialised as a plain path, a name
+/// that is not text stopped the run that had to record it.
+pub fn serialize_path_text<S: serde::Serializer>(p: &Path, s: S) -> Result<S::Ok, S::Error> {
+    PathText::of(p).serialize(s)
+}
+
+/// The bytes of a path.
+fn path_bytes(p: &Path) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        p.as_os_str().as_bytes().to_vec()
+    }
+    #[cfg(not(unix))]
+    {
+        p.to_string_lossy().into_owned().into_bytes()
+    }
+}
+
+/// A path from the hex of its bytes; `None` when it is not hex.
+pub fn path_from_hex(hex: &str) -> Option<PathBuf> {
+    if hex.len() % 2 != 0 {
+        return None;
+    }
+    let bytes: Option<Vec<u8>> = (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok())
+        .collect();
+    let bytes = bytes?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        Some(PathBuf::from(std::ffi::OsString::from_vec(bytes)))
+    }
+    #[cfg(not(unix))]
+    {
+        Some(PathBuf::from(String::from_utf8_lossy(&bytes).into_owned()))
+    }
 }
 
 /// What a path turned out to be (SPEC F-68).
@@ -459,6 +588,37 @@ pub fn append(path: &Path, rec: &Record) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A path that is not text goes into a record with its bytes beside
+    /// it and comes back as those bytes; one that is text goes as it
+    /// always did, with no second spelling.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_that_is_not_text_round_trips_through_a_record() {
+        use std::os::unix::ffi::OsStrExt;
+        let odd = PathBuf::from(std::ffi::OsStr::from_bytes(b"/out/d\xff/inner"));
+        let f = FileRef {
+            path: odd.clone(),
+            kind: Some(Kind::File),
+            size: 3,
+            sha256: Some("ab".into()),
+            sha1: None,
+            md5: None,
+        };
+        let v = serde_json::to_value(&f).unwrap();
+        assert_eq!(v["path"], "/out/d\u{fffd}/inner");
+        assert_eq!(v["path_hex"], "2f6f75742f64ff2f696e6e6572");
+        let back: FileRef = serde_json::from_value(v).unwrap();
+        assert_eq!(back, f);
+
+        let plain = FileRef {
+            path: PathBuf::from("/out/plain"),
+            ..f
+        };
+        let v = serde_json::to_value(&plain).unwrap();
+        assert!(v.get("path_hex").is_none(), "{v}");
+        assert_eq!(serde_json::from_value::<FileRef>(v).unwrap(), plain);
+    }
 
     #[test]
     fn a_record_round_trips_through_its_own_format() {

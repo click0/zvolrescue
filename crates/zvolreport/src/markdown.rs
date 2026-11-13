@@ -7,6 +7,7 @@
 
 use std::fmt::Write;
 
+use zvol_common::text::unseen;
 use zvol_common::timefmt::iso8601;
 
 use crate::model::Report;
@@ -34,31 +35,6 @@ fn visible(s: &str) -> String {
         }
     }
     out
-}
-
-/// A character that is not seen as itself: a line or paragraph
-/// separator, a Unicode format character (bidirectional overrides and
-/// isolates, zero-width spaces and joiners, the byte-order mark, tags),
-/// or whitespace other than the plain space.
-fn unseen(c: char) -> bool {
-    matches!(
-        c,
-        '\u{ad}'
-            | '\u{34f}'
-            | '\u{61c}'
-            | '\u{115f}'..='\u{1160}'
-            | '\u{17b4}'..='\u{17b5}'
-            | '\u{180b}'..='\u{180f}'
-            | '\u{200b}'..='\u{200f}'
-            | '\u{2028}'..='\u{202e}'
-            | '\u{2060}'..='\u{206f}'
-            | '\u{3164}'
-            | '\u{fe00}'..='\u{fe0f}'
-            | '\u{feff}'
-            | '\u{ffa0}'
-            | '\u{fff9}'..='\u{fffb}'
-            | '\u{e0000}'..='\u{e0fff}'
-    ) || (c.is_whitespace() && c != ' ')
 }
 
 /// Text from the logs or the pool, as text: nothing in it can open a
