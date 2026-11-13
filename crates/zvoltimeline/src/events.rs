@@ -81,14 +81,20 @@ pub fn sort(events: &mut [Event]) {
 /// A dataset as the diff sees it: what it is called and what about it is
 /// worth reporting a change to.
 pub fn describe(d: &Dataset) -> String {
+    describe_known(d, &[])
+}
+
+/// [`describe`], leaving out the facts named in `unknown`.
+fn describe_known(d: &Dataset, unknown: &[&str]) -> String {
     let mut parts = Vec::new();
-    if let Some(v) = d.volsize {
+    let known = |f: &str| !unknown.contains(&f);
+    if let Some(v) = d.volsize.filter(|_| known("volsize")) {
         parts.push(format!("volsize {v}"));
     }
-    if let Some(b) = d.volblocksize {
+    if let Some(b) = d.volblocksize.filter(|_| known("volblocksize")) {
         parts.push(format!("volblocksize {b}"));
     }
-    if let Some(e) = &d.encryption {
+    if let Some(e) = d.encryption.as_ref().filter(|_| known("encryption")) {
         parts.push(format!("encryption {}", e.suite_name()));
     }
     parts.join(" ")
@@ -144,7 +150,12 @@ pub fn diff(before: &[Dataset], after: &[Dataset], txg: u64, time: Option<u64>) 
                         last_seen_txg: None,
                     });
                 }
-                let (a, b) = (describe(was), describe(d));
+                // Only what was read at both: a fact one of them could not
+                // read is not one that changed. Unreadable encryption or
+                // volume metadata at one TXG was a `property` event at it
+                // and another at the next, neither of them true.
+                let unknown: Vec<&str> = was.unknown.iter().chain(&d.unknown).copied().collect();
+                let (a, b) = (describe_known(was, &unknown), describe_known(d, &unknown));
                 if a != b {
                     events.push(Event {
                         txg,
@@ -182,7 +193,7 @@ pub fn diff(before: &[Dataset], after: &[Dataset], txg: u64, time: Option<u64>) 
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use zfs_ondisk::dsl::{DslDatasetPhys, DSL_DATASET_MIN_LEN};
     use zfs_ondisk::Endian;
@@ -190,7 +201,7 @@ mod tests {
     /// A dataset with nothing on it but a name and an identity: the diff
     /// looks at the GUID, the name and the few properties it reports, and
     /// a zeroed `dsl_dataset_phys_t` is what an empty one parses to.
-    fn ds(name: &str, guid: u64, snapshot: bool) -> Dataset {
+    pub(crate) fn ds(name: &str, guid: u64, snapshot: bool) -> Dataset {
         Dataset {
             name: name.to_string(),
             object: 0,
@@ -211,6 +222,7 @@ mod tests {
             phys: DslDatasetPhys::parse(&[0u8; DSL_DATASET_MIN_LEN], Endian::Little)
                 .expect("a zeroed bonus buffer parses"),
             warnings: Vec::new(),
+            unknown: Vec::new(),
         }
     }
 
@@ -328,6 +340,26 @@ mod tests {
         let one = diff(&[], &[a.clone(), b.clone(), c.clone()], 100, None);
         let other = diff(&[], &[c, a, b], 100, None);
         assert_eq!(one, other);
+    }
+
+    /// A fact one transaction group could not read is not one that
+    /// changed: unreadable volume metadata at one TXG was a `property`
+    /// event there, `volsize 8192 -> `, and another at the next.
+    #[test]
+    fn a_fact_not_read_is_no_change() {
+        let mut was = ds("tank/vm/disk0", 7, false);
+        was.volsize = Some(8192);
+        was.volblocksize = Some(4096);
+        let mut blind = was.clone();
+        blind.volsize = None;
+        blind.unknown = vec!["volsize"];
+        assert!(diff(&[was.clone()], &[blind.clone()], 100, None).is_empty());
+        assert!(diff(&[blind.clone()], &[was.clone()], 101, None).is_empty());
+        // What it could read still counts.
+        blind.volblocksize = Some(8192);
+        let events = diff(&[was], &[blind], 100, None);
+        assert_eq!(kinds(&events), [("property", Some("tank/vm/disk0"))]);
+        assert_eq!(events[0].details, "volblocksize 4096 -> volblocksize 8192");
     }
 
     #[test]

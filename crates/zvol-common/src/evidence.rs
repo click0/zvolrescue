@@ -152,6 +152,17 @@ impl FileRef {
 
     /// Describe a file and read it through to hash it.
     pub fn hashed(path: &Path) -> io::Result<FileRef> {
+        // A pipe, a socket or a character device is not read back to be
+        // hashed: `-o /dev/stdout | cat` waited for ever on the pipe it
+        // had itself written into, and `/dev/zero` never ends. What went
+        // into one is in the record's result, or nowhere anyone could
+        // check it again.
+        if is_stream(path) {
+            return Err(io::Error::other(format!(
+                "{} is a stream, not a file; not read back",
+                path.display()
+            )));
+        }
         Ok(FileRef {
             sha256: Some(sha256_of(path)?),
             ..FileRef::stat(path)
@@ -183,6 +194,23 @@ pub fn digests_of_prefix(path: &Path, extra: Extra, limit: Option<u64>) -> io::R
         left -= n as u64;
     }
     Ok(digests.finish())
+}
+
+/// Whether `path` is a pipe, a socket or a character device: something
+/// written into that is not there to be read back.
+#[cfg(unix)]
+pub fn is_stream(path: &Path) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    std::fs::metadata(path).is_ok_and(|m| {
+        let t = m.file_type();
+        t.is_fifo() || t.is_socket() || t.is_char_device()
+    })
+}
+
+/// Whether `path` is a pipe, a socket or a character device.
+#[cfg(not(unix))]
+pub fn is_stream(_path: &Path) -> bool {
+    false
 }
 
 /// Whether writing to `path` keeps nothing: `/dev/null`, `/dev/zero`.
@@ -522,5 +550,20 @@ mod tests {
             Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A stream is not read back to be hashed: `/dev/zero` never ends,
+    /// and a pipe the run wrote into waits for ever for more.
+    #[cfg(unix)]
+    #[test]
+    fn a_stream_is_not_read_back() {
+        for p in ["/dev/zero", "/dev/null"] {
+            let p = Path::new(p);
+            if p.exists() {
+                assert!(is_stream(p));
+                assert!(FileRef::hashed(p).is_err(), "{}", p.display());
+            }
+        }
+        assert!(!is_stream(Path::new("/")));
     }
 }

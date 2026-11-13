@@ -657,6 +657,26 @@ tagged. `v0.7.1` is the release that carries those six.
   step and for each shift: 3.4 GB for the first 64 MiB of a 96 MiB
   member. Each probe is now read once for a run of bases and checked
   from memory, at the finest step only: 0.39 GB, the same bases found.
+* **A history read in part invented events.** `zvoltimeline` took what
+  the oldest transaction group did not read — part of its dataset tree
+  unreadable, and nothing before it to carry over from — for things
+  created at the next one, snapshots and all (`--from 459` on a damaged
+  draid2: `temp_0` "created" at 460, made at 241). What a TXG could not
+  see is now dated by when it was made, "already there at txg T, where
+  it was not read". A dataset carried over a TXG that did not read its
+  part of the tree was "last seen" there, and the command to recover it
+  named a TXG it does not read at; it is dated from the last TXG it was
+  read at. Encryption or volume metadata that did not read at one TXG
+  was a `property` event there and another at the next: a fact read at
+  only one of two TXGs is no change. `--pending` on a TXG read in part
+  says its numbers are a floor; a TXG that cannot be walked says why;
+  the header and the JSON (`partial_txgs`) count the TXGs read in part.
+* **`-o /dev/stdout | cat` hung.** `zvoltimeline` and `zvolreport build`
+  read their report back to hash it for the record, and read from the
+  pipe they had written into, waiting for ever — with or without
+  `--evidence-log`. A pipe, a socket or a character device is not read
+  back now, by any tool: what went into one is no output anyone can
+  check again, and `/dev/zero` never ended.
 
 ## v0.9.12 — 2026-11-07
 

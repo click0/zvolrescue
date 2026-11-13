@@ -21,6 +21,20 @@ It reads the members the way
 does, never writes to them, and can write an evidence log the same
 way.
 .Pp
+A TXG whose MOS cannot be walked is an
+.Ql unreadable
+event that says why.
+One read in part \(em part of its dataset tree did not read \(em is
+counted as read in part, and what lies there is taken as it was at the
+TXG before; it is not destroyed there, and a dataset destroyed later is
+last seen at the last TXG it was read at.
+What such a TXG, or the oldest one read, could not see is not created
+at the next one: it is dated by when it was made, and said to have been
+there unread.
+A property that could not be read at one TXG is not a change, and
+.Fl -pending
+on a TXG read in part is a floor.
+.Pp
 The pool members are given as devices, or as image files with
 .Fl -image .
 The
@@ -52,6 +66,8 @@ reallocated.
 Write the report to
 .Ar file
 instead of standard output.
+A pipe or a terminal is written to and not read back: the evidence
+log records a file it wrote, with its hash, and the report itself.
 Refused, with exit 5, if it is anything the run reads or shares bytes
 with it: a member under any name, a map, the hints, a device a member
 is on, or the path a log goes to.

@@ -159,3 +159,56 @@ fn a_destroyed_snapshot_says_how_to_get_it_back() {
     assert_eq!(code, 3, "{err}");
     assert!(err.contains("no dataset or snapshot of that name"), "{err}");
 }
+
+/// `-o /dev/stdout` into a pipe ends: the report was read back from it to
+/// be hashed for the record, and the run waited for ever on the pipe it
+/// had written into — `| cat` hung, with or without `--evidence-log`.
+#[cfg(unix)]
+#[test]
+fn a_report_into_a_pipe_is_not_read_back() {
+    let dir = scratch("pipe");
+    let m = members(&dir);
+    let log = dir.join("case.jsonl");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_zvoltimeline"))
+        .args([
+            "-q",
+            "--evidence-log",
+            log.to_str().unwrap(),
+            "-o",
+            "/dev/stdout",
+            &m[0],
+            &m[1],
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("run zvoltimeline");
+    let mut out = String::new();
+    std::io::Read::read_to_string(child.stdout.as_mut().unwrap(), &mut out).ok();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let status = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break s;
+        }
+        if std::time::Instant::now() > deadline {
+            child.kill().ok();
+            panic!("still running a minute after its report was written: {out}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    assert_eq!(status.code(), Some(0));
+    assert!(out.contains("transaction group(s) still readable"), "{out}");
+    let rec: serde_json::Value = serde_json::from_str(
+        std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .last()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        rec["outputs"],
+        serde_json::json!([]),
+        "a pipe is no output to check"
+    );
+}

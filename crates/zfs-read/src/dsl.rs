@@ -223,6 +223,11 @@ pub struct Dataset {
     pub phys: DslDatasetPhys,
     /// Problems met while describing this dataset (never fatal).
     pub warnings: Vec<String>,
+    /// The facts above that could not be read, by name: `type`,
+    /// `volsize`, `volblocksize`, `encryption`. One that is `None` here
+    /// is not known to be absent — what a history must not take for a
+    /// change.
+    pub unknown: Vec<&'static str>,
 }
 
 /// One property as a dataset's own ZAP holds it (SPEC F-14).
@@ -840,12 +845,14 @@ fn describe(
         }
     );
     let mut warnings = Vec::new();
+    let mut unknown = Vec::new();
     let mut volsize = None;
     let mut volblocksize = None;
     let encryption = match read_encryption(mos, phys.dir_obj) {
         Ok(e) => e,
         Err(e) => {
             warnings.push(format!("encryption metadata: {e}"));
+            unknown.push("encryption");
             None
         }
     };
@@ -860,8 +867,14 @@ fn describe(
                             DnodeArray::new(mos.reader(), os.meta_dnode.clone(), phys.bp.endian);
                         match objs.get(ZVOL_OBJ) {
                             Ok(d) if !d.is_free() => volblocksize = Some(d.datablksz()),
-                            Ok(_) => warnings.push("zvol data object is free".into()),
-                            Err(e) => warnings.push(format!("zvol data object: {e}")),
+                            Ok(_) => {
+                                warnings.push("zvol data object is free".into());
+                                unknown.push("volblocksize");
+                            }
+                            Err(e) => {
+                                warnings.push(format!("zvol data object: {e}"));
+                                unknown.push("volblocksize");
+                            }
                         }
                         match objs.object(ZVOL_ZAP_OBJ).and_then(|o| read_zap(&o)) {
                             Ok(entries) => {
@@ -871,20 +884,26 @@ fn describe(
                                     .and_then(|e| e.value.as_u64());
                                 if volsize.is_none() {
                                     warnings.push("zvol properties have no size".into());
+                                    unknown.push("volsize");
                                 }
                             }
-                            Err(e) => warnings.push(format!("zvol properties: {e}")),
+                            Err(e) => {
+                                warnings.push(format!("zvol properties: {e}"));
+                                unknown.push("volsize");
+                            }
                         }
                     }
                     Some(os.os_type)
                 }
                 Err(e) => {
                     warnings.push(format!("objset header: {e}"));
+                    unknown.extend(["type", "volsize", "volblocksize"]);
                     None
                 }
             },
             Err(e) => {
                 warnings.push(format!("objset block: {e}"));
+                unknown.extend(["type", "volsize", "volblocksize"]);
                 None
             }
         }
@@ -908,6 +927,7 @@ fn describe(
         encryption,
         phys,
         warnings,
+        unknown,
     })
 }
 

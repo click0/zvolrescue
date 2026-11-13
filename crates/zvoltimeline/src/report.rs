@@ -61,6 +61,11 @@ struct TimelineOut {
     txgs: Vec<u64>,
     /// TXGs that were read but whose MOS could not be walked.
     unreadable_txgs: Vec<u64>,
+    /// TXGs whose MOS was walked but where part of the dataset tree
+    /// could not be read: their datasets are partly carried over from
+    /// the TXG before.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    partial_txgs: Vec<u64>,
     /// The object `--dataset` asked about.
     #[serde(skip_serializing_if = "Option::is_none")]
     dataset: Option<String>,
@@ -118,10 +123,11 @@ fn print_text(out: &TimelineOut, w: &mut dyn Write) -> std::io::Result<()> {
         out.pool,
         out.pool_guid,
         out.txgs.len() - out.unreadable_txgs.len(),
-        if out.unreadable_txgs.is_empty() {
-            String::new()
-        } else {
-            format!(", {} unreadable", out.unreadable_txgs.len())
+        match (out.unreadable_txgs.len(), out.partial_txgs.len()) {
+            (0, 0) => String::new(),
+            (u, 0) => format!(", {u} unreadable"),
+            (0, p) => format!(", {p} of them read in part"),
+            (u, p) => format!(", {u} unreadable, {p} read in part"),
         }
     )?;
     if let Some(d) = out
@@ -197,7 +203,7 @@ fn about(events: Vec<Event>, want: &str) -> Vec<Event> {
         .collect()
 }
 
-/// Datasets at one TXG, or `None` when its MOS cannot be walked.
+/// Datasets at one TXG, or why its MOS cannot be walked.
 ///
 /// `pending` is read from the same walk when it was asked for: opening
 /// the MOS twice to answer two questions about the same transaction
@@ -207,11 +213,215 @@ fn datasets_at(
     c: &Candidate,
     pool_name: &str,
     want_pending: bool,
-) -> Option<(zfs_read::dsl::DatasetTree, Option<Pending>)> {
-    let mos = open_mos(reader, &c.ub).ok()?;
-    let tree = walk(&mos, pool_name).ok()?;
+) -> Result<(zfs_read::dsl::DatasetTree, Option<Pending>), String> {
+    let mos = open_mos(reader, &c.ub).map_err(|e| format!("the MOS: {e}"))?;
+    let tree = walk(&mos, pool_name).map_err(|e| format!("the dataset tree: {e}"))?;
     let p = want_pending.then(|| zfs_read::dsl::pending(&mos, &tree.datasets));
-    Some((tree, p))
+    Ok((tree, p))
+}
+
+/// The history as it is read, one transaction group at a time, oldest
+/// first: what [`run`] reads, and what the tests give it by hand.
+#[derive(Default)]
+struct History {
+    events: Vec<Event>,
+    unreadable: Vec<u64>,
+    partial: Vec<u64>,
+    // What each dataset was, the last time it was seen: a destroyed one
+    // is recovered by the tool for its type, with a key if it had one.
+    what: std::collections::BTreeMap<u64, (Option<ObjsetType>, bool)>,
+    previous: Option<(u64, Vec<Dataset>)>,
+    // The last TXG each dataset was read at, not carried to. Its
+    // destruction is dated from there: dated from a TXG where it was
+    // only carried over, "last seen at txg T" and the command to recover
+    // it at T named a TXG it does not read at.
+    read_at: std::collections::BTreeMap<u64, u64>,
+}
+
+impl History {
+    /// Take in what was read at `txg`, or why nothing was.
+    fn step(
+        &mut self,
+        txg: u64,
+        timestamp: u64,
+        read: Result<(zfs_read::dsl::DatasetTree, Option<Pending>), String>,
+    ) {
+        let (mut tree, pending) = match read {
+            Ok(x) => x,
+            Err(why) => {
+                self.unreadable.push(txg);
+                self.events.push(Event {
+                    txg,
+                    time: Some(timestamp),
+                    kind: Kind::Unreadable,
+                    object: None,
+                    guid: 0,
+                    details: format!(
+                        "the MOS at this transaction group could not be walked: {why}"
+                    ),
+                    last_seen_txg: None,
+                });
+                return;
+            }
+        };
+        let mut now = std::mem::take(&mut tree.datasets);
+        for d in &now {
+            self.read_at.insert(d.guid, txg);
+        }
+        // A part of the tree that could not be read here is not a part
+        // that is gone. What was there at the last transaction group is
+        // taken to be there still, and said: missing, it was "destroyed"
+        // here and "created" again at the next one, the same GUID, on a
+        // pool whose DSL directory simply did not read at this one.
+        let carried: Vec<Dataset> = match &self.previous {
+            Some((_, before)) if !tree.unread.is_empty() => before
+                .iter()
+                .filter(|d| tree.unread_at(&d.name) && !now.iter().any(|n| n.guid == d.guid))
+                .cloned()
+                .collect(),
+            _ => Vec::new(),
+        };
+        if !tree.unread.is_empty() {
+            self.partial.push(txg);
+            let more = tree.errors.len().saturating_sub(3);
+            self.events.push(Event {
+                txg,
+                time: Some(timestamp),
+                kind: Kind::Unreadable,
+                object: None,
+                guid: 0,
+                details: format!(
+                    "part of the dataset tree could not be read at this transaction group ({}{}); {} dataset(s) and snapshot(s) there before are taken as unchanged",
+                    tree.errors.iter().take(3).cloned().collect::<Vec<_>>().join("; "),
+                    if more > 0 {
+                        format!("; and {more} more")
+                    } else {
+                        String::new()
+                    },
+                    carried.len()
+                ),
+                last_seen_txg: None,
+            });
+        }
+        now.extend(carried);
+        if let Some(p) = pending {
+            self.events.push(Event {
+                txg,
+                time: Some(timestamp),
+                kind: Kind::Pending,
+                object: None,
+                guid: 0,
+                details: format!(
+                    "{} byte(s) not yet freed: {} in the pool's free list ({} block pointer(s)), {} in {} deadlist(s){}{}{}",
+                    p.total(),
+                    p.free_bpobj_bytes,
+                    p.free_bpobj_blkptrs,
+                    p.deadlist_bytes,
+                    p.deadlists,
+                    if p.unreadable > 0 {
+                        format!(", {} unreadable", p.unreadable)
+                    } else {
+                        String::new()
+                    },
+                    // The deadlists' own objects come to the same total
+                    // when this reader has them right; saying so is how
+                    // anyone can tell the number is not invented. At any
+                    // TXG but the newest some of those objects may have
+                    // been reused since, and a header that could not be
+                    // checked is said to be that, not contradicted.
+                    if p.inconsistent > 0 {
+                        format!(
+                            "; {} deadlist(s) disagree with their own objects ({} byte(s) there)",
+                            p.inconsistent, p.bpobj_bytes
+                        )
+                    } else if p.unverified > 0 {
+                        format!(
+                            "; {} deadlist(s) unverified, their objects unreadable at this TXG; the other(s)' own objects agree ({})",
+                            p.unverified, p.bpobj_bytes
+                        )
+                    } else {
+                        format!("; the deadlists' own objects agree ({})", p.bpobj_bytes)
+                    },
+                    // What the part of the tree that did not read holds
+                    // back is not in these numbers: they are a floor.
+                    if tree.unread.is_empty() {
+                        String::new()
+                    } else {
+                        "; at least: part of the dataset tree could not be read, and the deadlists of what lies there are not counted".to_string()
+                    }
+                ),
+                last_seen_txg: None,
+            });
+        }
+        match &self.previous {
+            None => {
+                // The oldest readable TXG is the baseline: everything in
+                // it was created at or before it, which the creation TXG
+                // of each dataset already says.
+                for d in &now {
+                    // The dataset records when it was made, which can be
+                    // older than anything still readable. Say so, rather
+                    // than dating it to the transaction group it happened
+                    // to be found in.
+                    let mut details = crate::events::describe(d);
+                    if d.creation_txg < txg {
+                        if !details.is_empty() {
+                            details.push_str(", ");
+                        }
+                        details
+                            .push_str(&format!("already there at the oldest readable txg {}", txg));
+                    }
+                    self.events.push(Event {
+                        txg: d.creation_txg.min(txg),
+                        time: (d.creation_time != 0).then_some(d.creation_time),
+                        kind: crate::events::appeared_as(d),
+                        object: Some(d.name.clone()),
+                        guid: d.guid,
+                        details,
+                        last_seen_txg: None,
+                    });
+                }
+            }
+            Some((prev_txg, before)) => {
+                let mut diffed = crate::events::diff(before, &now, txg, Some(timestamp));
+                for e in &mut diffed {
+                    if matches!(e.kind, Kind::Destroyed | Kind::SnapshotDestroyed) {
+                        e.last_seen_txg =
+                            Some(self.read_at.get(&e.guid).copied().unwrap_or(*prev_txg));
+                    }
+                    // Not seen at the TXG before, but there by its own
+                    // record: that read missed it — the part of the tree
+                    // it lies in did not read, at the oldest TXG, where
+                    // there is nothing to carry over from, or at one
+                    // the dataset was made in between. Dated by when it
+                    // was made, and said, as the oldest TXG's are; it
+                    // was "created" here, with snapshots older than it.
+                    if matches!(e.kind, Kind::Created | Kind::Snapshot | Kind::Clone) {
+                        if let Some(d) = now
+                            .iter()
+                            .find(|d| d.guid == e.guid)
+                            .filter(|d| d.creation_txg <= *prev_txg)
+                        {
+                            e.txg = d.creation_txg;
+                            e.time = (d.creation_time != 0).then_some(d.creation_time);
+                            if !e.details.is_empty() {
+                                e.details.push_str(", ");
+                            }
+                            e.details.push_str(&format!(
+                                "already there at txg {prev_txg}, where it was not read; first read at txg {}",
+                                txg
+                            ));
+                        }
+                    }
+                }
+                self.events.extend(diffed);
+            }
+        }
+        for d in &now {
+            self.what.insert(d.guid, (d.kind, d.encryption.is_some()));
+        }
+        self.previous = Some((txg, now));
+    }
 }
 
 /// Run the tool.
@@ -245,152 +455,19 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     }
     let reader = PoolReader::new(&pool, members.devices()).with_base_offsets(&members.bases());
 
-    let mut events: Vec<Event> = Vec::new();
-    let mut unreadable = Vec::new();
-    // What each dataset was, the last time it was seen: a destroyed one
-    // is recovered by the tool for its type, with a key if it had one.
-    let mut what: std::collections::BTreeMap<u64, (Option<ObjsetType>, bool)> =
-        std::collections::BTreeMap::new();
-    let mut previous: Option<(u64, Vec<Dataset>)> = None;
+    let mut history = History::default();
     // Only two dataset lists are ever held at once (T-11).
     for c in &candidates {
-        let Some((mut tree, pending)) = datasets_at(&reader, c, &pool.name, opts.pending) else {
-            unreadable.push(c.ub.txg);
-            events.push(Event {
-                txg: c.ub.txg,
-                time: Some(c.ub.timestamp),
-                kind: Kind::Unreadable,
-                object: None,
-                guid: 0,
-                details: "the MOS at this transaction group could not be walked".into(),
-                last_seen_txg: None,
-            });
-            continue;
-        };
-        let mut now = std::mem::take(&mut tree.datasets);
-        // A part of the tree that could not be read here is not a part
-        // that is gone. What was there at the last transaction group is
-        // taken to be there still, and said: missing, it was "destroyed"
-        // here and "created" again at the next one, the same GUID, on a
-        // pool whose DSL directory simply did not read at this one.
-        let carried: Vec<Dataset> = match &previous {
-            Some((_, before)) if !tree.unread.is_empty() => before
-                .iter()
-                .filter(|d| tree.unread_at(&d.name) && !now.iter().any(|n| n.guid == d.guid))
-                .cloned()
-                .collect(),
-            _ => Vec::new(),
-        };
-        if !tree.unread.is_empty() {
-            let more = tree.errors.len().saturating_sub(3);
-            events.push(Event {
-                txg: c.ub.txg,
-                time: Some(c.ub.timestamp),
-                kind: Kind::Unreadable,
-                object: None,
-                guid: 0,
-                details: format!(
-                    "part of the dataset tree could not be read at this transaction group ({}{}); {} dataset(s) and snapshot(s) there before are taken as unchanged",
-                    tree.errors.iter().take(3).cloned().collect::<Vec<_>>().join("; "),
-                    if more > 0 {
-                        format!("; and {more} more")
-                    } else {
-                        String::new()
-                    },
-                    carried.len()
-                ),
-                last_seen_txg: None,
-            });
-        }
-        now.extend(carried);
-        if let Some(p) = pending {
-            events.push(Event {
-                txg: c.ub.txg,
-                time: Some(c.ub.timestamp),
-                kind: Kind::Pending,
-                object: None,
-                guid: 0,
-                details: format!(
-                    "{} byte(s) not yet freed: {} in the pool's free list ({} block pointer(s)), {} in {} deadlist(s){}{}",
-                    p.total(),
-                    p.free_bpobj_bytes,
-                    p.free_bpobj_blkptrs,
-                    p.deadlist_bytes,
-                    p.deadlists,
-                    if p.unreadable > 0 {
-                        format!(", {} unreadable", p.unreadable)
-                    } else {
-                        String::new()
-                    },
-                    // The deadlists' own objects come to the same total
-                    // when this reader has them right; saying so is how
-                    // anyone can tell the number is not invented. At any
-                    // TXG but the newest some of those objects may have
-                    // been reused since, and a header that could not be
-                    // checked is said to be that, not contradicted.
-                    if p.inconsistent > 0 {
-                        format!(
-                            "; {} deadlist(s) disagree with their own objects ({} byte(s) there)",
-                            p.inconsistent, p.bpobj_bytes
-                        )
-                    } else if p.unverified > 0 {
-                        format!(
-                            "; {} deadlist(s) unverified, their objects unreadable at this TXG; the other(s)' own objects agree ({})",
-                            p.unverified, p.bpobj_bytes
-                        )
-                    } else {
-                        format!("; the deadlists' own objects agree ({})", p.bpobj_bytes)
-                    }
-                ),
-                last_seen_txg: None,
-            });
-        }
-        match &previous {
-            None => {
-                // The oldest readable TXG is the baseline: everything in
-                // it was created at or before it, which the creation TXG
-                // of each dataset already says.
-                for d in &now {
-                    // The dataset records when it was made, which can be
-                    // older than anything still readable. Say so, rather
-                    // than dating it to the transaction group it happened
-                    // to be found in.
-                    let mut details = crate::events::describe(d);
-                    if d.creation_txg < c.ub.txg {
-                        if !details.is_empty() {
-                            details.push_str(", ");
-                        }
-                        details.push_str(&format!(
-                            "already there at the oldest readable txg {}",
-                            c.ub.txg
-                        ));
-                    }
-                    events.push(Event {
-                        txg: d.creation_txg.min(c.ub.txg),
-                        time: (d.creation_time != 0).then_some(d.creation_time),
-                        kind: crate::events::appeared_as(d),
-                        object: Some(d.name.clone()),
-                        guid: d.guid,
-                        details,
-                        last_seen_txg: None,
-                    });
-                }
-            }
-            Some((prev_txg, before)) => {
-                let mut diffed = crate::events::diff(before, &now, c.ub.txg, Some(c.ub.timestamp));
-                for e in &mut diffed {
-                    if matches!(e.kind, Kind::Destroyed | Kind::SnapshotDestroyed) {
-                        e.last_seen_txg = Some(*prev_txg);
-                    }
-                }
-                events.extend(diffed);
-            }
-        }
-        for d in &now {
-            what.insert(d.guid, (d.kind, d.encryption.is_some()));
-        }
-        previous = Some((c.ub.txg, now));
+        let read = datasets_at(&reader, c, &pool.name, opts.pending);
+        history.step(c.ub.txg, c.ub.timestamp, read);
     }
+    let History {
+        mut events,
+        unreadable,
+        partial,
+        what,
+        ..
+    } = history;
 
     // Hosts that had the pool imported, from the labels (T-06).
     for (hostid, hostname) in &pool.hosts {
@@ -425,6 +502,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         members: members.paths.clone(),
         txgs: candidates.iter().map(|c| c.ub.txg).collect(),
         unreadable_txgs: unreadable,
+        partial_txgs: partial,
         dataset: opts.dataset.clone(),
         events: events
             .iter()
@@ -518,7 +596,8 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         0
     };
     // The report is the only thing this tool writes; record it with the
-    // hash of what actually landed on disk.
+    // hash of what actually landed on disk — a file, read back; a pipe
+    // or a terminal is not read back, and the report is in the record.
     let written = match &opts.output {
         Some(path) => evidence::FileRef::hashed(path)
             .map(|f| vec![f])
@@ -536,6 +615,130 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         written,
         &members.ledger.incidents(),
     )
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+    use crate::events::tests::ds;
+    use zfs_read::dsl::{DatasetTree, Unread};
+
+    fn made(name: &str, guid: u64, txg: u64) -> Dataset {
+        Dataset {
+            creation_txg: txg,
+            ..ds(name, guid, name.contains('@'))
+        }
+    }
+
+    fn tree(datasets: Vec<Dataset>, unread: &[&str]) -> DatasetTree {
+        DatasetTree {
+            pool_name: "tank".into(),
+            datasets,
+            errors: unread.iter().map(|u| format!("{u}: unreadable")).collect(),
+            unread: unread
+                .iter()
+                .map(|u| (u.to_string(), Unread::All))
+                .collect(),
+        }
+    }
+
+    fn line(h: &History, kind: Kind, object: &str) -> Event {
+        h.events
+            .iter()
+            .find(|e| e.kind == kind && e.object.as_deref() == Some(object))
+            .unwrap_or_else(|| panic!("no {kind:?} of {object}: {:#?}", h.events))
+            .clone()
+    }
+
+    /// The oldest TXG read in part: what lies where it did not read is
+    /// there when the next one reads it, made long before. It was
+    /// "created" at the next TXG, and its snapshots with it; it is dated
+    /// by when it was made, and said.
+    #[test]
+    fn what_the_oldest_txg_did_not_read_was_not_created_after_it() {
+        let mut h = History::default();
+        let tank = made("tank", 1, 1);
+        let temp = made("tank/temp", 2, 40);
+        let snap = made("tank/temp@s", 3, 45);
+        h.step(
+            100,
+            1000,
+            Ok((tree(vec![tank.clone()], &["tank/temp"]), None)),
+        );
+        h.step(
+            101,
+            1001,
+            Ok((tree(vec![tank.clone(), temp, snap], &[]), None)),
+        );
+        // One made between the two is created at the second, as before.
+        h.step(
+            102,
+            1002,
+            Ok((tree(vec![tank, made("tank/new", 4, 102)], &[]), None)),
+        );
+        let e = line(&h, Kind::Created, "tank/temp");
+        assert_eq!(e.txg, 40);
+        assert!(
+            e.details
+                .contains("already there at txg 100, where it was not read"),
+            "{e:?}"
+        );
+        assert_eq!(line(&h, Kind::Snapshot, "tank/temp@s").txg, 45);
+        let new = line(&h, Kind::Created, "tank/new");
+        assert_eq!((new.txg, new.details.as_str()), (102, ""));
+        assert_eq!(h.partial, [100]);
+    }
+
+    /// Carried over a TXG that did not read its part of the tree, a
+    /// dataset destroyed after it was last seen at the TXG before: its
+    /// recovery at the carried one would not read it.
+    #[test]
+    fn a_dataset_carried_over_is_not_seen_where_it_was_carried() {
+        let mut h = History::default();
+        let tank = made("tank", 1, 1);
+        let temp = made("tank/temp", 2, 40);
+        h.step(642, 1, Ok((tree(vec![tank.clone(), temp], &[]), None)));
+        h.step(643, 2, Ok((tree(vec![tank.clone()], &["tank/temp"]), None)));
+        h.step(644, 3, Ok((tree(vec![tank], &[]), None)));
+        let e = line(&h, Kind::Destroyed, "tank/temp");
+        assert_eq!((e.txg, e.last_seen_txg), (644, Some(642)));
+        assert_eq!(h.partial, [643]);
+    }
+
+    /// A TXG that cannot be walked says why; one read in part says its
+    /// pending space is a floor.
+    #[test]
+    fn what_could_not_be_read_is_said() {
+        let mut h = History::default();
+        h.step(10, 1, Err("the MOS: every copy failed its checksum".into()));
+        h.step(
+            11,
+            2,
+            Ok((
+                tree(vec![made("tank", 1, 1)], &["tank/x"]),
+                Some(Pending::default()),
+            )),
+        );
+        assert_eq!(h.unreadable, [10]);
+        let walked = h.events.iter().find(|e| e.txg == 10).expect("an event");
+        assert!(
+            walked
+                .details
+                .ends_with(": the MOS: every copy failed its checksum"),
+            "{walked:?}"
+        );
+        let pending = h
+            .events
+            .iter()
+            .find(|e| e.kind == Kind::Pending)
+            .expect("pending");
+        assert!(
+            pending
+                .details
+                .contains("; at least: part of the dataset tree"),
+            "{pending:?}"
+        );
+    }
 }
 
 #[cfg(test)]
