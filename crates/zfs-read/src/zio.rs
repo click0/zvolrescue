@@ -428,19 +428,70 @@ fn more_telling(so_far: ReadError, next: ReadError) -> ReadError {
     }
 }
 
-/// The leaves a copy is read whole from: a disk, or every side of a
-/// mirror (nested mirrors flattened). `None` for a vdev whose members
-/// hold rows rather than copies.
-fn leaves_of(node: &Node) -> Option<Vec<Option<usize>>> {
-    match node {
-        Node::Leaf { device, .. } => Some(vec![*device]),
-        Node::Mirror { children } => children
-            .iter()
-            .map(leaves_of)
-            .collect::<Option<Vec<_>>>()
-            .map(|v| v.into_iter().flatten().collect()),
-        _ => None,
+/// `ranges` with `[from, to)` taken out of them.
+fn cut(ranges: &[(u64, u64)], from: u64, to: u64) -> Vec<(u64, u64)> {
+    let mut out = Vec::with_capacity(ranges.len());
+    for &(s, l) in ranges {
+        let e = s.saturating_add(l);
+        if e <= from || s >= to {
+            out.push((s, l));
+            continue;
+        }
+        if s < from {
+            out.push((s, from - s));
+        }
+        if e > to {
+            out.push((to, e - to));
+        }
     }
+    out
+}
+
+/// Sorted ranges with the adjacent and overlapping ones joined.
+fn merge_ranges(mut ranges: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
+    ranges.sort_unstable();
+    let mut out: Vec<(u64, u64)> = Vec::with_capacity(ranges.len());
+    for (s, l) in ranges {
+        match out.last_mut() {
+            Some((ps, pl)) if *ps + *pl >= s => *pl = (*pl).max(s + l - *ps),
+            _ => out.push((s, l)),
+        }
+    }
+    out
+}
+
+/// Lay `from` under `into`: every byte `into` lost and `from` has is
+/// taken from `from`, and what is still lost is what both lost.
+fn fill_from(into: &mut Salvage, from: &Salvage) {
+    let (data, bad) = into;
+    let (other, other_bad) = from;
+    let mut left = Vec::new();
+    for &(s, l) in bad.iter() {
+        let end = (s + l).min(data.len() as u64).min(other.len() as u64);
+        let mut pos = s;
+        for &(os, ol) in other_bad.iter() {
+            let oe = os + ol;
+            if oe <= pos {
+                continue;
+            }
+            if os >= end {
+                break;
+            }
+            if os > pos {
+                data[pos as usize..os as usize].copy_from_slice(&other[pos as usize..os as usize]);
+            }
+            let held = oe.min(end);
+            left.push((os.max(pos), held - os.max(pos)));
+            pos = held;
+        }
+        if pos < end {
+            data[pos as usize..end as usize].copy_from_slice(&other[pos as usize..end as usize]);
+        }
+        if end < s + l {
+            left.push((end.max(s), s + l - end.max(s)));
+        }
+    }
+    *bad = merge_ranges(left);
 }
 
 impl<'a> PoolReader<'a> {
@@ -757,14 +808,22 @@ impl<'a> PoolReader<'a> {
             .flatten()
             .ok_or(ReadError::NoMember)?;
         let base = self.bases.get(index).copied().unwrap_or(0);
+        let at = base + LABEL_START_SIZE + offset;
+        let cached = self.cache.borrow().get(index, at, size);
+        if cached.is_none() && dev.kind() == zvolrescue_io::medium::Kind::Device {
+            // A device was asked for this block once already, by the read
+            // that failed; it is not asked again (N-10).
+            return Err(ReadError::Unsupported(
+                "a device is not asked for a block twice".into(),
+            ));
+        }
         if let Some(n) = self.reads.borrow_mut().get_mut(index) {
             *n += 1;
         }
         if let Some(stop) = self.medium_stop() {
             return Err(stop);
         }
-        let at = base + LABEL_START_SIZE + offset;
-        if let Some(hit) = self.cache.borrow().get(index, at, size) {
+        if let Some(hit) = cached {
             return Ok((hit, Vec::new()));
         }
         let mut buf = vec![0u8; size];
@@ -855,17 +914,21 @@ impl<'a> PoolReader<'a> {
         Err(last)
     }
 
-    /// What is left of one DVA on a member with bad sectors (SPEC F-33):
-    /// the `psize` bytes behind it read around every sector the device
-    /// refuses, with those sectors zeroed and named as ranges relative
-    /// to the block's start.
+    /// What is left of one DVA on members with bad sectors (SPEC F-33):
+    /// the `psize` bytes behind it read around every sector a member
+    /// refuses, with the sectors no member gives zeroed and named as
+    /// ranges relative to the block's start.
     ///
-    /// Only for a DVA on a plain disk or a mirror, where a copy is the
-    /// bytes themselves: under raidz or dRAID a column is data or parity
-    /// of a whole row and a partial column is reconstructed, not kept.
-    /// Of a mirror's sides the one with the fewest bytes lost is
-    /// returned. What comes back is unverified — the checksum covers the
-    /// whole block, and part of it is gone — and the caller says so.
+    /// The sides of a mirror fill each other: a sector one side refused
+    /// is taken from a side that read it. Under raidz or dRAID a refused
+    /// sector of a column is rebuilt from the same sector of the other
+    /// columns and the parity, wherever they hold it. Before, the mirror
+    /// side that lost least was kept with its holes, though the other
+    /// side had them, and a raidz block was not salvaged at all: a
+    /// column with one refused sector was lost whole, two such columns
+    /// on a raidz1 lost the block, and every sector was zeros. What
+    /// comes back is unverified — the caller checks the checksum when
+    /// nothing is missing, and says so when something is.
     pub fn salvage_dva(&self, dva: &Dva, psize: usize) -> Result<Salvage, ReadError> {
         if dva.gang {
             return Err(ReadError::Gang("a gang block is not salvaged".into()));
@@ -879,32 +942,211 @@ impl<'a> PoolReader<'a> {
             }
             None => return Err(ReadError::UnknownVdev(dva.vdev)),
         };
-        let leaves = leaves_of(node).ok_or_else(|| {
-            ReadError::Unsupported(format!(
-                "salvage under {}: parity reconstruction is whole-block",
-                node.describe()
-            ))
-        })?;
-        let mut best: Option<Salvage> = None;
-        let mut last = ReadError::NoMember;
-        for device in leaves {
-            match self.salvage_leaf(device, dva.offset, psize) {
-                Ok((data, bad)) => {
-                    let lost: u64 = bad.iter().map(|&(_, l)| l).sum();
-                    let better = best
-                        .as_ref()
-                        .is_none_or(|(_, b)| lost < b.iter().map(|&(_, l)| l).sum::<u64>());
-                    if better {
-                        best = Some((data, bad));
-                    }
-                    if lost == 0 {
-                        break;
-                    }
+        match node {
+            Node::Raidz { .. } | Node::Draid { .. } => {
+                self.salvage_striped(node, dva.offset, psize)
+            }
+            _ => self.salvage_node(node, dva.offset, psize, None, &[], 0),
+        }
+    }
+
+    /// Every copy of `bp` salvaged and laid over each other
+    /// ([`salvage_dva`](Self::salvage_dva)): a sector one copy lost is
+    /// taken from a copy that has it. The error is the first copy's.
+    pub fn salvage_copies(&self, bp: &BlkPtr) -> Result<Salvage, ReadError> {
+        let psize = bp.psize as usize;
+        let mut got: Option<Salvage> = None;
+        let mut first: Option<ReadError> = None;
+        for dva in bp.dvas() {
+            if got.as_ref().is_some_and(|(_, bad)| bad.is_empty()) {
+                break;
+            }
+            match self.salvage_dva(dva, psize) {
+                Ok(s) => match got.as_mut() {
+                    Some(g) => fill_from(g, &s),
+                    None => got = Some(s),
+                },
+                Err(e) => {
+                    first.get_or_insert(e);
                 }
-                Err(e) => last = e,
             }
         }
-        best.ok_or(last)
+        got.ok_or_else(|| first.unwrap_or(ReadError::NoMember))
+    }
+
+    /// `size` bytes at `offset` under a disk, a mirror, or a child of a
+    /// raidz or dRAID (`cfg` and `children` for its distributed spares),
+    /// read around refused sectors, each side of a mirror filling what
+    /// the sides before it refused.
+    fn salvage_node(
+        &self,
+        node: &Node,
+        offset: u64,
+        size: usize,
+        cfg: Option<&draid::Config>,
+        children: &[Node],
+        hops: usize,
+    ) -> Result<Salvage, ReadError> {
+        if hops > children.len() {
+            return Err(ReadError::Unsupported(
+                "distributed spare chain loops".into(),
+            ));
+        }
+        match node {
+            Node::Leaf { device, .. } => self.salvage_leaf(*device, offset, size),
+            Node::Mirror { children: sides } => {
+                let mut got: Option<Salvage> = None;
+                let mut last = ReadError::NoMember;
+                for side in sides {
+                    if got.as_ref().is_some_and(|(_, bad)| bad.is_empty()) {
+                        break;
+                    }
+                    match self.salvage_node(side, offset, size, cfg, children, hops) {
+                        Ok(s) => match got.as_mut() {
+                            Some(g) => fill_from(g, &s),
+                            None => got = Some(s),
+                        },
+                        Err(e) => last = more_telling(last, e),
+                    }
+                }
+                got.ok_or(last)
+            }
+            Node::Dspare { spare_id } => {
+                let cfg = cfg.ok_or_else(|| {
+                    ReadError::Unsupported("distributed spare read outside its dRAID".into())
+                })?;
+                let target = cfg.spare_child(*spare_id, offset).ok_or_else(|| {
+                    ReadError::Unsupported(format!(
+                        "distributed spare {spare_id} of a dRAID with {} spare(s)",
+                        cfg.nspares
+                    ))
+                })?;
+                let next = children
+                    .get(target as usize)
+                    .ok_or(ReadError::UnknownVdev(target as u32))?;
+                self.salvage_node(next, offset, size, Some(cfg), children, hops + 1)
+            }
+            other => Err(ReadError::Unsupported(format!(
+                "salvage under {}",
+                other.describe()
+            ))),
+        }
+    }
+
+    /// [`salvage_dva`](Self::salvage_dva) under a raidz or dRAID: every
+    /// column of every row read around what its member refuses, then
+    /// each [`SALVAGE_SECTOR`](zvolrescue_io::SALVAGE_SECTOR) of a row
+    /// whose data columns lost no more of it than the parity columns
+    /// kept rebuilt from them. Only a block some member refused in
+    /// sectors is salvaged: one that lost whole columns, and nothing
+    /// else, is what the read already said it was.
+    fn salvage_striped(&self, node: &Node, offset: u64, size: usize) -> Result<Salvage, ReadError> {
+        let (children, cfg, maps) = match node {
+            Node::Raidz {
+                nparity,
+                ashift,
+                children,
+            } => {
+                let unit = 1u64 << ashift;
+                let padded = (size as u64).div_ceil(unit) * unit;
+                let m = raidz::map(offset, padded, *ashift, children.len() as u64, *nparity);
+                (children.as_slice(), None, vec![m])
+            }
+            Node::Draid {
+                cfg,
+                ashift,
+                children,
+            } => {
+                let unit = 1u64 << ashift;
+                let padded = (size as u64).div_ceil(unit) * unit;
+                (
+                    children.as_slice(),
+                    Some(cfg.as_ref()),
+                    cfg.map(offset, padded, *ashift),
+                )
+            }
+            _ => return Err(ReadError::Unsupported("not a raidz or dRAID".into())),
+        };
+        let sector = zvolrescue_io::SALVAGE_SECTOR as usize;
+        let mut refused = false;
+        let mut column = |c: &raidz::Column| -> Salvage {
+            let n = c.size as usize;
+            if n == 0 {
+                return (Vec::new(), Vec::new());
+            }
+            let got = children
+                .get(c.devidx as usize)
+                .ok_or(ReadError::UnknownVdev(c.devidx as u32))
+                .and_then(|child| self.salvage_node(child, c.offset, n, cfg, children, 0));
+            match got {
+                Ok(s) => {
+                    refused |= !s.1.is_empty();
+                    s
+                }
+                Err(e) => {
+                    trace!("raidz", "    salvage: column dev{}: {e}", c.devidx);
+                    (vec![0u8; n], vec![(0, n as u64)])
+                }
+            }
+        };
+        let mut out: Vec<u8> = Vec::with_capacity(size);
+        let mut bad: Vec<(u64, u64)> = Vec::new();
+        for m in &maps {
+            let parity: Vec<Salvage> = m.parity().iter().map(&mut column).collect();
+            let mut data: Vec<Salvage> = m.data().iter().map(&mut column).collect();
+            let len = data.iter().map(|d| d.0.len()).max().unwrap_or(0);
+            let touches = |s: &Salvage, from: usize, to: usize| {
+                s.1.iter()
+                    .any(|&(b, l)| (b as usize) < to && (b + l) as usize > from)
+            };
+            for from in (0..len).step_by(sector) {
+                let to = (from + sector).min(len);
+                let lost: Vec<usize> = (0..data.len())
+                    .filter(|&i| from < data[i].0.len() && touches(&data[i], from, to))
+                    .collect();
+                if lost.is_empty() {
+                    continue;
+                }
+                let usable: Vec<Option<Vec<u8>>> = parity
+                    .iter()
+                    .map(|p| {
+                        (!touches(p, from, to) && p.0.len() >= to).then(|| p.0[from..to].to_vec())
+                    })
+                    .collect();
+                if lost.len() > usable.iter().filter(|p| p.is_some()).count() {
+                    continue;
+                }
+                let mut piece: Vec<Vec<u8>> = data
+                    .iter()
+                    .map(|d| d.0[from.min(d.0.len())..to.min(d.0.len())].to_vec())
+                    .collect();
+                if raidz::reconstruct(&mut piece, &usable, &lost).is_err() {
+                    continue;
+                }
+                for &i in &lost {
+                    let end = from + piece[i].len();
+                    data[i].0[from..end].copy_from_slice(&piece[i]);
+                    data[i].1 = cut(&data[i].1, from as u64, end as u64);
+                }
+                trace!(
+                    "raidz",
+                    "    salvage: bytes {from}..{to} of data column(s) {lost:?} rebuilt from parity"
+                );
+            }
+            for (bytes, holes) in data {
+                let base = out.len() as u64;
+                out.extend_from_slice(&bytes);
+                bad.extend(holes.iter().map(|&(s, l)| (base + s, l)));
+            }
+        }
+        if !refused {
+            return Err(ReadError::Unrecoverable(
+                "no member refused a sector of it: the columns it lost are lost whole".into(),
+            ));
+        }
+        out.truncate(size);
+        let bad = cut(&bad, size as u64, u64::MAX);
+        Ok((out, merge_ranges(bad)))
     }
 
     /// Read the columns of one raidz stripe: parity (None when unreadable),
@@ -952,35 +1194,66 @@ impl<'a> PoolReader<'a> {
             // it keeps its place in the parity equations.
             return Ok(Vec::new());
         }
-        let mut devidx = c.devidx;
-        for _ in 0..children.len() {
-            let child = children
-                .get(devidx as usize)
-                .ok_or(ReadError::UnknownVdev(devidx as u32))?;
-            match (child, cfg) {
-                (Node::Dspare { spare_id }, Some(cfg)) => {
-                    let Some(target) = cfg.spare_child(*spare_id, c.offset) else {
-                        return Err(ReadError::Unsupported(format!(
-                            "distributed spare {spare_id} of a dRAID with {} spare(s)",
-                            cfg.nspares
-                        )));
-                    };
-                    trace!(
-                        "draid",
-                        "    dspare#{spare_id} at {:#x} -> child {target}",
-                        c.offset
-                    );
-                    devidx = target;
-                }
-                (Node::Dspare { .. }, None) => {
-                    return Err(ReadError::Unsupported("dspare outside dRAID".into()))
-                }
-                _ => return self.read_first(child, c.offset, c.size as usize),
-            }
+        let child = children
+            .get(c.devidx as usize)
+            .ok_or(ReadError::UnknownVdev(c.devidx as u32))?;
+        self.read_raid_child(child, c, children, cfg, 0)
+    }
+
+    /// One child of a raidz or dRAID at a column. A distributed spare is
+    /// read from the child the dRAID's permutation gives it at that
+    /// offset; a `spare` or `replacing` vdev over one — the shape OpenZFS
+    /// leaves when it puts a distributed spare in for a failed disk —
+    /// through whichever side answers. That shape was read as a mirror
+    /// of an ordinary disk and of "a distributed spare outside its
+    /// dRAID": with the failed disk gone, its column was lost on every
+    /// row, and a pool `zdb` reads whole was called unreadable.
+    fn read_raid_child(
+        &self,
+        child: &Node,
+        c: &raidz::Column,
+        children: &[Node],
+        cfg: Option<&draid::Config>,
+        hops: usize,
+    ) -> Result<Vec<u8>, ReadError> {
+        if hops > children.len() {
+            return Err(ReadError::Unsupported(
+                "distributed spare chain loops".into(),
+            ));
         }
-        Err(ReadError::Unsupported(
-            "distributed spare chain loops".into(),
-        ))
+        match (child, cfg) {
+            (Node::Dspare { spare_id }, Some(cfg)) => {
+                let Some(target) = cfg.spare_child(*spare_id, c.offset) else {
+                    return Err(ReadError::Unsupported(format!(
+                        "distributed spare {spare_id} of a dRAID with {} spare(s)",
+                        cfg.nspares
+                    )));
+                };
+                trace!(
+                    "draid",
+                    "    dspare#{spare_id} at {:#x} -> child {target}",
+                    c.offset
+                );
+                let next = children
+                    .get(target as usize)
+                    .ok_or(ReadError::UnknownVdev(target as u32))?;
+                self.read_raid_child(next, c, children, Some(cfg), hops + 1)
+            }
+            (Node::Dspare { .. }, None) => {
+                Err(ReadError::Unsupported("dspare outside dRAID".into()))
+            }
+            (Node::Mirror { children: sides }, Some(_)) => {
+                let mut last = ReadError::NoMember;
+                for side in sides {
+                    match self.read_raid_child(side, c, children, cfg, hops + 1) {
+                        Ok(b) => return Ok(b),
+                        Err(e) => last = more_telling(last, e),
+                    }
+                }
+                Err(last)
+            }
+            _ => self.read_first(child, c.offset, c.size as usize),
+        }
     }
 
     /// Read the data columns of one row. The parity columns are left
@@ -1114,8 +1387,13 @@ impl<'a> PoolReader<'a> {
             if any_lost { " + reconstruction" } else { "" }
         );
         record(attempts, Ok(v));
-        if v != Verify::Mismatch {
-            return Ok((raw, v));
+        match v {
+            Verify::Ok | Verify::NotChecked => return Ok((raw, v)),
+            // Nothing tells a good column from a bad one: refused, as a
+            // disk or a mirror refuses it. Taken as read it was written
+            // and counted as verified, and no parity was tried.
+            Verify::Unsupported => return Err(ReadError::ChecksumUnsupported),
+            Verify::Mismatch => {}
         }
         // Combinatorial reconstruction, one row at a time (the other rows
         // are kept as read). Now the parity is needed.
@@ -1189,7 +1467,7 @@ impl<'a> PoolReader<'a> {
                     }
                     raw.truncate(psize);
                     let v = self.verify(bp, &raw);
-                    if v != Verify::Mismatch {
+                    if matches!(v, Verify::Ok | Verify::NotChecked) {
                         trace!(
                             "raidz",
                             "    combinatorial reconstruction succeeded (row {r}): data columns {missing:?} rebuilt, parity rows {bad_parity:?} distrusted"
@@ -2024,6 +2302,258 @@ mod tests {
             devices: (0..width).collect(),
             stale: vec![],
         }
+    }
+
+    /// A raidz block whose checksum cannot be computed (BLAKE3 with no
+    /// salt known) is refused, as a disk or a mirror refuses it, damaged
+    /// column or not. It was taken as read: the damaged column written,
+    /// counted as verified, and no parity tried.
+    #[test]
+    fn a_raidz_block_nothing_can_verify_is_refused() {
+        let a = striped_by_hand("raidz", 3, 1, None);
+        let data: Vec<u8> = (0..1024u32).map(|i| (i * 13 % 251) as u8).collect();
+        let offset = 0x2_0000u64;
+        let m = raidz::map(offset, data.len() as u64, 9, 3, 1);
+        let mut at = 0usize;
+        let cols: Vec<Vec<u8>> = m
+            .data()
+            .iter()
+            .map(|c| {
+                let col = data[at..at + c.size as usize].to_vec();
+                at += c.size as usize;
+                col
+            })
+            .collect();
+        let parity = raidz::generate_parity(&cols, 1);
+        let placed: Vec<(raidz::Column, Vec<u8>)> = m
+            .parity()
+            .iter()
+            .cloned()
+            .zip(parity)
+            .chain(m.data().iter().cloned().zip(cols))
+            .collect();
+        let raw = Builder::new()
+            .dva(0, 0, offset, data.len() as u64 * 2, false)
+            .sizes(data.len() as u64, data.len() as u64)
+            .props(2, 14, ot::ZVOL, 0)
+            .births(0, 100, 1)
+            .cksum([1, 2, 3, 4])
+            .bytes(Endian::Little);
+        let bp = BlkPtr::parse(&raw, Endian::Little).unwrap();
+        for damaged in [None, Some(m.data()[0].devidx)] {
+            let mut images = vec![vec![0u8; 5 << 20]; 3];
+            for (c, bytes) in &placed {
+                let mut bytes = bytes.clone();
+                if Some(c.devidx) == damaged {
+                    bytes.iter_mut().for_each(|b| *b ^= 0xff);
+                }
+                crate::fixture::write_at_dva(&mut images[c.devidx as usize], c.offset, &bytes);
+            }
+            let sources: Vec<MemSource> = images.into_iter().map(MemSource::new).collect();
+            let devs: Vec<Option<&dyn BlockSource>> = sources
+                .iter()
+                .map(|s| Some(s as &dyn BlockSource))
+                .collect();
+            let reader = PoolReader::new(&a, devs);
+            assert!(
+                matches!(
+                    reader.read_block(&bp, false),
+                    Err(ReadError::ChecksumUnsupported)
+                ),
+                "damaged column {damaged:?}"
+            );
+        }
+    }
+
+    /// Two data columns of a raidz1 block, each with one sector the
+    /// imager's map refuses: lost whole, the block was past its parity
+    /// and every byte zeros. Sector by sector each refused piece is the
+    /// only one lost in its stripe, and parity rebuilds the block whole.
+    /// Where both columns lost the same sector, only that sector is lost.
+    #[test]
+    fn refused_sectors_of_raidz_columns_are_rebuilt_sector_by_sector() {
+        use zvolrescue_io::FlakySource;
+        let a = striped_by_hand("raidz", 3, 1, None);
+        let data: Vec<u8> = (0..4096u32).map(|i| (i * 31 % 253) as u8).collect();
+        let offset = 0x2_0000u64;
+        let m = raidz::map(offset, data.len() as u64, 9, 3, 1);
+        let mut at = 0usize;
+        let cols: Vec<Vec<u8>> = m
+            .data()
+            .iter()
+            .map(|c| {
+                let col = data[at..at + c.size as usize].to_vec();
+                at += c.size as usize;
+                col
+            })
+            .collect();
+        let parity = raidz::generate_parity(&cols, 1);
+        let mut images = vec![vec![0u8; 5 << 20]; 3];
+        for (c, bytes) in m
+            .parity()
+            .iter()
+            .zip(parity.iter())
+            .chain(m.data().iter().zip(cols.iter()))
+        {
+            crate::fixture::write_at_dva(&mut images[c.devidx as usize], c.offset, bytes);
+        }
+        let raw = Builder::new()
+            .dva(0, 0, offset, data.len() as u64 * 3 / 2, false)
+            .sizes(data.len() as u64, data.len() as u64)
+            .props(2, 7, ot::ZVOL, 0)
+            .births(0, 100, 1)
+            .cksum(zfs_ondisk::checksum::fletcher4(&data, Endian::Little))
+            .bytes(Endian::Little);
+        let bp = BlkPtr::parse(&raw, Endian::Little).unwrap();
+        let (d0, d1) = (&m.data()[0], &m.data()[1]);
+        let sector_of = |c: &raidz::Column, k: u64| (LABEL_START_SIZE + c.offset + k * 512, 512);
+        let run = |bad0: u64, bad1: u64| {
+            let mut refused = vec![Vec::new(); 3];
+            refused[d0.devidx as usize].push(sector_of(d0, bad0));
+            refused[d1.devidx as usize].push(sector_of(d1, bad1));
+            let sources: Vec<FlakySource<MemSource>> = images
+                .iter()
+                .zip(refused)
+                .map(|(img, bad)| FlakySource::new(MemSource::new(img.clone()), bad))
+                .collect();
+            let devs: Vec<Option<&dyn BlockSource>> = sources
+                .iter()
+                .map(|s| Some(s as &dyn BlockSource))
+                .collect();
+            let reader = PoolReader::new(&a, devs);
+            assert!(reader.read_block(&bp, false).is_err(), "two columns lost");
+            reader.salvage_copies(&bp).unwrap()
+        };
+        let (whole, bad) = run(0, 1);
+        assert!(bad.is_empty(), "{bad:?}");
+        assert_eq!(whole, data);
+        let (part, bad) = run(1, 1);
+        assert_eq!(bad, vec![(512, 512), (d0.size + 512, 512)]);
+        let mut expected = data.clone();
+        expected[512..1024].fill(0);
+        let second = d0.size as usize + 512;
+        expected[second..second + 512].fill(0);
+        assert_eq!(part, expected);
+    }
+
+    /// The pieces of ranges: what one copy lost and another has is
+    /// filled from it, and only what both lost stays lost.
+    #[test]
+    fn copies_fill_each_others_refused_ranges() {
+        let mut a: Salvage = (vec![1u8; 4096], vec![(0, 1024), (2048, 1024)]);
+        let b: Salvage = (vec![2u8; 4096], vec![(512, 1024), (3584, 512)]);
+        fill_from(&mut a, &b);
+        assert_eq!(a.1, vec![(512, 512)]);
+        assert!(a.0[..512].iter().all(|&x| x == 2));
+        assert!(a.0[1024..2048].iter().all(|&x| x == 1));
+        assert!(a.0[2048..3072].iter().all(|&x| x == 2));
+        assert!(a.0[3072..].iter().all(|&x| x == 1));
+        assert_eq!(cut(&[(0, 100)], 10, 20), vec![(0, 10), (20, 80)]);
+        assert_eq!(
+            merge_ranges(vec![(10, 5), (0, 10), (30, 1)]),
+            vec![(0, 15), (30, 1)]
+        );
+    }
+
+    /// A dRAID child OpenZFS replaced with a distributed spare — the
+    /// child becomes `spare{failed disk, draid1-0-0}` — is read from where
+    /// the spare put its columns, with the failed disk gone. It was read
+    /// as a mirror of a missing disk and of "a distributed spare outside
+    /// its dRAID", and the pool was called unreadable.
+    #[test]
+    fn a_distributed_spare_under_a_spare_vdev_is_read() {
+        use zfs_ondisk::label::VdevNode;
+        let leaf = |i: u64| VdevNode {
+            kind: "file".into(),
+            id: i,
+            guid: i + 1,
+            ..VdevNode::default()
+        };
+        let mut children: Vec<VdevNode> = (0..5).map(leaf).collect();
+        children.push(VdevNode {
+            kind: "spare".into(),
+            id: 5,
+            guid: 50,
+            children: vec![
+                leaf(5),
+                VdevNode {
+                    kind: "dspare".into(),
+                    id: 1,
+                    guid: 70,
+                    path: Some("draid1-0-0".into()),
+                    ..VdevNode::default()
+                },
+            ],
+            ..VdevNode::default()
+        });
+        let tree = VdevNode {
+            kind: "draid".into(),
+            guid: 999,
+            nparity: Some(1),
+            ashift: Some(9),
+            draid_ndata: Some(4),
+            draid_nspares: Some(1),
+            draid_ngroups: Some(1),
+            children,
+            ..VdevNode::default()
+        };
+        let mut a = striped_by_hand("draid", 6, 1, Some(4));
+        a.tops[0].tree = tree;
+        a.tops[0].members[5].present = None;
+        a.devices = (0..5).collect();
+        assert!(a.readable(), "the spare stands in for the failed disk");
+
+        // The block's columns where OpenZFS writes them: a column of the
+        // replaced child on the child the spare's permutation names.
+        let cfg = draid::Config::new(4, 1, 1, 6, 1).unwrap();
+        let data: Vec<u8> = (0..8192u32).map(|i| (i * 7 % 251) as u8).collect();
+        let offset = 0x10_0000u64;
+        let mut images = vec![vec![0u8; 8 << 20]; 5];
+        let mut at = 0usize;
+        let mut spared = 0;
+        for m in cfg.map(offset, data.len() as u64, 9) {
+            let cols: Vec<Vec<u8>> = m
+                .data()
+                .iter()
+                .map(|c| {
+                    let n = c.size as usize;
+                    let col = data[at..at + n].to_vec();
+                    at += n;
+                    col
+                })
+                .collect();
+            let parity = raidz::generate_parity(&cols, 1);
+            let placed = m
+                .parity()
+                .iter()
+                .zip(parity.iter())
+                .chain(m.data().iter().zip(cols.iter()));
+            for (c, bytes) in placed {
+                let mut dev = c.devidx;
+                if dev == 5 {
+                    dev = cfg.spare_child(0, c.offset).expect("a spare slice");
+                    spared += 1;
+                }
+                crate::fixture::write_at_dva(&mut images[dev as usize], c.offset, bytes);
+            }
+        }
+        assert_eq!(at, data.len());
+        assert!(spared > 0, "the block has a column on the replaced child");
+        let sources: Vec<MemSource> = images.into_iter().map(MemSource::new).collect();
+        let devs: Vec<Option<&dyn BlockSource>> = sources
+            .iter()
+            .map(|s| Some(s as &dyn BlockSource))
+            .collect();
+        let reader = PoolReader::new(&a, devs);
+        let raw = Builder::new()
+            .dva(0, 0, offset, data.len() as u64 * 2, false)
+            .sizes(data.len() as u64, data.len() as u64)
+            .props(2, 7, ot::ZVOL, 0)
+            .births(0, 100, 1)
+            .cksum(zfs_ondisk::checksum::fletcher4(&data, Endian::Little))
+            .bytes(Endian::Little);
+        let bp = BlkPtr::parse(&raw, Endian::Little).unwrap();
+        assert_eq!(reader.read_block(&bp, false).unwrap().data, data);
     }
 
     /// A block no combination of columns repairs gives up in bounded

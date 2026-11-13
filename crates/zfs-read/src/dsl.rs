@@ -624,7 +624,7 @@ pub fn removed_tops_of(
 /// the parser as though it were data.
 fn read_packed_nvlist(mos: &DnodeArray<'_, '_>, object: u64) -> Result<NvList, ReadError> {
     let obj = mos.object(object)?;
-    let stored = mos.endian().u64_at(&obj.dnode().bonus, 0);
+    let stored = obj.dnode().endian.u64_at(&obj.dnode().bonus, 0);
     let len = stored
         .filter(|n| *n > 0 && *n <= obj.logical_size())
         .unwrap_or_else(|| obj.logical_size());
@@ -636,7 +636,7 @@ fn read_packed_nvlist(mos: &DnodeArray<'_, '_>, object: u64) -> Result<NvList, R
 /// in the bonus, the entries in the data.
 fn read_indirect_mapping(mos: &DnodeArray<'_, '_>, object: u64) -> Result<Mapping, ReadError> {
     let obj = mos.object(object)?;
-    let endian = mos.endian();
+    let endian = obj.dnode().endian;
     let phys = MappingPhys::parse(&obj.dnode().bonus, endian)
         .map_err(|e| ReadError::Io(format!("mapping bonus: {e}")))?;
     let len = phys
@@ -822,13 +822,13 @@ fn walk_dir(
 /// Read a `dsl_dir_phys_t` from MOS object `obj`.
 pub fn read_dir(mos: &DnodeArray<'_, '_>, obj: u64) -> Result<DslDirPhys, ReadError> {
     let d = mos.get(obj)?;
-    Ok(DslDirPhys::parse(&d.bonus, mos.endian())?)
+    Ok(DslDirPhys::parse(&d.bonus, d.endian)?)
 }
 
 /// Read a `dsl_dataset_phys_t` from MOS object `obj`.
 pub fn read_dataset(mos: &DnodeArray<'_, '_>, obj: u64) -> Result<DslDatasetPhys, ReadError> {
     let d = mos.get(obj)?;
-    Ok(DslDatasetPhys::parse(&d.bonus, mos.endian())?)
+    Ok(DslDatasetPhys::parse(&d.bonus, d.endian)?)
 }
 
 fn describe(
@@ -1358,7 +1358,7 @@ pub fn pending(mos: &DnodeArray<'_, '_>, datasets: &[Dataset]) -> Pending {
     if let Ok(dir) = object_directory(mos) {
         if let Some((_, obj)) = dir.iter().find(|(n, _)| n == "free_bpobj") {
             if let Ok(d) = mos.get(*obj) {
-                if let Ok(b) = BpobjPhys::parse(&d.bonus, mos.endian()) {
+                if let Ok(b) = BpobjPhys::parse(&d.bonus, d.endian) {
                     out.free_bpobj_bytes = b.bytes;
                     out.free_bpobj_blkptrs = b.num_blkptrs;
                 }
@@ -1376,7 +1376,7 @@ pub fn pending(mos: &DnodeArray<'_, '_>, datasets: &[Dataset]) -> Pending {
             out.unreadable += 1;
             continue;
         };
-        let Ok(dl) = DeadlistPhys::parse(&d.bonus, mos.endian()) else {
+        let Ok(dl) = DeadlistPhys::parse(&d.bonus, d.endian) else {
             out.unreadable += 1;
             continue;
         };
@@ -1450,7 +1450,7 @@ fn bpobj_bytes(mos: &DnodeArray<'_, '_>, object: u64) -> Option<u64> {
         return Some(0);
     }
     let d = mos.get(object).ok()?;
-    let p = BpobjPhys::parse(&d.bonus, mos.endian()).ok()?;
+    let p = BpobjPhys::parse(&d.bonus, d.endian).ok()?;
     Some(p.bytes)
 }
 

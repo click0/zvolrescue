@@ -256,6 +256,20 @@ struct MemberOut {
     /// confirmed by reading, which is what `--assume-member` does.
     #[serde(skip_serializing_if = "Option::is_none")]
     named_by: Option<PathBuf>,
+    /// A dRAID's distributed spare: no device of its own, its slices on
+    /// the dRAID's other children. It was listed as a member missing.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    distributed_spare: bool,
+}
+
+/// The GUIDs of the distributed spares under `node`.
+fn distributed_spares(node: &zfs_ondisk::label::VdevNode, out: &mut Vec<u64>) {
+    if node.kind == "dspare" {
+        out.push(node.guid);
+    }
+    for c in &node.children {
+        distributed_spares(c, out);
+    }
 }
 
 /// A vdev as a layout template: the same shape `--hints` takes, so the
@@ -570,11 +584,16 @@ fn pool_out(p: &PoolAssembly, paths: &[PathBuf], names: &[Vec<String>]) -> PoolO
             .find(|&&i| names[i].iter().any(|n| same_node(path, n)))
             .map(|&i| paths[i].clone())
     };
+    let mut spares = Vec::new();
+    for t in &p.tops {
+        distributed_spares(&t.tree, &mut spares);
+    }
     let member_out = |m: &zfs_read::pool::Member| MemberOut {
         guid: hex(m.guid),
         path: m.path.clone(),
         present: m.present.map(|i| paths[i].clone()),
         named_by: m.present.is_none().then(|| named_by(&m.path)).flatten(),
+        distributed_spare: spares.contains(&m.guid),
     };
     let claimed: Vec<PathBuf> = p
         .tops
@@ -906,6 +925,9 @@ fn print_text(out: &ScanOut, verbose: u8) {
                     m.path.as_deref().unwrap_or("-"),
                     match (&m.present, &m.named_by) {
                         (Some(p), _) => format!("present: {}", p.display()),
+                        (None, _) if m.distributed_spare => {
+                            "distributed spare: its slices lie on the dRAID's other children".to_string()
+                        }
                         (None, Some(d)) => format!(
                             "MISSING; {} is named {} on its own disk (SPEC F-71) — bind it with --assume-member {}={} and the read confirms or refuses it",
                             d.display(),

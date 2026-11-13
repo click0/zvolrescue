@@ -1639,6 +1639,22 @@ jobs:
       - run: sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends zfsutils-linux zfs-test
       - run: cargo build --release && cargo build --release -p zfs-read --examples
       - run: tests/crosscheck-ztest.sh ./target/release/zvolrescue /tmp/crosscheck ./target/release/examples/walk-objects ./target/release/examples/unwrap-key ./target/release/zvoltimeline ./target/release/examples/space
+      - name: A pool two hosts of each byte order wrote, against zdb
+        run: |
+          # The OpenZFS test suite's testpool_zstd was written in turn by
+          # a big-endian ppc64 FreeBSD and by x86_64: its dnode blocks,
+          # system attributes and embedded pointers come in both orders.
+          # Each was read in the object set's order, or as raw bytes, and
+          # the big-endian dataset came out empty.
+          d=/tmp/ots; mkdir -p $d
+          tar -C $d -xzf /usr/share/zfs/zfs-tests/tests/functional/compression/testpool_zstd.tar.gz
+          for ds in ppc64_fbsd x86_64; do
+            zdb -e -p $d -r testpool_zstd/$ds zstd $d/zdb-$ds
+            ./target/release/zvolfiles -q extract testpool_zstd/$ds $d/testpool_zstd -o $d/out-$ds
+            cmp $d/zdb-$ds $d/out-$ds/zstd
+          done
+          ./target/release/zvolfiles -f json list testpool_zstd $d/testpool_zstd |
+            python3 -c 'import json,sys; f={(x["path"],x["type"],x["mode"]) for x in json.load(sys.stdin)["files"]}; assert f == {("ppc64_fbsd","d","0755"),("x86_64","d","0755")}, f'
 
   # Every fixture here is written by this repository, and a decoding
   # mistake made twice — once in the reader, once in the fixture — passes

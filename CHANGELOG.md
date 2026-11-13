@@ -13,6 +13,55 @@ development milestone that names what changed when — the sections below
 are their record — and ships inside the next version that does get
 tagged. `v0.7.1` is the release that carries those six.
 
+## Unreleased
+
+**Pools OpenZFS wrote on other machines read as they are.** A pool a
+big-endian host wrote — its small files, its root directory, its dnode
+blocks — read wrong or not at all; a dRAID that had put a distributed
+spare in for a failed disk was called unreadable; a raidz took a block
+it could not check as checked; and the sectors a ddrescue map refused
+were not looked for where the pool kept them twice.
+
+### Fixed
+
+* **Small blocks a big-endian host wrote came out with their bytes
+  reversed.** A block of up to 112 bytes lives inside its pointer, and
+  the pointer's words were taken in the order of the block they point
+  to, not of the block that holds them. On the OpenZFS test suite's
+  `testpool_zstd`, the dataset a ppc64 FreeBSD host wrote listed no
+  files at all; `zdb` lists them. The payload is now read in its
+  holder's byte order, and the pool's files extract identical to what
+  `zdb -r` gives, for both hosts' datasets (checked in CI).
+* **A file system's attributes were read in the order of the dataset,
+  not of the buffer.** A system-attribute buffer says its byte order by
+  its magic, and a dnode block, a legacy inode or a DSL bonus by the
+  pointer to its block; all were taken in the object set's order. The
+  root directory of a dataset written on the other kind of host was
+  "bad SA magic", and a dnode block rewritten by it was unreadable. Each
+  is now read in its own order.
+* **A dRAID with a distributed spare in for a failed disk was
+  unreadable.** OpenZFS leaves that child as a `spare` vdev over the
+  failed disk and `draid1-0-0`; it was read as a mirror of a missing
+  disk and of "a distributed spare outside its dRAID", every row lost a
+  column, and `ztest`'s dRAID pools were NOT READABLE where `zdb` reads
+  them. The spare's side is now read where the dRAID's permutation puts
+  it, `scan` counts the pool readable, and the member list marks the
+  distributed spare.
+* **raidz and dRAID took a block nothing could check as checked.** With
+  a checksum the reader cannot compute — BLAKE3, Skein or Edon-R with no
+  salt known — a disk or a mirror refuses the block, but under parity it
+  was written as read: a damaged column went into the image, counted as
+  read, exit 0, and parity was never tried. It is now refused there too.
+* **A sector the ddrescue map refused was not looked for in the pool's
+  other copies.** Of a mirror's sides the one that lost least was kept
+  with its holes, though the other side had read them; and under raidz
+  or dRAID a column with one refused sector was lost whole, so two such
+  columns on a raidz1 zeroed the block. A refused sector is now taken
+  from a side or a copy that read it, or rebuilt from the same sector of
+  the row's other columns and parity; a block that comes out whole and
+  matches its checksum is read, compressed or not, and only what no
+  copy holds is zeros (SPEC F-33).
+
 ## v0.9.15 — 2026-11-13
 
 **Real OpenZFS file systems read, the record holds, and what a run could

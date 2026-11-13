@@ -248,6 +248,11 @@ pub struct BlkPtr {
     pub cksum: [u64; 4],
     /// Raw bytes, kept for embedded payload extraction and verification.
     raw: [u8; SIZE],
+    /// Byte order of the block that holds this pointer, which its words
+    /// are stored in — not [`BlkPtr::endian`], the order of the block it
+    /// points to: a block a big-endian host wrote, under a parent another
+    /// host rewrote, has the two differ.
+    words: Endian,
 }
 
 impl BlkPtr {
@@ -341,6 +346,7 @@ impl BlkPtr {
                 [w(12), w(13), w(14), w(15)]
             },
             raw,
+            words: endian,
         })
     }
 
@@ -368,7 +374,7 @@ impl BlkPtr {
         if !self.is_encrypted() {
             return None;
         }
-        let w = |i: usize| self.endian.u64_at(&self.raw, i * 8).expect("128 bytes");
+        let w = |i: usize| self.words.u64_at(&self.raw, i * 8).expect("128 bytes");
         Some((w(4), w(5), bits(w(11), 32, 32) as u32))
     }
 
@@ -390,13 +396,21 @@ impl BlkPtr {
     /// of the pointer other than `blk_prop` and `blk_birth`, in order.
     /// Returns `None` for ordinary pointers. Decompress with
     /// [`BlkPtr::compression`] to `lsize` bytes.
+    ///
+    /// Each word is a number in the byte order of the block that holds
+    /// the pointer, and the payload is its bytes from the least
+    /// significant up (`decode_embedded_bp_compressed`). The raw bytes are
+    /// that only in a little-endian block: in a big-endian one each word's
+    /// eight came out reversed, and every small ZAP of a dataset written
+    /// on ppc64 failed to decompress.
     pub fn embedded_payload(&self) -> Option<Vec<u8>> {
         if !self.embedded {
             return None;
         }
         let mut out = Vec::with_capacity(EMBEDDED_PAYLOAD);
         for word in [0usize, 1, 2, 3, 4, 5, 7, 8, 9, 11, 12, 13, 14, 15] {
-            out.extend_from_slice(&self.raw[word * 8..word * 8 + 8]);
+            let w = self.words.u64_at(&self.raw, word * 8).expect("128 bytes");
+            out.extend_from_slice(&w.to_le_bytes());
         }
         out.truncate(self.psize as usize);
         Some(out)
@@ -642,6 +656,24 @@ mod tests {
         assert_eq!(bp.compression, Compression::Lz4);
         assert_eq!(bp.birth, 77);
         assert_eq!(bp.embedded_payload().unwrap(), payload);
+    }
+
+    /// In a big-endian block the payload words are numbers stored big
+    /// end first, and the payload is each number's bytes low end first:
+    /// taken as the raw bytes, every word came out reversed.
+    #[test]
+    fn embedded_payload_of_a_big_endian_block() {
+        let payload: Vec<u8> = (0..100u8).collect();
+        let raw = Builder::new()
+            .births(0, 77, 0)
+            .embedded(&payload, 4096, 15, 19)
+            .bytes(Endian::Big);
+        let bp = BlkPtr::parse(&raw, Endian::Big).unwrap();
+        assert!(bp.embedded);
+        assert_eq!((bp.lsize, bp.psize, bp.birth), (4096, 100, 77));
+        assert_eq!(bp.embedded_payload().unwrap(), payload);
+        // The raw bytes of the first word are its payload backwards.
+        assert_eq!(raw[..8], [7, 6, 5, 4, 3, 2, 1, 0]);
     }
 
     #[test]

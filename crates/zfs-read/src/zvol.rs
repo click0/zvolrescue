@@ -10,8 +10,9 @@ use zvolrescue_io::{trace, BlockSink};
 use crate::dmu::{DnodeArray, ObjectReader};
 use crate::dsl::{Dataset, ZVOL_OBJ};
 use crate::hash::{Digests, Extra};
-use crate::zio::{PoolReader, ReadError, Salvage};
+use crate::zio::{PoolReader, ReadError};
 use zfs_ondisk::checksum::Verify;
+use zfs_ondisk::compress::decompress;
 
 /// What to do with a block that cannot be read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -497,42 +498,42 @@ enum Salvaged {
     Partial(Vec<u8>, Vec<(u64, u64)>),
 }
 
-/// Try to keep what a member will still give of a block it refused
-/// (SPEC F-33). Only an I/O failure on an uncompressed, unencrypted
-/// block on a disk or mirror is salvaged: a checksum mismatch says
-/// nothing about *which* bytes are wrong, a compressed block cannot be
-/// decompressed in part, ciphertext cannot be decrypted in part, and
-/// under parity a partial column is reconstructed rather than kept.
+/// Try to keep what the members will still give of a block they
+/// refused (SPEC F-33). A sector one copy, mirror side or raidz column
+/// refused is taken from another that has it, or rebuilt from parity
+/// ([`PoolReader::salvage_copies`]). When nothing is left missing and
+/// the checksum agrees the block is whole — compressed or not. When
+/// something is, only an uncompressed, unencrypted block is kept in
+/// part: a checksum mismatch says nothing about *which* bytes are
+/// wrong, a compressed block cannot be decompressed in part, and
+/// ciphertext cannot be decrypted in part.
 fn salvage(reader: &PoolReader<'_>, bp: &BlkPtr, e: &ReadError) -> Option<Salvaged> {
     // A device's refusal is never read around (N-10): with
-    // `--device-may-fail` the block is zeroed whole, once.
-    if !matches!(e, ReadError::Io(_))
-        || bp.compression != Compression::Off
+    // `--device-may-fail` the block is zeroed whole, once. A raidz that
+    // lost more columns than it has parity says `Unrecoverable`; the
+    // salvage finds out whether a member refused sectors of them.
+    if !matches!(e, ReadError::Io(_) | ReadError::Unrecoverable(_))
         || bp.is_encrypted()
         || bp.embedded_payload().is_some()
     {
         return None;
     }
-    let mut best: Option<Salvage> = None;
-    for dva in bp.dvas() {
-        if let Ok((data, bad)) = reader.salvage_dva(dva, bp.psize as usize) {
-            let lost: u64 = bad.iter().map(|&(_, l)| l).sum();
-            if best
-                .as_ref()
-                .is_none_or(|(_, b)| lost < b.iter().map(|&(_, l)| l).sum::<u64>())
-            {
-                best = Some((data, bad));
-            }
-            if lost == 0 {
-                break;
-            }
-        }
-    }
-    let (data, bad) = best?;
+    let (data, bad) = reader.salvage_copies(bp).ok()?;
     if bad.is_empty() {
-        // Nothing was refused the second time. Only a checksum makes
-        // that a block; without one it is a read that happened to work.
-        return (reader.verify(bp, &data) == Verify::Ok).then_some(Salvaged::Whole(data));
+        // Nothing was refused in the end. Only a checksum makes that a
+        // block; without one it is a read that happened to work.
+        if reader.verify(bp, &data) != Verify::Ok {
+            return None;
+        }
+        if bp.compression == Compression::Off {
+            return Some(Salvaged::Whole(data));
+        }
+        return decompress(bp.compression, &data, bp.lsize as usize)
+            .ok()
+            .map(Salvaged::Whole);
+    }
+    if bp.compression != Compression::Off {
+        return None;
     }
     Some(Salvaged::Partial(data, bad))
 }
@@ -548,13 +549,9 @@ fn why_not_salvaged(reader: &PoolReader<'_>, bp: &BlkPtr) -> String {
             bp.compression.name()
         );
     }
-    match bp
-        .dvas()
-        .next()
-        .map(|d| reader.salvage_dva(d, bp.psize as usize))
-    {
-        Some(Err(err)) => format!("not salvaged: {err}"),
-        _ => "not salvaged".into(),
+    match reader.salvage_copies(bp) {
+        Err(err) => format!("not salvaged: {err}"),
+        Ok(_) => "not salvaged".into(),
     }
 }
 
@@ -1042,6 +1039,64 @@ mod tests {
             (2, 0, 0)
         );
         assert!(r.bad.is_empty());
+        assert_eq!(sink.data, expected_image());
+    }
+
+    /// Both sides of a mirror refuse a sector of the block, not the same
+    /// one: neither copy reads whole, and the side that lost least was
+    /// kept with its hole though the other side had it. Laid over each
+    /// other the sides give the block whole, and it verifies.
+    #[test]
+    fn mirror_sides_fill_each_others_refused_sectors() {
+        let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1)]);
+        let mut members = vec![vec![0u8; SIZE as usize], vec![0u8; SIZE as usize]];
+        let mut a = Alloc::new(0x20_0000);
+        build_sample_mos(&mut pool, &mut members, &mut a);
+        for (i, m) in members.iter_mut().enumerate() {
+            pool.write_labels(i, m);
+        }
+        let data_off = crate::fixture::SAMPLE_ZVOL_BLOCK0_OFFSET;
+        let sources: Vec<MemSource> = members.into_iter().map(MemSource::new).collect();
+        let scans: Vec<_> = sources.iter().map(|s| scan_device(s).ok()).collect();
+        let ub = scans[0].as_ref().unwrap().labels[0]
+            .best()
+            .unwrap()
+            .ub
+            .clone();
+        let assembly = assemble(&scans).into_iter().next().unwrap();
+        let side0 = FlakySource::new(
+            sources[0].clone(),
+            vec![(LABEL_START_SIZE + data_off + 4096, 512)],
+        );
+        let side1 = FlakySource::new(
+            sources[1].clone(),
+            vec![(LABEL_START_SIZE + data_off + 512, 512)],
+        );
+        let reader = PoolReader::new(
+            &assembly,
+            vec![
+                Some(&side0 as &dyn BlockSource),
+                Some(&side1 as &dyn BlockSource),
+            ],
+        );
+        let mos = open_mos(&reader, &ub).unwrap();
+        let tree = walk(&mos, "tank").unwrap();
+        let ds = tree.get("tank/vm/disk0").unwrap();
+        let (obj, _) = open_volume(&reader, ds).unwrap();
+        let mut sink = MemSink::default();
+        let r = extract(
+            &obj,
+            ds.volsize.unwrap(),
+            &mut sink,
+            OnError::Zero,
+            |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(
+            (r.blocks_read, r.blocks_salvaged, r.blocks_zeroed),
+            (2, 0, 0)
+        );
+        assert!(r.bad.is_empty(), "{:?}", r.bad);
         assert_eq!(sink.data, expected_image());
     }
 

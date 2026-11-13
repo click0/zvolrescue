@@ -298,9 +298,13 @@ impl<'r, 'a> DnodeArray<'r, 'a> {
         if per == 0 {
             return Err(ReadError::Io("meta-dnode has zero data block size".into()));
         }
-        let block = self.meta.read_blkid(objnum / per)?;
+        // Each block of the array in the byte order its own pointer gives:
+        // a pool written by two hosts has dnode blocks of both orders, and
+        // the array's order read a big-endian block's pointers as nonsense
+        // ("DVA names unknown top-level vdev").
+        let (block, endian) = self.meta.read_blkid_ext(objnum / per)?;
         let at = ((objnum % per) * DNODE_SIZE as u64) as usize;
-        let d = DnodePhys::parse(&block[at..], self.meta.endian)?;
+        let d = DnodePhys::parse(&block[at..], endian)?;
         trace!(
             "dnode",
             "object {objnum} (block {} slot {}): type {} ({}) nlevels {} nblkptr {} indblkshift {} datablksz {} maxblkid {} bonustype {} bonuslen {}{}",
@@ -341,7 +345,8 @@ impl<'r, 'a> DnodeArray<'r, 'a> {
     /// An [`ObjectReader`] for object `objnum`.
     pub fn object(&self, objnum: u64) -> Result<ObjectReader<'r, 'a>, ReadError> {
         let dnode = self.get(objnum)?;
-        Ok(ObjectReader::new(self.meta.reader, dnode, self.meta.endian))
+        let endian = dnode.endian;
+        Ok(ObjectReader::new(self.meta.reader, dnode, endian))
     }
 
     /// Byte order the array's dnodes were written in.

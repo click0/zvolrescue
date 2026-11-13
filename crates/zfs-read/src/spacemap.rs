@@ -199,7 +199,7 @@ fn read_one(
     ashift: u32,
 ) -> Result<(SpaceMapPhys, Vec<zfs_ondisk::spacemap::Entry>), ReadError> {
     let dnode: DnodePhys = mos.get(object)?;
-    let phys = SpaceMapPhys::parse(&dnode.bonus, mos.endian())?;
+    let phys = SpaceMapPhys::parse(&dnode.bonus, dnode.endian)?;
     if phys.length == 0 {
         return Ok((phys, Vec::new()));
     }
@@ -208,5 +208,5 @@ fn read_one(
     // is space the map has grown into but not written.
     let want = phys.length.min(obj.logical_size()) as usize;
     let raw = obj.read_range(0, want)?;
-    Ok((phys, entries(&raw, ashift, mos.endian())))
+    Ok((phys, entries(&raw, ashift, dnode.endian)))
 }

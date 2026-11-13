@@ -328,8 +328,11 @@ impl Filesystem<'_, '_> {
         if d.is_free() {
             return Err(ReadError::Io(format!("object {object} is free")));
         }
+        // A legacy znode is swapped with the dnode block around it, so it
+        // is in that block's order — not the object set's, which a pool
+        // two hosts wrote need not share.
         if d.bonus_type == OT_ZNODE {
-            return Ok(parse_znode_phys(&d.bonus, self.endian)?);
+            return Ok(parse_znode_phys(&d.bonus, d.endian)?);
         }
         // Without the registry no attribute has a name or a length, and
         // every field would come out as zero: said instead.
@@ -338,7 +341,8 @@ impl Filesystem<'_, '_> {
                 "object {object}: the dataset's system-attribute registry could not be read, so its attributes cannot be decoded"
             )));
         }
-        let header = parse_sa_header(&d.bonus, self.endian)?;
+        let sa = zfs_ondisk::zpl::sa_endian(&d.bonus).unwrap_or(d.endian);
+        let header = parse_sa_header(&d.bonus, sa)?;
         let layout = self.layouts.get(&header.layout).cloned().ok_or_else(|| {
             ReadError::Io(format!(
                 "object {object}: system-attribute layout {} is not in this dataset's layouts",
@@ -346,17 +350,20 @@ impl Filesystem<'_, '_> {
             ))
         })?;
         let lengths = |n: u16| self.attr_length.get(&n).copied();
-        let placed = place_attrs(&d.bonus, &header, &layout, &lengths, self.endian);
-        let mut by_num: BTreeMap<u16, Vec<u8>> = placed.into_iter().collect();
+        let placed = place_attrs(&d.bonus, &header, &layout, &lengths, sa);
+        // Each value with the order of the buffer it came from: the bonus
+        // and the spill block are written apart, and need not agree.
+        let mut by_num: BTreeMap<u16, (Vec<u8>, Endian)> =
+            placed.into_iter().map(|(n, v)| (n, (v, sa))).collect();
         // Whatever did not fit the bonus buffer is in the spill block,
         // under a header and a layout of its own (Z-10).
         let mut spill_error = None;
         if d.bonus_type == ot::SA {
             if let Some(bp) = &d.spill {
                 match self.spilled_attrs(object, bp) {
-                    Ok(attrs) => {
+                    Ok((attrs, order)) => {
                         for (num, value) in attrs {
-                            by_num.entry(num).or_insert(value);
+                            by_num.entry(num).or_insert((value, order));
                         }
                     }
                     Err(e) => spill_error = Some(e.to_string()),
@@ -382,26 +389,28 @@ impl Filesystem<'_, '_> {
             self.attr_num
                 .get(name)
                 .and_then(|n| by_num.get(n))
-                .and_then(|b| zpl::attr_u64(b, self.endian))
+                .and_then(|(b, e)| zpl::attr_u64(b, *e))
                 .unwrap_or(0)
         };
         let time = |name: &str| -> zfs_ondisk::zpl::Time {
             self.attr_num
                 .get(name)
                 .and_then(|n| by_num.get(n))
-                .and_then(|b| zfs_ondisk::zpl::Time::from_attr(b, self.endian))
+                .and_then(|(b, e)| zfs_ondisk::zpl::Time::from_attr(b, *e))
                 .unwrap_or_default()
         };
         let symlink = self
             .attr_num
             .get(attr::SYMLINK)
             .and_then(|n| by_num.get(n))
+            .map(|(b, _)| b)
             .filter(|b| !b.is_empty())
             .cloned();
         let dxattr = self
             .attr_num
             .get(attr::DXATTR)
             .and_then(|n| by_num.get(n))
+            .map(|(b, _)| b)
             .filter(|b| !b.is_empty())
             .cloned();
         // Absent where the dataset has no `project_quota` feature, and
@@ -411,7 +420,7 @@ impl Filesystem<'_, '_> {
             .attr_num
             .get(attr::PROJID)
             .and_then(|n| by_num.get(n))
-            .and_then(|b| zpl::attr_u64(b, self.endian));
+            .and_then(|(b, e)| zpl::attr_u64(b, *e));
         Ok(Znode {
             dxattr,
             projid,
@@ -445,16 +454,22 @@ impl Filesystem<'_, '_> {
     /// wrong answer unless it says so. It says so on the znode
     /// ([`Znode::spill_error`]), and [`Filesystem::xattrs`] and
     /// [`Filesystem::symlink_target`] report it.
-    fn spilled_attrs(&self, object: u64, bp: &BlkPtr) -> Result<Vec<(u16, Vec<u8>)>, ReadError> {
+    #[allow(clippy::type_complexity)]
+    fn spilled_attrs(
+        &self,
+        object: u64,
+        bp: &BlkPtr,
+    ) -> Result<(Vec<(u16, Vec<u8>)>, Endian), ReadError> {
         if bp.is_hole() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), bp.endian));
         }
         let block = self
             .objects
             .meta_reader()
             .read_block(bp, false)
             .map_err(|e| ReadError::Io(format!("object {object}: spill block: {e}")))?;
-        let header = parse_sa_header(&block.data, bp.endian).map_err(|e| {
+        let order = zfs_ondisk::zpl::sa_endian(&block.data).unwrap_or(bp.endian);
+        let header = parse_sa_header(&block.data, order).map_err(|e| {
             ReadError::Io(format!(
                 "object {object}: its spill block is not a system-attribute buffer: {e}"
             ))
@@ -472,12 +487,9 @@ impl Filesystem<'_, '_> {
             layout.len()
         );
         let lengths = |n: u16| self.attr_length.get(&n).copied();
-        Ok(place_attrs(
-            &block.data,
-            &header,
-            &layout,
-            &lengths,
-            bp.endian,
+        Ok((
+            place_attrs(&block.data, &header, &layout, &lengths, order),
+            order,
         ))
     }
 

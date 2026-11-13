@@ -51,6 +51,13 @@ impl TopVdev {
 /// Recursive readability: a leaf must be present, a mirror needs one
 /// readable child, raidz/draid tolerate up to `nparity` unreadable ones.
 pub fn node_readable(node: &VdevNode, members: &[Member]) -> bool {
+    // A distributed spare is no device: its slices lie on the dRAID's
+    // other children, which are counted as they are. Taken for a leaf
+    // that had to be present, it was always missing, and the `spare`
+    // vdev OpenZFS puts it in with a failed disk was unreadable with it.
+    if node.kind == "dspare" {
+        return true;
+    }
     if node.children.is_empty() {
         return members
             .iter()

@@ -332,6 +332,24 @@ pub struct SaHeader {
     pub lengths: usize,
 }
 
+/// The byte order a system-attribute buffer was written in, by its magic
+/// (`sa_build_index`: a magic that reads byte-swapped means a buffer to
+/// swap). A buffer of attributes keeps the order of the host that wrote
+/// it, whatever order the dnode block around it has: on a pool two hosts
+/// wrote, taking the object set's order called a big-endian file's
+/// attributes "not a system-attribute buffer". `None` when the magic
+/// reads in neither order.
+pub fn sa_endian(buf: &[u8]) -> Option<Endian> {
+    let magic: [u8; 4] = buf.get(0..4)?.try_into().ok()?;
+    if u32::from_le_bytes(magic) == SA_MAGIC {
+        Some(Endian::Little)
+    } else if u32::from_be_bytes(magic) == SA_MAGIC {
+        Some(Endian::Big)
+    } else {
+        None
+    }
+}
+
 /// Parse the header of a system-attribute buffer.
 ///
 /// `sa_layout_info` packs the layout number in its low ten bits and the
@@ -433,6 +451,21 @@ pub fn attr_u64(bytes: &[u8], endian: Endian) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A system-attribute buffer says its own byte order by its magic:
+    /// the order of the host that wrote it, whatever the dnode block
+    /// around it was written in.
+    #[test]
+    fn a_system_attribute_buffer_names_its_byte_order() {
+        let mut le = SA_MAGIC.to_le_bytes().to_vec();
+        le.extend_from_slice(&[0; 4]);
+        let mut be = SA_MAGIC.to_be_bytes().to_vec();
+        be.extend_from_slice(&[0; 4]);
+        assert_eq!(sa_endian(&le), Some(Endian::Little));
+        assert_eq!(sa_endian(&be), Some(Endian::Big));
+        assert_eq!(sa_endian(&[0u8; 8]), None);
+        assert_eq!(sa_endian(&[0x2f]), None);
+    }
 
     /// The registry value as OpenZFS writes it (`ATTR_ENCODE`): the
     /// number in the low sixteen bits. `ZPL_MODE` on a real pool is

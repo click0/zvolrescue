@@ -222,6 +222,11 @@ pub struct DnodePhys {
     pub bonus: Vec<u8>,
     /// Spill block pointer when `FLAG_SPILL_BLKPTR` is set.
     pub spill: Option<BlkPtr>,
+    /// Byte order the dnode was written in: that of the block holding it,
+    /// which is also the order of a bonus written with it (a legacy znode,
+    /// a DSL directory or dataset). A pool two hosts wrote has blocks of
+    /// both orders in one object set.
+    pub endian: Endian,
 }
 
 impl DnodePhys {
@@ -302,6 +307,7 @@ impl DnodePhys {
             blkptr,
             bonus: buf[bonus_start..bonus_end].to_vec(),
             spill,
+            endian,
         })
     }
 
