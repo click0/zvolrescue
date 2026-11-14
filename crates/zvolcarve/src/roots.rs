@@ -132,10 +132,6 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     // block pointer addresses a DVA and only the layout says where a DVA
     // is. Without labels that layout comes from `--hints` (SPEC F-65).
     let pool = choose_pool(members.pools.clone(), spec.pool_guid.as_deref()).ok();
-    let ashift = pool
-        .as_ref()
-        .and_then(|p| p.tops.iter().find_map(|t| t.ashift))
-        .unwrap_or(12) as u32;
 
     let codecs: Vec<Codec> = if opts.compressed == "none" {
         Vec::new()
@@ -206,7 +202,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             vdev_start: members.base_offsets.get(i).copied().unwrap_or(0),
             ..scan_opts.clone()
         };
-        match scan_member(src, i, ashift, &opts_here) {
+        match scan_member(src, i, crate::member_ashift(pool.as_ref(), i), &opts_here) {
             Ok(s) => {
                 bytes_read += s.bytes_read;
                 truncated |= s.roots_truncated;

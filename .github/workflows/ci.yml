@@ -772,6 +772,14 @@ jobs:
           ./target/release/zvolrescue -q dump tank/vm/disk0 /tmp/f69b/member0.img /tmp/f69b/member1.img --txg 4816229 -o /tmp/f69b/out.img > /tmp/f69b/log
           cmp /tmp/f69/out.img /tmp/f69b/out.img
           grep -q "0 zeroed (unreadable)" /tmp/f69/log
+          # The same volume carved: its dnode leads into the pool with no
+          # MOS behind it, and the mapping has to come from the newest MOS
+          # that reads. Without it both data blocks were "unknown
+          # top-level vdev 1", zeros, exit 4.
+          ./target/release/zvolcarve -q scan /tmp/f69/member0.img /tmp/f69/member1.img -o /tmp/f69/carve
+          ./target/release/zvolcarve -q dump /tmp/f69/carve c0001 /tmp/f69/member0.img /tmp/f69/member1.img -o /tmp/f69/carved.img > /tmp/f69/carve.log
+          grep -q "0 zeroed (unreadable)" /tmp/f69/carve.log
+          cmp /tmp/f69/carved.img /tmp/f69/out.img
           # The removed vdev is still counted and has no member to find.
           # From the labels alone that is a missing vdev; `scan` asks the
           # pool's own configuration and says which it really is — so a

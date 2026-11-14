@@ -218,7 +218,10 @@ with exit 1.
 .It Fl -strict
 Stop at the first block that cannot be read.
 .It Fl -size Ar bytes
-Extract this many bytes instead of what the dnode implies.
+Extract this many bytes.
+Without it the image is as large as a filesystem found at its start
+was made for, or, when none was found or it was made for less than
+the volume's blocks hold, as large as the dnode implies.
 .It Fl -hash Ar list
 Also hash the image with
 .Ql md5

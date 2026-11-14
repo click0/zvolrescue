@@ -25,6 +25,58 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use zvol_common::{exit, Global, PoolSpec};
 
+/// The ashift a member's blocks are aligned to: its own top-level
+/// vdev's, which is what the compressed pass steps by. The first top's,
+/// taken for every member, missed every block on a member of a top with
+/// a smaller ashift — on a ztest pool of mixed ashifts, 29 514 of 40 446
+/// dnodes. A member no top names is stepped by the smallest any top
+/// states, which no block of the pool is finer than; 12 when none does.
+pub(crate) fn member_ashift(pool: Option<&zfs_read::pool::PoolAssembly>, member: usize) -> u32 {
+    let Some(p) = pool else {
+        return 12;
+    };
+    let own = p
+        .tops
+        .iter()
+        .find(|t| t.members.iter().any(|m| m.present == Some(member)))
+        .and_then(|t| t.ashift);
+    own.or_else(|| p.tops.iter().filter_map(|t| t.ashift).min())
+        .map_or(12, |a| a.clamp(9, 17) as u32)
+}
+
+/// A reader for `pool` over the members, told what the pool's newest
+/// MOS that reads says about reading it: the checksum salt, without
+/// which no block checksummed with Skein, Edon-R or BLAKE3 verifies, and
+/// the mappings of the top-level vdevs that were removed (SPEC F-69). A
+/// carved dnode leads into the pool with neither: a volume's blocks on a
+/// removed vdev were zeros, "unknown top-level vdev", and a salted
+/// checksum could not be checked at all. Where no uberblock leads to a
+/// MOS that reads, the reader is as it was.
+pub(crate) fn primed_reader<'a>(
+    pool: &zfs_read::pool::PoolAssembly,
+    members: &'a zvol_common::members::Members,
+) -> zfs_read::zio::PoolReader<'a> {
+    let reader =
+        zfs_read::zio::PoolReader::new(pool, members.devices()).with_base_offsets(&members.bases());
+    let opened = zfs_read::pool::uberblock_candidates(&members.scans, pool)
+        .into_iter()
+        .find_map(|c| {
+            zfs_read::dsl::open_mos(&reader, &c.ub)
+                .ok()
+                .map(|_| c.ub.txg)
+        });
+    match opened {
+        Some(txg) => {
+            zvolrescue_io::trace!("carve", "salt and removed vdevs from the MOS at txg {txg}")
+        }
+        None => zvolrescue_io::trace!(
+            "carve",
+            "no MOS reads: no checksum salt, no removed vdev mapped"
+        ),
+    }
+    reader
+}
+
 /// Scan raw vdev space for volumes nothing points at any more.
 #[derive(Debug, Parser)]
 #[command(name = "zvolcarve", version, about, long_about = None)]

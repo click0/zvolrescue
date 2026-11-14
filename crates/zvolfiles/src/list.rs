@@ -6,7 +6,7 @@ use zfs_read::zpl::{walk_from, Entry};
 use zvol_common::timefmt::iso8601_ns;
 use zvol_common::{exit, Format, Global, PoolSpec};
 
-use crate::common::{resolve_path, with_dataset, AtArgs, Rdev};
+use crate::common::{resolve_path, with_dataset, AtArgs, PassedOver, Rdev};
 
 #[derive(Debug, Serialize)]
 struct FileOut {
@@ -58,6 +58,9 @@ struct FileOut {
 struct ListOut {
     dataset: String,
     txg: u64,
+    /// Newer transaction groups passed over for `txg`, and why.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    passed_over: Vec<PassedOver>,
     root: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     path: Option<String>,
@@ -232,6 +235,7 @@ pub fn run(
                 dataset: dataset.to_string(),
                 txg: opened.txg,
                 root: fs.root,
+                passed_over: opened.passed_over.clone(),
                 path: path.map(|p| p.to_string_lossy().into_owned()),
                 properties: fs.properties.clone(),
                 files,
@@ -306,7 +310,7 @@ pub fn run(
     let code = if out.interrupted {
         eprintln!("zvolfiles: interrupted; what is listed is what was walked (exit 6)");
         exit::INTERRUPTED
-    } else if unreadable > 0 {
+    } else if unreadable > 0 || PassedOver::any_unread(&out.passed_over) {
         exit::PARTIAL
     } else {
         0

@@ -294,6 +294,15 @@ impl<'r, 'a> DnodeArray<'r, 'a> {
 
     /// Read and parse dnode `objnum`; a free slot parses as a free dnode.
     pub fn get(&self, objnum: u64) -> Result<DnodePhys, ReadError> {
+        let (block, endian) = self.block(objnum)?;
+        self.parse_in(&block, endian, objnum)
+    }
+
+    /// The block of the array that holds `objnum`, and the byte order it
+    /// was written in. For a caller that walks the array and has to tell
+    /// a block that does not read — every object in it lost — from one
+    /// object that does not parse.
+    pub fn block(&self, objnum: u64) -> Result<(Vec<u8>, Endian), ReadError> {
         let per = self.slots_per_block();
         if per == 0 {
             return Err(ReadError::Io("meta-dnode has zero data block size".into()));
@@ -302,9 +311,19 @@ impl<'r, 'a> DnodeArray<'r, 'a> {
         // a pool written by two hosts has dnode blocks of both orders, and
         // the array's order read a big-endian block's pointers as nonsense
         // ("DVA names unknown top-level vdev").
-        let (block, endian) = self.meta.read_blkid_ext(objnum / per)?;
+        self.meta.read_blkid_ext(objnum / per)
+    }
+
+    /// Object `objnum` out of its block, as [`block`](Self::block) gave it.
+    pub fn parse_in(
+        &self,
+        block: &[u8],
+        endian: Endian,
+        objnum: u64,
+    ) -> Result<DnodePhys, ReadError> {
+        let per = self.slots_per_block().max(1);
         let at = ((objnum % per) * DNODE_SIZE as u64) as usize;
-        let d = DnodePhys::parse(&block[at..], endian)?;
+        let d = DnodePhys::parse(block.get(at..).unwrap_or(&[]), endian)?;
         trace!(
             "dnode",
             "object {objnum} (block {} slot {}): type {} ({}) nlevels {} nblkptr {} indblkshift {} datablksz {} maxblkid {} bonustype {} bonuslen {}{}",

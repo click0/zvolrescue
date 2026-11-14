@@ -195,6 +195,30 @@ pub struct Opened<'a> {
     pub txg: u64,
     /// Members, kept for the evidence record.
     pub members: &'a Members,
+    /// The newer transaction groups passed over for this one, and why.
+    pub passed_over: Vec<PassedOver>,
+}
+
+/// A transaction group newer than the one read, and why it was not.
+///
+/// When the newer ones did not read — their MOS, or the dataset in them —
+/// what is read is the dataset as it was before, perhaps empty: a run
+/// that fell back to the TXG the dataset was created at listed nothing,
+/// "0 file(s)", exit 0, and its record named that TXG without a word
+/// about the newer ones. Such a run now ends 4, and says which.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PassedOver {
+    pub txg: u64,
+    pub reason: String,
+    /// It did not read, as against not holding the dataset.
+    pub unread: bool,
+}
+
+impl PassedOver {
+    /// Whether any of `passed` is a TXG that did not read.
+    pub fn any_unread(passed: &[PassedOver]) -> bool {
+        passed.iter().any(|p| p.unread)
+    }
 }
 
 /// Open `name` at the requested transaction group and hand the
@@ -239,27 +263,36 @@ pub fn with_dataset<T>(
     // that could not be read was left out of the reasons, and a run that
     // read none ended "no dataset" — as if the dataset had not been
     // there — and one that read an older one did so without a word.
-    let mut passed: Vec<String> = Vec::new();
+    let mut passed: Vec<PassedOver> = Vec::new();
     let older = wanted.len();
-    let mut pass = |why: String| {
+    let mut pass = |txg: u64, why: String, unread: bool| {
         if passed.len() + 1 < older {
             eprintln!("zvolfiles: {why}; passed over for an older one");
         }
-        passed.push(why);
+        passed.push(PassedOver {
+            txg,
+            reason: why,
+            unread,
+        });
     };
     for c in &wanted {
         let tree = match open_mos(&reader, &c.ub).and_then(|mos| walk(&mos, &pool.name)) {
             Ok(t) => t,
             Err(e) => {
-                pass(format!(
-                    "txg {}: the pool's metadata does not read: {e}",
-                    c.ub.txg
-                ));
+                pass(
+                    c.ub.txg,
+                    format!("txg {}: the pool's metadata does not read: {e}", c.ub.txg),
+                    true,
+                );
                 continue;
             }
         };
         let Some(ds) = tree.datasets.iter().find(|d| d.name == name) else {
-            pass(format!("txg {}: no dataset {name}", c.ub.txg));
+            pass(
+                c.ub.txg,
+                format!("txg {}: no dataset {name}", c.ub.txg),
+                false,
+            );
             continue;
         };
         // A dataset of another kind is the wrong command, not damage: it
@@ -291,7 +324,7 @@ pub fn with_dataset<T>(
         let fs = match opened {
             Ok(fs) => fs,
             Err(e) => {
-                pass(format!("{name} at txg {}: {e}", c.ub.txg));
+                pass(c.ub.txg, format!("{name} at txg {}: {e}", c.ub.txg), true);
                 continue;
             }
         };
@@ -301,13 +334,17 @@ pub fn with_dataset<T>(
         let opened = Opened {
             txg: c.ub.txg,
             members: &members,
+            passed_over: passed.clone(),
         };
         return f(&fs, &opened);
     }
     eprintln!(
         "zvolfiles: {name} is in none of the {} transaction group(s) read{}",
         wanted.len(),
-        passed.last().map(|e| format!(" ({e})")).unwrap_or_default()
+        passed
+            .last()
+            .map(|e| format!(" ({})", e.reason))
+            .unwrap_or_default()
     );
     Err(exit::UNRECOVERABLE)
 }

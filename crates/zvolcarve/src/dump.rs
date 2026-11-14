@@ -13,7 +13,6 @@ use zfs_ondisk::dmu::DnodePhys;
 use zfs_ondisk::Endian;
 use zfs_read::dmu::ObjectReader;
 use zfs_read::hash::{Digests, Extra};
-use zfs_read::zio::PoolReader;
 use zfs_read::zvol::{extract_from, OnError, Report};
 use zvol_common::evidence::FileRef;
 use zvol_common::members::{choose_pool, open_members};
@@ -143,7 +142,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         );
         return zvol_common::end_early(g, "zvolcarve", spec, exit::USAGE);
     }
-    let reader = PoolReader::new(&pool, members.devices()).with_base_offsets(&members.bases());
+    let reader = crate::primed_reader(&pool, &members);
     let obj = ObjectReader::new(&reader, dnode, Endian::Little);
 
     // The dnode says how many blocks it has, not how large the volume
@@ -153,19 +152,26 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     // what the volume's own contents say it was made for (C-12), then
     // what the dnode implies. The last is the weakest — a volume whose
     // tail was never written has fewer blocks than it had bytes.
+    //
+    // A filesystem made for less than the dnode's blocks hold — one in
+    // a partition, or made smaller than its volume — does not size the
+    // volume: the blocks past it are the volume's, and were dropped,
+    // verified and all, exit 0. The larger of the two is taken then.
     let from_contents = c.contents.iter().find_map(|f| f.size);
+    let inside = c
+        .contents
+        .iter()
+        .find(|f| f.size.is_some())
+        .map_or("filesystem", |f| f.kind.as_str());
     let (size, why) = match (opts.size, from_contents) {
         (Some(s), _) => (s, "as asked".to_string()),
-        (None, Some(s)) => (
-            s,
+        (None, Some(s)) if s < c.implied_size => (
+            c.implied_size,
             format!(
-                "the {} inside it was made for this",
-                c.contents
-                    .iter()
-                    .find(|f| f.size.is_some())
-                    .map_or("filesystem", |f| f.kind.as_str())
+                "implied by the dnode; the {inside} inside it was made for {s}, fewer than its blocks hold"
             ),
         ),
+        (None, Some(s)) => (s, format!("the {inside} inside it was made for this")),
         (None, None) => (c.implied_size, "implied by the dnode".to_string()),
     };
     if !g.quiet {

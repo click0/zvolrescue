@@ -265,13 +265,6 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     // point — but when one does, its ashift and its reader are what make
     // the compressed pass and the tree walk possible.
     let pool = choose_pool(members.pools.clone(), spec.pool_guid.as_deref()).ok();
-    // The ashift belongs to the vdev, so whichever top still states it
-    // states it for every member; 12 is the modern default when none
-    // survived.
-    let ashift = pool
-        .as_ref()
-        .and_then(|p| p.tops.iter().find_map(|t| t.ashift))
-        .unwrap_or(12) as u32;
 
     // --like reads the numbers off a dataset that is still there.
     let like = match (&opts.profile.like, &pool) {
@@ -636,7 +629,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         let scan = match scan_member(
             src,
             i,
-            ashift,
+            crate::member_ashift(pool.as_ref(), i),
             &ScanOptions {
                 profile: profile.clone(),
                 strict_profile: opts.profile.strict_profile,
@@ -680,9 +673,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         // Walking a candidate's tree needs a pool to read through. Where
         // none assembled, the candidates are still recorded — the scan
         // is the part that could only be done here.
-        let reader = pool
-            .as_ref()
-            .map(|p| PoolReader::new(p, members.devices()).with_base_offsets(&members.bases()));
+        let reader = pool.as_ref().map(|p| crate::primed_reader(p, &members));
         // Which dataset each data object belonged to, worked out once per
         // member: asked of every candidate in turn, it read every dataset's
         // object set again for each — thousands of candidates by hundreds

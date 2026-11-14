@@ -20,7 +20,7 @@ use zvol_common::timefmt::iso8601_ns;
 use zvol_common::{exit, Format, Global, PoolSpec};
 
 use crate::common::{
-    resolve_path_or_why, with_dataset, AtArgs, Rdev, Zeroed, NO_BLOCK_SIZE, TAIL_NOTE,
+    resolve_path_or_why, with_dataset, AtArgs, PassedOver, Rdev, Zeroed, NO_BLOCK_SIZE, TAIL_NOTE,
 };
 use crate::out::{OutError, OutTree};
 
@@ -175,6 +175,9 @@ type WrittenObjects = std::collections::BTreeMap<u64, Written>;
 struct ManifestOut {
     dataset: String,
     txg: u64,
+    /// Newer transaction groups passed over for `txg`, and why.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    passed_over: Vec<PassedOver>,
     output: PathBuf,
     files: Vec<Extracted>,
     directories: usize,
@@ -803,6 +806,7 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
                 dataset: dataset.to_string(),
                 txg: opened.txg,
                 output: opts.output.clone(),
+                passed_over: opened.passed_over.clone(),
                 files,
                 directories: run.directories,
                 incomplete,
@@ -934,7 +938,11 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
         exit::REFUSED
     } else if !out.not_found.is_empty() {
         exit::UNRECOVERABLE
-    } else if out.failed > 0 || out.incomplete > 0 || out.stopped.is_some() {
+    } else if out.failed > 0
+        || out.incomplete > 0
+        || out.stopped.is_some()
+        || PassedOver::any_unread(&out.passed_over)
+    {
         exit::PARTIAL
     } else {
         0

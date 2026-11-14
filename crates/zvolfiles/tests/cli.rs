@@ -164,6 +164,31 @@ fn objects_does_not_need_the_master_node() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// A block of the dataset's dnodes that does not read loses every
+/// object in it, and `objects` says which: it passed over each without a
+/// word, "0 object(s)", exit 0 — with `--strict` too.
+#[test]
+fn objects_says_which_objects_a_lost_dnode_block_took() {
+    let dir = scratch("lost-dnodes");
+    let m = members_without(&dir, zfs_read::fixture::ZPL_BIG_DNODE_XATTR.as_bytes());
+    let out = dir.join("objs");
+    let o = out.to_string_lossy().into_owned();
+    let (code, err) = run(&["-q", "objects", "tank/fs", &m[0], &m[1], "-o", &o]);
+    assert_eq!(code, 4, "{err}");
+    assert!(err.contains("dnode block 0 could not be read"), "{err}");
+    let index: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(out.join("objects.json")).unwrap()).unwrap();
+    assert_eq!(index["unread"][0]["first"], 0, "{index}");
+    assert_eq!(index["unread"][0]["block"], 0, "{index}");
+    let o2 = dir.join("objs2").to_string_lossy().into_owned();
+    let (code, err) = run(&[
+        "-q", "objects", "tank/fs", &m[0], &m[1], "-o", &o2, "--strict",
+    ]);
+    assert_eq!(code, 4, "{err}");
+    assert!(err.contains("--strict"), "{err}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// Times come back as the dataset had them, a file of mostly holes takes
 /// the space of its blocks only, and `--preserve` refuses what it does
 /// not know rather than quietly turning the mode off.

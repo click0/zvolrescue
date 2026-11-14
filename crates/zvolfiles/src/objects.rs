@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use zvol_common::evidence::FileRef;
 use zvol_common::{exit, Format, Global, PoolSpec};
 
-use crate::common::{with_dataset, AtArgs, Zeroed, NO_BLOCK_SIZE};
+use crate::common::{with_dataset, AtArgs, PassedOver, Zeroed, NO_BLOCK_SIZE};
 use crate::out::{OutError, OutTree};
 
 #[derive(Debug, Serialize)]
@@ -40,10 +40,26 @@ struct ObjectOut {
     refused: bool,
 }
 
+/// One block of the dnode array as read, or why it did not read.
+type HeldBlock = Result<(Vec<u8>, zfs_ondisk::Endian), String>;
+
+/// Objects `first..=last` that could not be looked at, and why.
+#[derive(Debug, Serialize)]
+struct Unread {
+    first: u64,
+    last: u64,
+    /// The block of the dnode array they are in.
+    block: u64,
+    reason: String,
+}
+
 #[derive(Debug, Serialize)]
 struct ObjectsOut {
     dataset: String,
     txg: u64,
+    /// Newer transaction groups passed over for `txg`, and why.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    passed_over: Vec<PassedOver>,
     output: std::path::PathBuf,
     objects: Vec<ObjectOut>,
     /// Objects whose contents were written.
@@ -54,6 +70,10 @@ struct ObjectsOut {
     /// to be here rather than in `extract` (Z-08).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     damaged: Vec<String>,
+    /// Objects that could not be looked at: their dnode block did not
+    /// read, or their dnode did not parse.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    unread: Vec<Unread>,
     /// A signal ended the run (exit 6); objects after the last listed
     /// were not looked at.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -92,16 +112,60 @@ pub fn run(
     let result = with_dataset(spec, dataset, at, true, |fs, opened| {
         let tree = OutTree::open(g, spec, at, opened, output)?;
         let max = fs.objects.max_object();
+        let per = fs.objects.slots_per_block().max(1);
         let mut objects = Vec::new();
+        let mut unread: Vec<Unread> = Vec::new();
         let mut stopped = None;
         let mut obj = 0;
+        // The array a block at a time: a block that does not read loses
+        // every object in it, and says so. Each object that did not read
+        // was passed over without a word — 32 files of a dataset gone,
+        // exit 0 with `--strict` too, and none at all when the indirect
+        // block over the array was the one lost.
+        let mut held: Option<(u64, HeldBlock)> = None;
         while obj <= max {
             if interrupt.load(std::sync::atomic::Ordering::Relaxed) || stopped.is_some() {
                 break;
             }
-            let Ok(d) = fs.objects.get(obj) else {
-                obj += 1;
-                continue;
+            let blk = obj / per;
+            if held.as_ref().is_none_or(|(b, _)| *b != blk) {
+                held = Some((blk, fs.objects.block(obj).map_err(|e| e.to_string())));
+            }
+            let (block, endian) = match &held.as_ref().expect("just held").1 {
+                Ok(b) => (&b.0, b.1),
+                Err(e) => {
+                    let last = (blk + 1).saturating_mul(per).saturating_sub(1).min(max);
+                    eprintln!(
+                        "zvolfiles: objects {obj}–{last}: their dnode block {blk} could not be read: {e}"
+                    );
+                    if strict {
+                        stopped = Some(format!("objects {obj}–{last}: dnode block {blk}: {e}"));
+                    }
+                    unread.push(Unread {
+                        first: obj,
+                        last,
+                        block: blk,
+                        reason: e.clone(),
+                    });
+                    obj = last.saturating_add(1);
+                    continue;
+                }
+            };
+            let d = match fs.objects.parse_in(block, endian, obj) {
+                Ok(d) => d,
+                Err(e) => {
+                    unread.push(Unread {
+                        first: obj,
+                        last: obj,
+                        block: blk,
+                        reason: format!("its dnode does not parse: {e}"),
+                    });
+                    if strict {
+                        stopped = Some(format!("object {obj}: its dnode does not parse: {e}"));
+                    }
+                    obj += 1;
+                    continue;
+                }
             };
             // A large dnode owns the slots that follow it, and those hold
             // the rest of its bonus buffer rather than objects of their
@@ -172,10 +236,12 @@ pub fn run(
                 dataset: dataset.to_string(),
                 txg: opened.txg,
                 output: output.to_path_buf(),
+                passed_over: opened.passed_over.clone(),
                 objects,
                 written,
                 incomplete,
                 damaged: fs.damaged.clone(),
+                unread,
                 interrupted: interrupt.load(std::sync::atomic::Ordering::Relaxed),
                 stopped,
             },
@@ -245,6 +311,19 @@ pub fn run(
                         .map_or(String::new(), |e| format!("  ({e})"))
                 );
             }
+            for u in &out.unread {
+                println!(
+                    "  {:>6} not read{}: {} (dnode block {})",
+                    u.first,
+                    if u.last > u.first {
+                        format!(" through {}", u.last)
+                    } else {
+                        String::new()
+                    },
+                    u.reason,
+                    u.block
+                );
+            }
             if index_failed.is_some() {
                 println!("  index: NOT WRITTEN ({})", index.display());
             } else {
@@ -270,7 +349,12 @@ pub fn run(
         exit::INTERRUPTED
     } else if refused > 0 {
         exit::REFUSED
-    } else if out.incomplete > 0 || out.written < out.objects.len() || out.stopped.is_some() {
+    } else if out.incomplete > 0
+        || out.written < out.objects.len()
+        || out.stopped.is_some()
+        || !out.unread.is_empty()
+        || PassedOver::any_unread(&out.passed_over)
+    {
         exit::PARTIAL
     } else {
         0
