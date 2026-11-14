@@ -195,6 +195,14 @@ history a rewind left behind.
 * **`dump -r VOL@SNAP` found "no volume under" it, exit 3,** while a
   plain `dump` of the same name read it. It now extracts that snapshot
   of every volume under VOL which has one.
+* **`zfs promote` read as a rename.** The history had only "renamed
+  tank/vmc@before was tank/vm@before"; read from after it, the old
+  origin was a clone made before what it is a clone of, and the
+  promoted dataset "created". A clone that is one no longer is now a
+  `promoted` event, naming what it was a clone of and what it was
+  promoted over; the snapshots it took over are renamed "moved by the
+  promotion"; and a history that starts after a promotion still tells
+  it from the snapshots older than the dataset that holds them.
 
 ## v0.9.15 — 2026-11-13
 

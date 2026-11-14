@@ -16,6 +16,14 @@ reads every transaction group (TXG) that still verifies on the members
 of a pool, oldest to newest, and turns the differences between them
 into a history: when each dataset, volume and snapshot was created,
 renamed, destroyed or cloned, and what its properties were.
+A clone promoted over its origin is a
+.Ql promoted
+event; the snapshots the promotion moved to it are renamed, and say
+so.
+Read only from after a promotion, the dataset promoted is a clone
+promoted since, and the one it was promoted over was created, not
+cloned: snapshots older than the dataset that holds them came with a
+promotion.
 It reads the members the way
 .Xr zvolrescue 1
 does, never writes to them, and can write an evidence log the same

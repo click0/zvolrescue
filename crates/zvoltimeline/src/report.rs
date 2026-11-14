@@ -405,7 +405,10 @@ impl History {
                     // older than anything still readable. Say so, rather
                     // than dating it to the transaction group it happened
                     // to be found in.
-                    let mut details = crate::events::describe(d);
+                    let mut details = crate::events::joined(
+                        crate::events::describe(d),
+                        crate::events::appeared_details(d, &now),
+                    );
                     if d.creation_txg < txg {
                         if !details.is_empty() {
                             details.push_str(", ");
@@ -416,12 +419,31 @@ impl History {
                     self.events.push(Event {
                         txg: d.creation_txg.min(txg),
                         time: (d.creation_time != 0).then_some(d.creation_time),
-                        kind: crate::events::appeared_as(d),
+                        kind: crate::events::appeared_as(d, &now),
                         object: Some(d.name.clone()),
                         guid: d.guid,
                         details,
                         last_seen_txg: None,
                     });
+                    // Promoted where nothing was read: when is not known,
+                    // only that it was after the clone was made and by
+                    // this TXG. Read from after a promotion, the old
+                    // origin was a "clone" made before what it is a clone
+                    // of, and the promoted one "created".
+                    if crate::events::promoted_since(d, &now) {
+                        self.events.push(Event {
+                            txg,
+                            time: Some(timestamp),
+                            kind: Kind::Promoted,
+                            object: Some(d.name.clone()),
+                            guid: d.guid,
+                            details: format!(
+                                "at or before the oldest readable txg {txg}, after it was made at txg {}: it holds snapshots older than itself",
+                                d.creation_txg
+                            ),
+                            last_seen_txg: None,
+                        });
+                    }
                 }
             }
             Some((prev_txg, before)) => {
