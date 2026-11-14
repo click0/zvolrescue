@@ -338,6 +338,19 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             // verified uberblock at all, and "matches the requested TXG;
             // available: " with an empty list said neither.
             eprintln!("zvolrescue: no verified uberblock on these members");
+        } else if let TxgSelect::Before(ts) = sel {
+            // A time was asked for, and the answer is in times: it
+            // named the TXGs there are, which said nothing of when.
+            let oldest = candidates
+                .iter()
+                .min_by_key(|c| (c.ub.timestamp, c.ub.txg))
+                .expect("not empty");
+            eprintln!(
+                "zvolrescue: no verified uberblock at or before {}; the oldest is txg {} at {}",
+                iso8601(ts),
+                oldest.ub.txg,
+                iso8601(oldest.ub.timestamp)
+            );
         } else {
             eprintln!(
                 "zvolrescue: no verified uberblock matches the requested TXG; available: {}",

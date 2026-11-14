@@ -3046,3 +3046,20 @@ fn a_bulk_dump_takes_a_snapshot_name() {
         "the head is not the snapshot"
     );
 }
+
+/// `list --before` a time older than every TXG says so in times: it
+/// named the TXGs there are, which said nothing of when they were.
+#[test]
+fn before_every_txg_is_said_in_times() {
+    let dir = scratch("before-oldest");
+    let paths = write_members(&dir, &plain_members());
+    // The fixture's one TXG was written one second into 1970.
+    let (code, _, err) = run(&["-q", "list", "--before", "0", &paths[0], &paths[1]]);
+    assert_eq!(code, 3, "{err}");
+    assert!(
+        err.contains(
+            "no verified uberblock at or before 1970-01-01T00:00:00Z; the oldest is txg 100 at 1970-01-01T00:00:01Z"
+        ),
+        "{err}"
+    );
+}

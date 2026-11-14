@@ -203,6 +203,25 @@ history a rewind left behind.
   promoted over; the snapshots it took over are renamed "moved by the
   promotion"; and a history that starts after a promotion still tells
   it from the snapshots older than the dataset that holds them.
+* **A file with more names than ext4 takes lost the rest of them.**
+  Past 65 000 hard links every further name was "Too many links",
+  unwritten, exit 4. The next name is now written as a copy
+  (`copy_of`), and the names after it are links to the copy: a file
+  of 363 000 names extracts whole, exit 0.
+* **A path longer than the system takes was not written, nor anything
+  under it.** "File name too long", exit 4, for every entry below a
+  directory so deep. Such an entry now goes under
+  `.zvolfiles-deep/OBJECT` in the output directory — a directory with
+  everything under it by the names it has — and the manifest says
+  where (`written_as`); the evidence record lists each file where it
+  is, so `zvolreport verify` checks it there.
+* **Extracting a tree read its dnode blocks again for every entry.** A
+  file of 65 000 names took 38 s, 97 % of it decompressing one 16 KiB
+  block over and over, and a dataset of 363 000 entries 3.5 minutes.
+  The blocks read last are kept: 3.2 s and 20 s.
+* **`list --before` a time older than every TXG named the TXGs there
+  are,** which said nothing of when they were. It now says the time
+  asked for and the oldest TXG with its time.
 
 ## v0.9.15 — 2026-11-13
 

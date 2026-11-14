@@ -265,9 +265,18 @@ pub const MAX_TAIL_READS: u32 = 64;
 /// above any object read whole and far below what a hostile length asks.
 pub const MAX_RANGE: u64 = 1 << 30;
 
+/// How many blocks of the array [`DnodeArray`] keeps once read.
+const DNODE_BLOCKS_KEPT: usize = 8;
+
 /// The dnode array of an objset, addressed by object number.
 pub struct DnodeArray<'r, 'a> {
     meta: ObjectReader<'r, 'a>,
+    /// The blocks read last, by block number. Every lookup of an object
+    /// read its block of the array again and decompressed it: a file of
+    /// 65 000 names took 38 s to extract, 97 % of it in decompressing
+    /// one 16 KiB block over and over. An objset at one TXG does not
+    /// change; a block that did not read is not kept.
+    kept: std::sync::Mutex<Vec<(u64, Vec<u8>, Endian)>>,
 }
 
 impl<'r, 'a> DnodeArray<'r, 'a> {
@@ -275,6 +284,7 @@ impl<'r, 'a> DnodeArray<'r, 'a> {
     pub fn new(reader: &'r PoolReader<'a>, meta_dnode: DnodePhys, endian: Endian) -> Self {
         DnodeArray {
             meta: ObjectReader::new(reader, meta_dnode, endian),
+            kept: std::sync::Mutex::new(Vec::with_capacity(DNODE_BLOCKS_KEPT)),
         }
     }
 
@@ -311,7 +321,20 @@ impl<'r, 'a> DnodeArray<'r, 'a> {
         // a pool written by two hosts has dnode blocks of both orders, and
         // the array's order read a big-endian block's pointers as nonsense
         // ("DVA names unknown top-level vdev").
-        self.meta.read_blkid_ext(objnum / per)
+        let blkid = objnum / per;
+        if let Ok(kept) = self.kept.lock() {
+            if let Some((_, b, e)) = kept.iter().find(|(id, _, _)| *id == blkid) {
+                return Ok((b.clone(), *e));
+            }
+        }
+        let (block, endian) = self.meta.read_blkid_ext(blkid)?;
+        if let Ok(mut kept) = self.kept.lock() {
+            if kept.len() == DNODE_BLOCKS_KEPT {
+                kept.remove(0);
+            }
+            kept.push((blkid, block.clone(), endian));
+        }
+        Ok((block, endian))
     }
 
     /// Object `objnum` out of its block, as [`block`](Self::block) gave it.

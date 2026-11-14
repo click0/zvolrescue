@@ -134,10 +134,16 @@ impl OutTree {
             .map_err(|e| OutError::Failed(format!("{}: {e}", path.display())))
     }
 
-    /// `to` as a second name for `from`, a file this run wrote.
-    pub fn hard_link(&self, from: &Path, to: &Path) -> Result<(), OutError> {
+    /// `to` as a second name for `from`, a file this run wrote. `Ok(Some)`
+    /// says why the output's filesystem takes no further name for it —
+    /// ext4 stops at 65 000 — and the caller writes a copy instead.
+    pub fn hard_link(&self, from: &Path, to: &Path) -> Result<Option<String>, OutError> {
         self.make_way(to)?;
-        std::fs::hard_link(from, to).map_err(|e| OutError::Failed(format!("{}: {e}", to.display())))
+        match std::fs::hard_link(from, to) {
+            Ok(()) => Ok(None),
+            Err(e) if no_more_names(&e) => Ok(Some(e.to_string())),
+            Err(e) => Err(OutError::Failed(format!("{}: {e}", to.display()))),
+        }
     }
 
     /// Make the directories above `path`, and clear `path` itself.
@@ -172,6 +178,23 @@ impl OutTree {
             _ => Ok(()),
         }
     }
+}
+
+/// The filesystem will not give the file another name: it has as many
+/// as it takes, or it takes no hard links at all.
+fn no_more_names(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::TooManyLinks | io::ErrorKind::Unsupported
+    )
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "freebsd")))]
+#[test]
+fn a_file_with_every_name_it_can_take_is_copied() {
+    // EMLINK is 31 on both.
+    assert!(no_more_names(&io::Error::from_raw_os_error(31)));
+    assert!(!no_more_names(&io::Error::from_raw_os_error(28)));
 }
 
 /// Remove a link or a file; one already gone is not an error.
@@ -281,7 +304,10 @@ mod tests {
         assert_eq!(std::fs::read(out.join("old.txt")).unwrap(), b"");
         for _ in 0..2 {
             t.create(&out.join("a.txt")).unwrap();
-            t.hard_link(&out.join("a.txt"), &out.join("b.txt")).unwrap();
+            assert_eq!(
+                t.hard_link(&out.join("a.txt"), &out.join("b.txt")).unwrap(),
+                None
+            );
         }
         assert!(matches!(t.create(&out), Err(OutError::Failed(_))));
         std::fs::remove_dir_all(&dir).unwrap();

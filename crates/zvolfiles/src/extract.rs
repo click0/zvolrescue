@@ -68,6 +68,20 @@ pub struct Extracted {
     /// The earlier path this one is a hard link to (Z-07).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hardlink_to: Option<String>,
+    /// Where under the output directory this entry was written, when not
+    /// at its path: the path is longer than the system takes, and the
+    /// entry went to a short name here instead — a directory with
+    /// everything under it, by the names they have.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub written_as: Option<String>,
+    /// Where it was written, for the evidence record.
+    #[serde(skip)]
+    pub written_to: Option<PathBuf>,
+    /// The earlier path this one is the same file as, written as a copy:
+    /// the output's filesystem took no further name for it. Its later
+    /// names are links to this copy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub copy_of: Option<String>,
     /// Extended attributes, recorded rather than applied (Z-04).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub xattrs: Vec<Xattr>,
@@ -163,7 +177,8 @@ pub struct Xattr {
 #[derive(Debug, Clone)]
 struct Written {
     path: String,
-    raw_path: Vec<u8>,
+    /// Where it was written: at its path, or under a short name.
+    out: PathBuf,
     sha256: Option<String>,
     /// What of it was written as zeros: the same bytes under every name.
     zeroed: Vec<Zeroed>,
@@ -188,6 +203,10 @@ struct ManifestOut {
     failed: usize,
     /// Files written as hard links to an earlier path.
     hardlinks: usize,
+    /// Entries written under a short name (`written_as`): their paths
+    /// are longer than the system takes.
+    #[serde(skip_serializing_if = "is_zero")]
+    written_short: usize,
     /// Fifos, devices and sockets: recorded, not made.
     #[serde(skip_serializing_if = "is_zero")]
     special: usize,
@@ -382,6 +401,35 @@ fn safe_join(root: &Path, path: &[u8]) -> Option<PathBuf> {
         out.push(os_component(part)?);
     }
     Some(out)
+}
+
+/// Where entries whose paths are longer than the system takes are
+/// written instead, under the output directory.
+const DEEP: &str = ".zvolfiles-deep";
+
+/// The longest path the system takes, in bytes, with its NUL.
+const PATH_MAX: usize = if cfg!(target_os = "linux") {
+    4096
+} else {
+    1024
+};
+
+/// Where an entry goes: under the output directory by its path, or,
+/// below a directory that went to a short name, under that one.
+fn place(root: &Path, raw: &[u8], moved: &[(Vec<u8>, PathBuf)]) -> Option<PathBuf> {
+    match moved
+        .iter()
+        .filter(|(dir, _)| under(dir, raw))
+        .max_by_key(|(dir, _)| dir.len())
+    {
+        Some((dir, to)) => safe_join(to, &raw[dir.len() + 1..]),
+        None => safe_join(root, raw),
+    }
+}
+
+/// Whether the system would refuse `path` for its length.
+fn too_long(path: &Path) -> bool {
+    std::path::absolute(path).is_ok_and(|p| p.as_os_str().len() >= PATH_MAX)
 }
 
 /// How a file's copy can end short of the file.
@@ -584,6 +632,9 @@ struct Run {
     unwritten_dirs: Vec<(Vec<u8>, String, u64)>,
     /// `--strict` ended the run, at this file and block.
     stopped: Option<String>,
+    /// Directories written under a short name, as their path's bytes and
+    /// where they went: what is under one goes under it.
+    moved: Vec<(Vec<u8>, PathBuf)>,
 }
 
 /// Run `extract`.
@@ -800,6 +851,7 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
             );
         }
         let hardlinks = files.iter().filter(|f| f.hardlink_to.is_some()).count();
+        let written_short = files.iter().filter(|f| f.written_as.is_some()).count();
         let special = files.iter().filter(|f| f.not_made.is_some()).count();
         Ok((
             ManifestOut {
@@ -812,6 +864,7 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
                 incomplete,
                 failed,
                 hardlinks,
+                written_short,
                 special,
                 stopped: run.stopped,
                 interrupted,
@@ -900,6 +953,12 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
             if out.hardlinks > 0 {
                 println!("  {} hard link(s)", out.hardlinks);
             }
+            if out.written_short > 0 {
+                println!(
+                    "  {} written under {DEEP}: their paths are longer than the system takes (the manifest's written_as)",
+                    entries(out.written_short)
+                );
+            }
             if out.special > 0 {
                 println!(
                     "  {} fifo(s), device(s) or socket(s) recorded in the manifest, not made",
@@ -964,11 +1023,12 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
             .iter()
             .filter(|f| f.error.is_none())
             .filter_map(|f| {
-                let rel = match &f.path_hex {
-                    Some(h) => zvol_common::evidence::path_from_hex(h)?,
-                    None => std::path::PathBuf::from(&f.path),
+                let at = match (&f.written_to, &f.path_hex) {
+                    (Some(to), _) => to.clone(),
+                    (None, Some(h)) => out.output.join(zvol_common::evidence::path_from_hex(h)?),
+                    (None, None) => out.output.join(&f.path),
                 };
-                Some(FileRef::known(&out.output.join(rel), f.sha256.as_ref()?))
+                Some(FileRef::known(&at, f.sha256.as_ref()?))
             }),
     );
     // A device refused a read: every incident on stderr, and the stop —
@@ -1033,6 +1093,9 @@ fn record_of(fs: &Filesystem<'_, '_>, e: &Entry, z: &Znode) -> Extracted {
         sha256: None,
         target: None,
         hardlink_to: None,
+        copy_of: None,
+        written_as: None,
+        written_to: None,
         xattrs: xattrs.0,
         xattr_errors: xattrs.1,
         contents_errors: e.contents_errors.clone(),
@@ -1150,7 +1213,7 @@ fn write_entry(
         run.files.push(record);
         return;
     }
-    let Some(to) = safe_join(&opts.output, &e.raw_path) else {
+    let Some(mut to) = place(&opts.output, &e.raw_path, &run.moved) else {
         reject(
             run,
             record,
@@ -1158,6 +1221,21 @@ fn write_entry(
         );
         return;
     };
+    // A path the system does not take: "File name too long", and
+    // nothing under a directory so named was written, exit 4. It goes to
+    // a short name under the output directory instead, and what is under
+    // it goes under that, by the names it has.
+    if too_long(&to) {
+        let short = opts.output.join(DEEP).join(e.object.to_string());
+        if !too_long(&short) {
+            record.written_as = Some(format!("{DEEP}/{}", e.object));
+            if is_dir {
+                run.moved.push((e.raw_path.clone(), short.clone()));
+            }
+            to = short;
+        }
+    }
+    record.written_to = Some(to.clone());
     if !run.taken.insert(to.clone()) {
         reject(
             run,
@@ -1205,13 +1283,8 @@ fn write_entry(
             // The same object under a second name is a hard link, and
             // reading its blocks again would only prove that twice.
             if let Some(first) = run.written_objects.get(&e.object).cloned() {
-                match safe_join(&opts.output, &first.raw_path)
-                    .ok_or_else(|| {
-                        OutError::Failed("the first name is not one this platform can write".into())
-                    })
-                    .and_then(|from| tree.hard_link(&from, &to))
-                {
-                    Ok(()) => {
+                match tree.hard_link(&first.out, &to) {
+                    Ok(None) => {
                         // The same bytes, zeros and all: the second name
                         // said `errors 0` for a file the first name said
                         // had blocks written as zeros.
@@ -1219,11 +1292,26 @@ fn write_entry(
                         record.sha256 = first.sha256.clone();
                         record.errors = first.zeroed.len() as u64;
                         record.zeroed = first.zeroed;
+                        run.files.push(record);
+                        return;
                     }
-                    Err(err) => fail(&mut record, err),
+                    // A file with more names than the output's filesystem
+                    // takes: the names past its limit went unwritten,
+                    // exit 4. This one is written again from the pool,
+                    // and the names after it are links to it.
+                    Ok(Some(why)) => {
+                        eprintln!(
+                            "zvolfiles: {}: {why}; written as a copy of {}, its later names linked to the copy",
+                            e.path, first.path
+                        );
+                        record.copy_of = Some(first.path.clone());
+                    }
+                    Err(err) => {
+                        fail(&mut record, err);
+                        run.files.push(record);
+                        return;
+                    }
                 }
-                run.files.push(record);
-                return;
             }
             match copy_file(fs, tree, e.object, z.size, &to, &e.path, opts.strict, stop) {
                 Ok(copied) => {
@@ -1249,7 +1337,7 @@ fn write_entry(
                             e.object,
                             Written {
                                 path: e.path.clone(),
-                                raw_path: e.raw_path.clone(),
+                                out: to.clone(),
                                 sha256: Some(copied.sha256),
                                 zeroed: copied.zeroed,
                             },
@@ -1322,6 +1410,9 @@ fn failed(e: &Entry, why: &str) -> Extracted {
         sha256: None,
         target: None,
         hardlink_to: None,
+        copy_of: None,
+        written_as: None,
+        written_to: None,
         xattrs: Vec::new(),
         xattr_errors: Vec::new(),
         contents_errors: e.contents_errors.clone(),
@@ -1385,14 +1476,47 @@ fn xattrs_of(fs: &Filesystem<'_, '_>, z: &Znode) -> (Vec<Xattr>, Vec<String>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{safe_join, Meta, Preserve};
+    use super::{place, safe_join, too_long, Meta, Preserve, PATH_MAX};
     use std::collections::BTreeSet;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     /// The set-id bits go only with the owner, a link's target is never
     /// executable, and a time is put back as the dataset had it; an item
     /// `--preserve` does not know is refused.
     #[cfg(unix)]
+    /// Below a directory written under a short name, an entry goes
+    /// under that name by the rest of its path; the deepest one wins.
+    #[test]
+    fn what_is_under_a_moved_directory_goes_with_it() {
+        let root = Path::new("/out");
+        let moved = vec![
+            (b"a/b".to_vec(), PathBuf::from("/out/.zvolfiles-deep/7")),
+            (b"a/b/c/d".to_vec(), PathBuf::from("/out/.zvolfiles-deep/9")),
+        ];
+        assert_eq!(
+            place(root, b"a/x", &moved).as_deref(),
+            Some(Path::new("/out/a/x"))
+        );
+        assert_eq!(
+            place(root, b"a/b/c/f", &moved).as_deref(),
+            Some(Path::new("/out/.zvolfiles-deep/7/c/f"))
+        );
+        assert_eq!(
+            place(root, b"a/b/c/d/e", &moved).as_deref(),
+            Some(Path::new("/out/.zvolfiles-deep/9/e"))
+        );
+        // A name that only begins like a moved directory is not under it.
+        assert_eq!(
+            place(root, b"a/bc", &moved).as_deref(),
+            Some(Path::new("/out/a/bc"))
+        );
+        assert!(!too_long(Path::new("/out/a")));
+        assert!(too_long(&PathBuf::from(format!(
+            "/{}",
+            "x".repeat(PATH_MAX)
+        ))));
+    }
+
     #[test]
     fn what_preserve_puts_back() {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
