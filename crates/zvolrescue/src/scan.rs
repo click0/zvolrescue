@@ -161,6 +161,9 @@ struct MapOut {
     /// Label positions (0..=3) the unfinished ranges touch: where the
     /// pool's own account of itself was never read.
     labels_touched: Vec<usize>,
+    /// What the map says was not read, in words.
+    #[serde(skip)]
+    said: String,
 }
 
 /// What a GEOM class left in a provider's last sector (SPEC F-71).
@@ -760,10 +763,9 @@ fn print_text(out: &ScanOut, verbose: u8) {
         }
         if let Some(m) = &d.map {
             println!(
-                "  imager's map {}: {} byte(s) in {} range(s) never read{}; they are refused, not trusted (SPEC F-72)",
+                "  imager's map {}: it says {}{}{}",
                 m.path.display(),
-                m.unreadable_bytes,
-                m.unreadable.len(),
+                m.said,
                 if m.labels_touched.is_empty() {
                     String::new()
                 } else {
@@ -775,6 +777,11 @@ fn print_text(out: &ScanOut, verbose: u8) {
                             .collect::<Vec<_>>()
                             .join(",")
                     )
+                },
+                if m.unreadable.is_empty() {
+                    ""
+                } else {
+                    "; they are refused, not trusted (SPEC F-72)"
                 }
             );
         }
@@ -1186,17 +1193,13 @@ pub fn run(
         }
     }
     let devices = &once[..];
-    for (member, file) in &open.maps {
-        if !devices.contains(member) {
-            eprintln!(
-                "zvolrescue: --map {}={}: {} is not among the devices given",
-                member.display(),
-                file.display(),
-                member.display()
-            );
+    let open = &match open.for_inputs(devices, "devices") {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("zvolrescue: {e}");
             return exit::USAGE;
         }
-    }
+    };
     let mut scans: Vec<Option<DeviceScan>> = Vec::with_capacity(devices.len());
     let mut outs: Vec<DeviceOut> = Vec::with_capacity(devices.len());
     // Kept open past the loop: telling a removed top-level vdev from a
@@ -1257,6 +1260,7 @@ pub fn run(
                     .map(|(_, f)| f.clone())
                     .unwrap_or_default(),
                 unreadable_bytes: m.unreadable_bytes(),
+                said: m.said(),
                 unreadable: m.unreadable().to_vec(),
                 by_status: m.by_status.clone(),
                 labels_touched,

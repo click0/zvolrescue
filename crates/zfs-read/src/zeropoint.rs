@@ -487,21 +487,31 @@ fn scan_from_anchors(dev: &dyn BlockSource, zero: &ZeroPoint) -> crate::vdev::De
     // label of its own: L3 when it ends where the device does, L2 when
     // the label after it would, and otherwise the nearer to the front of
     // two is L2.
+    // Every rear ring, placed or not: a ring placed by the hypothesis
+    // that the vdev runs to the end of the device is placed wrong when
+    // it does not — with one label of space after it, its L3 is where L2
+    // would be.
     let mut rear: Vec<u64> = zero
         .anchors
         .iter()
-        .filter(|a| a.label.is_none())
+        .filter(|a| !matches!(a.label, Some(0) | Some(1)))
         .map(ring)
         .collect();
     rear.sort_unstable();
     rear.dedup();
     let end = dev.size().saturating_sub(zero.base) / LABEL_SIZE * LABEL_SIZE;
+    // Two rings side by side are the pair, whatever lies after them:
+    // with exactly one label of space after the vdev, the end rule took
+    // L3 for L2, and the vdev had two L2s and no L3.
+    let pair = rear.len() == 2 && rear[0] + LABEL_SIZE == rear[1];
     let rear_index = |at: u64| -> usize {
-        if at + LABEL_SIZE == end {
-            3
-        } else if at + 2 * LABEL_SIZE == end {
-            2
-        } else if rear.len() == 2 && rear[0] + LABEL_SIZE == rear[1] && at == rear[1] {
+        if pair {
+            if at == rear[1] {
+                3
+            } else {
+                2
+            }
+        } else if at + LABEL_SIZE == end {
             3
         } else {
             2
@@ -512,7 +522,12 @@ fn scan_from_anchors(dev: &dyn BlockSource, zero: &ZeroPoint) -> crate::vdev::De
         let shift = anchor.shift;
         let slots = zfs_ondisk::zeropoint::slots_per_ring(shift);
         let offset = ring(anchor);
-        let index = anchor.label.unwrap_or_else(|| rear_index(offset));
+        let index = match anchor.label {
+            Some(l @ (0 | 1)) => l,
+            _ if pair => rear_index(offset),
+            Some(l) => l,
+            None => rear_index(offset),
+        };
         let label = match labels
             .iter_mut()
             .find(|l| l.index == index && l.offset == offset)
@@ -645,11 +660,20 @@ mod tests {
     /// then held every slot three times.
     #[test]
     fn rear_rings_of_unknown_size_are_labels_of_their_own() {
+        // Exactly one label of space after the vdev too: its L3 was
+        // called L2, for the label after it would end where the device
+        // does.
+        for after in [2 * 1024 * 1024, LABEL_SIZE] {
+            rear_rings_after(after);
+        }
+    }
+
+    fn rear_rings_after(after: u64) {
         let base = 3 * 1024 * 1024;
         let psize = 16 * 1024 * 1024;
         let mut img = vec![0x5au8; base as usize];
         img.extend_from_slice(&member(psize));
-        img.extend_from_slice(&vec![0u8; 2 * 1024 * 1024]);
+        img.extend_from_slice(&vec![0u8; after as usize]);
         wipe_configs(&mut img[..(base + psize) as usize], base);
         let dev = MemSource::new(img);
         let scan = scan_with_recovered_base(&dev).expect("scan");
@@ -681,7 +705,7 @@ mod tests {
             .collect();
         assert!(
             rear == [(2, psize - 2 * LABEL_SIZE), (3, psize - LABEL_SIZE)],
-            "{rear:?}"
+            "{after} byte(s) after: {rear:?}"
         );
     }
 

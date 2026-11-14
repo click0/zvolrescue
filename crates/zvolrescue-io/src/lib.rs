@@ -154,6 +154,11 @@ pub mod ddrescue {
         /// end — which are refused as the unfinished ones are: what the
         /// imager says nothing of, it is not known to have read.
         pub undescribed: u64,
+        /// Ranges its lines mark unfinished, merged, and not counting
+        /// what it does not describe.
+        marked: usize,
+        /// Where the last of them ends.
+        marked_end: Option<u64>,
     }
 
     impl Map {
@@ -207,6 +212,10 @@ pub mod ddrescue {
                 let total = map.by_status.entry(status).or_insert(0);
                 *total = total.saturating_add(size);
                 if status != '+' && size > 0 {
+                    if map.marked_end != Some(pos) {
+                        map.marked += 1;
+                    }
+                    map.marked_end = Some(end);
                     match map.unreadable.last_mut() {
                         Some((s, l)) if *s + *l == pos => *l += size,
                         _ => map.unreadable.push((pos, size)),
@@ -224,6 +233,24 @@ pub mod ddrescue {
         /// Ranges the imager did not finish, merged and in order.
         pub fn unreadable(&self) -> &[(u64, u64)] {
             &self.unreadable
+        }
+
+        /// What the map says was not read, in words: the ranges its
+        /// lines mark unfinished, and apart from them what it says
+        /// nothing of. It was "0 byte(s) in 2 range(s) were never read"
+        /// for a map whose two ranges were both bytes it did not
+        /// describe.
+        pub fn said(&self) -> String {
+            let marked = self.unreadable_bytes().saturating_sub(self.undescribed);
+            match (marked, self.undescribed) {
+                (0, 0) => "every byte was read".to_string(),
+                (0, u) => format!("nothing of {u} byte(s), between its lines or past its end"),
+                (m, 0) => format!("{m} byte(s) in {} range(s) were never read", self.marked),
+                (m, u) => format!(
+                    "{m} byte(s) in {} range(s) were never read, and nothing of {u} byte(s) more, between its lines or past its end",
+                    self.marked
+                ),
+            }
         }
 
         /// Refuse `[pos, pos + len)`, which the map does not describe.
@@ -975,6 +1002,25 @@ mod tests {
         assert!(!m.touches(0x100400, 0x1000));
         assert_eq!(m.within(0x0FFE00, 0x400), vec![(0x200, 0x200)]);
         assert_eq!(m.within(0x10F000, 0x5000), vec![(0x1000, 0x3000)]);
+        assert_eq!(m.said(), "13312 byte(s) in 2 range(s) were never read");
+        // Two gaps the map says nothing of are not "0 byte(s) in 2
+        // range(s) were never read".
+        let gaps = ddrescue::Map::parse("0x0 +\n0x0 0x100 +\n0x200 0x100 +\n0x400 0x100 +\n")
+            .expect("a map");
+        assert_eq!(gaps.unreadable().len(), 2);
+        assert_eq!(
+            gaps.said(),
+            "nothing of 512 byte(s), between its lines or past its end"
+        );
+        let both = ddrescue::Map::parse("0x0 +\n0x0 0x100 -\n0x200 0x100 -\n").expect("a map");
+        assert_eq!(
+            both.said(),
+            "512 byte(s) in 2 range(s) were never read, and nothing of 256 byte(s) more, between its lines or past its end"
+        );
+        assert_eq!(
+            ddrescue::Map::parse("0x0 +\n0x0 0x100 +\n").unwrap().said(),
+            "every byte was read"
+        );
         assert!(ddrescue::Map::parse("# only comments\n").is_err());
         assert!(ddrescue::Map::parse("0x0 + 1\n0x0 0x100 x\n").is_err());
         assert!(ddrescue::Map::parse("0x0 + 1\n0x100 0x100 +\n0x0 0x100 +\n").is_err());

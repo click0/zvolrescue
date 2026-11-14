@@ -1102,6 +1102,43 @@ impl OpenOpts {
         self.maps.iter().map(|(_, f)| f.clone()).collect()
     }
 
+    /// The maps, each on the spelling of its member the run reads. A
+    /// member named twice is read once, under its first name, and a map
+    /// given for the second spelling was "not among the members given",
+    /// exit 1, right after "read once". `what` names the inputs in the
+    /// message: members, or devices.
+    pub fn for_inputs(&self, inputs: &[PathBuf], what: &str) -> Result<OpenOpts, String> {
+        let mut maps: Vec<(PathBuf, PathBuf)> = Vec::with_capacity(self.maps.len());
+        for (member, file) in &self.maps {
+            let Some(kept) = inputs.iter().find(|k| *k == member || same_file(k, member)) else {
+                return Err(format!(
+                    "--map {}={}: {} is not among the {what} given",
+                    member.display(),
+                    file.display(),
+                    member.display()
+                ));
+            };
+            match maps.iter().find(|(m, _)| m == kept) {
+                Some((_, other)) if other != file && !same_file(other, file) => {
+                    return Err(format!(
+                        "--map {}={}: {} has a map already, {}",
+                        member.display(),
+                        file.display(),
+                        kept.display(),
+                        other.display()
+                    ));
+                }
+                Some(_) => {}
+                None => maps.push((kept.clone(), file.clone())),
+            }
+        }
+        Ok(OpenOpts {
+            ledger: self.ledger.clone(),
+            surface_scan_on_device: self.surface_scan_on_device,
+            maps,
+        })
+    }
+
     /// Open `path` read-only on the run's ledger and, when one was named
     /// for it, with its imager's map.
     pub fn open(&self, path: &Path) -> std::io::Result<FileSource> {

@@ -216,6 +216,43 @@ fn hints_without_a_name_take_the_pools() {
     ]);
     assert_eq!(code, 0, "{err}");
     assert_eq!(json(&out)["volumes"][0]["dataset"], "tank/vm/disk0");
+    // And the GUID from the pool's own configuration: it was 0 in the
+    // header, the JSON and the record.
+    assert_eq!(json(&out)["pool_guid"], "0x0000000000004242", "{out}");
+}
+
+/// With no label left and no name in the hints, the pool is named by
+/// its own configuration in the MOS: its datasets were, and the pool
+/// stayed "?" in the header, the JSON and the record.
+#[test]
+fn a_pool_no_label_names_is_named_by_its_mos() {
+    let dir = scratch("hints-mos-name");
+    let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1)]);
+    let mut members = removed_vdev_members(&mut pool, SIZE);
+    for m in &mut members {
+        wipe_configs(m);
+    }
+    let paths = write_members(&dir, &members);
+    let hints = dir.join("layout.hints");
+    std::fs::write(
+        &hints,
+        serde_json::json!({"ashift": 12,
+            "tops": [{"kind": "mirror", "members": [&paths[0], &paths[1]]}]})
+        .to_string(),
+    )
+    .unwrap();
+    let (code, out, err) = run(&[
+        "-q",
+        "-f",
+        "json",
+        "list",
+        &paths[0],
+        &paths[1],
+        "--hints",
+        &hints.to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(json(&out)["pool"], "tank", "{out}");
 }
 
 /// A member given twice — by its path and by a link to it — is read
@@ -258,6 +295,22 @@ fn a_member_twice_is_read_once_and_given_one_map() {
     ]);
     assert_eq!(code, 1, "{err}");
     assert!(err.contains("has a map already"), "{err}");
+
+    // A map given for the second spelling goes with the member read:
+    // it was "read once", then "not among the members given", exit 1.
+    for cmd in ["scan", "list"] {
+        let (code, _, err) = run(&[
+            "-q",
+            cmd,
+            &paths[0],
+            &link.to_string_lossy(),
+            &paths[1],
+            "--map",
+            &format!("{}={}", link.display(), a.display()),
+        ]);
+        assert_eq!(code, 0, "{cmd}: {err}");
+        assert!(!err.contains("not among"), "{cmd}: {err}");
+    }
 }
 
 /// A map shorter than its image says nothing of the rest, which is not
@@ -279,7 +332,7 @@ fn what_a_map_does_not_describe_is_not_trusted() {
     let rest = SIZE - 0x10_0000;
     assert!(
         err.contains(&format!(
-            "the imager's map says 0 byte(s) in 1 range(s) were never read, and says nothing of {rest} byte(s) more"
+            "the imager's map says nothing of {rest} byte(s), between its lines or past its end"
         )),
         "{err}"
     );

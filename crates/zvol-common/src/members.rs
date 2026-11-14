@@ -451,38 +451,26 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
             paths.len()
         );
     }
-    let open = spec.open_opts().map_err(|e| {
-        say!("{e}");
-        exit::USAGE
-    })?;
-    for (member, file) in &open.maps {
-        if !paths.contains(member) {
-            say!(
-                "--map {}={}: {} is not among the members given",
-                member.display(),
-                file.display(),
-                member.display()
-            );
-            return Err(exit::USAGE);
-        }
-    }
+    let open = spec
+        .open_opts()
+        .and_then(|o| o.for_inputs(&paths, "members"))
+        .map_err(|e| {
+            say!("{e}");
+            exit::USAGE
+        })?;
     let mut sources = Vec::with_capacity(paths.len());
     let mut scans = Vec::with_capacity(paths.len());
     for p in &paths {
         let opened = open.open(p).and_then(|src| {
             if let Some(m) = src.map() {
                 say!(
-                    "{}: the imager's map says {} byte(s) in {} range(s) were never read{}; they are refused, not trusted (SPEC F-72)",
+                    "{}: the imager's map says {}{}",
                     p.display(),
-                    m.unreadable_bytes() - m.undescribed,
-                    m.unreadable().len(),
-                    if m.undescribed > 0 {
-                        format!(
-                            ", and says nothing of {} byte(s) more, between its lines or past its end",
-                            m.undescribed
-                        )
+                    m.said(),
+                    if m.unreadable().is_empty() {
+                        ""
                     } else {
-                        String::new()
+                        "; they are refused, not trusted (SPEC F-72)"
                     }
                 );
             }
@@ -569,6 +557,9 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
             if layout.name.is_none() {
                 layout.name = scans.iter().flatten().find_map(|s| s.config()?.name);
             }
+            if layout.guid.is_none() {
+                layout.guid = scans.iter().flatten().find_map(|s| s.config()?.pool_guid);
+            }
             if spec.search_order {
                 let devices: Vec<Option<&dyn BlockSource>> = sources
                     .iter()
@@ -576,8 +567,26 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
                     .collect();
                 layout = search_layout(&layout, &scans, &devices, &bases)?;
             }
+            let mut pool = layout.assemble();
+            // What the labels could not give, the MOS can: a pool read
+            // through hints without a name was "?", GUID 0, in the
+            // header, the JSON and the record, while its datasets were
+            // named from the MOS.
+            if layout.name.is_none() || layout.guid.is_none() {
+                let devices: Vec<Option<&dyn BlockSource>> = sources
+                    .iter()
+                    .map(|s| s.as_ref().map(|s| s as &dyn BlockSource))
+                    .collect();
+                let (name, guid) = zfs_read::dsl::pool_identity(&scans, devices, &bases, &pool);
+                if layout.name.is_none() && name.is_some()
+                    || layout.guid.is_none() && guid.is_some()
+                {
+                    layout.name = layout.name.take().or(name);
+                    layout.guid = layout.guid.or(guid);
+                    pool = layout.assemble();
+                }
+            }
             crate::evidence::note_layout(layout_record(&layout, &paths, file, spec.search_order));
-            let pool = layout.assemble();
             say!(
                 "reading through the layout in {}: {}",
                 file.display(),

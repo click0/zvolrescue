@@ -26,7 +26,11 @@ resume on another disk of the same name, files with names that are
 not text, a case moved before it was verified. And what a run could
 not read is said where it was passed over: dnodes that did not read,
 newer transaction groups, a carved volume's removed vdev, the line of
-history a rewind left behind.
+history a rewind left behind. And what was refused or had to be done by
+hand works: a dRAID relabelled from its hints, a bulk dump resumed
+without extracting again what it finished, a snapshot of every volume
+at once, a promotion in the history, a file with more names than ext4
+takes, a path longer than the system takes.
 
 ### Fixed
 
@@ -222,6 +226,23 @@ history a rewind left behind.
 * **`list --before` a time older than every TXG named the TXGs there
   are,** which said nothing of when they were. It now says the time
   asked for and the oldest TXG with its time.
+* **A map given for the second spelling of a member was refused.** A
+  member named twice is read once, under its first name, and a `--map`
+  for the other was "not among the members given", exit 1, right after
+  "read once". It now goes with the member read.
+* **The imager's map counted ranges it does not describe as never
+  read.** "0 byte(s) in 2 range(s) were never read" said of a map whose
+  two ranges were both bytes it says nothing of. The count is now of
+  the ranges its lines mark, and the rest is said apart; a map that
+  marks nothing says every byte was read.
+* **One label of space after a vdev whose configurations are gone made
+  its L3 an L2.** The rear rings were placed against the end of the
+  device; two rings side by side are now the pair, wherever the device
+  ends.
+* **A pool read through hints without a name stayed "?", GUID 0.** Its
+  datasets were named from the MOS, the pool not, in the header, the
+  JSON and the record. The name and GUID now come from a member's
+  label, or else from the pool's configuration in its MOS.
 
 ## v0.9.15 — 2026-11-13
 
