@@ -434,41 +434,7 @@ pub fn label_nvlist(
 ) -> NvList {
     let assembly = layout.assemble();
     let t = &assembly.tops[top];
-    let children: Vec<NvList> = t
-        .tree
-        .children
-        .iter()
-        .map(|c| {
-            encode::list(vec![
-                ("type", Value::String("disk".into())),
-                ("id", Value::Uint64(c.id)),
-                ("guid", Value::Uint64(c.guid)),
-                ("whole_disk", Value::Uint64(0)),
-                ("create_txg", Value::Uint64(4)),
-            ])
-        })
-        .collect();
-    let mut tree = vec![
-        ("type", Value::String(t.kind.clone())),
-        ("id", Value::Uint64(t.id)),
-        ("guid", Value::Uint64(t.guid)),
-        ("ashift", Value::Uint64(layout.ashift)),
-        ("create_txg", Value::Uint64(4)),
-    ];
-    if let Some(p) = t.nparity {
-        tree.push(("nparity", Value::Uint64(p)));
-    }
-    if let Some(a) = asize {
-        tree.push(("asize", Value::Uint64(a)));
-    }
-    if t.kind == "disk" {
-        // A single-device top is the leaf itself, not a wrapper.
-        tree.retain(|(k, _)| *k != "type");
-        tree.insert(0, ("type", Value::String("disk".into())));
-        tree.push(("guid", Value::Uint64(t.members[leaf].guid)));
-    } else {
-        tree.push(("children", Value::ListArray(children)));
-    }
+    let tree = tree_nvlist(&t.tree, Some((layout.ashift, asize)));
     encode::list(vec![
         ("version", Value::Uint64(5000)),
         (
@@ -481,8 +447,52 @@ pub fn label_nvlist(
         ("vdev_children", Value::Uint64(layout.tops.len() as u64)),
         ("guid", Value::Uint64(assembly.tops[top].members[leaf].guid)),
         ("top_guid", Value::Uint64(t.guid)),
-        ("vdev_tree", Value::List(encode::list(tree))),
+        ("vdev_tree", Value::List(tree)),
     ])
+}
+
+/// One node of a `vdev_tree` as a label carries it, with everything under
+/// it. `top` holds what only the top-level vdev records (`ashift`,
+/// `asize`). Every group keeps its parity and, for dRAID, the three
+/// numbers its geometry is computed from: a label without them describes
+/// a dRAID no reader can lay out. A group nested in another is written as
+/// nested, so a member of a raidz inside a mirror gets the tree it is in.
+fn tree_nvlist(node: &VdevNode, top: Option<(u64, Option<u64>)>) -> NvList {
+    let leaf = node.children.is_empty();
+    let kind = if leaf && top.is_none() {
+        "disk".to_string()
+    } else {
+        node.kind.clone()
+    };
+    let mut pairs = vec![
+        ("type", Value::String(kind)),
+        ("id", Value::Uint64(node.id)),
+        ("guid", Value::Uint64(node.guid)),
+    ];
+    if let Some((ashift, asize)) = top {
+        pairs.push(("ashift", Value::Uint64(ashift)));
+        if let Some(a) = asize {
+            pairs.push(("asize", Value::Uint64(a)));
+        }
+    }
+    pairs.push(("create_txg", Value::Uint64(4)));
+    if leaf {
+        pairs.push(("whole_disk", Value::Uint64(0)));
+        return encode::list(pairs);
+    }
+    for (key, value) in [
+        ("nparity", node.nparity),
+        ("draid_ndata", node.draid_ndata),
+        ("draid_nspares", node.draid_nspares),
+        ("draid_ngroups", node.draid_ngroups),
+    ] {
+        if let Some(v) = value {
+            pairs.push((key, Value::Uint64(v)));
+        }
+    }
+    let children = node.children.iter().map(|c| tree_nvlist(c, None)).collect();
+    pairs.push(("children", Value::ListArray(children)));
+    encode::list(pairs)
 }
 
 /// Render the front 128 KiB of a label carrying that configuration,
@@ -619,6 +629,55 @@ mod tests {
             parse_vdev_phys(phys, elsewhere).checksum,
             ChecksumStatus::Bad
         );
+    }
+
+    /// A dRAID label carries the three numbers its layout is computed
+    /// from, and a member of a group nested in the top gets the tree it is
+    /// in. Without them a relabelled dRAID read as nothing (exit 3), and a
+    /// nested layout had "0 member(s)" to emit a label for.
+    #[test]
+    fn an_emitted_label_keeps_draid_geometry_and_nesting() {
+        let leaf = |i| TopHint {
+            kind: "disk".into(),
+            nparity: None,
+            draid_ndata: None,
+            draid_nspares: None,
+            draid_ngroups: None,
+            members: vec![Some(i)],
+            children: Vec::new(),
+        };
+        let mut spare = leaf(5);
+        spare.kind = "spare".into();
+        spare.members = vec![Some(5), None];
+        let l = LayoutHints {
+            name: Some("tank".into()),
+            guid: None,
+            ashift: 12,
+            tops: vec![TopHint {
+                kind: "draid".into(),
+                nparity: Some(1),
+                draid_ndata: Some(4),
+                draid_nspares: Some(1),
+                draid_ngroups: Some(1),
+                members: Vec::new(),
+                children: vec![leaf(0), leaf(1), leaf(2), leaf(3), leaf(4), spare],
+            }],
+        };
+        let nv = label_nvlist(&l, 0, 5, 107, None);
+        let tree = nv.list("vdev_tree").expect("vdev_tree");
+        assert_eq!(tree.str("type"), Some("draid"));
+        assert_eq!(tree.u64("draid_ndata"), Some(4));
+        assert_eq!(tree.u64("draid_nspares"), Some(1));
+        assert_eq!(tree.u64("draid_ngroups"), Some(1));
+        let node = VdevNode::from_nvlist(tree);
+        assert_eq!(node.children.len(), 6);
+        let spare = &node.children[5];
+        assert_eq!(spare.kind, "spare");
+        assert_eq!(spare.children.len(), 2);
+        // The sixth leaf in vdev order is the first under the spare.
+        assert_eq!(nv.u64("guid"), Some(spare.children[0].guid));
+        assert_eq!(node.children[0].kind, "disk");
+        assert!(node.children[0].children.is_empty());
     }
 
     #[test]

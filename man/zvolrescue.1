@@ -211,6 +211,18 @@ the members is refused, with exit 5, before either file is written.
 .It Fl -emit-for Ar top : Ns Ar leaf
 Which member of the layout the emitted label belongs to; default
 .Ql 0:0 .
+.Ar leaf
+counts every member of the top-level vdev in vdev order, those of
+groups nested in it (a spare, a vdev being replaced) included, and the
+label describes the whole tree the member is in.
+A dRAID label carries
+.Ql draid_ndata ,
+.Ql draid_nspares
+and
+.Ql draid_ngroups
+from the hints, without which no reader can lay the dRAID out.
+The label has no metaslab array: what it reads through is the data,
+not the space maps.
 .It Fl -emit-label-index Ar n
 Which of the four label positions to seal the emitted label for;
 default 0.
@@ -344,6 +356,21 @@ and
 .Ql .img
 added; volumes whose names come out the same that way also carry their
 GUID, so that no image is written over another.
+A snapshot name,
+.Ar dataset Ns @ Ns Ar snap ,
+extracts that snapshot of every volume under
+.Ar dataset
+which has one, as
+.Ql zfs snapshot -r
+makes them.
+With
+.Fl -resume ,
+an image the run being resumed finished is kept, not extracted again,
+when
+.Pa manifest.json
+names it whole at the same TXG and the file still hashes to the
+SHA-256 recorded there; one that does not is extracted again, saying
+so.
 .It Fl -hash Ar list
 Also hash the image with these, as it is written, for a toolchain
 that wants them:
@@ -373,6 +400,13 @@ written since.
 Under the output directory of
 .Cm dump Fl r :
 every image written, its dataset, TXG, size and hash.
+It is written again as each volume ends, so that a run killed outright
+still leaves what it finished on record for
+.Fl -resume ;
+an image kept from the run being resumed is marked
+.Ql kept ,
+and those a resumed run stopped before reaching are listed under
+.Ql finished_before .
 .El
 .Sh EXIT STATUS
 .Bl -tag -width Ds -compact

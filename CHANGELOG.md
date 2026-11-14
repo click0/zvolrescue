@@ -178,6 +178,23 @@ history a rewind left behind.
 * **Host events were all dated at the newest label and ignored
   `--from`/`--to`.** Each is now dated at the newest label that names
   its host, and only shown within the range asked for.
+* **`scan --emit-label` wrote a dRAID label no reader could use.** The
+  label left out `draid_ndata`, `draid_nspares` and `draid_ngroups`,
+  and members placed with it read as nothing, exit 3; for a layout
+  with groups nested in its top — a spare, a vdev being replaced — it
+  had "0 member(s)" to emit for. Both now carry what the hints say: a
+  dRAID relabelled from its hints reads object for object as the
+  original, flat or with a spare in it.
+* **`dump -r --resume` extracted every finished image again.** A run
+  stopped at its third volume left the first two whole, and the resume
+  started each of them from block 0. An image the manifest names whole
+  at the same TXG, and whose file still hashes to what is recorded
+  there, is now kept and marked `kept`; one that does not is extracted
+  again, saying why. The manifest is written as each volume ends, so a
+  run killed outright still leaves what it finished on record.
+* **`dump -r VOL@SNAP` found "no volume under" it, exit 3,** while a
+  plain `dump` of the same name read it. It now extracts that snapshot
+  of every volume under VOL which has one.
 
 ## v0.9.15 — 2026-11-13
 

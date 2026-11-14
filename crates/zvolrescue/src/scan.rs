@@ -1100,10 +1100,13 @@ fn emit_label(
             hints.layout.tops.len()
         )
     })?;
-    if leaf >= hint_top.members.len() {
+    // The members of a nested top are those of its groups, numbered in
+    // vdev order as the layout lists them.
+    let leaves = hint_top.leaves();
+    if leaf >= leaves.len() {
         return Err(format!(
             "--emit-for: top {top} has {} member(s)",
-            hint_top.members.len()
+            leaves.len()
         ));
     }
     let index = opts.emit_label_index.unwrap_or(0);
@@ -1124,8 +1127,10 @@ fn emit_label(
         "txg": txg,
         "kind": hint_top.kind,
         "nparity": hint_top.nparity,
-        "members": hint_top
-            .members
+        "draid_ndata": hint_top.draid_ndata,
+        "draid_nspares": hint_top.draid_nspares,
+        "draid_ngroups": hint_top.draid_ngroups,
+        "members": leaves
             .iter()
             .map(|m| m.map(|i| devices[i].display().to_string()))
             .collect::<Vec<_>>(),

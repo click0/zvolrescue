@@ -2959,3 +2959,90 @@ fn a_command_line_that_does_not_parse_is_a_usage_error() {
         assert!(!out.is_empty(), "{args:?}");
     }
 }
+
+/// `dump -r --resume` keeps an image the run it takes up finished, when
+/// the file still hashes to what that run's manifest records, and
+/// extracts again one that does not. It used to extract every finished
+/// image again from block 0: hours, for a run stopped at its last volume.
+#[test]
+fn a_bulk_resume_keeps_the_images_already_finished() {
+    let dir = scratch("bulk-resume-keeps");
+    let paths = write_members(&dir, &plain_members());
+    let out = dir.join("bulk");
+    let o = out.to_string_lossy().into_owned();
+    let (code, _, err) = run(&["-q", "dump", "-r", "tank", &paths[0], &paths[1], "-o", &o]);
+    assert_eq!(code, 0, "{err}");
+    let image = out.join("tank_vm_disk0.img");
+    let whole = std::fs::read(&image).unwrap();
+    let modified = std::fs::metadata(&image).unwrap().modified().unwrap();
+
+    let (code, text, err) = run(&[
+        "dump", "-r", "--resume", "--hash", "md5", "tank", &paths[0], &paths[1], "-o", &o,
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(err.contains("keeping tank/vm/disk0"), "{err}");
+    assert!(!err.contains("starting from block 0"), "{err}");
+    assert!(text.contains("(kept: whole"), "{text}");
+    assert!(text.contains("0 volume(s) written, 1 kept"), "{text}");
+    assert!(
+        text.contains("md5:"),
+        "the digest asked for is taken: {text}"
+    );
+    assert_eq!(
+        std::fs::metadata(&image).unwrap().modified().unwrap(),
+        modified,
+        "the image was not written again"
+    );
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(out.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["volumes"][0]["kept"], true, "{manifest}");
+
+    // A byte changed since: not the image that run finished.
+    let mut changed = whole.clone();
+    changed[4096] ^= 0xff;
+    std::fs::write(&image, &changed).unwrap();
+    let (code, _, err) = run(&[
+        "-q", "-f", "json", "dump", "-r", "--resume", "tank", &paths[0], &paths[1], "-o", &o,
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(err.contains("its sha256 differs"), "{err}");
+    assert_eq!(std::fs::read(&image).unwrap(), whole);
+
+    // A --strict resume keeps no image with blocks written as zeros.
+    let mut m = manifest.clone();
+    m["volumes"][0]["blocks_zeroed"] = 1.into();
+    std::fs::write(out.join("manifest.json"), m.to_string()).unwrap();
+    let (code, _, err) = run(&[
+        "dump", "-r", "--resume", "--strict", "tank", &paths[0], &paths[1], "-o", &o,
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!err.contains("keeping"), "{err}");
+}
+
+/// `dump -r VOL@SNAP` extracts that snapshot of every volume under VOL
+/// which has one; it was "no volume under …", exit 3, while a plain
+/// `dump` of the same name read it.
+#[test]
+fn a_bulk_dump_takes_a_snapshot_name() {
+    let dir = scratch("bulk-snapshot");
+    let (_, members) = two_top_mirror_members("tank", 0x7070, 12, [2, 3], &[(100, 1)], SIZE);
+    let paths = write_members(&dir, &members);
+    let mut args: Vec<String> = ["-q", "-f", "json", "dump", "-r", "tank/vm/disk0@before"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    args.extend(paths.iter().cloned());
+    let out = dir.join("bulk");
+    args.extend(["-o".to_string(), out.to_string_lossy().into_owned()]);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let (code, text, err) = run(&args);
+    assert_eq!(code, 0, "{err}");
+    let volumes = json(&text)["volumes"].as_array().unwrap().clone();
+    assert_eq!(volumes.len(), 1, "{text}");
+    assert_eq!(volumes[0]["dataset"], "tank/vm/disk0@before");
+    assert!(out.join("tank_vm_disk0@before.img").is_file());
+    assert!(
+        !out.join("tank_vm_disk0.img").exists(),
+        "the head is not the snapshot"
+    );
+}

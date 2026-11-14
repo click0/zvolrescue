@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use zfs_read::crypt::{unwrap_keys, wrapping_key, DatasetKeys, KeyMaterial};
 use zfs_read::dsl::{open_mos, walk, Dataset, DatasetTree, Encryption};
 use zfs_read::hash::{Digests, Extra};
@@ -38,7 +38,7 @@ pub struct Options {
     pub hash: Extra,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct BadOut {
     blkid: u64,
     offset: u64,
@@ -46,7 +46,7 @@ struct BadOut {
     reason: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct DumpOut {
     dataset: String,
     dataset_guid: String,
@@ -99,13 +99,154 @@ struct DumpOut {
     #[serde(skip)]
     image_bytes: u64,
     seconds: f64,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     bad: Vec<BadOut>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     warnings: Vec<String>,
     /// Encryption suite the volume was decrypted with.
     #[serde(skip_serializing_if = "Option::is_none")]
     encryption: Option<String>,
+    /// A `-r --resume` found the image whole, as the run it resumes
+    /// finished it, and its SHA-256 still the one that run's manifest
+    /// records: it was kept, not extracted again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    kept: bool,
+}
+
+/// What a `-r` run's manifest says, as far as a `--resume` of it reads.
+#[derive(Debug, Deserialize)]
+struct EarlierRun {
+    pool_guid: String,
+    #[serde(default)]
+    volumes: Vec<DumpOut>,
+    #[serde(default)]
+    finished_before: Vec<DumpOut>,
+}
+
+/// What a `-r --resume` does with a volume the run it resumes finished.
+enum Earlier {
+    /// The image is the one that run finished: keep it.
+    Kept(Box<DumpOut>),
+    /// Nothing to keep: extract it.
+    Extract,
+    /// A signal came while the image was being read back.
+    Interrupted,
+}
+
+/// The volumes of the `-r` run a `--resume` takes up that it finished,
+/// from the manifest it left in `dir`. A run that stopped at its third
+/// volume left the first two whole and their states cleared, and the
+/// resume extracted them again from block 0 — hours, for nothing.
+fn earlier_run(dir: &Path, pool_guid: &str) -> Vec<DumpOut> {
+    let manifest = dir.join("manifest.json");
+    let Ok(bytes) = std::fs::read(&manifest) else {
+        return Vec::new();
+    };
+    match serde_json::from_slice::<EarlierRun>(&bytes) {
+        Ok(run) if run.pool_guid == pool_guid => run
+            .volumes
+            .into_iter()
+            .chain(run.finished_before)
+            .filter(|v| {
+                !v.aborted
+                    && v.interrupted_at.is_none()
+                    && v.output_failed.is_none()
+                    && v.stopped_by_medium.is_none()
+            })
+            .collect(),
+        Ok(_) => Vec::new(),
+        Err(e) => {
+            eprintln!(
+                "zvolrescue: {} is not a manifest this reads ({e}); every volume is extracted",
+                manifest.display()
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// Whether the image a volume goes to is the one the run being resumed
+/// finished: that run's manifest names it whole, at this TXG and for
+/// this dataset, nothing left for a resume state to take up, and the
+/// file hashes to what the manifest records. A `--strict` resume keeps
+/// no image with blocks written as zeros.
+fn keep_earlier(
+    earlier: &mut Vec<DumpOut>,
+    ds: &Dataset,
+    txg: u64,
+    output: &Path,
+    strict: bool,
+    extra: Extra,
+) -> Earlier {
+    let guid = format!("{:#018x}", ds.guid);
+    let Some(at) = earlier.iter().position(|v| {
+        v.dataset_guid == guid
+            && v.txg == txg
+            && v.output == output
+            && (!strict || v.blocks_zeroed + v.blocks_salvaged == 0)
+    }) else {
+        return Earlier::Extract;
+    };
+    if resume::path(output).exists() {
+        return Earlier::Extract;
+    }
+    let mut v = earlier.swap_remove(at);
+    let Ok(mut file) = std::fs::File::open(output) else {
+        return Earlier::Extract;
+    };
+    let interrupt = zvol_common::interrupt_flag();
+    let mut digests = Digests::new(extra);
+    let mut buf = vec![0u8; 1 << 20];
+    let mut len = 0u64;
+    loop {
+        if interrupt.load(std::sync::atomic::Ordering::Relaxed) {
+            return Earlier::Interrupted;
+        }
+        match std::io::Read::read(&mut file, &mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                digests.update(&buf[..n]);
+                len += n as u64;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return Earlier::Extract,
+        }
+    }
+    let sums = digests.finish();
+    if len != v.volsize || sums.sha256 != v.sha256 {
+        eprintln!(
+            "zvolrescue: {}: not the image the run being resumed finished ({}); extracting it again",
+            output.display(),
+            if len != v.volsize {
+                format!("{len} bytes, not {}", v.volsize)
+            } else {
+                "its sha256 differs from the manifest's".to_string()
+            }
+        );
+        return Earlier::Extract;
+    }
+    v.kept = true;
+    v.finished = true;
+    v.image_bytes = len;
+    v.resumed_from_block = 0;
+    v.resume_at = None;
+    if extra.sha1 {
+        v.sha1 = sums.sha1;
+    }
+    if extra.md5 {
+        v.md5 = sums.md5;
+    }
+    Earlier::Kept(Box::new(v))
+}
+
+/// The volumes the run being resumed finished that this one has not
+/// reached: those whose image it has not written or kept.
+fn unreached(earlier: &[DumpOut], done: &[DumpOut]) -> Vec<DumpOut> {
+    earlier
+        .iter()
+        .filter(|v| !done.iter().any(|d| d.output == v.output))
+        .cloned()
+        .collect()
 }
 
 /// A TXG that was passed over for an older one. At the `dataset` stage
@@ -156,6 +297,11 @@ struct RunOut {
     /// Datasets under the tree that were skipped (not volumes) or failed.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     skipped: Vec<String>,
+    /// Volumes the run a `-r --resume` took up had finished, which this
+    /// one stopped before it reached: as that run recorded them, for
+    /// the next `--resume` to check and keep.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    finished_before: Vec<DumpOut>,
     /// Peak resident set of the run, in KiB (SPEC N-03), where the
     /// platform reports it. Like `seconds`, it varies from run to run
     /// and is not part of what a reproducible run must repeat (N-05).
@@ -543,6 +689,7 @@ fn dump_one(
             .cloned()
             .collect(),
         encryption: ds.encryption.as_ref().map(Encryption::suite_name),
+        kept: false,
     })
 }
 
@@ -556,7 +703,10 @@ fn print_text(out: &RunOut) {
             v.txg,
             v.time,
             v.output.display(),
-            if v.resumed_from_block > 0 {
+            if v.kept {
+                " (kept: whole as the run being resumed left it, sha256 as its manifest records)"
+                    .to_string()
+            } else if v.resumed_from_block > 0 {
                 format!(" (resumed at block {})", v.resumed_from_block)
             } else {
                 String::new()
@@ -622,11 +772,25 @@ fn print_text(out: &RunOut) {
     for s in &out.skipped {
         println!("skipped: {s}");
     }
-    if out.recursive {
+    if !out.finished_before.is_empty() {
         println!(
-            "{} volume(s) written; manifest in the output directory",
-            out.volumes.len()
+            "{} volume(s) the run being resumed finished were not reached; --resume checks and keeps them",
+            out.finished_before.len()
         );
+    }
+    if out.recursive {
+        let kept = out.volumes.iter().filter(|v| v.kept).count();
+        if kept > 0 {
+            println!(
+                "{} volume(s) written, {kept} kept from the run being resumed; manifest in the output directory",
+                out.volumes.len() - kept
+            );
+        } else {
+            println!(
+                "{} volume(s) written; manifest in the output directory",
+                out.volumes.len()
+            );
+        }
     }
 }
 
@@ -746,6 +910,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 recursive: opts.recursive,
                 volumes: Vec::new(),
                 skipped: Vec::new(),
+                finished_before: Vec::new(),
                 peak_rss_kib: zvol_common::peak_rss_kib(),
             };
             let json = serde_json::to_value(&out).expect("serialisable");
@@ -766,12 +931,28 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         // Nothing to extract is not a success: "0 volume(s) written",
         // exit 0, while the volumes were destroyed at this txg and an
         // older one still has them — which `list --diff` names.
-        let prefix = format!("{}/", opts.dataset);
-        let any = tree.datasets.iter().any(|d| {
-            !d.snapshot
-                && (d.name == opts.dataset || d.name.starts_with(&prefix))
-                && d.kind == Some(zfs_ondisk::dmu::ObjsetType::Zvol)
-        });
+        // `POOL/VOL@SNAP` is that snapshot of every volume under
+        // `POOL/VOL` which has one, as `zfs snapshot -r` makes them: it
+        // was "no volume under …", exit 3, while a plain `dump` of the
+        // same name read it.
+        let (root, snap) = match opts.dataset.split_once('@') {
+            Some((r, s)) => (r, Some(s)),
+            None => (opts.dataset.as_str(), None),
+        };
+        let prefix = format!("{root}/");
+        let under = |d: &Dataset| match snap {
+            None => !d.snapshot && (d.name == root || d.name.starts_with(&prefix)),
+            Some(snap) => {
+                d.snapshot
+                    && d.name.split_once('@').is_some_and(|(head, s)| {
+                        s == snap && (head == root || head.starts_with(&prefix))
+                    })
+            }
+        };
+        let any = tree
+            .datasets
+            .iter()
+            .any(|d| under(d) && d.kind == Some(zfs_ondisk::dmu::ObjsetType::Zvol));
         if !any {
             eprintln!(
                 "zvolrescue: no volume under {} at txg {txg}; `zvolrescue list --diff OLDER_TXG` names the volumes destroyed since, and --txg reads one where they are (exit 3)",
@@ -786,12 +967,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             );
             return zvol_common::end_early(g, "zvolrescue", spec, exit::USAGE);
         }
-        let prefix = format!("{}/", opts.dataset);
-        let chosen: Vec<&Dataset> = tree
-            .datasets
-            .iter()
-            .filter(|d| !d.snapshot && (d.name == opts.dataset || d.name.starts_with(&prefix)))
-            .collect();
+        let chosen: Vec<&Dataset> = tree.datasets.iter().filter(|d| under(d)).collect();
         // Names only for what will be written: a filesystem flattening
         // to a volume's name gave the volume a GUID suffix for a clash
         // with nothing.
@@ -890,14 +1066,67 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         recursive: opts.recursive,
         volumes: Vec::new(),
         skipped: Vec::new(),
+        finished_before: Vec::new(),
         peak_rss_kib: None,
     };
     let mut code = 0u8;
     let mut key_cache: std::collections::BTreeMap<u64, DatasetKeys> = Default::default();
+    // What the run a `-r --resume` takes up finished, read before this
+    // run writes a manifest of its own over that one's.
+    let mut earlier = if opts.recursive && opts.resume {
+        earlier_run(&opts.output, &out.pool_guid)
+    } else {
+        Vec::new()
+    };
+    let manifest = opts.output.join("manifest.json");
+    // The manifest is written as each volume ends, not only at the end:
+    // a run killed outright still leaves what it finished on record for
+    // a `--resume` to keep.
+    let note = |out: &mut RunOut, earlier: &[DumpOut]| {
+        if !opts.recursive {
+            return;
+        }
+        out.finished_before = unreached(earlier, &out.volumes);
+        let _ = std::fs::write(
+            &manifest,
+            serde_json::to_string_pretty(&*out).expect("serialisable"),
+        );
+    };
     for (ds, output) in targets {
         if opts.recursive && ds.kind != Some(zfs_ondisk::dmu::ObjsetType::Zvol) {
             out.skipped.push(format!("{}: not a volume", ds.name));
             continue;
+        }
+        if !earlier.is_empty() {
+            match keep_earlier(&mut earlier, ds, txg, &output, opts.strict, opts.hash) {
+                Earlier::Kept(v) => {
+                    if !g.quiet {
+                        eprintln!(
+                            "  keeping {}: {} is whole, as the run being resumed left it",
+                            ds.name,
+                            output.display()
+                        );
+                    }
+                    code = exit::after_extraction(
+                        code,
+                        v.aborted,
+                        v.blocks_zeroed + v.blocks_salvaged,
+                    );
+                    out.volumes.push(*v);
+                    note(&mut out, &earlier);
+                    continue;
+                }
+                Earlier::Interrupted => {
+                    eprintln!(
+                        "zvolrescue: {}: interrupted while checking {}; --resume checks it again (exit 6)",
+                        ds.name,
+                        output.display()
+                    );
+                    code = code.max(exit::INTERRUPTED);
+                    break;
+                }
+                Earlier::Extract => {}
+            }
         }
         reader.set_keys(None);
         if let Some(enc) = &ds.encryption {
@@ -971,6 +1200,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 // would go to the same place.
                 let interrupted = v.interrupted_at.is_some() || v.output_failed.is_some();
                 out.volumes.push(v);
+                note(&mut out, &earlier);
                 if interrupted {
                     code = code.max(exit::INTERRUPTED);
                     break;
@@ -991,9 +1221,9 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         }
     }
     out.peak_rss_kib = zvol_common::peak_rss_kib();
+    out.finished_before = unreached(&earlier, &out.volumes);
     let json = serde_json::to_value(&out).expect("serialisable");
     if opts.recursive {
-        let manifest = opts.output.join("manifest.json");
         if let Err(e) = std::fs::write(
             &manifest,
             serde_json::to_string_pretty(&json).expect("serialisable"),
@@ -1037,7 +1267,6 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         })
         .collect();
     if opts.recursive {
-        let manifest = opts.output.join("manifest.json");
         if let Ok(f) = evidence::FileRef::hashed(&manifest) {
             written.push(f);
         }
