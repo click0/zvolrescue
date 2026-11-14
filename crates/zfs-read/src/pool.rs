@@ -102,6 +102,10 @@ pub struct PoolAssembly {
     pub removed_tops: Vec<u64>,
     /// Distinct `(hostid, hostname)` pairs seen in labels.
     pub hosts: Vec<(Option<u64>, Option<String>)>,
+    /// The newest label TXG each of [`hosts`](Self::hosts) was seen at,
+    /// index for index: when that host last had the pool. Every host was
+    /// dated at the newest label's TXG, whichever label named it.
+    pub host_txgs: Vec<u64>,
     /// Indices of scanned devices that belong to this pool.
     pub devices: Vec<usize>,
     /// Scanned devices carrying this pool's GUID whose label does not
@@ -406,10 +410,16 @@ pub fn assemble(scans: &[Option<DeviceScan>]) -> Vec<PoolAssembly> {
         tops.sort_by_key(|t| t.id);
 
         let mut hosts: Vec<(Option<u64>, Option<String>)> = Vec::new();
+        let mut host_txgs: Vec<u64> = Vec::new();
         for (_, c) in &entries {
             let h = (c.hostid, c.hostname.clone());
-            if !hosts.contains(&h) {
-                hosts.push(h);
+            let at = c.txg.unwrap_or(0);
+            match hosts.iter().position(|x| *x == h) {
+                Some(i) => host_txgs[i] = host_txgs[i].max(at),
+                None => {
+                    hosts.push(h);
+                    host_txgs.push(at);
+                }
             }
         }
 
@@ -449,6 +459,7 @@ pub fn assemble(scans: &[Option<DeviceScan>]) -> Vec<PoolAssembly> {
             tops,
             removed_tops: Vec::new(),
             hosts,
+            host_txgs,
             devices: entries.iter().map(|(i, _)| *i).collect(),
             stale,
         });
@@ -667,6 +678,7 @@ mod removed_tops_tests {
                 .collect(),
             removed_tops: Vec::new(),
             hosts: Vec::new(),
+            host_txgs: Vec::new(),
             devices: Vec::new(),
             stale: Vec::new(),
         }
@@ -710,7 +722,14 @@ pub struct Candidate {
 }
 
 /// Every checksum-verified uberblock of `pool` across its scanned members,
-/// one per TXG (first occurrence kept), newest first.
+/// one per TXG, newest first.
+///
+/// Of two with one TXG the one OpenZFS would take is kept
+/// (`vdev_uberblock_compare`): the later timestamp, then the higher
+/// multihost sequence. The first one met was kept, so which tree a run
+/// read — two uberblocks of one TXG can name different ones, after a
+/// rewind import or with multihost — followed the order the members were
+/// named in.
 pub fn uberblock_candidates(scans: &[Option<DeviceScan>], pool: &PoolAssembly) -> Vec<Candidate> {
     let mut out: Vec<Candidate> = Vec::new();
     for &dev in &pool.devices {
@@ -722,14 +741,16 @@ pub fn uberblock_candidates(scans: &[Option<DeviceScan>], pool: &PoolAssembly) -
                 if slot.checksum != ChecksumStatus::Ok || slot.ub.txg == 0 {
                     continue;
                 }
-                if out.iter().any(|c| c.ub.txg == slot.ub.txg) {
-                    continue;
-                }
-                out.push(Candidate {
+                let found = Candidate {
                     ub: slot.ub.clone(),
                     device: dev,
                     label: label.index,
-                });
+                };
+                match out.iter_mut().find(|c| c.ub.txg == slot.ub.txg) {
+                    Some(c) if preferred(&slot.ub, &c.ub) => *c = found,
+                    Some(_) => {}
+                    None => out.push(found),
+                }
             }
         }
     }
@@ -745,11 +766,63 @@ pub fn uberblock_candidates(scans: &[Option<DeviceScan>], pool: &PoolAssembly) -
     out
 }
 
+/// Whether `a` is the uberblock OpenZFS takes over `b` of the same TXG:
+/// the later timestamp, then the higher multihost sequence where both
+/// carry one.
+fn preferred(a: &Uberblock, b: &Uberblock) -> bool {
+    const MMP_MAGIC: u64 = 0xa11c_ea11;
+    const MMP_SEQ_VALID: u64 = 0x2;
+    let seq = |u: &Uberblock| {
+        if u.mmp_magic == MMP_MAGIC && u.mmp_config & MMP_SEQ_VALID != 0 {
+            (u.mmp_config >> 32) & 0xffff
+        } else {
+            0
+        }
+    };
+    (a.timestamp, seq(a)) > (b.timestamp, seq(b))
+}
+
 /// Choose among `candidates` (newest first) per `sel`.
 pub fn select_uberblock(candidates: &[Candidate], sel: TxgSelect) -> Option<&Candidate> {
     match sel {
         TxgSelect::Newest => candidates.first(),
         TxgSelect::Exact(txg) => candidates.iter().find(|c| c.ub.txg == txg),
         TxgSelect::Before(ts) => candidates.iter().find(|c| c.ub.timestamp <= ts),
+    }
+}
+
+#[cfg(test)]
+mod same_txg_tests {
+    use super::*;
+    use zfs_ondisk::Endian;
+
+    fn ub(timestamp: u64, mmp: Option<u64>) -> Uberblock {
+        Uberblock {
+            endian: Endian::Little,
+            version: 5000,
+            txg: 7,
+            guid_sum: 1,
+            timestamp,
+            rootbp: [0; zfs_ondisk::blkptr::SIZE],
+            software_version: 0,
+            mmp_magic: mmp.map_or(0, |_| 0xa11c_ea11),
+            mmp_delay: 0,
+            mmp_config: mmp.map_or(0, |seq| (seq << 32) | 0x2),
+            checkpoint_txg: 0,
+        }
+    }
+
+    /// Of two uberblocks of one TXG the later is taken, then the one of
+    /// the higher multihost sequence — whichever member was named first.
+    #[test]
+    fn of_two_uberblocks_of_one_txg_the_later_is_taken() {
+        assert!(preferred(&ub(20, None), &ub(10, None)));
+        assert!(!preferred(&ub(10, None), &ub(20, None)));
+        assert!(preferred(&ub(10, Some(3)), &ub(10, Some(2))));
+        assert!(!preferred(&ub(10, Some(2)), &ub(10, Some(3))));
+        assert!(
+            !preferred(&ub(10, None), &ub(10, None)),
+            "a tie keeps the first"
+        );
     }
 }

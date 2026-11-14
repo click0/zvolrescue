@@ -114,6 +114,7 @@ impl LayoutHints {
             tops,
             removed_tops: Vec::new(),
             hosts: Vec::new(),
+            host_txgs: Vec::new(),
             devices,
             stale: Vec::new(),
         }

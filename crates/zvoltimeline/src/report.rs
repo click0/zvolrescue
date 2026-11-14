@@ -228,7 +228,7 @@ fn about(events: Vec<Event>, want: &str) -> Vec<Event> {
     events
         .into_iter()
         .filter(|e| {
-            matches!(e.kind, Kind::Pending | Kind::Unreadable)
+            matches!(e.kind, Kind::Pending | Kind::Unreadable | Kind::Abandoned)
                 || e.object.as_deref() == Some(want)
                 || (e.guid != 0 && guids.contains(&e.guid))
         })
@@ -344,10 +344,20 @@ impl History {
                 object: None,
                 guid: 0,
                 details: format!(
-                    "{} byte(s) not yet freed: {} in the pool's free list ({} block pointer(s)), {} in {} deadlist(s){}{}{}",
+                    "{} byte(s) not yet freed: {} in the pool's free list ({} block pointer(s)), {}{} in {} deadlist(s){}{}{}",
                     p.total(),
                     p.free_bpobj_bytes,
                     p.free_bpobj_blkptrs,
+                    // Said when there is something there: a volume
+                    // destroyed in the background is still on disk.
+                    [
+                        (p.deferred_bytes, "deferred to the next transaction group"),
+                        (p.destroying_bytes, "of datasets being destroyed in the background"),
+                    ]
+                    .iter()
+                    .filter(|(b, _)| *b > 0)
+                    .map(|(b, what)| format!("{b} {what}, "))
+                    .collect::<String>(),
                     p.deadlist_bytes,
                     p.deadlists,
                     if p.unreadable > 0 {
@@ -428,21 +438,34 @@ impl History {
                     // the dataset was made in between. Dated by when it
                     // was made, and said, as the oldest TXG's are; it
                     // was "created" here, with snapshots older than it.
+                    //
+                    // Made after the TXG before and before this one — at
+                    // a TXG the ring no longer holds, or one that did not
+                    // read — it is dated by its own record too, and said
+                    // to have been made between the two read: it was
+                    // dated at this TXG, 594 for a dataset `zdb` says
+                    // was made at 562.
                     if matches!(e.kind, Kind::Created | Kind::Snapshot | Kind::Clone) {
                         if let Some(d) = now
                             .iter()
                             .find(|d| d.guid == e.guid)
-                            .filter(|d| d.creation_txg <= *prev_txg)
+                            .filter(|d| d.creation_txg != 0 && d.creation_txg < txg)
                         {
                             e.txg = d.creation_txg;
                             e.time = (d.creation_time != 0).then_some(d.creation_time);
                             if !e.details.is_empty() {
                                 e.details.push_str(", ");
                             }
-                            e.details.push_str(&format!(
-                                "already there at txg {prev_txg}, where it was not read; first read at txg {}",
-                                txg
-                            ));
+                            if d.creation_txg <= *prev_txg {
+                                e.details.push_str(&format!(
+                                    "already there at txg {prev_txg}, where it was not read; first read at txg {}",
+                                    txg
+                                ));
+                            } else {
+                                e.details.push_str(&format!(
+                                    "made between the transaction groups read, {prev_txg} and {txg}"
+                                ));
+                            }
                         }
                     }
                 }
@@ -454,6 +477,33 @@ impl History {
         }
         self.previous = Some((txg, now));
     }
+}
+
+/// Take out of `candidates` (oldest first) the TXGs of a line of
+/// history an import with rewind left behind, and return them as
+/// `(txg, timestamp, the lower TXG written after it)`.
+///
+/// An import with rewind goes on from an older TXG, and the TXGs of the
+/// line it left behind stay in the ring among the new ones: read in TXG
+/// order, the history went back and forth between the two, datasets
+/// created and destroyed again and time running backwards. A TXG written
+/// before a lower one already taken is of the line left behind. Within
+/// one second the two cannot be told apart; a rewind is rarely that
+/// quick.
+fn drop_abandoned(candidates: &mut Vec<zfs_read::pool::Candidate>) -> Vec<(u64, u64, u64)> {
+    let mut abandoned = Vec::new();
+    let mut latest: Option<(u64, u64)> = None;
+    candidates.retain(|c| match latest {
+        Some((txg, time)) if c.ub.timestamp < time => {
+            abandoned.push((c.ub.txg, c.ub.timestamp, txg));
+            false
+        }
+        _ => {
+            latest = Some((c.ub.txg, c.ub.timestamp));
+            true
+        }
+    });
+    abandoned
 }
 
 /// Run the tool.
@@ -481,6 +531,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     candidates.retain(|c| {
         opts.from.is_none_or(|f| c.ub.txg >= f) && opts.to.is_none_or(|t| c.ub.txg <= t)
     });
+    let abandoned = drop_abandoned(&mut candidates);
     if candidates.is_empty() {
         eprintln!("zvoltimeline: no verified uberblock in that range");
         return zvol_common::end_early(g, "zvoltimeline", spec, exit::UNRECOVERABLE);
@@ -501,10 +552,35 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         ..
     } = history;
 
-    // Hosts that had the pool imported, from the labels (T-06).
-    for (hostid, hostname) in &pool.hosts {
+    for (txg, time, after) in &abandoned {
         events.push(Event {
-            txg: pool.txg.unwrap_or(0),
+            txg: *txg,
+            time: Some(*time),
+            kind: Kind::Abandoned,
+            object: None,
+            guid: 0,
+            details: format!(
+                "written before txg {after} though numbered after it: a line of history an import with rewind left behind; not read"
+            ),
+            last_seen_txg: None,
+        });
+    }
+
+    // Hosts that had the pool imported, from the labels (T-06): each at
+    // the newest label that names it, and only within the range asked
+    // for — every one was dated at the newest label's TXG, and shown
+    // whatever `--from` and `--to` said.
+    for (i, (hostid, hostname)) in pool.hosts.iter().enumerate() {
+        let txg = pool
+            .host_txgs
+            .get(i)
+            .copied()
+            .unwrap_or_else(|| pool.txg.unwrap_or(0));
+        if opts.from.is_some_and(|f| txg < f) || opts.to.is_some_and(|t| txg > t) {
+            continue;
+        }
+        events.push(Event {
+            txg,
             time: None,
             kind: Kind::Host,
             object: None,
@@ -874,5 +950,55 @@ mod recover_tests {
             None
         );
         assert_eq!(recover_with(&s, "gone", 7, None, false), None);
+    }
+}
+
+#[cfg(test)]
+mod rewind_tests {
+    use super::*;
+    use zfs_ondisk::uberblock::Uberblock;
+    use zfs_read::pool::Candidate;
+
+    fn at(txg: u64, timestamp: u64) -> Candidate {
+        Candidate {
+            ub: Uberblock {
+                endian: zfs_ondisk::Endian::Little,
+                version: 5000,
+                txg,
+                guid_sum: 1,
+                timestamp,
+                rootbp: [0; zfs_ondisk::blkptr::SIZE],
+                software_version: 0,
+                mmp_magic: 0,
+                mmp_delay: 0,
+                mmp_config: 0,
+                checkpoint_txg: 0,
+            },
+            device: 0,
+            label: 0,
+        }
+    }
+
+    /// A pool rewound from txg 33 to 17 and run on: its TXGs 18–20 and
+    /// 24 and 37 were written after the line it left, whose 21, 25 and 29
+    /// are still in the ring. Those are said and not read; what went
+    /// before the rewind is kept.
+    #[test]
+    fn the_line_a_rewind_left_behind_is_not_read() {
+        let mut c = vec![
+            at(13, 100),
+            at(17, 110),
+            at(19, 1000),
+            at(20, 1001),
+            at(21, 120),
+            at(24, 1002),
+            at(25, 130),
+            at(29, 140),
+            at(37, 1003),
+        ];
+        let left = drop_abandoned(&mut c);
+        let kept: Vec<u64> = c.iter().map(|c| c.ub.txg).collect();
+        assert_eq!(kept, [13, 17, 19, 20, 24, 37]);
+        assert_eq!(left, [(21, 120, 20), (25, 130, 24), (29, 140, 24)]);
     }
 }

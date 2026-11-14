@@ -23,7 +23,10 @@ it could not check as checked; and the sectors a ddrescue map refused
 were not looked for where the pool kept them twice. And the record
 holds where it did not: a dump to a disk resumed after a crash, a
 resume on another disk of the same name, files with names that are
-not text, a case moved before it was verified.
+not text, a case moved before it was verified. And what a run could
+not read is said where it was passed over: dnodes that did not read,
+newer transaction groups, a carved volume's removed vdev, the line of
+history a rewind left behind.
 
 ### Fixed
 
@@ -128,6 +131,53 @@ not text, a case moved before it was verified.
   they were: a newline in a file name forged a line of the listing, and
   an escape sequence erased the FAIL `verify` had just printed. Control
   and invisible characters are now shown as their codes, `\u{1b}`.
+
+* **`zvolfiles objects` passed over objects whose dnodes did not read.**
+  Every object of a block of the dataset's dnodes that did not read was
+  skipped without a word: 32 files gone, exit 0, with `--strict` too,
+  and with the indirect block over the dnodes lost, "0 object(s)". Each
+  such block is now in the index and the output as the objects it held,
+  `unread`, with the reason; the run exits 4, and `--strict` stops there.
+* **`zvolfiles` fell back to an older transaction group without
+  saying so in its result.** When the newest TXGs did not read — their
+  MOS, or the dataset in them — the dataset was read as it was before,
+  even empty at the TXG it was made in: "0 file(s)", exit 0, and the
+  record named that TXG alone. `list`, `extract` and `objects` now name
+  the TXGs passed over and why (`passed_over`), and exit 4 when any of
+  them did not read; a dataset that was not there yet is no damage.
+* **`zvolcarve` read a carved volume without what the pool's MOS
+  says.** Its blocks on a removed top-level vdev were zeros ("unknown
+  top-level vdev"), exit 4, and a checksum salted by the pool (Skein,
+  Edon-R, BLAKE3) could not be checked. The newest MOS that reads now
+  gives the mapping and the salt; a carved volume comes out identical
+  to `zvolrescue dump`'s (checked in CI on a pool with a vdev removed).
+* **`zvolcarve` stepped every member by the first top-level vdev's
+  ashift.** On a pool of mixed ashifts the compressed pass missed every
+  block on a top with a smaller one: 29 514 of 40 446 dnodes of a ztest
+  pool. Each member is now stepped by its own top's ashift.
+* **Of two uberblocks with one TXG, the first member named won.** Which
+  tree a run read depended on the order of the arguments. The later
+  timestamp, then the higher multihost sequence, is now taken, as
+  OpenZFS takes it.
+* **`zvolcarve dump` without `--size` cut the volume to a filesystem
+  inside it.** A filesystem made for less than the volume's blocks
+  hold sized the image, and the verified blocks past it were dropped,
+  exit 0. The dnode's size is taken then, and the run says why.
+* **`zvoltimeline --pending` missed a volume being destroyed.** A
+  dataset destroyed in the background and the frees deferred to the
+  next TXG were not counted: a 32 MiB volume still on disk was "0
+  byte(s) not yet freed". Both are now counted and named.
+* **A rewound pool's history went back and forth.** After an import
+  with rewind the TXGs of the line left behind were read among the new
+  ones: datasets created and destroyed again, time running backwards.
+  A TXG written before a lower one already read is now an `abandoned`
+  event and is not read.
+* **A dataset made between two TXGs read was dated at the second.** It
+  is dated by its own creation TXG, and said to have been made between
+  the two.
+* **Host events were all dated at the newest label and ignored
+  `--from`/`--to`.** Each is now dated at the newest label that names
+  its host, and only shown within the range asked for.
 
 ## v0.9.15 — 2026-11-13
 

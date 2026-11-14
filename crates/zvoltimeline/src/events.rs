@@ -34,6 +34,9 @@ pub enum Kind {
     Pending,
     /// The MOS at this TXG could not be read.
     Unreadable,
+    /// A TXG of a line of history an import with rewind left behind:
+    /// written before a lower one already read. Not read.
+    Abandoned,
 }
 
 impl Kind {
@@ -50,6 +53,7 @@ impl Kind {
             Kind::Host => "host",
             Kind::Pending => "pending",
             Kind::Unreadable => "unreadable",
+            Kind::Abandoned => "abandoned",
         }
     }
 }

@@ -2299,6 +2299,7 @@ mod tests {
             }],
             removed_tops: vec![],
             hosts: vec![],
+            host_txgs: Vec::new(),
             devices: (0..width).collect(),
             stale: vec![],
         }
@@ -2649,6 +2650,7 @@ mod tests {
             }],
             removed_tops: Vec::new(),
             hosts: Vec::new(),
+            host_txgs: Vec::new(),
             devices: Vec::new(),
             stale: Vec::new(),
         };

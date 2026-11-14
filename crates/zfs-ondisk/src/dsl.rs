@@ -234,6 +234,24 @@ pub mod encode {
 mod tests {
     use super::encode::{dsl_dataset, dsl_dir};
     use super::*;
+
+    /// The background-destroy queue's header, in either byte order: its
+    /// third word is the bytes still to free.
+    #[test]
+    fn a_bptree_header_says_what_it_still_holds() {
+        for endian in [Endian::Little, Endian::Big] {
+            let mut b = Vec::new();
+            for w in [0u64, 2, 33_980_416, 33_980_416, 33_554_432] {
+                b.extend_from_slice(&match endian {
+                    Endian::Little => w.to_le_bytes(),
+                    Endian::Big => w.to_be_bytes(),
+                });
+            }
+            let t = BptreePhys::parse(&b, endian).unwrap();
+            assert_eq!((t.begin, t.end, t.bytes), (0, 2, 33_980_416));
+            assert!(BptreePhys::parse(&b[..32], endian).is_err());
+        }
+    }
     use crate::blkptr::encode::Builder;
 
     #[test]
@@ -344,6 +362,45 @@ impl BpobjPhys {
             uncomp: at(24),
             subobjs: at(32),
             num_subobjs: at(40),
+        })
+    }
+}
+
+/// `bptree_phys_t`: the pool's queue of datasets destroyed in the
+/// background (`async_destroy`), whose blocks are still being handed
+/// back. A destroyed volume stays on disk, whole, while this accounts
+/// for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BptreePhys {
+    /// First entry still to be freed.
+    pub begin: u64,
+    /// One past the last entry.
+    pub end: u64,
+    /// Bytes the entries still hold.
+    pub bytes: u64,
+    /// Compressed size of those bytes.
+    pub comp: u64,
+    /// Uncompressed size.
+    pub uncomp: u64,
+}
+
+impl BptreePhys {
+    /// Parse from a bonus buffer.
+    pub fn parse(bonus: &[u8], endian: Endian) -> Result<BptreePhys, ParseError> {
+        const NEEDED: usize = 40;
+        if bonus.len() < NEEDED {
+            return Err(ParseError::Truncated {
+                needed: NEEDED,
+                got: bonus.len(),
+            });
+        }
+        let at = |o: usize| endian.u64_at(bonus, o).expect("length checked");
+        Ok(BptreePhys {
+            begin: at(0),
+            end: at(8),
+            bytes: at(16),
+            comp: at(24),
+            uncomp: at(32),
         })
     }
 }

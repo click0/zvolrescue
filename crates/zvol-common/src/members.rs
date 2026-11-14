@@ -750,6 +750,7 @@ mod assume_member_tests {
                 .collect(),
             removed_tops: Vec::new(),
             hosts: Vec::new(),
+            host_txgs: Vec::new(),
             devices: Vec::new(),
             stale: Vec::new(),
         }

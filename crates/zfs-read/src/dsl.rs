@@ -1308,9 +1308,14 @@ mod tests {
 /// How much space is held by things ZFS has finished with but not freed
 /// (COMPANIONS T-07).
 ///
-/// Two places account for it. The pool's `free_bpobj` holds blocks
-/// queued for freeing but not yet handed back to the allocator; each
-/// dataset's deadlist holds the blocks its successors stopped using.
+/// Four places account for it. The pool's `free_bpobj` holds blocks
+/// queued for freeing but not yet handed back to the allocator, its
+/// `sync_bplist` those whose freeing was deferred to the next transaction
+/// group, and its `bptree_obj` the datasets destroyed in the background
+/// and not yet freed; each dataset's deadlist holds the blocks its
+/// successors stopped using. The two in the middle were not read: a
+/// volume of 32 MiB destroyed and still on disk was "0 byte(s) not yet
+/// freed".
 /// While either still accounts for a block, that block has not been
 /// reallocated — which is the difference between a destroyed dataset
 /// that can still be recovered and one that cannot.
@@ -1320,6 +1325,11 @@ pub struct Pending {
     pub free_bpobj_bytes: u64,
     /// Block pointers it holds.
     pub free_bpobj_blkptrs: u64,
+    /// Bytes the deferred-free list (`sync_bplist`) still accounts for.
+    pub deferred_bytes: u64,
+    /// Bytes of datasets destroyed in the background (`bptree_obj`) not
+    /// yet freed.
+    pub destroying_bytes: u64,
     /// Bytes all readable deadlists account for, from their headers.
     pub deadlist_bytes: u64,
     /// The same, added up from the block-pointer objects those
@@ -1348,7 +1358,10 @@ pub struct Pending {
 impl Pending {
     /// Everything still held, in bytes.
     pub fn total(&self) -> u64 {
-        self.free_bpobj_bytes.saturating_add(self.deadlist_bytes)
+        self.free_bpobj_bytes
+            .saturating_add(self.deferred_bytes)
+            .saturating_add(self.destroying_bytes)
+            .saturating_add(self.deadlist_bytes)
     }
 }
 
@@ -1356,12 +1369,25 @@ impl Pending {
 pub fn pending(mos: &DnodeArray<'_, '_>, datasets: &[Dataset]) -> Pending {
     let mut out = Pending::default();
     if let Ok(dir) = object_directory(mos) {
-        if let Some((_, obj)) = dir.iter().find(|(n, _)| n == "free_bpobj") {
-            if let Ok(d) = mos.get(*obj) {
-                if let Ok(b) = BpobjPhys::parse(&d.bonus, d.endian) {
-                    out.free_bpobj_bytes = b.bytes;
-                    out.free_bpobj_blkptrs = b.num_blkptrs;
-                }
+        let bonus_of = |name: &str| {
+            dir.iter()
+                .find(|(n, _)| n == name)
+                .and_then(|(_, obj)| mos.get(*obj).ok())
+        };
+        if let Some(d) = bonus_of("free_bpobj") {
+            if let Ok(b) = BpobjPhys::parse(&d.bonus, d.endian) {
+                out.free_bpobj_bytes = b.bytes;
+                out.free_bpobj_blkptrs = b.num_blkptrs;
+            }
+        }
+        if let Some(d) = bonus_of("sync_bplist") {
+            if let Ok(b) = BpobjPhys::parse(&d.bonus, d.endian) {
+                out.deferred_bytes = b.bytes;
+            }
+        }
+        if let Some(d) = bonus_of("bptree_obj") {
+            if let Ok(b) = zfs_ondisk::dsl::BptreePhys::parse(&d.bonus, d.endian) {
+                out.destroying_bytes = b.bytes;
             }
         }
     }

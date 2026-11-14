@@ -24,6 +24,13 @@ way.
 A TXG whose MOS cannot be walked is an
 .Ql unreadable
 event that says why.
+A TXG written before a lower one already read belongs to a line of
+history an import with rewind left behind; it is an
+.Ql abandoned
+event and is not read into the history.
+The hosts the labels name are
+.Ql host
+events, each at the newest label that names it.
 One read in part \(em part of its dataset tree did not read \(em is
 counted as read in part, and what lies there is taken as it was at the
 TXG before; it is not destroyed there, and a dataset destroyed later is
