@@ -22,8 +22,8 @@ event; the snapshots the promotion moved to it are renamed, and say
 so.
 Read only from after a promotion, the dataset promoted is a clone
 promoted since, and the one it was promoted over was created, not
-cloned: snapshots older than the dataset that holds them came with a
-promotion.
+cloned: a snapshot older than the dataset that holds it, which another
+dataset is a clone of, came with a promotion.
 It reads the members the way
 .Xr zvolrescue 1
 does, never writes to them, and can write an evidence log the same

@@ -206,7 +206,8 @@ takes, a path longer than the system takes.
   `promoted` event, naming what it was a clone of and what it was
   promoted over; the snapshots it took over are renamed "moved by the
   promotion"; and a history that starts after a promotion still tells
-  it from the snapshots older than the dataset that holds them.
+  it from a snapshot older than the dataset that holds it, which
+  another dataset is a clone of.
 * **A file with more names than ext4 takes lost the rest of them.**
   Past 65 000 hard links every further name was "Too many links",
   unwritten, exit 4. The next name is now written as a copy

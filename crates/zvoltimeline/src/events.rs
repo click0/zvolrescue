@@ -123,9 +123,11 @@ fn head(snapshot: &str) -> &str {
     snapshot.split_once('@').map_or(snapshot, |(h, _)| h)
 }
 
-/// A head dataset that holds a snapshot older than itself got it by a
-/// promotion: it was made a clone, and was promoted since. Nothing else
-/// gives a dataset a snapshot taken before it existed.
+/// A head dataset that holds a snapshot older than itself, which another
+/// dataset is a clone of, got it by a promotion: it was made a clone,
+/// and was promoted over that other one since. A snapshot older than
+/// its dataset alone is not taken for one — nothing in a pool OpenZFS
+/// wrote has it otherwise, but a damaged or hand-made one can.
 pub fn promoted_since(d: &Dataset, all: &[Dataset]) -> bool {
     !d.snapshot
         && !d.clone
@@ -135,6 +137,9 @@ pub fn promoted_since(d: &Dataset, all: &[Dataset]) -> bool {
                 && s.creation_txg != 0
                 && s.creation_txg < d.creation_txg
                 && head(&s.name) == d.name
+                && all
+                    .iter()
+                    .any(|c| !c.snapshot && c.clone && c.origin_obj == s.object)
         })
 }
 
@@ -487,6 +492,11 @@ pub(crate) mod tests {
         // A clone made after its origin snapshot is just a clone.
         assert_eq!(appeared_as(&before[2], &before), Kind::Clone);
         assert!(!promoted_since(&before[0], &before));
+        // A snapshot older than its dataset that nothing is a clone of
+        // says no promotion.
+        let alone = vec![after[1].clone(), after[2].clone()];
+        assert!(!promoted_since(&alone[1], &alone));
+        assert_eq!(appeared_as(&alone[1], &alone), Kind::Created);
     }
 
     #[test]
