@@ -251,7 +251,6 @@ pub fn write(
     lost: &Lost,
     prefix_sha256: Option<&str>,
 ) -> Result<(), Unwritten> {
-    use std::io::Write;
     let state_err = |e: std::io::Error| Unwritten::State(format!("{}: {e}", state_path.display()));
     std::fs::OpenOptions::new()
         .write(true)
@@ -284,14 +283,23 @@ pub fn write(
         ..expected.key()
     };
     let json = serde_json::to_vec(&s).map_err(|e| Unwritten::State(e.to_string()))?;
+    replace(state_path, &json).map_err(state_err)
+}
+
+/// Put `bytes` at `path` whole or not at all: written under
+/// [`tmp_path`] of it, flushed, and renamed over what was there. A
+/// file a resume goes by — a state, the manifest of a bulk run — is
+/// never left cut short by a run that died while writing it.
+pub fn replace(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
     // Whatever is at the temporary name goes first — a stale one from a
     // run that died, or a link — and the file is made new: `create`
     // would follow a link there, and a link to a mapfile, a key or a
     // member got the state written over it.
-    let tmp = tmp_path(state_path);
+    let tmp = tmp_path(path);
     if let Err(e) = std::fs::remove_file(&tmp) {
         if e.kind() != std::io::ErrorKind::NotFound {
-            return Err(state_err(e));
+            return Err(e);
         }
     }
     let written = std::fs::OpenOptions::new()
@@ -299,17 +307,17 @@ pub fn write(
         .create_new(true)
         .open(&tmp)
         .and_then(|mut f| {
-            f.write_all(&json)?;
+            f.write_all(bytes)?;
             f.sync_all()
         })
-        .and_then(|()| std::fs::rename(&tmp, state_path));
+        .and_then(|()| std::fs::rename(&tmp, path));
     if let Err(e) = written {
         let _ = std::fs::remove_file(&tmp);
-        return Err(state_err(e));
+        return Err(e);
     }
     // The rename is an entry in the directory; flush that too — the
     // current one when the path is relative and has no directory part.
-    let dir = match state_path.parent() {
+    let dir = match path.parent() {
         Some(d) if !d.as_os_str().is_empty() => d,
         _ => Path::new("."),
     };

@@ -70,8 +70,8 @@ pub struct Extracted {
     pub hardlink_to: Option<String>,
     /// Where under the output directory this entry was written, when not
     /// at its path: the path is longer than the system takes, and the
-    /// entry went to a short name here instead — a directory with
-    /// everything under it, by the names they have.
+    /// entry went under a short name instead — `.zvolfiles-deep`, its
+    /// object number, its own name — or lies under a directory that did.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub written_as: Option<String>,
     /// Where it was written, for the evidence record.
@@ -203,8 +203,8 @@ struct ManifestOut {
     failed: usize,
     /// Files written as hard links to an earlier path.
     hardlinks: usize,
-    /// Entries written under a short name (`written_as`): their paths
-    /// are longer than the system takes.
+    /// Entries written away from their paths (`written_as`), which are
+    /// longer than the system takes.
     #[serde(skip_serializing_if = "is_zero")]
     written_short: usize,
     /// Fifos, devices and sockets: recorded, not made.
@@ -414,16 +414,41 @@ const PATH_MAX: usize = if cfg!(target_os = "linux") {
     1024
 };
 
-/// Where an entry goes: under the output directory by its path, or,
-/// below a directory that went to a short name, under that one.
-fn place(root: &Path, raw: &[u8], moved: &[(Vec<u8>, PathBuf)]) -> Option<PathBuf> {
+/// Where an entry goes — under the output directory by its path, or,
+/// below a directory that went to a short name, under that one — and
+/// whether that is somewhere other than its path.
+fn place(root: &Path, raw: &[u8], moved: &[(Vec<u8>, PathBuf)]) -> Option<(PathBuf, bool)> {
     match moved
         .iter()
         .filter(|(dir, _)| under(dir, raw))
         .max_by_key(|(dir, _)| dir.len())
     {
-        Some((dir, to)) => safe_join(to, &raw[dir.len() + 1..]),
-        None => safe_join(root, raw),
+        Some((dir, to)) => Some((safe_join(to, &raw[dir.len() + 1..])?, true)),
+        None => Some((safe_join(root, raw)?, false)),
+    }
+}
+
+/// The short name for an entry whose path is longer than the system
+/// takes: `.zvolfiles-deep/OBJECT/NAME`, its own name kept under a
+/// directory named by its object number. A file with two names that are
+/// both too long is one object twice: the second goes under `OBJECT.2`,
+/// and so on — under `OBJECT` alone it came to the path of the first and
+/// was refused as "already written at this path".
+fn short_place(root: &Path, object: u64, raw: &[u8], taken: &BTreeSet<PathBuf>) -> Option<PathBuf> {
+    let name = raw.rsplit(|&b| b == b'/').next()?;
+    let deep = root.join(DEEP);
+    let mut n = 1u64;
+    loop {
+        let dir = if n == 1 {
+            object.to_string()
+        } else {
+            format!("{object}.{n}")
+        };
+        let to = safe_join(&deep.join(dir), name)?;
+        if !taken.contains(&to) {
+            return Some(to);
+        }
+        n += 1;
     }
 }
 
@@ -1213,7 +1238,7 @@ fn write_entry(
         run.files.push(record);
         return;
     }
-    let Some(mut to) = place(&opts.output, &e.raw_path, &run.moved) else {
+    let Some((mut to, mut elsewhere)) = place(&opts.output, &e.raw_path, &run.moved) else {
         reject(
             run,
             record,
@@ -1226,14 +1251,22 @@ fn write_entry(
     // a short name under the output directory instead, and what is under
     // it goes under that, by the names it has.
     if too_long(&to) {
-        let short = opts.output.join(DEEP).join(e.object.to_string());
-        if !too_long(&short) {
-            record.written_as = Some(format!("{DEEP}/{}", e.object));
+        let short = short_place(&opts.output, e.object, &e.raw_path, &run.taken);
+        if let Some(short) = short.filter(|s| !too_long(s)) {
             if is_dir {
                 run.moved.push((e.raw_path.clone(), short.clone()));
             }
             to = short;
+            elsewhere = true;
         }
+    }
+    // Every entry that is not at its path says where it is: one under a
+    // directory that moved, as much as the directory.
+    if elsewhere {
+        record.written_as = to
+            .strip_prefix(&opts.output)
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned());
     }
     record.written_to = Some(to.clone());
     if !run.taken.insert(to.clone()) {
@@ -1282,6 +1315,8 @@ fn write_entry(
         FileType::Regular => {
             // The same object under a second name is a hard link, and
             // reading its blocks again would only prove that twice.
+            // Why this name is a copy and no link, said once it is one.
+            let mut copied_for = None;
             if let Some(first) = run.written_objects.get(&e.object).cloned() {
                 match tree.hard_link(&first.out, &to) {
                     Ok(None) => {
@@ -1300,10 +1335,7 @@ fn write_entry(
                     // exit 4. This one is written again from the pool,
                     // and the names after it are links to it.
                     Ok(Some(why)) => {
-                        eprintln!(
-                            "zvolfiles: {}: {why}; written as a copy of {}, its later names linked to the copy",
-                            e.path, first.path
-                        );
+                        copied_for = Some(why);
                         record.copy_of = Some(first.path.clone());
                     }
                     Err(err) => {
@@ -1315,6 +1347,12 @@ fn write_entry(
             }
             match copy_file(fs, tree, e.object, z.size, &to, &e.path, opts.strict, stop) {
                 Ok(copied) => {
+                    if let (Some(why), Some(first)) = (&copied_for, &record.copy_of) {
+                        eprintln!(
+                            "zvolfiles: {}: no link to {first} ({why}); written as a copy, its later names linked to the copy",
+                            e.path
+                        );
+                    }
                     if let Some(first) = copied.zeroed.first() {
                         eprintln!(
                             "zvolfiles: {}: {} run(s) of bytes written as zeros, the first {}–{}: {} (the manifest lists each)",
@@ -1476,47 +1514,60 @@ fn xattrs_of(fs: &Filesystem<'_, '_>, z: &Znode) -> (Vec<Xattr>, Vec<String>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{place, safe_join, too_long, Meta, Preserve, PATH_MAX};
+    use super::{place, safe_join, short_place, too_long, Meta, Preserve, PATH_MAX};
     use std::collections::BTreeSet;
     use std::path::{Path, PathBuf};
 
-    /// The set-id bits go only with the owner, a link's target is never
-    /// executable, and a time is put back as the dataset had it; an item
-    /// `--preserve` does not know is refused.
-    #[cfg(unix)]
     /// Below a directory written under a short name, an entry goes
     /// under that name by the rest of its path; the deepest one wins.
+    /// And a second name of one object, too long as well, gets a place
+    /// of its own.
     #[test]
     fn what_is_under_a_moved_directory_goes_with_it() {
         let root = Path::new("/out");
         let moved = vec![
-            (b"a/b".to_vec(), PathBuf::from("/out/.zvolfiles-deep/7")),
-            (b"a/b/c/d".to_vec(), PathBuf::from("/out/.zvolfiles-deep/9")),
+            (b"a/b".to_vec(), PathBuf::from("/out/.zvolfiles-deep/7/b")),
+            (
+                b"a/b/c/d".to_vec(),
+                PathBuf::from("/out/.zvolfiles-deep/9/d"),
+            ),
         ];
+        let at = |raw: &[u8]| place(root, raw, &moved);
+        assert_eq!(at(b"a/x"), Some((PathBuf::from("/out/a/x"), false)));
         assert_eq!(
-            place(root, b"a/x", &moved).as_deref(),
-            Some(Path::new("/out/a/x"))
+            at(b"a/b/c/f"),
+            Some((PathBuf::from("/out/.zvolfiles-deep/7/b/c/f"), true))
         );
         assert_eq!(
-            place(root, b"a/b/c/f", &moved).as_deref(),
-            Some(Path::new("/out/.zvolfiles-deep/7/c/f"))
-        );
-        assert_eq!(
-            place(root, b"a/b/c/d/e", &moved).as_deref(),
-            Some(Path::new("/out/.zvolfiles-deep/9/e"))
+            at(b"a/b/c/d/e"),
+            Some((PathBuf::from("/out/.zvolfiles-deep/9/d/e"), true))
         );
         // A name that only begins like a moved directory is not under it.
-        assert_eq!(
-            place(root, b"a/bc", &moved).as_deref(),
-            Some(Path::new("/out/a/bc"))
-        );
+        assert_eq!(at(b"a/bc"), Some((PathBuf::from("/out/a/bc"), false)));
         assert!(!too_long(Path::new("/out/a")));
         assert!(too_long(&PathBuf::from(format!(
             "/{}",
             "x".repeat(PATH_MAX)
         ))));
+
+        let mut taken = BTreeSet::new();
+        let first = short_place(root, 500, b"deep/dir/name", &taken).unwrap();
+        assert_eq!(first, Path::new("/out/.zvolfiles-deep/500/name"));
+        taken.insert(first);
+        assert_eq!(
+            short_place(root, 500, b"other/dir/name", &taken).as_deref(),
+            Some(Path::new("/out/.zvolfiles-deep/500.2/name"))
+        );
+        assert_eq!(
+            short_place(root, 500, b"deep/dir/other", &taken).as_deref(),
+            Some(Path::new("/out/.zvolfiles-deep/500/other"))
+        );
     }
 
+    /// The set-id bits go only with the owner, a link's target is never
+    /// executable, and a time is put back as the dataset had it; an item
+    /// `--preserve` does not know is refused.
+    #[cfg(unix)]
     #[test]
     fn what_preserve_puts_back() {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};

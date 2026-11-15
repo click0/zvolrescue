@@ -131,8 +131,12 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     // whatever is at those offsets there: every block fails its
     // checksum, the image is zeros, and the run ended 4 as if the
     // volume were damaged.
+    // A scan made before the pool's GUID was known — through a layout
+    // without one, no label left — recorded none, and is held to the
+    // members it lists, not refused for the GUID a later run reads.
     let guid = format!("{:#018x}", pool.guid);
-    if index.pool_guid != "-" && index.pool_guid != guid {
+    let unknown = ["-", zvol_common::NO_POOL_GUID].contains(&index.pool_guid.as_str());
+    if !unknown && index.pool_guid != guid {
         eprintln!(
             "zvolcarve: {} was made from pool {} ({}); these members are pool {} ({guid}): give the members that scan read",
             opts.dir.display(),

@@ -660,6 +660,13 @@ impl Global {
     }
 }
 
+/// The GUID a pool was recorded under when nothing gave it one: read
+/// through a layout written by hand, no label left to name it. Its own
+/// configuration is asked for it now, so a work directory or a manifest
+/// made before that carries this where a later run has the pool's own.
+/// It stands for "not known", and is no other pool's.
+pub const NO_POOL_GUID: &str = "0x0000000000000000";
+
 /// Whether `a` and `b` are one file: the same inode when both exist, the
 /// same place once resolved when either does not yet — two outputs a
 /// run is about to create can collide too.
@@ -1118,19 +1125,9 @@ impl OpenOpts {
                     member.display()
                 ));
             };
-            match maps.iter().find(|(m, _)| m == kept) {
-                Some((_, other)) if other != file && !same_file(other, file) => {
-                    return Err(format!(
-                        "--map {}={}: {} has a map already, {}",
-                        member.display(),
-                        file.display(),
-                        kept.display(),
-                        other.display()
-                    ));
-                }
-                Some(_) => {}
-                None => maps.push((kept.clone(), file.clone())),
-            }
+            // No two maps name one member — the options were refused
+            // for that when they were read — so each has a place.
+            maps.push((kept.clone(), file.clone()));
         }
         Ok(OpenOpts {
             ledger: self.ledger.clone(),

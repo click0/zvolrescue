@@ -364,15 +364,19 @@ extracts that snapshot of every volume under
 .Ar dataset
 which has one, as
 .Ql zfs snapshot -r
-makes them.
+makes them;
+.Ar dataset Ns @ Ns Ar snap
+itself has to be there.
 With
 .Fl -resume ,
 an image the run being resumed finished is kept, not extracted again,
 when
 .Pa manifest.json
-names it whole at the same TXG and the file still hashes to the
-SHA-256 recorded there; one that does not is extracted again, saying
-so.
+names it whole at the same TXG \(em every block read \(em and the
+file still hashes to the SHA-256 recorded there; one that does not is
+extracted again, saying so.
+An image with blocks written as zeros is extracted again: what did not
+read then may read now.
 .It Fl -hash Ar list
 Also hash the image with these, as it is written, for a toolchain
 that wants them:
@@ -402,8 +406,8 @@ written since.
 Under the output directory of
 .Cm dump Fl r :
 every image written, its dataset, TXG, size and hash.
-It is written again as each volume ends, so that a run killed outright
-still leaves what it finished on record for
+It is written again as each volume ends, whole or not at all, so that
+a run killed outright still leaves what it finished on record for
 .Fl -resume ;
 an image kept from the run being resumed is marked
 .Ql kept ,

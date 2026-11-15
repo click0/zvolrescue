@@ -192,19 +192,24 @@ takes, a path longer than the system takes.
 * **`dump -r --resume` extracted every finished image again.** A run
   stopped at its third volume left the first two whole, and the resume
   started each of them from block 0. An image the manifest names whole
-  at the same TXG, and whose file still hashes to what is recorded
-  there, is now kept and marked `kept`; one that does not is extracted
-  again, saying why. The manifest is written as each volume ends, so a
-  run killed outright still leaves what it finished on record.
+  at the same TXG — every block read — and whose file still hashes to
+  what is recorded there, is now kept and marked `kept`, the directory
+  named as before or by another spelling of its path; one that does
+  not is extracted again, saying why, and so is one with blocks
+  written as zeros, which may read now. The manifest is written as
+  each volume ends, whole or not at all, so a run killed outright
+  still leaves what it finished on record.
 * **`dump -r VOL@SNAP` found "no volume under" it, exit 3,** while a
   plain `dump` of the same name read it. It now extracts that snapshot
-  of every volume under VOL which has one.
+  of every volume under VOL which has one; VOL@SNAP itself has to be
+  there, as it is after `zfs snapshot -r`.
 * **`zfs promote` read as a rename.** The history had only "renamed
   tank/vmc@before was tank/vm@before"; read from after it, the old
   origin was a clone made before what it is a clone of, and the
-  promoted dataset "created". A clone that is one no longer is now a
-  `promoted` event, naming what it was a clone of and what it was
-  promoted over; the snapshots it took over are renamed "moved by the
+  promoted dataset "created". A clone that now holds the snapshot it
+  was made from — a clone of a clone as much as any — is a `promoted`
+  event, naming what it was a clone of and what it was promoted
+  over; the snapshots it took over are renamed "moved by the
   promotion"; and a history that starts after a promotion still tells
   it from a snapshot older than the dataset that holds it, which
   another dataset is a clone of.
@@ -212,14 +217,16 @@ takes, a path longer than the system takes.
   Past 65 000 hard links every further name was "Too many links",
   unwritten, exit 4. The next name is now written as a copy
   (`copy_of`), and the names after it are links to the copy: a file
-  of 363 000 names extracts whole, exit 0.
+  of 363 000 names extracts whole, exit 0. So is every second name on
+  a filesystem that takes no hard links at all.
 * **A path longer than the system takes was not written, nor anything
   under it.** "File name too long", exit 4, for every entry below a
   directory so deep. Such an entry now goes under
-  `.zvolfiles-deep/OBJECT` in the output directory — a directory with
-  everything under it by the names it has — and the manifest says
-  where (`written_as`); the evidence record lists each file where it
-  is, so `zvolreport verify` checks it there.
+  `.zvolfiles-deep/OBJECT/NAME` in the output directory — a directory
+  with everything under it by the names it has — and every entry that
+  is not at its path says where it is in the manifest (`written_as`);
+  the evidence record lists each file where it is, so `zvolreport
+  verify` checks it there.
 * **Extracting a tree read its dnode blocks again for every entry.** A
   file of 65 000 names took 38 s, 97 % of it decompressing one 16 KiB
   block over and over, and a dataset of 363 000 entries 3.5 minutes.
@@ -243,7 +250,9 @@ takes, a path longer than the system takes.
 * **A pool read through hints without a name stayed "?", GUID 0.** Its
   datasets were named from the MOS, the pool not, in the header, the
   JSON and the record. The name and GUID now come from a member's
-  label, or else from the pool's configuration in its MOS.
+  label, or else from the pool's configuration in its MOS. A
+  `zvolcarve` work directory or a `dump -r` manifest made before, with
+  no GUID on it, is still taken.
 
 ## v0.9.15 — 2026-11-13
 

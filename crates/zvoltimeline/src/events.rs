@@ -123,6 +123,23 @@ fn head(snapshot: &str) -> &str {
     snapshot.split_once('@').map_or(snapshot, |(h, _)| h)
 }
 
+/// Whether `d`, which was `was` at the TXG before, was promoted between
+/// the two: the snapshot it was a clone of is its own now. A promotion
+/// hands the clone its origin's snapshots and its origin's own origin,
+/// so a clone of a clone is still a clone after it — telling by "a
+/// clone no longer" alone, a promotion in such a chain was no event.
+/// That rule stays beside this one, for a snapshot this read does not
+/// have where it is now.
+fn promoted_between(was: &Dataset, d: &Dataset, after: &[Dataset]) -> bool {
+    if d.snapshot || !was.clone {
+        return false;
+    }
+    let its_own_now = after
+        .iter()
+        .any(|s| s.snapshot && s.object == was.origin_obj && head(&s.name) == d.name);
+    its_own_now || !d.clone
+}
+
 /// A head dataset that holds a snapshot older than itself, which another
 /// dataset is a clone of, got it by a promotion: it was made a clone,
 /// and was promoted over that other one since. A snapshot older than
@@ -130,7 +147,6 @@ fn head(snapshot: &str) -> &str {
 /// wrote has it otherwise, but a damaged or hand-made one can.
 pub fn promoted_since(d: &Dataset, all: &[Dataset]) -> bool {
     !d.snapshot
-        && !d.clone
         && d.creation_txg != 0
         && all.iter().any(|s| {
             s.snapshot
@@ -147,6 +163,9 @@ pub fn promoted_since(d: &Dataset, all: &[Dataset]) -> bool {
 /// it: it became a clone when the dataset holding that snapshot was
 /// promoted over it.
 fn demoted<'a>(d: &Dataset, all: &'a [Dataset]) -> Option<&'a Dataset> {
+    if d.snapshot {
+        return None;
+    }
     origin_of(d, all)
         .filter(|o| o.creation_txg != 0 && d.creation_txg != 0 && o.creation_txg > d.creation_txg)
 }
@@ -159,8 +178,22 @@ fn demoted<'a>(d: &Dataset, all: &'a [Dataset]) -> Option<&'a Dataset> {
 /// was promoted over a "clone" made before what it is a clone of.
 pub fn appeared_as(d: &Dataset, all: &[Dataset]) -> Kind {
     if d.snapshot {
-        Kind::Snapshot
-    } else if promoted_since(d, all) || (d.clone && demoted(d, all).is_none()) {
+        return Kind::Snapshot;
+    }
+    if let Some(o) = demoted(d, all) {
+        // What it was before the promotion: the dataset promoted over
+        // it took its origin, and is a clone still only if it had one.
+        let promoter = head(&o.name);
+        let was_clone = all
+            .iter()
+            .any(|p| !p.snapshot && p.name == promoter && p.clone);
+        return if was_clone {
+            Kind::Clone
+        } else {
+            Kind::Created
+        };
+    }
+    if d.clone || promoted_since(d, all) {
         Kind::Clone
     } else {
         Kind::Created
@@ -200,10 +233,14 @@ pub fn diff(before: &[Dataset], after: &[Dataset], txg: u64, time: Option<u64>) 
     let old = by_guid(before);
     let new = by_guid(after);
     let mut events = Vec::new();
-    // Clones that are clones no longer: promoted at this TXG.
+    // Clones that hold the snapshot they were made from: promoted at
+    // this TXG.
     let promoted: Vec<&Dataset> = new
         .iter()
-        .filter(|(g, d)| !d.snapshot && !d.clone && old.get(g).is_some_and(|o| o.clone))
+        .filter(|(g, d)| {
+            old.get(g)
+                .is_some_and(|was| promoted_between(was, d, after))
+        })
         .map(|(_, d)| d)
         .collect();
 
@@ -246,28 +283,39 @@ pub fn diff(before: &[Dataset], after: &[Dataset], txg: u64, time: Option<u64>) 
                         last_seen_txg: None,
                     });
                 }
-                if was.clone && !d.clone && !d.snapshot {
-                    // The datasets it was promoted over: those that were
-                    // not clones and are now.
+                if promoted.iter().any(|p| p.guid == *guid) {
+                    // The datasets it was promoted over: those whose
+                    // origin is a snapshot of this one now, and was
+                    // another before. Their own snapshots are not
+                    // datasets it was promoted over, nor is what another
+                    // promotion between the same two TXGs was over.
                     let over: Vec<&str> = new
                         .iter()
-                        .filter(|(g, n)| n.clone && old.get(g).is_some_and(|o| !o.clone))
+                        .filter(|(g, n)| {
+                            !n.snapshot
+                                && origin_of(n, after).is_some_and(|o| head(&o.name) == d.name)
+                                && old.get(g).is_some_and(|o| o.origin_obj != n.origin_obj)
+                        })
                         .map(|(_, n)| n.name.as_str())
                         .collect();
-                    let from = origin_of(was, before)
+                    let mut details = origin_of(was, before)
                         .map(|o| format!("was a clone of {}", o.name))
                         .unwrap_or_else(|| "was a clone".to_string());
+                    if !over.is_empty() {
+                        details.push_str(&format!("; now the origin of {}", over.join(", ")));
+                    }
+                    // A clone of a clone is a clone still: of what the
+                    // one it was promoted over was made from.
+                    if let Some(o) = origin_of(d, after) {
+                        details.push_str(&format!(", and a clone of {}", o.name));
+                    }
                     events.push(Event {
                         txg,
                         time,
                         kind: Kind::Promoted,
                         object: Some(d.name.clone()),
                         guid: *guid,
-                        details: if over.is_empty() {
-                            from
-                        } else {
-                            format!("{from}; now the origin of {}", over.join(", "))
-                        },
+                        details,
                         last_seen_txg: None,
                     });
                 }
@@ -497,6 +545,77 @@ pub(crate) mod tests {
         let alone = vec![after[1].clone(), after[2].clone()];
         assert!(!promoted_since(&alone[1], &alone));
         assert_eq!(appeared_as(&alone[1], &alone), Kind::Created);
+    }
+
+    /// A clone of a clone, promoted, is a clone still — of what the one
+    /// it was promoted over was made from — and it was no event: only
+    /// "renamed tank/c@s2 was tank/b@s2". The dataset it was promoted
+    /// over is named, and that one's own later snapshots are not.
+    #[test]
+    fn a_promotion_in_a_chain_of_clones_is_one_too() {
+        let at = |mut d: Dataset, txg: u64, object: u64| {
+            d.creation_txg = txg;
+            d.object = object;
+            d
+        };
+        let clone_of = |mut d: Dataset, origin: u64| {
+            d.clone = true;
+            d.origin_obj = origin;
+            d
+        };
+        let a = at(ds("tank/a", 1, false), 5, 50);
+        let s1 = at(ds("tank/a@s1", 2, true), 9, 60);
+        let b = clone_of(at(ds("tank/b", 3, false), 13, 70), 60);
+        let s2 = clone_of(at(ds("tank/b@s2", 4, true), 20, 80), 60);
+        let c = clone_of(at(ds("tank/c", 5, false), 24, 90), 80);
+        let later = clone_of(at(ds("tank/b@later", 6, true), 28, 100), 60);
+        let before = vec![
+            a.clone(),
+            s1.clone(),
+            b.clone(),
+            s2.clone(),
+            c.clone(),
+            later.clone(),
+        ];
+
+        // `zfs promote tank/c`: c takes b's origin and s2, b is a clone
+        // of c@s2, and b's later snapshot goes with b.
+        let mut s2_moved = clone_of(s2.clone(), 60);
+        s2_moved.name = "tank/c@s2".into();
+        let after = vec![
+            a,
+            s1,
+            clone_of(b, 80),
+            s2_moved,
+            clone_of(c, 60),
+            clone_of(later, 80),
+        ];
+
+        let events = diff(&before, &after, 32, None);
+        assert_eq!(
+            kinds(&events),
+            [("promoted", Some("tank/c")), ("renamed", Some("tank/c@s2"))]
+        );
+        assert_eq!(
+            events[0].details,
+            "was a clone of tank/b@s2; now the origin of tank/b, and a clone of tank/a@s1"
+        );
+        assert_eq!(
+            events[1].details,
+            "was tank/b@s2, moved by the promotion of tank/c"
+        );
+
+        // Read only from after it: both were clones when they were made.
+        assert_eq!(appeared_as(&after[2], &after), Kind::Clone);
+        assert_eq!(
+            appeared_details(&after[2], &after).as_deref(),
+            Some("a clone of tank/c@s2 since tank/c was promoted over it")
+        );
+        assert_eq!(appeared_as(&after[4], &after), Kind::Clone);
+        assert!(promoted_since(&after[4], &after));
+        // A snapshot is no dataset a promotion was over.
+        assert_eq!(appeared_as(&after[5], &after), Kind::Snapshot);
+        assert_eq!(appeared_details(&after[5], &after), None);
     }
 
     #[test]

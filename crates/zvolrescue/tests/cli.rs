@@ -3050,6 +3050,20 @@ fn a_bulk_resume_keeps_the_images_already_finished() {
         serde_json::from_slice(&std::fs::read(out.join("manifest.json")).unwrap()).unwrap();
     assert_eq!(manifest["volumes"][0]["kept"], true, "{manifest}");
 
+    // The same directory by another spelling of its path is the same
+    // images: a manifest names them as the run that wrote it was told.
+    let respelt = dir
+        .join("..")
+        .join(dir.file_name().unwrap())
+        .join("bulk")
+        .to_string_lossy()
+        .into_owned();
+    let (code, _, err) = run(&[
+        "dump", "-r", "--resume", "tank", &paths[0], &paths[1], "-o", &respelt,
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(err.contains("keeping tank/vm/disk0"), "{err}");
+
     // A byte changed since: not the image that run finished.
     let mut changed = whole.clone();
     changed[4096] ^= 0xff;
@@ -3061,15 +3075,35 @@ fn a_bulk_resume_keeps_the_images_already_finished() {
     assert!(err.contains("its sha256 differs"), "{err}");
     assert_eq!(std::fs::read(&image).unwrap(), whole);
 
-    // A --strict resume keeps no image with blocks written as zeros.
+    // An image with blocks written as zeros is not whole, and is
+    // extracted again: what did not read then may read now, with the
+    // member that was missing given.
     let mut m = manifest.clone();
     m["volumes"][0]["blocks_zeroed"] = 1.into();
     std::fs::write(out.join("manifest.json"), m.to_string()).unwrap();
     let (code, _, err) = run(&[
-        "dump", "-r", "--resume", "--strict", "tank", &paths[0], &paths[1], "-o", &o,
+        "dump", "-r", "--resume", "tank", &paths[0], &paths[1], "-o", &o,
     ]);
     assert_eq!(code, 0, "{err}");
     assert!(!err.contains("keeping"), "{err}");
+    assert!(
+        !out.join("manifest.json.tmp").exists(),
+        "the manifest is renamed into place"
+    );
+
+    // A manifest of another pool keeps nothing, and says so; one made
+    // before the pool's GUID was known is taken by its volumes.
+    for (guid, kept) in [("0x0000000000000bad", false), ("0x0000000000000000", true)] {
+        let mut m = manifest.clone();
+        m["pool_guid"] = guid.into();
+        std::fs::write(out.join("manifest.json"), m.to_string()).unwrap();
+        let (code, _, err) = run(&[
+            "dump", "-r", "--resume", "tank", &paths[0], &paths[1], "-o", &o,
+        ]);
+        assert_eq!(code, 0, "{err}");
+        assert_eq!(err.contains("keeping tank/vm/disk0"), kept, "{guid}: {err}");
+        assert_eq!(err.contains("is of pool"), !kept, "{guid}: {err}");
+    }
 }
 
 /// `dump -r VOL@SNAP` extracts that snapshot of every volume under VOL

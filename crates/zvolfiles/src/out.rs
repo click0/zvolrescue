@@ -181,19 +181,24 @@ impl OutTree {
 }
 
 /// The filesystem will not give the file another name: it has as many
-/// as it takes, or it takes no hard links at all.
+/// as it takes (`EMLINK`), or it takes no hard links at all — FAT and
+/// exFAT, which Linux answers for with `EPERM` and FreeBSD with
+/// `EOPNOTSUPP`. A directory that may not be written is `EACCES`, of
+/// the same kind as `EPERM`: the copy tried in its place fails there
+/// the same way, and that is the error the entry is given.
 fn no_more_names(e: &io::Error) -> bool {
     matches!(
         e.kind(),
-        io::ErrorKind::TooManyLinks | io::ErrorKind::Unsupported
+        io::ErrorKind::TooManyLinks | io::ErrorKind::Unsupported | io::ErrorKind::PermissionDenied
     )
 }
 
 #[cfg(all(test, any(target_os = "linux", target_os = "freebsd")))]
 #[test]
 fn a_file_with_every_name_it_can_take_is_copied() {
-    // EMLINK is 31 on both.
+    // EMLINK is 31 on both, EPERM 1, ENOSPC 28.
     assert!(no_more_names(&io::Error::from_raw_os_error(31)));
+    assert!(no_more_names(&io::Error::from_raw_os_error(1)));
     assert!(!no_more_names(&io::Error::from_raw_os_error(28)));
 }
 

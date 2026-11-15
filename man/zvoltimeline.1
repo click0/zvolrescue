@@ -18,8 +18,9 @@ into a history: when each dataset, volume and snapshot was created,
 renamed, destroyed or cloned, and what its properties were.
 A clone promoted over its origin is a
 .Ql promoted
-event; the snapshots the promotion moved to it are renamed, and say
-so.
+event, a clone of a clone as much as any, naming the dataset it was
+promoted over; the snapshots the promotion moved to it are renamed,
+and say so.
 Read only from after a promotion, the dataset promoted is a clone
 promoted since, and the one it was promoted over was created, not
 cloned: a snapshot older than the dataset that holds it, which another

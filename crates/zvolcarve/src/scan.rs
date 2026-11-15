@@ -459,7 +459,9 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 .all(|(a, b)| a == b || zvol_common::same_file(a, b));
         // The range may differ: a resume goes on from where each member
         // got to, to the end of the range it is given.
-        let differs = if i.pool_guid != guid {
+        // The pool's GUID, where the scan had one: begun before it was
+        // known, through a layout without one, it is told by its members.
+        let differs = if i.pool_guid != guid && i.pool_guid != zvol_common::NO_POOL_GUID {
             Some(format!("pool {} there, {guid} here", i.pool_guid))
         } else if !same_members {
             Some("other members, or the same in another order".into())

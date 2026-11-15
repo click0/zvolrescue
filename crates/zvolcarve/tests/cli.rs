@@ -960,6 +960,35 @@ fn a_carved_dump_is_a_volume_of_the_pool_it_was_found_in() {
     assert_eq!(code, 1, "{err}");
     assert!(err.contains("give the members that scan read"), "{err}");
     assert!(!dir.join("never.img").exists());
+
+    // A scan made before the pool's GUID was known recorded none: its
+    // work directory is not another pool's, for a run that reads one.
+    let index = Path::new(&carve).join("candidates.json");
+    let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&index).unwrap()).unwrap();
+    v["pool_guid"] = "0x0000000000000000".into();
+    std::fs::write(&index, v.to_string()).unwrap();
+    let again = dir.join("again.img").to_string_lossy().into_owned();
+    let (code, _, err) = run(&[
+        "-q",
+        "dump",
+        &carve,
+        "c0001",
+        &members[0],
+        &members[1],
+        "-o",
+        &again,
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let (code, _, err) = run(&[
+        "-q",
+        "scan",
+        &members[0],
+        &members[1],
+        "-o",
+        &carve,
+        "--resume",
+    ]);
+    assert_eq!(code, 0, "{err}");
 }
 
 /// `--resume` goes on with the scan that was started, or refuses: with
