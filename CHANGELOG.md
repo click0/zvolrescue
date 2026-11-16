@@ -13,7 +13,7 @@ development milestone that names what changed when — the sections below
 are their record — and ships inside the next version that does get
 tagged. `v0.7.1` is the release that carries those six.
 
-## Unreleased
+## v0.9.16 — 2026-11-16
 
 **Pools OpenZFS wrote on other machines read as they are.** A pool a
 big-endian host wrote — its small files, its root directory, its dnode

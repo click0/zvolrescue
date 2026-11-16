@@ -1,6 +1,6 @@
 # zvolrescue — Technical Specification (ТЗ)
 
-**Status:** living document, revised 2026-11-13 (tool at v0.9.15) · **Owner:** Vladyslav V. Prodan
+**Status:** living document, revised 2026-11-16 (tool at v0.9.16) · **Owner:** Vladyslav V. Prodan
 
 **Ukrainian version:** [SPEC.uk.md](SPEC.uk.md) · **Companion tools:** [COMPANIONS.md](COMPANIONS.md)
 
@@ -684,6 +684,12 @@ report to its logs and every extracted file to its hash (R-02, R-04),
 resumes a dump stopped by a full disk with what it lost (F-32), and
 exits with the codes §7 names, an argument that does not parse among
 them.
+`v0.9.16` reads pools as other machines wrote them — a big-endian
+host's small blocks and directories, a dRAID with a distributed spare
+in for a failed disk (F-25) — looks where the pool kept twice what a
+ddrescue map refused (F-72), writes a dRAID's label from its hints
+(F-67), keeps on a bulk resume the images already finished (F-31,
+F-32), and tells a `zfs promote` in the history (T-03).
 `1.0.0` is the full release, and waits for what no CI can supply: three real-world incidents with
 documented outcomes ([REALWORLD-TESTS.md](REALWORLD-TESTS.md)). The
 packaging it also waited for — a FreeBSD port, a `.deb`, an AUR
