@@ -13,6 +13,23 @@ development milestone that names what changed when — the sections below
 are their record — and ships inside the next version that does get
 tagged. `v0.7.1` is the release that carries those six.
 
+## Unreleased
+
+### Fixed
+
+* **The port's `distinfo` held the hash of a 404 page for one crate.**
+  `packaging/freebsd/distinfo.sh` cut `wasi-0.11.1+wasi-snapshot-preview1`
+  at its last hyphen, asked crates.io for a crate of another name, and
+  wrote down the hash and the 364 bytes of the error page it got — a
+  different hash at every release since the script was written,
+  v0.9.16's among them — so the committed file did not describe the
+  crate a ports tree fetches. CI never saw it: the port's job writes
+  its own `distinfo` in the VM. The name now ends where the version
+  begins, a download that fails stops the script, every crate is held
+  to the checksum `Cargo.lock` records for it, and CI holds the
+  committed file to the same. `packaging/aur/update.sh` hashed an
+  error page the same way for a tag that is not there, and stops too.
+
 ## v0.9.16 — 2026-11-16
 
 **Pools OpenZFS wrote on other machines read as they are.** A pool a

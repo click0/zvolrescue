@@ -50,6 +50,34 @@ jobs:
           packaging/freebsd/update-crates.sh
           git diff --exit-code packaging/freebsd/sysutils/zvolrescue/Makefile.crates \
             || { echo "::error::Makefile.crates is out of date: run packaging/freebsd/update-crates.sh"; exit 1; }
+          # And what the committed distinfo says of a crate is what
+          # Cargo.lock says of it. The port's own job writes its distinfo
+          # afresh in the VM (`make makesum`), so nothing checked the
+          # committed one — and for one crate it held the hash of a 404
+          # page. A crate distinfo still lists from the last tag, which
+          # the lock file has since dropped, is not this check's.
+          python3 - <<'EOF'
+          import re, sys
+          lock = open("Cargo.lock").read()
+          want = {
+              f"{m[1]}-{m[2]}": m[3]
+              for m in re.finditer(
+                  r'name = "([^"]+)"\nversion = "([^"]+)"\nsource = "registry[^"]*"\nchecksum = "([0-9a-f]+)"', lock
+              )
+          }
+          bad = []
+          seen = 0
+          for line in open("packaging/freebsd/sysutils/zvolrescue/distinfo"):
+              m = re.match(r"SHA256 \(rust/crates/(.+)\.crate\) = ([0-9a-f]+)", line)
+              if m and m[1] in want:
+                  seen += 1
+                  if want[m[1]] != m[2]:
+                      bad.append(f"{m[1]}: distinfo {m[2]}, Cargo.lock {want[m[1]]}")
+          assert seen, "distinfo names no crate of Cargo.lock"
+          if bad:
+              sys.exit("::error::distinfo is not Cargo.lock's for: " + "; ".join(bad))
+          print(f"{seen} crates of distinfo checked against Cargo.lock")
+          EOF
       - name: The .deb installs, and man zvolrescue is there (REALWORLD-TESTS E4)
         run: |
           v=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
