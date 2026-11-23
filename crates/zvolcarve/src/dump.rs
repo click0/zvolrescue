@@ -179,6 +179,30 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         (None, Some(s)) => (s, format!("the {inside} inside it was made for this")),
         (None, None) => (c.implied_size, "implied by the dnode".to_string()),
     };
+    // A size no image can have: asked for, it is a usage error; read
+    // off the disk, it is not this volume's. Either way the run that
+    // took it hashed the zeros after the last block for ever.
+    if size > zfs_read::zvol::MAX_VOLSIZE {
+        errln!(
+            "zvolcarve: {}: {size} bytes ({why}) is more than a file or a device can hold{}",
+            c.id,
+            if opts.size.is_some() {
+                ""
+            } else {
+                ": give the volume's size with --size"
+            }
+        );
+        return zvol_common::end_early(
+            g,
+            "zvolcarve",
+            spec,
+            if opts.size.is_some() {
+                exit::USAGE
+            } else {
+                exit::UNRECOVERABLE
+            },
+        );
+    }
     if !g.quiet {
         errln!(
             "zvolcarve: {}: {} block(s) of {} bytes, {size} bytes ({why})",
@@ -186,6 +210,9 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             c.maxblkid.saturating_add(1),
             c.volblocksize,
         );
+        if let Some(tail) = zfs_read::zvol::tail_said(&obj, size) {
+            errln!("zvolcarve: {}: {tail}", c.id);
+        }
     }
     // The same state file, the same resume, as `zvolrescue dump`
     // (C-07): a candidate has no dataset GUID or TXG to record, and
@@ -279,9 +306,9 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         errln!("zvolcarve: {}: {why}; {resume_words} (exit 6)", c.id);
     } else if let Some(at) = report.interrupted_at {
         errln!(
-            "zvolcarve: {}: interrupted at block {at} of {}; {resume_words} (exit 6)",
+            "zvolcarve: {}: interrupted {}; {resume_words} (exit 6)",
             c.id,
-            report.blocks_total
+            zfs_read::zvol::interrupted_said(at, report.blocks_total)
         );
     }
     // What the run that was resumed lost is this image's too.
@@ -412,7 +439,8 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 outln!("  OUTPUT FAILED (exit 6): {why}; the image is incomplete: {resume_words}");
             } else if let Some(at) = report.interrupted_at {
                 outln!(
-                    "  INTERRUPTED at block {at} (exit 6); the image is incomplete: {resume_words}"
+                    "  INTERRUPTED {} (exit 6); the image is incomplete: {resume_words}",
+                    zfs_read::zvol::interrupted_said(at, report.blocks_total)
                 );
             } else if report.aborted {
                 outln!("  ABORTED (--strict, exit 4): the image is incomplete: {resume_words}");

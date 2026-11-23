@@ -17,6 +17,21 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ### Fixed
 
+* **A size no image can have is refused, and a long hole at a volume's
+  end is said.** `zvolcarve dump --size 18446744073709551615` was
+  taken, and the run hashed the zeros after the volume's last block —
+  2^64 bytes of them — with nothing to say it would never end; a
+  volume whose `size` property read as much did the same to `zvolrescue
+  dump`. A size past 2^63 − 1 bytes, which no file and no device can
+  hold, is refused before anything is opened to write (exit 1 for a
+  `--size`, 3 for a size read off the disk). A size that can be is
+  still a size: what follows a volume's last block is hashed as zeros
+  at the rate a hash goes, about a gibibyte a second, and for a thin
+  volume that is most of the run, with no block read and the count of
+  blocks standing still. A hole of a gibibyte or more is now said on
+  standard error before the run begins, and a run interrupted in it
+  says "after its last block, in the hole that ends the volume" where
+  it said "at block 640 of 640".
 * **A volume of small blocks was read at a tenth of the rate of one of
   large blocks.** Every block of an object comes down through its
   indirect blocks, and each of those was fetched, checked against its

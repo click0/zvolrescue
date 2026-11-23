@@ -102,6 +102,56 @@ pub struct Report {
     pub md5: Option<String>,
 }
 
+/// The longest image there can be: no file and no device is longer
+/// than a signed offset counts. A size past it is no volume's — a
+/// forged `size` property, a `--size` typed with too many digits — and
+/// an extraction of it was not refused: it hashed the zeros of the hole
+/// after the last block, 2^64 bytes of them, with nothing to say it
+/// would never end.
+pub const MAX_VOLSIZE: u64 = i64::MAX as u64;
+
+/// A volume whose size runs this far past its last block is said to on
+/// standard error before it is read ([`tail_said`]).
+pub const TAIL_NOTE: u64 = 1 << 30;
+
+/// Where the last block of `obj` ends within a volume of `volsize`
+/// bytes: what follows is a hole to the volume's end.
+pub fn data_end(obj: &ObjectReader<'_, '_>, volsize: u64) -> u64 {
+    obj.dnode()
+        .maxblkid
+        .saturating_add(1)
+        .saturating_mul(obj.dnode().datablksz())
+        .min(volsize)
+}
+
+/// What to say before reading a volume that ends in a long hole: the
+/// zeros of it are hashed with the rest of the image, at the rate a
+/// hash goes, and for a thin volume that is most of the run — minutes
+/// in which no block is read and the count of blocks does not move.
+/// `None` for a hole under [`TAIL_NOTE`].
+pub fn tail_said(obj: &ObjectReader<'_, '_>, volsize: u64) -> Option<String> {
+    let end = data_end(obj, volsize);
+    let tail = volsize - end;
+    (tail >= TAIL_NOTE).then(|| {
+        format!(
+            "{volsize} bytes, and its last block ends at byte {end}: the {tail} bytes after it are a hole, hashed as zeros once the blocks are done (no block is read then; SIGINT stops the run where --resume takes it up)"
+        )
+    })
+}
+
+/// Where an interrupted run stopped, in words: at a block, or — every
+/// block done — in the hole after the last one, which read "at block
+/// 640 of 640" for a run a terabyte of zeros past it.
+pub fn interrupted_said(at: u64, blocks_total: u64) -> String {
+    if at >= blocks_total {
+        format!(
+            "after its last block, in the hole that ends the volume (all {blocks_total} block(s) are written)"
+        )
+    } else {
+        format!("at block {at} of {blocks_total}")
+    }
+}
+
 /// Open the dataset's objset and return its data object plus block size.
 pub fn open_volume<'r, 'a>(
     reader: &'r PoolReader<'a>,
@@ -227,6 +277,11 @@ pub fn extract_from(
         return Err(ReadError::Io(
             "volume data object has zero block size".into(),
         ));
+    }
+    if volsize > MAX_VOLSIZE {
+        return Err(ReadError::Io(format!(
+            "a volume of {volsize} bytes is more than a file or a device can hold ({MAX_VOLSIZE})"
+        )));
     }
     // Blocks that lie inside volsize; the tree may extend past it.
     let blocks_in_volume = volsize.div_ceil(bs);
@@ -651,6 +706,44 @@ mod tests {
         )
         .unwrap();
         assert_eq!(&sink.data[..32768], &expected_image()[..32768]);
+    }
+
+    /// A size no image can have is refused before a block is read: the
+    /// zeros after the last block were hashed for it, 2^64 bytes of
+    /// them. And a volume that ends in a long hole is said to, as a run
+    /// stopped in that hole is said to have stopped there.
+    #[test]
+    fn a_size_no_image_has_is_refused_and_a_long_tail_is_said() {
+        let (s, a, ub, _) = build();
+        let reader = PoolReader::new(&a, vec![Some(&s[0] as &dyn BlockSource)]);
+        let mos = open_mos(&reader, &ub).unwrap();
+        let tree = walk(&mos, "tank").unwrap();
+        let ds = tree.get("tank/vm/disk0").unwrap();
+        let (obj, _) = open_volume(&reader, ds).unwrap();
+        for size in [u64::MAX, MAX_VOLSIZE + 1] {
+            let mut sink = MemSink::default();
+            let e = extract(&obj, size, &mut sink, OnError::Zero, |_, _| {}).unwrap_err();
+            assert!(
+                e.to_string()
+                    .contains("more than a file or a device can hold"),
+                "{e}"
+            );
+            assert!(sink.writes.is_empty());
+        }
+        // Four blocks of 8 KiB, the last at 24576.
+        assert_eq!(data_end(&obj, 32 << 20), 32768);
+        assert_eq!(data_end(&obj, 20000), 20000);
+        assert_eq!(tail_said(&obj, 32 << 20), None);
+        let said = tail_said(&obj, 3 << 30).expect("a hole of nearly 3 GiB");
+        assert!(
+            said.starts_with("3221225472 bytes, and its last block ends at byte 32768: the 3221192704 bytes after it are a hole"),
+            "{said}"
+        );
+        assert_eq!(interrupted_said(3, 640), "at block 3 of 640");
+        assert_eq!(
+            interrupted_said(640, 640),
+            "after its last block, in the hole that ends the volume (all 640 block(s) are written)"
+        );
     }
 
     #[test]

@@ -651,6 +651,20 @@ fn dump_one(
             return Err(exit::UNRECOVERABLE);
         }
     };
+    // Before the output is opened: a size no image can have is no
+    // volume's size, and reading for it never ends.
+    if volsize > zfs_read::zvol::MAX_VOLSIZE {
+        errln!(
+            "zvolrescue: {}: its size reads as {volsize} bytes, more than a file or a device can hold: that is not a volume's size, and nothing is extracted",
+            ds.name
+        );
+        return Err(exit::UNRECOVERABLE);
+    }
+    if !g.quiet {
+        if let Some(tail) = zfs_read::zvol::tail_said(&obj, volsize) {
+            errln!("zvolrescue: {}: {tail}", ds.name);
+        }
+    }
     let blocksize = obj.dnode().datablksz();
     let expected_state = resume::State {
         version: 1,
@@ -760,9 +774,9 @@ fn dump_one(
         errln!("zvolrescue: {}: {why}; {resume_words} (exit 6)", ds.name);
     } else if let Some(at) = report.interrupted_at {
         errln!(
-            "zvolrescue: {}: interrupted at block {at} of {}; {resume_words} (exit 6)",
+            "zvolrescue: {}: interrupted {}; {resume_words} (exit 6)",
             ds.name,
-            report.blocks_total
+            zfs_read::zvol::interrupted_said(at, report.blocks_total)
         );
     }
     // What the run that was resumed lost is this image's too.
@@ -896,7 +910,8 @@ fn print_text(out: &RunOut) {
             outln!("  STOPPED: a device refused a read (exit 7); the image is incomplete. Image the disk with a map, then --map and --resume continue on the image (SPEC F-33, N-10)");
         } else if let Some(at) = v.interrupted_at {
             outln!(
-                "  INTERRUPTED at block {at} (exit 6); the image is incomplete: {}",
+                "  INTERRUPTED {} (exit 6); the image is incomplete: {}",
+                zfs_read::zvol::interrupted_said(at, v.blocks_total),
                 v.resume_words
             );
         } else if v.aborted {

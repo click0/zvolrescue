@@ -913,6 +913,44 @@ fn carved_members(dir: &std::path::Path, guid: u64, tag: &str) -> Vec<String> {
         .collect()
 }
 
+/// `--size` is the volume's size when the dnode cannot say it, and a
+/// size no file or device can hold is not one: it was taken, and the
+/// run hashed the zeros after the last block — 2^64 bytes of them, with
+/// nothing to say it would not end. It is refused before anything is
+/// opened to write.
+#[test]
+fn a_size_no_image_can_have_is_refused() {
+    let dir = scratch("dump-size");
+    let members = carved_members(&dir, 0x4242, "member");
+    let carve = dir.join("carve").to_string_lossy().into_owned();
+    let (code, _, err) = run(&["-q", "scan", &members[0], &members[1], "-o", &carve]);
+    assert_eq!(code, 0, "{err}");
+    let img = dir.join("carved.img");
+    for size in ["18446744073709551615", "9223372036854775808"] {
+        let (code, _, err) = run(&[
+            "-q",
+            "dump",
+            &carve,
+            "c0001",
+            &members[0],
+            &members[1],
+            "-o",
+            img.to_str().unwrap(),
+            "--size",
+            size,
+        ]);
+        assert_eq!(code, 1, "{err}");
+        assert!(
+            err.contains(&format!(
+                "c0001: {size} bytes (as asked) is more than a file or a device can hold"
+            )),
+            "{err}"
+        );
+        assert!(!img.exists(), "an image was opened for --size {size}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// A carve's extraction is on the record in the shape `zvolrescue dump`
 /// gives one — `volumes`, with the pool it came from — so a report
 /// built from the log has it; it had none. And a candidate read

@@ -303,6 +303,13 @@ it, and such blocks are counted apart from the rest, on a line of the
 summary and as
 .Ql blocks_unverified
 in the record.
+A hole is written as one and hashed as zeros, at the rate a hash
+goes; a volume that ends in a hole of a gibibyte or more \(em a thin
+one, mostly \(em is said to before the run begins, since no block is
+read while those zeros are hashed, and a run interrupted there says
+so.
+A volume whose size reads as more than a file or a device can hold
+(2^63 \- 1 bytes) is not extracted: that is no volume's size.
 The dataset comes first so that the variable-length list of members
 can follow it.
 Without

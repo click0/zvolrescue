@@ -226,6 +226,11 @@ Extract this many bytes.
 Without it the image is as large as a filesystem found at its start
 was made for, or, when none was found or it was made for less than
 the volume's blocks hold, as large as the dnode implies.
+What lies past the volume's last block is a hole: it is written as
+one and hashed as zeros, at the rate a hash goes, and a hole of a
+gibibyte or more is said before the run begins.
+A size no file or device can hold \(em more than 2^63 \- 1 bytes \(em
+is refused, with exit 1.
 .It Fl -hash Ar list
 Also hash the image with
 .Ql md5
