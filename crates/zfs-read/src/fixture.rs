@@ -388,6 +388,12 @@ pub struct Alloc {
     /// table this fixture has none of; one that reads the pointers as
     /// the pointers they are needs nothing more.
     pub dedup: bool,
+    /// The TXG every block written from now on is born at, whatever its
+    /// builder says. The sample builders write a whole tree as of one
+    /// TXG; a fixture that holds the pool at several sets this before
+    /// each later one, so that the trees are a history: nothing a later
+    /// TXG holds was written before an earlier one and is not there.
+    pub born: Option<u64>,
 }
 
 /// A dense volume for measurements (SPEC N-03, N-08): `bytes` of data
@@ -516,6 +522,7 @@ impl Alloc {
             last_zvol_dnodes: None,
             fill: 1,
             dedup: false,
+            born: None,
         }
     }
 
@@ -851,6 +858,7 @@ impl Alloc {
         txg: u64,
         header_size: usize,
     ) -> [u8; blkptr::SIZE] {
+        let txg = self.born.unwrap_or(txg);
         assert!(
             pieces.len() <= blkptr::gang_nblkptrs(header_size)
                 && pieces.iter().sum::<usize>() == data.len()
@@ -936,6 +944,7 @@ impl Alloc {
         level: u8,
         txg: u64,
     ) -> [u8; blkptr::SIZE] {
+        let txg = self.born.unwrap_or(txg);
         Builder::new()
             .dva(0, self.vdev, offset, asize, false)
             .sizes(lsize, psize)
@@ -1473,6 +1482,7 @@ fn destroyed_zvol_members_with(
     let mut alloc = Alloc::with_layout(0x20_0000, layout);
     alloc.dedup = dedup;
     let with = build_sample_mos_variant(&mut members, &mut alloc, true);
+    alloc.born = Some(newest);
     let without = build_sample_mos_variant(&mut members, &mut alloc, false);
     pool.rootbp = Some(with);
     pool.rootbp_by_txg = vec![(newest, without)];
@@ -1517,6 +1527,7 @@ pub fn objset_reused_members(pool: &mut Pool, size: u64) -> Reused {
     let mut members: Vec<Vec<u8>> = (0..n).map(|_| vec![0u8; size as usize]).collect();
     let mut alloc = Alloc::with_layout(0x20_0000, Layout::Mirror);
     let with = build_sample_mos_variant(&mut members, &mut alloc, true);
+    alloc.born = Some(reused);
     let with_again = build_sample_mos_variant(&mut members, &mut alloc, true);
     let objset = alloc
         .last_zvol_objset
@@ -1524,6 +1535,7 @@ pub fn objset_reused_members(pool: &mut Pool, size: u64) -> Reused {
     let dnodes = alloc
         .last_zvol_dnodes
         .expect("the sample builder records the volume's dnodes");
+    alloc.born = Some(newest);
     let without = build_sample_mos_variant(&mut members, &mut alloc, false);
     pool.rootbp = Some(with);
     pool.rootbp_by_txg = vec![(newest, without), (reused, with_again)];

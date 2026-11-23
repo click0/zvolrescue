@@ -128,19 +128,30 @@ fn print_text(out: &TimelineOut, w: &mut dyn Write) -> std::io::Result<()> {
     use zvol_common::text::shown;
     // `txgs` is every TXG whose uberblock verified; the readable ones are
     // those whose MOS could also be walked.
-    writeln!(
-        w,
-        "pool {:?} guid {}: {} transaction group(s) still readable{}",
-        out.pool,
-        out.pool_guid,
-        out.txgs.len() - out.unreadable_txgs.len(),
-        match (out.unreadable_txgs.len(), out.partial_txgs.len()) {
-            (0, 0) => String::new(),
-            (u, 0) => format!(", {u} unreadable"),
-            (0, p) => format!(", {p} of them read in part"),
-            (u, p) => format!(", {u} unreadable, {p} read in part"),
-        }
-    )?;
+    if out.txgs.is_empty() {
+        // A range that holds nothing of the pool's own history.
+        writeln!(
+            w,
+            "pool {:?} guid {}: no transaction group read: the {} in that range are of a line of history the pool did not go on from",
+            out.pool,
+            out.pool_guid,
+            out.events.iter().filter(|e| e.event == "abandoned").count()
+        )?;
+    } else {
+        writeln!(
+            w,
+            "pool {:?} guid {}: {} transaction group(s) still readable{}",
+            out.pool,
+            out.pool_guid,
+            out.txgs.len() - out.unreadable_txgs.len(),
+            match (out.unreadable_txgs.len(), out.partial_txgs.len()) {
+                (0, 0) => String::new(),
+                (u, 0) => format!(", {u} unreadable"),
+                (0, p) => format!(", {p} of them read in part"),
+                (u, p) => format!(", {u} unreadable, {p} read in part"),
+            }
+        )?;
+    }
     if let Some(d) = out
         .dataset
         .as_ref()
@@ -228,8 +239,10 @@ fn about(events: Vec<Event>, want: &str) -> Vec<Event> {
     events
         .into_iter()
         .filter(|e| {
-            matches!(e.kind, Kind::Pending | Kind::Unreadable | Kind::Abandoned)
-                || e.object.as_deref() == Some(want)
+            matches!(
+                e.kind,
+                Kind::Pending | Kind::Unreadable | Kind::Abandoned | Kind::Clock
+            ) || e.object.as_deref() == Some(want)
                 || (e.guid != 0 && guids.contains(&e.guid))
         })
         .collect()
@@ -501,31 +514,80 @@ impl History {
     }
 }
 
-/// Take out of `candidates` (oldest first) the TXGs of a line of
-/// history an import with rewind left behind, and return them as
-/// `(txg, timestamp, the lower TXG written after it)`.
+/// A transaction group the pool did not go on from.
+struct OffLine {
+    txg: u64,
+    time: u64,
+    /// The later one, on the pool's line, that was not made from it.
+    later: u64,
+    /// Where that line leads: the newest transaction group that opens.
+    head: u64,
+    proof: zfs_read::lineage::Parted,
+}
+
+/// Which of `candidates` (oldest first) are not on the pool's line of
+/// history, down to `from`.
 ///
-/// An import with rewind goes on from an older TXG, and the TXGs of the
-/// line it left behind stay in the ring among the new ones: read in TXG
-/// order, the history went back and forth between the two, datasets
-/// created and destroyed again and time running backwards. A TXG written
-/// before a lower one already taken is of the line left behind. Within
-/// one second the two cannot be told apart; a rewind is rarely that
-/// quick.
-fn drop_abandoned(candidates: &mut Vec<zfs_read::pool::Candidate>) -> Vec<(u64, u64, u64)> {
-    let mut abandoned = Vec::new();
-    let mut latest: Option<(u64, u64)> = None;
-    candidates.retain(|c| match latest {
-        Some((txg, time)) if c.ub.timestamp < time => {
-            abandoned.push((c.ub.txg, c.ub.timestamp, txg));
-            false
+/// The line is the one that leads to the newest transaction group that
+/// opens — what an import takes. An import with rewind goes on from an
+/// older group and leaves the newer ones in the ring: numbered above the
+/// new line where a group to go back to was named, below it where the
+/// import chose one itself. Read in order, they are datasets created and
+/// destroyed that nobody created or destroyed.
+///
+/// What tells them is what they hold, not when they were written
+/// ([`zfs_read::lineage`]): each group, newest first, is held against
+/// the nearest later one on the line. A group written before a lower
+/// one was taken for a line left behind, and a clock set back — a
+/// hardware clock kept in local time and corrected after boot — put the
+/// newest groups of the pool, read by everything else as its present,
+/// out of the history as abandoned. And the groups a rewind without a
+/// named group leaves are older than the new line and numbered below
+/// it: time said nothing of them at all.
+fn off_the_line(
+    reader: &PoolReader<'_>,
+    candidates: &[Candidate],
+    from: Option<u64>,
+) -> Vec<OffLine> {
+    let mut off = Vec::new();
+    let mut anchor: Option<&Candidate> = None;
+    let mut head = 0;
+    for c in candidates.iter().rev() {
+        if from.is_some_and(|f| c.ub.txg < f) {
+            break;
         }
-        _ => {
-            latest = Some((c.ub.txg, c.ub.timestamp));
-            true
+        let Some(later) = anchor else {
+            if open_mos(reader, &c.ub).is_ok() {
+                anchor = Some(c);
+                head = c.ub.txg;
+            }
+            continue;
+        };
+        match zfs_read::lineage::compare(reader, &c.ub, &later.ub) {
+            Ok(zfs_read::lineage::Compared {
+                parted: Some(proof),
+                ..
+            }) => off.push(OffLine {
+                txg: c.ub.txg,
+                time: c.ub.timestamp,
+                later: later.ub.txg,
+                head,
+                proof,
+            }),
+            // On the line, for all that read. One whose own blocks did
+            // not all read is not what the next is held against: what
+            // lies under them would go unseen a second time.
+            Ok(compared) => {
+                if compared.unread == 0 {
+                    anchor = Some(c);
+                }
+            }
+            // It does not open, and is said so when it is read.
+            Err(_) => {}
         }
-    });
-    abandoned
+    }
+    off.reverse();
+    off
 }
 
 /// Run the tool.
@@ -550,21 +612,46 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     // uberblock_candidates gives the newest first; history reads forward.
     let mut candidates = uberblock_candidates(&members.scans, &pool);
     candidates.reverse();
-    candidates.retain(|c| {
-        opts.from.is_none_or(|f| c.ub.txg >= f) && opts.to.is_none_or(|t| c.ub.txg <= t)
-    });
-    let abandoned = drop_abandoned(&mut candidates);
-    if candidates.is_empty() {
+    let reader = PoolReader::new(&pool, members.devices()).with_base_offsets(&members.bases());
+    // The pool's line of history is found in the whole ring, and the
+    // range asked for is taken from it afterwards: a range that began
+    // on a group the pool did not go on from made it the baseline, and
+    // the pool's own datasets "created" after it.
+    let in_range =
+        |txg: u64| opts.from.is_none_or(|f| txg >= f) && opts.to.is_none_or(|t| txg <= t);
+    let mut abandoned = off_the_line(&reader, &candidates, opts.from);
+    candidates.retain(|c| in_range(c.ub.txg) && !abandoned.iter().any(|a| a.txg == c.ub.txg));
+    abandoned.retain(|a| in_range(a.txg));
+    if candidates.is_empty() && abandoned.is_empty() {
         eprintln!("zvoltimeline: no verified uberblock in that range");
         return zvol_common::end_early(g, "zvoltimeline", spec, exit::UNRECOVERABLE);
     }
-    let reader = PoolReader::new(&pool, members.devices()).with_base_offsets(&members.bases());
 
     let mut history = History::default();
+    let mut clock = Vec::new();
     // Only two dataset lists are ever held at once (T-11).
-    for c in &candidates {
+    for (i, c) in candidates.iter().enumerate() {
         let read = datasets_at(&reader, c, &pool.name, opts.pending);
         history.step(c.ub.txg, c.ub.timestamp, read);
+        // Dated before the one it follows: the dates of the two are not
+        // to be read as the order of things.
+        if let Some(before) = i.checked_sub(1).map(|p| &candidates[p].ub) {
+            if c.ub.timestamp < before.timestamp {
+                clock.push(Event {
+                    txg: c.ub.txg,
+                    time: Some(c.ub.timestamp),
+                    kind: Kind::Clock,
+                    object: None,
+                    guid: 0,
+                    details: format!(
+                        "dated before txg {} ({}), which it is numbered after and, for all that was read, made from: the clock was set back between them",
+                        before.txg,
+                        iso8601(before.timestamp)
+                    ),
+                    last_seen_txg: None,
+                });
+            }
+        }
     }
     let History {
         mut events,
@@ -574,15 +661,18 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         ..
     } = history;
 
-    for (txg, time, after) in &abandoned {
+    events.extend(clock);
+    for a in &abandoned {
         events.push(Event {
-            txg: *txg,
-            time: Some(*time),
+            txg: a.txg,
+            time: Some(a.time),
             kind: Kind::Abandoned,
             object: None,
             guid: 0,
             details: format!(
-                "written before txg {after} though numbered after it: a line of history an import with rewind left behind; not read"
+                "not on the line of history that leads to txg {}: {}. An import with rewind leaves such a line behind; not read",
+                a.head,
+                a.proof.says(a.txg, a.later)
             ),
             last_seen_txg: None,
         });
@@ -972,55 +1062,5 @@ mod recover_tests {
             None
         );
         assert_eq!(recover_with(&s, "gone", 7, None, false), None);
-    }
-}
-
-#[cfg(test)]
-mod rewind_tests {
-    use super::*;
-    use zfs_ondisk::uberblock::Uberblock;
-    use zfs_read::pool::Candidate;
-
-    fn at(txg: u64, timestamp: u64) -> Candidate {
-        Candidate {
-            ub: Uberblock {
-                endian: zfs_ondisk::Endian::Little,
-                version: 5000,
-                txg,
-                guid_sum: 1,
-                timestamp,
-                rootbp: [0; zfs_ondisk::blkptr::SIZE],
-                software_version: 0,
-                mmp_magic: 0,
-                mmp_delay: 0,
-                mmp_config: 0,
-                checkpoint_txg: 0,
-            },
-            device: 0,
-            label: 0,
-        }
-    }
-
-    /// A pool rewound from txg 33 to 17 and run on: its TXGs 18–20 and
-    /// 24 and 37 were written after the line it left, whose 21, 25 and 29
-    /// are still in the ring. Those are said and not read; what went
-    /// before the rewind is kept.
-    #[test]
-    fn the_line_a_rewind_left_behind_is_not_read() {
-        let mut c = vec![
-            at(13, 100),
-            at(17, 110),
-            at(19, 1000),
-            at(20, 1001),
-            at(21, 120),
-            at(24, 1002),
-            at(25, 130),
-            at(29, 140),
-            at(37, 1003),
-        ];
-        let left = drop_abandoned(&mut c);
-        let kept: Vec<u64> = c.iter().map(|c| c.ub.txg).collect();
-        assert_eq!(kept, [13, 17, 19, 20, 24, 37]);
-        assert_eq!(left, [(21, 120, 20), (25, 130, 24), (29, 140, 24)]);
     }
 }

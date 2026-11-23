@@ -33,10 +33,22 @@ way.
 A TXG whose MOS cannot be walked is an
 .Ql unreadable
 event that says why.
-A TXG written before a lower one already read belongs to a line of
-history an import with rewind left behind; it is an
+The history is the line that leads to the newest TXG, the one an
+import takes.
+An import with rewind goes on from an older TXG and leaves the newer
+ones in the ring, numbered above the new line or below it; such a TXG
+is an
 .Ql abandoned
 event and is not read into the history.
+It is told by what it holds, not by when it was written: a later TXG on
+the pool's line holds a block written at or before it that it does not
+hold, and the event names the block.
+A line left behind whose every change the pool wrote over again shows
+nothing, and is read as history.
+A TXG dated before the one it follows is a
+.Ql clock
+event: the clock was set back, and the dates of the two are not the
+order of things.
 The hosts the labels name are
 .Ql host
 events, each at the newest label that names it.
@@ -64,6 +76,11 @@ and are listed here in brief.
 Oldest transaction group to read; default the oldest that verifies.
 .It Fl -to Ar txg
 Newest transaction group to read; default the newest that verifies.
+The pool's line of history is found in the whole ring whatever the
+range: a TXG left behind by a rewind is
+.Ql abandoned
+inside a range as outside it, and a range that holds nothing else is
+exit 3.
 .It Fl -dataset Ar name | guid
 Only events about this object: a dataset or snapshot name it had at
 any TXG, or its GUID, in hex as this tool prints it or in decimal as

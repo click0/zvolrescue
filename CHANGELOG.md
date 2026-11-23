@@ -17,6 +17,41 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ### Fixed
 
+* **A clock set back took the pool's newest transaction groups out of
+  its history; a rewind's line is now told by what it holds.**
+  `zvoltimeline` took a group written before a lower-numbered one for
+  a line of history an import with rewind had left behind, and did not
+  read it. A lower date does not show that. A host whose hardware
+  clock runs ahead until it is corrected after boot — one kept in
+  local time, a virtual machine resumed — dates every group written
+  after the correction before those written just before it: they were
+  all "abandoned … not read", the destruction the tool exists to show
+  and the command that undoes it were not in the report, and it ended
+  0, while `zvolrescue list` read the same groups as the pool's
+  present. And the date said nothing of the commoner rewind: after
+  `zpool import -F` the groups left behind are numbered below the new
+  line and older than it, and were read as history — a dataset that
+  is still there "destroyed", one nobody removed "destroyed" too.
+  What tells a line left behind is what its groups hold. A block
+  written at one group stays as it is until a later group writes over
+  it, so where a later group holds a block written at or before an
+  earlier one, the earlier holds that same block there — or the later
+  was not made from it. The object array of the MOS and the trees of
+  its objects are compared so, from the newest group back, each group
+  against the nearest later one on the pool's line; a dataset made at
+  or before the earlier group and not in it says the same. An
+  `abandoned` event now names the block that shows it. A line whose
+  every change the pool wrote over again shows nothing and is read as
+  history — nothing on disk tells it apart. A group dated before the
+  one it follows is read, and is a `clock` event.
+* **`--from`/`--to` no longer make a group the pool left behind the
+  start of its history.** The range was applied before the line left
+  behind was taken out, so a range that began on one of its groups
+  read it as the baseline: its datasets "already there", the pool's
+  own "created" after it. The line is found in the whole ring and the
+  range taken from it; a range that holds nothing but groups left
+  behind says so and ends 3.
+
 * **A multihost heartbeat no longer dates its transaction group.** On a
   pool with `multihost=on` the newest uberblock is written again every
   second the pool sits idle — the same group, the same tree, a later

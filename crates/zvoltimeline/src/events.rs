@@ -39,9 +39,12 @@ pub enum Kind {
     Pending,
     /// The MOS at this TXG could not be read.
     Unreadable,
-    /// A TXG of a line of history an import with rewind left behind:
-    /// written before a lower one already read. Not read.
+    /// A TXG of a line of history the pool did not go on from, as an
+    /// import with rewind leaves: a later one on the pool's line holds
+    /// what was written before this one and is not in it. Not read.
     Abandoned,
+    /// A TXG dated before the one it follows: the clock was set back.
+    Clock,
 }
 
 impl Kind {
@@ -60,6 +63,7 @@ impl Kind {
             Kind::Pending => "pending",
             Kind::Unreadable => "unreadable",
             Kind::Abandoned => "abandoned",
+            Kind::Clock => "clock",
         }
     }
 }

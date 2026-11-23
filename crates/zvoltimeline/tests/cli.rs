@@ -242,3 +242,148 @@ fn a_report_into_a_pipe_is_not_read_back() {
         "a pipe is no output to check"
     );
 }
+
+/// Write `members` to `dir` with the labels of `pool`.
+fn written(dir: &std::path::Path, pool: &Pool, mut members: Vec<Vec<u8>>) -> Vec<String> {
+    members
+        .iter_mut()
+        .enumerate()
+        .map(|(i, m)| {
+            pool.write_labels(i, m);
+            let p = dir.join(format!("member{i}.img"));
+            std::fs::write(&p, &m).expect("write member");
+            p.to_string_lossy().into_owned()
+        })
+        .collect()
+}
+
+/// The exit status and what was printed.
+fn printed(args: &[&str]) -> (i32, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_zvoltimeline"))
+        .args(args)
+        .output()
+        .expect("run zvoltimeline");
+    (
+        out.status.code().expect("exit code"),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+    )
+}
+
+/// A clock set back is not an import with rewind. The pool's newest
+/// group, dated two hours before the two it was made from, was "a line
+/// of history an import with rewind left behind; not read": the
+/// destruction it holds, and the command that undoes it, were not in
+/// the report, which ended 0. It is read, and the dates are said not to
+/// be the order of things.
+#[test]
+fn a_clock_set_back_is_not_a_line_left_behind() {
+    let dir = scratch("clock");
+    let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 9000), (101, 9005), (102, 2000)]);
+    let (members, _, _) = zfs_read::fixture::destroyed_zvol_members(&mut pool, SIZE);
+    let m = written(&dir, &pool, members);
+    let (code, text) = printed(&[&m[0], &m[1]]);
+    assert_eq!(code, 0, "{text}");
+    assert!(
+        text.contains("3 transaction group(s) still readable"),
+        "{text}"
+    );
+    assert!(!text.contains("abandoned"), "{text}");
+    let destroyed = text
+        .lines()
+        .position(|l| l.contains(" destroyed ") && l.contains("tank/vm/disk0"))
+        .unwrap_or_else(|| panic!("the volume's destruction is not there: {text}"));
+    assert!(
+        text.lines().nth(destroyed).unwrap().starts_with("102 ")
+            && text
+                .lines()
+                .nth(destroyed)
+                .unwrap()
+                .contains("last seen at txg 101")
+            && text
+                .lines()
+                .nth(destroyed + 1)
+                .unwrap()
+                .contains("--txg 101"),
+        "{text}"
+    );
+    let clock = text
+        .lines()
+        .find(|l| l.contains(" clock "))
+        .unwrap_or_else(|| panic!("nothing about the clock: {text}"));
+    assert!(
+        clock.starts_with("102 ") && clock.contains("dated before txg 101"),
+        "{clock}"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The groups an import with rewind left behind are told by what they
+/// hold, wherever they are numbered and whenever they were written.
+/// Here the pool went back from txg 102 to txg 100 and on: 101 and 102,
+/// where the volume was destroyed, are older than the group that
+/// followed and numbered below it, and were read as the pool's history
+/// — the volume destroyed at 101 and created again at 103. And a range
+/// is taken from the pool's line, not the line from the range:
+/// `--from 101` made the group left behind the baseline.
+#[test]
+fn a_line_a_rewind_left_behind_is_told_by_what_it_holds() {
+    use zfs_read::fixture::build_sample_mos_variant;
+
+    let dir = scratch("rewind");
+    let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[
+        (100, 1000),
+        (101, 1005),
+        (102, 1010),
+        (103, 2000),
+    ]);
+    let mut members = vec![vec![0u8; SIZE as usize], vec![0u8; SIZE as usize]];
+    let mut a = Alloc::new(0x20_0000);
+    let with = build_sample_mos_variant(&mut members, &mut a, true);
+    a.born = Some(101);
+    let without = build_sample_mos_variant(&mut members, &mut a, false);
+    // The MOS of txg 100 is the pool's again at 103.
+    pool.rootbp = Some(with);
+    pool.rootbp_by_txg = vec![(101, without), (102, without)];
+    let m = written(&dir, &pool, members);
+
+    let (code, text) = printed(&[&m[0], &m[1]]);
+    assert_eq!(code, 0, "{text}");
+    assert!(
+        text.contains("2 transaction group(s) still readable"),
+        "{text}"
+    );
+    let abandoned: Vec<&str> = text.lines().filter(|l| l.contains(" abandoned ")).collect();
+    assert_eq!(abandoned.len(), 2, "{text}");
+    assert!(
+        abandoned[0].starts_with("101 ")
+            && abandoned[1].starts_with("102 ")
+            && abandoned[1].contains("not on the line of history that leads to txg 103")
+            && abandoned[1].contains("txg 103 holds the root of the MOS as txg 100 wrote it"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("destroyed") && !text.contains(" clock "),
+        "{text}"
+    );
+
+    // The range begins on the line left behind: it is still that, and
+    // the first group of the pool's own in the range is the baseline.
+    let (code, text) = printed(&[&m[0], &m[1], "--from", "101"]);
+    assert_eq!(code, 0, "{text}");
+    assert_eq!(text.matches(" abandoned ").count(), 2, "{text}");
+    assert!(
+        text.contains("already there at the oldest readable txg 103")
+            && !text.contains("destroyed"),
+        "{text}"
+    );
+
+    // Nothing but the line left behind in the range: said, and exit 3.
+    let (code, text) = printed(&[&m[0], &m[1], "--from", "101", "--to", "102"]);
+    assert_eq!(code, 3, "{text}");
+    assert!(
+        text.contains("no transaction group read: the 2 in that range are of a line of history the pool did not go on from"),
+        "{text}"
+    );
+    assert_eq!(text.matches(" abandoned ").count(), 2, "{text}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}

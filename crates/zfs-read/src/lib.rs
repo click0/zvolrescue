@@ -6,7 +6,8 @@
 //! ([`pool`]); [`zio`] reads and verifies blocks through them; [`dmu`]
 //! walks object block trees and dnode arrays; [`zap`] reads whole ZAP
 //! objects; [`dsl`] walks the MOS into a dataset tree; [`zvol`] extracts a
-//! volume's data object. [`zeropoint`] recovers a member's vdev base from
+//! volume's data object. [`lineage`] tells whether one transaction group
+//! was made from another. [`zeropoint`] recovers a member's vdev base from
 //! surviving uberblocks when its labels are gone. [`fixture`] builds
 //! synthetic members for tests.
 
@@ -18,6 +19,7 @@ pub mod dsl;
 pub mod fixture;
 pub mod hash;
 pub mod hints;
+pub mod lineage;
 pub mod pointers;
 pub mod pool;
 pub mod spacemap;
