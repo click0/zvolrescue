@@ -660,6 +660,27 @@ impl Global {
     }
 }
 
+/// What a dataset's intent log holds that was not applied, for a
+/// record: `None` when it holds nothing an import would replay — a
+/// dataset with no log, or one whose every record is of a transaction
+/// group that synced.
+pub fn intent_log_json(log: Option<&zfs_read::zil::IntentLog>) -> Option<serde_json::Value> {
+    let log = log.filter(|l| l.unreplayed > 0)?;
+    Some(serde_json::json!({
+        "unreplayed": log.unreplayed,
+        "by_type": log.by_type,
+        "objects": log.objects,
+        "object_count": log.object_count,
+        "write_bytes": log.write_bytes,
+        "txgs": log.txgs.map(|(lo, hi)| [lo, hi]),
+        "blocks": log.blocks,
+        "records": log.records,
+        "claim_txg": log.claim_txg,
+        "replay_seq": log.replay_seq,
+        "cut_short": log.cut_short,
+    }))
+}
+
 /// The GUID a pool was recorded under when nothing gave it one: read
 /// through a layout written by hand, no label left to name it. Its own
 /// configuration is asked for it now, so a work directory or a manifest

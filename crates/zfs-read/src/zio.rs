@@ -923,6 +923,20 @@ impl<'a> PoolReader<'a> {
         Err(last)
     }
 
+    /// Every copy of the `psize` bytes behind one DVA that reads, as the
+    /// members have it and verified by nothing: for a block that
+    /// verifies itself, as an intent log's do, where the first copy to
+    /// read need not be the one that is the block.
+    pub(crate) fn raw_copies(&self, dva: &Dva, psize: usize) -> Vec<Vec<u8>> {
+        if dva.gang {
+            return Vec::new();
+        }
+        self.candidates_on(dva.vdev, dva.offset, psize, 0)
+            .into_iter()
+            .filter_map(|(_, c)| c.ok())
+            .collect()
+    }
+
     /// Read the raw `psize` bytes behind one DVA without verification
     /// (first copy that reads). Gang pointers are followed.
     pub fn read_dva(&self, dva: &Dva, psize: usize) -> Result<(Vec<u8>, usize), ReadError> {

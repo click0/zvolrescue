@@ -17,6 +17,29 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ### Fixed
 
+* **What a dataset's intent log holds that was not applied is counted
+  and said.** A write an application was told is on disk — `fsync`,
+  `O_SYNC`, a volume's flush — is in the dataset's intent log before
+  its transaction group syncs, and an import replays the records of
+  the groups that never did. Nothing here replays them, which is right
+  for a tool that reads a pool as a transaction group left it, and
+  nothing said so: on a pool that went down with such writes in the
+  log, `zvolrescue dump` and `zvolfiles` gave the last synced group's
+  bytes with exit 0, and neither the summary, the manifest nor the
+  evidence record mentioned the records `zdb -ivv` prints. The chain is
+  now walked as OpenZFS walks it — each block verified by the checksum
+  it carries, seeded with its pointer's, on whichever side of a mirror
+  holds it — and the records an import would replay are counted: how
+  many, of which kinds, on which objects, of which transaction groups,
+  how many bytes they write. They are said on standard error and in the
+  summary, recorded as `intent_log` (the volume's entry of `dump`; the
+  manifest, the index and the list of `zvolfiles`), carried into
+  `zvolreport` as `unreplayed` with a warning, and make the exit status
+  4: the output is whole as its transaction group left it, and is not
+  what an import would give. A pool exported cleanly, a snapshot, and a
+  log whose every record is of a group that synced say nothing. A log
+  of the format before pool version 26, or one with a block written in
+  pieces, is said to have been cut short.
 * **Blocks that carry no checksum are no longer counted with the
   verified.** A dataset with `checksum=off` has pointers that name no
   checksum, and its blocks are whatever a member holds there: a stale

@@ -197,6 +197,10 @@ pub struct Opened<'a> {
     pub members: &'a Members,
     /// The newer transaction groups passed over for this one, and why.
     pub passed_over: Vec<PassedOver>,
+    /// What the dataset's intent log holds that an import would replay
+    /// and this did not: writes acknowledged as safe that are not in
+    /// what is read. `None` when there are none.
+    pub intent_log: Option<serde_json::Value>,
 }
 
 /// A transaction group newer than the one read, and why it was not.
@@ -345,10 +349,20 @@ pub fn with_dataset<T>(
         for d in &fs.damaged {
             eprintln!("zvolfiles: {name} at txg {}: {d}", c.ub.txg);
         }
+        // Nothing of the intent log is applied, and what it holds that
+        // an import would replay is said: after a crash the dataset as
+        // its last synced group left it lacks the writes its
+        // applications were last told were safe, and a run that ended 0
+        // said nothing of them.
+        let log = zfs_read::zil::intent_log(&reader, ds, c.ub.txg);
+        if let Some(log) = log.as_ref().filter(|l| l.unreplayed > 0) {
+            eprintln!("zvolfiles: {} (exit 4)", log.says(name, c.ub.txg));
+        }
         let opened = Opened {
             txg: c.ub.txg,
             members: &members,
             passed_over: passed.clone(),
+            intent_log: zvol_common::intent_log_json(log.as_ref()),
         };
         return f(&fs, &opened);
     }

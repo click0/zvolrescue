@@ -198,7 +198,7 @@ Priority: **M** = must (v1), **S** = should (v1 if time permits), **C** = could 
 
 | ID | Pri | Requirement |
 |---|---|---|
-| F-20 | M | Extract a zvol object at a chosen TXG to a raw image file, preserving holes as sparse regions. Without `--txg` the TXG is the newest verified one that names the dataset *and* still reads it as far as the first data block — its object set and, for a volume, its data object and size: after a `zfs destroy` the pool goes on writing, the freed blocks are among the first reused, in no particular order, and the ring may name the dataset at a TXG where they are gone while an older one's read. Such a TXG is passed over — said on stderr and listed under `unreadable_at` in the record — and the older one is used; readable at none, the run says at which TXG it was named and why it does not read there (exit 3). |
+| F-20 | M | Extract a zvol object at a chosen TXG to a raw image file, preserving holes as sparse regions. Without `--txg` the TXG is the newest verified one that names the dataset *and* still reads it as far as the first data block — its object set and, for a volume, its data object and size: after a `zfs destroy` the pool goes on writing, the freed blocks are among the first reused, in no particular order, and the ring may name the dataset at a TXG where they are gone while an older one's read. Such a TXG is passed over — said on stderr and listed under `unreadable_at` in the record — and the older one is used; readable at none, the run says at which TXG it was named and why it does not read there (exit 3). The dataset's intent log is not replayed: what is extracted is the dataset as its TXG left it, and the records an import would replay — writes acknowledged as safe that had reached no transaction group — are counted (`intent_log`: how many, of which kinds, objects and TXGs), said, and make the exit status 4; `zvolfiles` does the same. |
 | F-21 | M | Support all standard checksums: `fletcher2`, `fletcher4`, `sha256`, `sha512`, `skein`, `edonr`, `blake3`; verify every block and record mismatches. A block whose pointer names no checksum (`checksum=off`) has none to verify it by: it is written as read and counted apart (`blocks_unverified`; `unverified` per file), never among the verified. |
 | F-22 | M | Support all standard compression algorithms: `lzjb`, `lz4`, `gzip-1..9`, `zle`, `zstd` (all levels), `off`. |
 | F-23 | M | Read from stripe and mirror vdevs, trying all DVA copies on checksum failure. |
@@ -410,7 +410,8 @@ Exit codes: `0` success, `1` usage error, `2` evidence unreadable, `3` pool
 unrecoverable at requested TXG, `4` the image is not the whole volume —
 blocks that could not be read were written as zeros, or `--strict`
 aborted at the first one — or `list` could not read part of the dataset
-tree, `5` refused (would write to evidence, or would
+tree, or the dataset's intent log holds writes an import would replay,
+which nothing here applies, `5` refused (would write to evidence, or would
 scan a device), `6` interrupted by a signal, the state written (`--resume` continues), `7` the medium refused
 a read: a device, not an image, returned an I/O error and the run stopped
 there (F-33, N-10).

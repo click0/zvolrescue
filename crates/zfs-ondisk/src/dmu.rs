@@ -414,6 +414,8 @@ pub struct ObjsetPhys {
     pub zil_log: BlkPtr,
     /// `zh_claim_txg`.
     pub zil_claim_txg: u64,
+    /// `zh_replay_seq`: the highest record sequence already replayed.
+    pub zil_replay_seq: u64,
     /// `os_type`.
     pub os_type: ObjsetType,
     /// `os_flags`.
@@ -443,6 +445,7 @@ impl ObjsetPhys {
         Ok(ObjsetPhys {
             meta_dnode: DnodePhys::parse(&buf[..DNODE_SIZE], endian)?,
             zil_claim_txg: endian.u64_at(buf, 512).expect("length checked"),
+            zil_replay_seq: endian.u64_at(buf, 520).expect("length checked"),
             zil_log: BlkPtr::parse(&buf[528..528 + blkptr::SIZE], endian)?,
             os_type: ObjsetType::from_raw(endian.u64_at(buf, 704).expect("length checked")),
             flags: endian.u64_at(buf, 712).expect("length checked"),

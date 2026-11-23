@@ -61,6 +61,10 @@ struct ListOut {
     /// Newer transaction groups passed over for `txg`, and why.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     passed_over: Vec<PassedOver>,
+    /// What the intent log holds that was not applied: the list is of
+    /// the dataset as `txg` left it, without these.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    intent_log: Option<serde_json::Value>,
     root: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     path: Option<String>,
@@ -236,6 +240,7 @@ pub fn run(
                 txg: opened.txg,
                 root: fs.root,
                 passed_over: opened.passed_over.clone(),
+                intent_log: opened.intent_log.clone(),
                 path: path.map(|p| p.to_string_lossy().into_owned()),
                 properties: fs.properties.clone(),
                 files,
@@ -310,7 +315,8 @@ pub fn run(
     let code = if out.interrupted {
         eprintln!("zvolfiles: interrupted; what is listed is what was walked (exit 6)");
         exit::INTERRUPTED
-    } else if unreadable > 0 || PassedOver::any_unread(&out.passed_over) {
+    } else if unreadable > 0 || PassedOver::any_unread(&out.passed_over) || out.intent_log.is_some()
+    {
         exit::PARTIAL
     } else {
         0

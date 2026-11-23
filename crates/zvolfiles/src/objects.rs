@@ -68,6 +68,10 @@ struct ObjectsOut {
     /// Newer transaction groups passed over for `txg`, and why.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     passed_over: Vec<PassedOver>,
+    /// What the intent log holds that was not applied: the objects are
+    /// the dataset's as `txg` left them, without these.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    intent_log: Option<serde_json::Value>,
     output: std::path::PathBuf,
     objects: Vec<ObjectOut>,
     /// Objects whose contents were written.
@@ -252,6 +256,7 @@ pub fn run(
                 txg: opened.txg,
                 output: output.to_path_buf(),
                 passed_over: opened.passed_over.clone(),
+                intent_log: opened.intent_log.clone(),
                 objects,
                 written,
                 incomplete,
@@ -376,6 +381,7 @@ pub fn run(
         || out.stopped.is_some()
         || !out.unread.is_empty()
         || PassedOver::any_unread(&out.passed_over)
+        || out.intent_log.is_some()
     {
         exit::PARTIAL
     } else {

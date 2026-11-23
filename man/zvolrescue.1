@@ -302,6 +302,18 @@ destroy is passed over for an older one, and the record says so.
 So is one at which the dataset tree does not read where the dataset
 would be: whether it is there cannot be told, which is not the same as
 its not being there.
+.Pp
+The volume's intent log is not replayed.
+The image is the volume as the TXG read left it; writes the volume's
+user was told are safe and that were only in the log when the pool
+went down \(em what an import would replay \(em are not in it.
+They are counted: how many records, of which kinds and transaction
+groups, how many bytes they write, as
+.Ql intent_log
+in the record and on a line of the summary, and the exit status is 4.
+.Xr zdb 8
+.Fl ivv
+prints the records themselves.
 .Bl -tag -width Ds
 .It Fl o , Fl -output Ar out.img
 The output image; a directory with
@@ -454,6 +466,9 @@ Or
 .Cm list
 could not read part of the dataset tree: what it lists is not all
 there is.
+Or the volume's intent log holds writes an import would replay, which
+.Cm dump
+does not apply.
 .It 5
 Refused: the output would land on an input, or a device would have
 been surface-scanned without leave.

@@ -86,6 +86,14 @@ struct DumpOut {
     /// block the state on disk names.
     #[serde(skip_serializing_if = "Option::is_none")]
     resume_at: Option<u64>,
+    /// What the volume's intent log holds that an import would replay
+    /// and this did not: writes acknowledged as safe that are not in
+    /// the image, which is the volume as `txg` left it (exit 4).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    intent_log: Option<serde_json::Value>,
+    /// The sentence that says so.
+    #[serde(skip)]
+    intent_log_says: Option<String>,
     /// What the run says of the image and of a resume of it.
     #[serde(skip)]
     resume_words: String,
@@ -604,6 +612,9 @@ fn dump_one(
         exit::USAGE
     })?;
 
+    // Counted before the image is written, said after it: nothing of
+    // the intent log is applied.
+    let log = zfs_read::zil::intent_log(reader, ds, txg);
     let started = Instant::now();
     let quiet = g.quiet;
     let mut last_report = Instant::now();
@@ -707,6 +718,11 @@ fn dump_one(
         interrupted_at: report.interrupted_at,
         output_failed: report.output_failed.clone(),
         resume_at,
+        intent_log: zvol_common::intent_log_json(log.as_ref()),
+        intent_log_says: log
+            .as_ref()
+            .filter(|l| l.unreplayed > 0)
+            .map(|l| l.says(&ds.name, txg)),
         resume_words,
         finished: report.finished,
         sha256: report.sha256.clone(),
@@ -773,6 +789,9 @@ fn print_text(out: &RunOut) {
                 "  UNVERIFIED: {} of the {} block(s) read carry no checksum (checksum=off): written as the members gave them, and checked by nothing",
                 v.blocks_unverified, v.blocks_read
             );
+        }
+        if let Some(says) = &v.intent_log_says {
+            println!("  INTENT LOG NOT APPLIED (exit 4): {says}");
         }
         println!("  sha256: {}", v.sha256);
         if let Some(h) = &v.sha1 {
@@ -1264,6 +1283,12 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 // the JSON and in the evidence record; now it says so
                 // in the one place a `dump || fail` can see.
                 code = exit::after_extraction(code, v.aborted, v.blocks_zeroed + v.blocks_salvaged);
+                // Whole as its transaction group left it, and not the
+                // volume an import would give: its intent log holds
+                // writes that were acknowledged and are not in it.
+                if v.intent_log.is_some() {
+                    code = code.max(exit::PARTIAL);
+                }
                 // An interrupt ends the run, not just the volume: the
                 // operator asked for it to stop, and a bulk run that went
                 // on to the next volume would not have stopped.

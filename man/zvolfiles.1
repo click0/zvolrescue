@@ -241,6 +241,13 @@ or
 and so on when an earlier run left one there.
 A transaction group at which the dataset does not open is passed over
 for an older one, by every subcommand.
+The dataset's intent log is not replayed, by any subcommand: what is
+read is the dataset as its transaction group left it.
+Where the log holds records an import would replay \(em writes that
+were acknowledged and had not reached a transaction group when the
+pool went down \(em they are counted on standard error and as
+.Ql intent_log
+in the manifest, the index and the record, and the exit status is 4.
 So is one at which the dataset tree does not read where the dataset
 would be \(em its own directory, or the list it would be in: it is
 named as one that did not read, with the reason, and the exit status
@@ -258,7 +265,8 @@ As in
 0 success, 1 usage (a missing key among it), 2 evidence unreadable, 3
 the dataset unreadable at the requested TXG, or a
 .Fl -path
-not in it there, 4 not every file whole, 5
+not in it there, 4 not every file whole, or the intent log holds
+writes that are not applied, 5
 refused, 6 interrupted by a signal, 7 the medium refused a read.
 .Sh EXAMPLES
 One directory of a home dataset, at the TXG before it was emptied:

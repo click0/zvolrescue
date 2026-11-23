@@ -231,6 +231,7 @@ fn tree_extraction(r: &Record) -> Option<Extraction> {
         md5: None,
         errors: count("incomplete").saturating_add(count("failed")),
         unverified: count("unverified_blocks"),
+        unreplayed: unreplayed_of(result),
         // A signal ended it: not every file or object was looked at.
         aborted: result.get("stopped").is_some_and(|s| !s.is_null())
             || result
@@ -244,6 +245,13 @@ fn tree_extraction(r: &Record) -> Option<Extraction> {
         pool_guid: None,
         files: Some(written.len() as u64),
     })
+}
+
+/// The records an extraction's `intent_log` says were not applied.
+fn unreplayed_of(v: &serde_json::Value) -> u64 {
+    v.get("intent_log")
+        .and_then(|l| u64_at(l, "unreplayed"))
+        .unwrap_or(0)
 }
 
 /// The extractions a `dump` record described.
@@ -268,6 +276,7 @@ fn extractions_of(result: &serde_json::Value) -> Vec<Extraction> {
                     .unwrap_or(0)
                     .saturating_add(u64_at(v, "blocks_salvaged").unwrap_or(0)),
                 unverified: u64_at(v, "blocks_unverified").unwrap_or(0),
+                unreplayed: unreplayed_of(v),
                 aborted: v
                     .get("aborted")
                     .and_then(serde_json::Value::as_bool)
@@ -515,6 +524,15 @@ pub fn assemble(records: &[(LogRef, Vec<Record>)], opts: &Options) -> Report {
             warnings.push(format!(
                 "{}: {} block(s) could not be read whole and were written as zeros, in whole or in part",
                 e.dataset, e.errors
+            ));
+        }
+        if e.unreplayed > 0 {
+            warnings.push(format!(
+                "{}: its intent log held {} record(s) an import would replay; they were not applied, and {} is the dataset as txg {} left it, without them",
+                e.dataset,
+                e.unreplayed,
+                e.output.display(),
+                e.txg
             ));
         }
         if e.unverified > 0 {
@@ -1027,6 +1045,34 @@ mod tests {
             "{:?}",
             r.warnings
         );
+    }
+
+    /// An extraction of a dataset whose intent log held records an
+    /// import would replay is the dataset without them, and the report
+    /// says so: the count on the extraction, and a warning.
+    #[test]
+    fn records_left_in_the_intent_log_are_said() {
+        let mut d = dump(9, 0, false);
+        d["volumes"][0]["intent_log"] = serde_json::json!({"unreplayed": 3, "write_bytes": 4096});
+        let r = assemble(&log(vec![record("zvolrescue", 11, 4, d)]), &opts());
+        let e = &r.extractions[0];
+        assert_eq!(e.unreplayed, 3);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("its intent log held 3 record(s)")),
+            "{:?}",
+            r.warnings
+        );
+        assert_eq!(serde_json::to_value(e).unwrap()["unreplayed"], 3);
+        let r = assemble(
+            &log(vec![record("zvolrescue", 11, 0, dump(9, 0, false))]),
+            &opts(),
+        );
+        assert!(serde_json::to_value(&r.extractions[0])
+            .unwrap()
+            .get("unreplayed")
+            .is_none());
     }
 
     /// Blocks that carry no checksum (`checksum=off`) are read whole and
