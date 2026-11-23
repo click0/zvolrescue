@@ -98,12 +98,18 @@ tagged. `v0.7.1` is the release that carries those six.
   many, of which kinds, on which objects, of which transaction groups,
   how many bytes they write. They are said on standard error and in the
   summary, recorded as `intent_log` (the volume's entry of `dump`; the
-  manifest, the index and the list of `zvolfiles`), carried into
-  `zvolreport` as `unreplayed` with a warning, and make the exit status
-  4: the output is whole as its transaction group left it, and is not
-  what an import would give. A pool exported cleanly, a snapshot, and a
-  log whose every record is of a group that synced say nothing. A log
-  of the format before pool version 26, or one with a block written in
+  manifest, the index and the list of `zvolfiles`), and carried into
+  `zvolreport` as `unreplayed` with a warning. The exit status is not
+  changed by them: the output is whole as its transaction group left
+  it, and 4 stays what it was — something could not be read. On a pool
+  that went down under load nearly every busy volume has such a log,
+  and a status of 4 for it would no longer tell an image with nothing
+  lost from one with blocks written as zeros. Read at a transaction
+  group that is not the pool's newest, the log is that of the groups
+  which followed and no import replays it: it is counted the same and
+  said as that. A pool exported cleanly, a snapshot, and a log whose
+  every record is of a group that synced say nothing. A log of the
+  format before pool version 26, or one with a block written in
   pieces, is said to have been cut short.
 * **Blocks that carry no checksum are no longer counted with the
   verified.** A dataset with `checksum=off` has pointers that name no

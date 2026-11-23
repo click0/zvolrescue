@@ -315,8 +315,7 @@ pub fn run(
     let code = if out.interrupted {
         eprintln!("zvolfiles: interrupted; what is listed is what was walked (exit 6)");
         exit::INTERRUPTED
-    } else if unreadable > 0 || PassedOver::any_unread(&out.passed_over) || out.intent_log.is_some()
-    {
+    } else if unreadable > 0 || PassedOver::any_unread(&out.passed_over) {
         exit::PARTIAL
     } else {
         0

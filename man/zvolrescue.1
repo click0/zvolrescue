@@ -310,7 +310,12 @@ went down \(em what an import would replay \(em are not in it.
 They are counted: how many records, of which kinds and transaction
 groups, how many bytes they write, as
 .Ql intent_log
-in the record and on a line of the summary, and the exit status is 4.
+in the record and on a line of the summary.
+The exit status is not changed by it: the image is whole as its TXG
+left it, and 4 is for what could not be read.
+At a TXG that is not the pool's newest the log is that of the TXGs
+which followed, and no import replays it; it is counted and said the
+same.
 .Xr zdb 8
 .Fl ivv
 prints the records themselves.
@@ -466,9 +471,6 @@ Or
 .Cm list
 could not read part of the dataset tree: what it lists is not all
 there is.
-Or the volume's intent log holds writes an import would replay, which
-.Cm dump
-does not apply.
 .It 5
 Refused: the output would land on an input, or a device would have
 been surface-scanned without leave.

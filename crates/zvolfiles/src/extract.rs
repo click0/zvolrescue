@@ -1068,7 +1068,6 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
         || out.incomplete > 0
         || out.stopped.is_some()
         || PassedOver::any_unread(&out.passed_over)
-        || out.intent_log.is_some()
     {
         exit::PARTIAL
     } else {

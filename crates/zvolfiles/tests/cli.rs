@@ -1038,3 +1038,66 @@ fn a_tree_too_tall_to_count_is_said_at_once() {
     let status = child.wait().unwrap();
     assert_eq!(status.code(), Some(6), "{said}");
 }
+
+/// A pool that went down with a write in the dataset's intent log:
+/// every subcommand reads the dataset as its transaction group left it,
+/// says what the log holds on standard error and in what it writes, and
+/// ends 0 — nothing it read for failed to read. It was exit 4 for a
+/// while, the status of a run that lost something.
+#[test]
+fn what_the_intent_log_holds_is_said_and_is_not_the_exit_status() {
+    use zfs_read::fixture::{zpl_members_damaged, ZplDamage};
+
+    let dir = scratch("intent-log");
+    let mut pool = Pool::mirror("tank", 0x5eed_0000_0000_0004, 12)
+        .txgs(&[(4816228, 1757100000), (4816229, 1757100005)]);
+    let m: Vec<String> = zpl_members_damaged(&mut pool, 64 * 1024 * 1024, ZplDamage::LogLeft)
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let p = dir.join(format!("m{i}.img"));
+            std::fs::write(&p, m).expect("write member");
+            p.to_string_lossy().into_owned()
+        })
+        .collect();
+    let says = "tank/fs: the intent log holds 1 record(s) of txg 4816230, newer than the txg 4816229 that was read (1 TX_WRITE on object(s) 8, 4096 byte(s) written); an import replays such records, and they are NOT applied here";
+
+    let (code, err) = run(&["-q", "list", "tank/fs", &m[0], &m[1]]);
+    assert_eq!(code, 0, "{err}");
+    assert!(err.contains(says) && !err.contains("exit 4"), "{err}");
+    let (code, v) = json_of(&["-q", "-f", "json", "list", "tank/fs", &m[0], &m[1]]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["intent_log"]["unreplayed"], 1, "{v}");
+
+    let tree = dir.join("tree");
+    let (code, err) = run(&[
+        "-q",
+        "extract",
+        "tank/fs",
+        &m[0],
+        &m[1],
+        "-o",
+        tree.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(err.contains(says), "{err}");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(tree.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["intent_log"]["unreplayed"], 1, "{manifest}");
+
+    let objects = dir.join("objects");
+    let (code, err) = run(&[
+        "-q",
+        "objects",
+        "tank/fs",
+        &m[0],
+        &m[1],
+        "-o",
+        objects.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let index: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(objects.join("objects.json")).unwrap()).unwrap();
+    assert_eq!(index["intent_log"]["unreplayed"], 1, "{index}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}

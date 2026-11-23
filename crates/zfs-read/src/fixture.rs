@@ -394,6 +394,11 @@ pub struct Alloc {
     /// each later one, so that the trees are a history: nothing a later
     /// TXG holds was written before an earlier one and is not there.
     pub born: Option<u64>,
+    /// Leave a write in the intent log of the dataset a builder makes —
+    /// the sample volume, the ZPL filesystem — of this TXG: what a pool
+    /// that went down between a `fsync` and the sync of its transaction
+    /// group holds ([`intent_log_left`]).
+    pub log_left: Option<u64>,
 }
 
 /// A dense volume for measurements (SPEC N-03, N-08): `bytes` of data
@@ -523,6 +528,7 @@ impl Alloc {
             fill: 1,
             dedup: false,
             born: None,
+            log_left: None,
         }
     }
 
@@ -956,6 +962,45 @@ impl Alloc {
     }
 }
 
+/// Where `zh_log`, the head of the intent log, lies in an object set.
+const ZH_LOG_AT: usize = 512 + 16;
+
+/// Leave one write in an intent log: a chain of one block that holds a
+/// `TX_WRITE` of 4096 bytes to `object`, of transaction group `txg`, and
+/// the block after it never written — where a chain ends. Returns the
+/// head, for an object set's `zh_log` ([`with_log`]).
+pub fn intent_log_left(
+    members: &mut [Vec<u8>],
+    a: &mut Alloc,
+    object: u64,
+    txg: u64,
+) -> [u8; blkptr::SIZE] {
+    use crate::zil::encode::{block, pointer, record, WRITE};
+    assert_eq!(a.layout, Layout::Mirror, "a log on a mirror");
+    let at = a.next;
+    a.next += 2 * 4096;
+    let (first, second) = (pointer(at, 1), pointer(at + 4096, 2));
+    let one = block(
+        &first,
+        &second,
+        &[record(WRITE, txg, 1, &[object, 0, 4096, 0])],
+    );
+    for m in a.mine(members) {
+        write_at_dva(m, at, &one);
+    }
+    first
+}
+
+/// `objset` with the intent log `a` was asked to leave ([`Alloc::log_left`])
+/// as its `zh_log`: a write to `object`.
+fn with_log(mut objset: Vec<u8>, members: &mut [Vec<u8>], a: &mut Alloc, object: u64) -> Vec<u8> {
+    if let Some(txg) = a.log_left {
+        let head = intent_log_left(members, a, object, txg);
+        objset[ZH_LOG_AT..ZH_LOG_AT + blkptr::SIZE].copy_from_slice(&head);
+    }
+    objset
+}
+
 /// A `dsl_dataset_phys_t` for fixtures.
 pub fn dataset_phys(
     dir: u64,
@@ -1169,7 +1214,8 @@ pub fn build_sample_mos_variant(
         ..DnodeSpec::default()
     }
     .build();
-    let os_zvol = a.put_objset(m, &objset(&zvol_meta, 3), zvol_objects, 100);
+    let os_zvol = with_log(objset(&zvol_meta, 3), m, a, 1);
+    let os_zvol = a.put_objset(m, &os_zvol, zvol_objects, 100);
     a.last_zvol_objset = Some(os_zvol);
     a.last_zvol_dnodes = Some(zvol_dnode_blk);
 
@@ -1951,6 +1997,9 @@ pub enum ZplDamage {
     /// under 8 levels: more blocks per top-level pointer than a block id
     /// can count.
     LinkTall,
+    /// The pool went down with a write in the dataset's intent log: one
+    /// `TX_WRITE` of the transaction group after the newest.
+    LogLeft,
 }
 
 /// What the ZPL fixture's spill block holds (Z-10).
@@ -2324,7 +2373,8 @@ fn build_zpl_objset(
         ..DnodeSpec::default()
     }
     .build();
-    a.put_objset(m, &objset(&meta_dnode, 2), objects, 100)
+    let os = with_log(objset(&meta_dnode, 2), m, a, 8);
+    a.put_objset(m, &os, objects, 100)
 }
 
 /// What the header of the parent block-pointer object of the ZPL
@@ -2450,6 +2500,9 @@ fn zpl_members_inner(
         _ => Layout::Mirror,
     };
     let mut a = Alloc::with_layout(0x20_0000, layout);
+    if damage == Some(ZplDamage::LogLeft) {
+        a.log_left = pool.uberblocks.last().map(|(txg, _)| txg + 1);
+    }
     let m = &mut members[..];
     let os_zpl = build_zpl_objset(m, &mut a, matching, spill, damage);
     let empty_meta = DnodeSpec {

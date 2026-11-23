@@ -167,9 +167,9 @@ pub struct Extraction {
     /// and not read through a checksum like the rest.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub unverified: u64,
-    /// Records the dataset's intent log held that an import would
-    /// replay and the extraction did not apply: writes acknowledged as
-    /// safe that are not in the output.
+    /// Records the dataset's intent log held that the extraction did
+    /// not apply: writes acknowledged as safe that are not in the
+    /// output.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub unreplayed: u64,
     /// For a tree of files (`zvolfiles extract`): how many were written,

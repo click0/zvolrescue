@@ -349,7 +349,12 @@ fn walk_chain(
 
 impl IntentLog {
     /// One sentence for a person: what was left out, and that it was.
-    pub fn says(&self, name: &str, read_txg: u64) -> String {
+    ///
+    /// `newest` is whether `read_txg` is the pool's newest transaction
+    /// group. Only there is the log what an import would replay; read at
+    /// an older one, its records are of the groups that followed, which
+    /// the reader chose to go before.
+    pub fn says(&self, name: &str, read_txg: u64, newest: bool) -> String {
         let kinds: Vec<String> = self
             .by_type
             .iter()
@@ -372,8 +377,27 @@ impl IntentLog {
             Some((lo, hi)) => format!("txg {lo}–{hi}"),
             None => "a later txg".to_string(),
         };
+        // Which records they are: a log an import has claimed keeps
+        // them across the groups that sync until the dataset is opened.
+        let which = if self.claim_txg != 0 {
+            format!(
+                "of {txgs}, claimed by an import at txg {} and not replayed since",
+                self.claim_txg
+            )
+        } else {
+            format!("of {txgs}, newer than the txg {read_txg} that was read")
+        };
+        let fate = match (newest, self.claim_txg != 0) {
+            (true, false) => "an import replays such records, and they are".to_string(),
+            (true, true) => {
+                "OpenZFS replays them when the dataset is next opened, and they are".to_string()
+            }
+            (false, _) => format!(
+                "they are of what came after txg {read_txg}, which is not the pool's newest, and are"
+            ),
+        };
         format!(
-            "{name}: the intent log holds {} record(s) of {txgs}, newer than the txg {read_txg} that was read ({}{objects}{}); an import replays such records, and they are NOT applied here: what is read is the dataset as txg {read_txg} left it, without those writes{}",
+            "{name}: the intent log holds {} record(s) {which} ({}{objects}{}); {fate} NOT applied here: what is read is the dataset as txg {read_txg} left it, without those writes{}",
             self.unreplayed,
             kinds.join(", "),
             if self.write_bytes > 0 {
@@ -389,23 +413,33 @@ impl IntentLog {
     }
 }
 
-#[cfg(test)]
-mod tests {
+/// Builders for fixtures.
+pub mod encode {
     use super::*;
     use zfs_ondisk::blkptr::encode::Builder;
 
-    fn pointer(seq: u64) -> BlkPtr {
-        let raw = Builder::new()
-            .dva(0, 0, 0x10000 * (seq + 1), 4096, false)
-            .sizes(4096, 4096)
+    /// `TX_WRITE`, for [`record`].
+    pub const WRITE: u64 = TX_WRITE;
+    /// `TX_TRUNCATE`.
+    pub const TRUNCATE: u64 = TX_TRUNCATE;
+    /// The bit a record of a case-insensitive name carries.
+    pub const CI: u64 = TX_CI;
+
+    /// The pointer to the log block at DVA offset `offset`, the `seq`-th
+    /// of its chain: the checksum words of a log pointer are the chain's
+    /// own identity and the block's place in it.
+    pub fn pointer(offset: u64, seq: u64) -> [u8; blkptr::SIZE] {
+        Builder::new()
+            .dva(0, 0, offset, MIN_BLOCK as u64, false)
+            .sizes(MIN_BLOCK as u64, MIN_BLOCK as u64)
             .props(2, CHECKSUM_ZILOG2, 9, 0)
             .births(0, 11, 1)
             .cksum([0x1111, 0x2222, 77, seq])
-            .bytes(Endian::Little);
-        BlkPtr::parse(&raw, Endian::Little).unwrap()
+            .bytes(Endian::Little)
     }
 
-    fn record(txtype: u64, txg: u64, seq: u64, body: &[u64]) -> Vec<u8> {
+    /// One record: its header, then `body`.
+    pub fn record(txtype: u64, txg: u64, seq: u64, body: &[u64]) -> Vec<u8> {
         let reclen = (RECORD_HEADER + body.len() * 8) as u64;
         [txtype, reclen, txg, seq]
             .iter()
@@ -416,16 +450,13 @@ mod tests {
 
     /// A log block as OpenZFS writes it: the chain header, the records,
     /// and the checksum of it all with the pointer's in its place.
-    fn block(bp: &BlkPtr, next: &BlkPtr, records: &[Vec<u8>]) -> Vec<u8> {
-        let mut raw = vec![0u8; 4096];
-        let next_raw = Builder::new()
-            .dva(0, 0, next.dva[0].offset, 4096, false)
-            .sizes(4096, 4096)
-            .props(2, CHECKSUM_ZILOG2, 9, 0)
-            .births(0, 11, 1)
-            .cksum(next.cksum)
-            .bytes(Endian::Little);
-        raw[NEXT_AT..NEXT_AT + blkptr::SIZE].copy_from_slice(&next_raw);
+    pub fn block(
+        bp: &[u8; blkptr::SIZE],
+        next: &[u8; blkptr::SIZE],
+        records: &[Vec<u8>],
+    ) -> Vec<u8> {
+        let mut raw = vec![0u8; MIN_BLOCK];
+        raw[NEXT_AT..NEXT_AT + blkptr::SIZE].copy_from_slice(next);
         let mut at = CHAIN_SIZE;
         for r in records {
             raw[at..at + r.len()].copy_from_slice(r);
@@ -433,14 +464,30 @@ mod tests {
         }
         raw[NUSED_AT..NUSED_AT + 8].copy_from_slice(&(at as u64).to_le_bytes());
         raw[MAGIC_AT..MAGIC_AT + 8].copy_from_slice(&ZEC_MAGIC.to_le_bytes());
-        for (i, w) in bp.cksum.iter().enumerate() {
-            raw[CKSUM_AT + i * 8..CKSUM_AT + i * 8 + 8].copy_from_slice(&w.to_le_bytes());
-        }
+        // The pointer's checksum words stand where the block's own
+        // will: bytes 96..128 of a pointer.
+        raw[CKSUM_AT..CKSUM_AT + 32].copy_from_slice(&bp[96..128]);
         let sum = fletcher4(&raw, Endian::Little);
         for (i, w) in sum.iter().enumerate() {
             raw[CKSUM_AT + i * 8..CKSUM_AT + i * 8 + 8].copy_from_slice(&w.to_le_bytes());
         }
         raw
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn pointer(seq: u64) -> BlkPtr {
+        BlkPtr::parse(&encode::pointer(0x10000 * (seq + 1), seq), Endian::Little).unwrap()
+    }
+
+    fn record(txtype: u64, txg: u64, seq: u64, body: &[u64]) -> Vec<u8> {
+        encode::record(txtype, txg, seq, body)
+    }
+
+    fn block(bp: &BlkPtr, next: &BlkPtr, records: &[Vec<u8>]) -> Vec<u8> {
+        encode::block(bp.raw(), next.raw(), records)
     }
 
     /// A log block verifies by the checksum inside it, seeded with its
@@ -580,7 +627,7 @@ mod tests {
             txgs: Some((11, 11)),
             ..IntentLog::default()
         };
-        let s = log.says("zl/fs", 10);
+        let s = log.says("zl/fs", 10, true);
         assert!(
             s.contains("2 record(s) of txg 11, newer than the txg 10"),
             "{s}"
@@ -590,7 +637,30 @@ mod tests {
             "{s}"
         );
         assert!(
-            s.contains("NOT applied") && s.contains("as txg 10 left it"),
+            s.contains("an import replays such records, and they are NOT applied here")
+                && s.contains("as txg 10 left it"),
+            "{s}"
+        );
+        // Read at a group that is not the pool's newest: no import
+        // replays the log that group had, and none is said to.
+        let s = log.says("zl/fs", 10, false);
+        assert!(
+            s.contains("they are of what came after txg 10, which is not the pool's newest, and are NOT applied here")
+                && !s.contains("import"),
+            "{s}"
+        );
+        // A log an import has claimed holds its records across the
+        // groups that sync after: they are not "newer than" the one read.
+        let claimed = IntentLog {
+            claim_txg: 12,
+            txgs: Some((12, 12)),
+            ..log.clone()
+        };
+        let s = claimed.says("zl/fs", 40, true);
+        assert!(
+            s.contains("of txg 12, claimed by an import at txg 12 and not replayed since")
+                && s.contains("OpenZFS replays them when the dataset is next opened")
+                && !s.contains("newer than"),
             "{s}"
         );
     }

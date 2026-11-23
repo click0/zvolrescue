@@ -528,7 +528,7 @@ pub fn assemble(records: &[(LogRef, Vec<Record>)], opts: &Options) -> Report {
         }
         if e.unreplayed > 0 {
             warnings.push(format!(
-                "{}: its intent log held {} record(s) an import would replay; they were not applied, and {} is the dataset as txg {} left it, without them",
+                "{}: its intent log held {} record(s) that were not applied: {} is the dataset as txg {} left it, without the writes they hold",
                 e.dataset,
                 e.unreplayed,
                 e.output.display(),
@@ -1047,8 +1047,8 @@ mod tests {
         );
     }
 
-    /// An extraction of a dataset whose intent log held records an
-    /// import would replay is the dataset without them, and the report
+    /// An extraction of a dataset whose intent log held records that
+    /// were not applied is the dataset without them, and the report
     /// says so: the count on the extraction, and a warning.
     #[test]
     fn records_left_in_the_intent_log_are_said() {

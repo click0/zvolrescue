@@ -86,9 +86,10 @@ struct DumpOut {
     /// block the state on disk names.
     #[serde(skip_serializing_if = "Option::is_none")]
     resume_at: Option<u64>,
-    /// What the volume's intent log holds that an import would replay
-    /// and this did not: writes acknowledged as safe that are not in
-    /// the image, which is the volume as `txg` left it (exit 4).
+    /// What the volume's intent log holds that was not applied: writes
+    /// acknowledged as safe that are not in the image, which is the
+    /// volume as `txg` left it. Said, and not an exit status: nothing
+    /// that was read for failed to read.
     #[serde(skip_serializing_if = "Option::is_none")]
     intent_log: Option<serde_json::Value>,
     /// The sentence that says so.
@@ -551,6 +552,7 @@ fn dump_one(
     reader: &PoolReader<'_>,
     ds: &Dataset,
     txg: u64,
+    newest: bool,
     time: &str,
     output: &Path,
     strict: bool,
@@ -722,7 +724,7 @@ fn dump_one(
         intent_log_says: log
             .as_ref()
             .filter(|l| l.unreplayed > 0)
-            .map(|l| l.says(&ds.name, txg)),
+            .map(|l| l.says(&ds.name, txg, newest)),
         resume_words,
         finished: report.finished,
         sha256: report.sha256.clone(),
@@ -791,7 +793,7 @@ fn print_text(out: &RunOut) {
             );
         }
         if let Some(says) = &v.intent_log_says {
-            println!("  INTENT LOG NOT APPLIED (exit 4): {says}");
+            println!("  INTENT LOG NOT APPLIED: {says}");
         }
         println!("  sha256: {}", v.sha256);
         if let Some(h) = &v.sha1 {
@@ -991,6 +993,9 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         }
     };
     let txg = chosen.ub.txg;
+    // Whether this is the pool's present: only there is a dataset's
+    // intent log what an import would replay.
+    let newest = candidates.first().is_some_and(|c| c.ub.txg == txg);
     let time = iso8601(chosen.ub.timestamp);
 
     // Which datasets, and where each one goes.
@@ -1270,6 +1275,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             &reader,
             ds,
             txg,
+            newest,
             &time,
             &output,
             opts.strict,
@@ -1283,12 +1289,13 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 // the JSON and in the evidence record; now it says so
                 // in the one place a `dump || fail` can see.
                 code = exit::after_extraction(code, v.aborted, v.blocks_zeroed + v.blocks_salvaged);
-                // Whole as its transaction group left it, and not the
-                // volume an import would give: its intent log holds
-                // writes that were acknowledged and are not in it.
-                if v.intent_log.is_some() {
-                    code = code.max(exit::PARTIAL);
-                }
+                // What the intent log holds is said and recorded, and
+                // is not this status: the image is whole as its
+                // transaction group left it, and 4 is for what could
+                // not be read. On a pool that went down under load
+                // nearly every volume has such a log, and 4 for it told
+                // an image with nothing lost from one with blocks
+                // written as zeros no more.
                 // An interrupt ends the run, not just the volume: the
                 // operator asked for it to stop, and a bulk run that went
                 // on to the next volume would not have stopped.

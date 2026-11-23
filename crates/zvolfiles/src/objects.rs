@@ -381,7 +381,6 @@ pub fn run(
         || out.stopped.is_some()
         || !out.unread.is_empty()
         || PassedOver::any_unread(&out.passed_over)
-        || out.intent_log.is_some()
     {
         exit::PARTIAL
     } else {

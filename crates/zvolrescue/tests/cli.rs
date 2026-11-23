@@ -3242,3 +3242,87 @@ fn before_every_txg_is_said_in_times() {
         "{err}"
     );
 }
+
+/// A pool that went down with a write in a volume's intent log. The
+/// image is the volume as its transaction group left it, every block
+/// read; what the log holds is said in the summary and in the record,
+/// and is not the exit status — that is for what could not be read. On
+/// a pool that went down under load nearly every volume has such a log:
+/// exit 4 for it, which is what it was for a while, told an image with
+/// nothing lost from one with blocks written as zeros no more.
+#[test]
+fn what_the_intent_log_holds_is_said_and_is_not_the_exit_status() {
+    use zfs_read::fixture::build_sample_mos_variant;
+
+    let dir = scratch("intent-log");
+    let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1)]);
+    let mut members = vec![vec![0u8; SIZE as usize], vec![0u8; SIZE as usize]];
+    let mut a = Alloc::new(0x20_0000);
+    a.log_left = Some(101);
+    build_sample_mos(&mut pool, &mut members, &mut a);
+    for (i, m) in members.iter_mut().enumerate() {
+        pool.write_labels(i, m);
+    }
+    let paths = write_members(&dir, &members);
+    let image = dir.join("disk0.img").to_string_lossy().into_owned();
+    let (code, out, err) = run(&["dump", "tank/vm/disk0", &paths[0], &paths[1], "-o", &image]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    let said = out
+        .lines()
+        .find(|l| l.contains("INTENT LOG NOT APPLIED"))
+        .unwrap_or_else(|| panic!("nothing about the log: {out}"));
+    assert!(
+        said.contains("the intent log holds 1 record(s) of txg 101, newer than the txg 100 that was read (1 TX_WRITE on object(s) 1, 4096 byte(s) written)")
+            && said.contains("an import replays such records, and they are NOT applied here")
+            && !said.contains("exit"),
+        "{said}"
+    );
+    assert!(out.contains("0 zeroed (unreadable)"), "{out}");
+    let again = dir.join("again.img").to_string_lossy().into_owned();
+    let (code, out, _) = run(&[
+        "-f",
+        "json",
+        "dump",
+        "tank/vm/disk0",
+        &paths[0],
+        &paths[1],
+        "-o",
+        &again,
+    ]);
+    assert_eq!(code, 0, "{out}");
+    let log = &json(&out)["volumes"][0]["intent_log"];
+    assert_eq!(log["unreplayed"], 1, "{log}");
+    assert_eq!(log["write_bytes"], 4096, "{log}");
+
+    // The volume read at a transaction group that is not the pool's
+    // newest — here the last one it is at, the one after has it
+    // destroyed. The log that group had is no log an import replays,
+    // and is not said to be one.
+    let dir = scratch("intent-log-older");
+    let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1), (101, 2)]);
+    let mut members = vec![vec![0u8; SIZE as usize], vec![0u8; SIZE as usize]];
+    let mut a = Alloc::new(0x20_0000);
+    a.log_left = Some(101);
+    let with = build_sample_mos_variant(&mut members, &mut a, true);
+    a.log_left = None;
+    a.born = Some(101);
+    let without = build_sample_mos_variant(&mut members, &mut a, false);
+    pool.rootbp = Some(with);
+    pool.rootbp_by_txg = vec![(101, without)];
+    for (i, m) in members.iter_mut().enumerate() {
+        pool.write_labels(i, m);
+    }
+    let paths = write_members(&dir, &members);
+    let image = dir.join("disk0.img").to_string_lossy().into_owned();
+    let (code, out, err) = run(&["dump", "tank/vm/disk0", &paths[0], &paths[1], "-o", &image]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    let said = out
+        .lines()
+        .find(|l| l.contains("INTENT LOG NOT APPLIED"))
+        .unwrap_or_else(|| panic!("nothing about the log: {out}"));
+    assert!(
+        said.contains("they are of what came after txg 100, which is not the pool's newest, and are NOT applied here")
+            && !said.contains("import"),
+        "{said}"
+    );
+}

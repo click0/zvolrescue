@@ -197,9 +197,9 @@ pub struct Opened<'a> {
     pub members: &'a Members,
     /// The newer transaction groups passed over for this one, and why.
     pub passed_over: Vec<PassedOver>,
-    /// What the dataset's intent log holds that an import would replay
-    /// and this did not: writes acknowledged as safe that are not in
-    /// what is read. `None` when there are none.
+    /// What the dataset's intent log holds that was not applied: writes
+    /// acknowledged as safe that are not in what is read. `None` when
+    /// there are none.
     pub intent_log: Option<serde_json::Value>,
 }
 
@@ -251,6 +251,7 @@ pub fn with_dataset<T>(
 
     // Newest first; --txg picks one exactly.
     let candidates = uberblock_candidates(&members.scans, &pool);
+    let newest = candidates.first().map(|c| c.ub.txg);
     let wanted: Vec<_> = match at.txg {
         None => candidates,
         Some(n) => candidates.into_iter().filter(|c| c.ub.txg == n).collect(),
@@ -353,10 +354,14 @@ pub fn with_dataset<T>(
         // an import would replay is said: after a crash the dataset as
         // its last synced group left it lacks the writes its
         // applications were last told were safe, and a run that ended 0
-        // said nothing of them.
+        // said nothing of them. Said, recorded, and not the exit
+        // status: that is for what did not read.
         let log = zfs_read::zil::intent_log(&reader, ds, c.ub.txg);
         if let Some(log) = log.as_ref().filter(|l| l.unreplayed > 0) {
-            eprintln!("zvolfiles: {} (exit 4)", log.says(name, c.ub.txg));
+            eprintln!(
+                "zvolfiles: {}",
+                log.says(name, c.ub.txg, newest == Some(c.ub.txg))
+            );
         }
         let opened = Opened {
             txg: c.ub.txg,
