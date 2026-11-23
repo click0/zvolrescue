@@ -27,6 +27,7 @@ OUT=${1:?output directory}
 TAG=${2:-image-v0-ztest}
 KEY_MATERIAL=abcdefghijklmnopqrstuvwxyz012345   # ztest_wkeydata, fixed in ztest.c
 RUN_TIME=${RUN_TIME:-45}
+ZTEST_TRIES=${ZTEST_TRIES:-3}                    # runs of ztest per pool before giving up
 
 mkdir -p "$OUT"
 OUT=$(cd "$OUT" && pwd)
@@ -46,14 +47,29 @@ else sha() { sha256 -q "$1"; }; fi
 # seconds (hundreds of TXGs) and leaves the members on disk. `-g` lowers the
 # gang threshold so gang blocks are always present, `-k 0` lets the run end
 # cleanly instead of in a simulated crash.
+#
+# ztest ends by checking its own pool with zdb, and now and then that check
+# aborts (`zdb -bcc ...` exit code 134): a failure of ztest or zdb on the
+# pool ztest has just made, before anything of this repository has run. One
+# such run turned the whole matrix red. Another run is another pool, so a
+# failed one is said and made again; three in a row are not chance, and
+# the build stops.
 build_pool() {
     topo=$1; shift
     dir="$OUT/pools/$topo"
-    rm -rf "$dir"; mkdir -p "$dir"
-    say "$topo: ztest (${RUN_TIME}s)"
-    ( cd "$dir" && ztest -f "$dir" -v 1 "$@" -g 8192 -s 128m -a 12 -d 4 -t 4 -k 0 \
-        -T "$RUN_TIME" -P 8 > "$dir/ztest.log" 2>&1 ) || {
-        grep -v "^\(loading\|verifying\)" "$dir/ztest.log" | tail -5; die "$topo: ztest failed"; }
+    attempt=1
+    while :; do
+        rm -rf "$dir"; mkdir -p "$dir"
+        say "$topo: ztest (${RUN_TIME}s)"
+        if ( cd "$dir" && ztest -f "$dir" -v 1 "$@" -g 8192 -s 128m -a 12 -d 4 -t 4 -k 0 \
+            -T "$RUN_TIME" -P 8 > "$dir/ztest.log" 2>&1 ); then
+            break
+        fi
+        grep -v "^\(loading\|verifying\)" "$dir/ztest.log" | tail -5
+        [ "$attempt" -lt "$ZTEST_TRIES" ] || die "$topo: ztest failed $attempt times"
+        say "$topo: ztest failed, run $attempt of $ZTEST_TRIES: making another pool"
+        attempt=$((attempt + 1))
+    done
 }
 
 capture_oracle() {
