@@ -17,6 +17,20 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ### Fixed
 
+* **A multihost heartbeat no longer dates its transaction group.** On a
+  pool with `multihost=on` the newest uberblock is written again every
+  second the pool sits idle — the same group, the same tree, a later
+  time — and of two uberblocks of one group the later was taken, as
+  OpenZFS takes it. The tree is the same either way; the time is not
+  when the group was synced. The newest group of a pool idle for an
+  hour was dated an hour late: `--before` passed it over for the one
+  before it and gave a volume destroyed ten seconds before the time
+  asked as still there, and the header of `zvolrescue list` and the
+  events of `zvoltimeline` carried the heartbeat's time. Which tree a
+  group number names is still decided as OpenZFS decides it; among the
+  uberblocks that name that tree, the one the sync wrote — the lowest
+  multihost sequence, then the earliest time — now dates it.
+
 * **What a dataset's intent log holds that was not applied is counted
   and said.** A write an application was told is on disk — `fsync`,
   `O_SYNC`, a volume's flush — is in the dataset's intent log before

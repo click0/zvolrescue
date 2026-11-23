@@ -724,14 +724,27 @@ pub struct Candidate {
 /// Every checksum-verified uberblock of `pool` across its scanned members,
 /// one per TXG, newest first.
 ///
-/// Of two with one TXG the one OpenZFS would take is kept
-/// (`vdev_uberblock_compare`): the later timestamp, then the higher
-/// multihost sequence. The first one met was kept, so which tree a run
-/// read — two uberblocks of one TXG can name different ones, after a
-/// rewind import or with multihost — followed the order the members were
+/// Of two with one TXG that name different trees, the tree OpenZFS would
+/// take is kept (`vdev_uberblock_compare`): that of the later timestamp,
+/// then of the higher multihost sequence. The first one met was kept, so
+/// which tree a run read — two uberblocks of one TXG can name different
+/// ones, after a rewind import — followed the order the members were
 /// named in.
+///
+/// Of those that name that tree, the one the sync wrote is given: the
+/// lowest multihost sequence, then the earliest timestamp. A multihost
+/// heartbeat is the same TXG and the same tree written again, every
+/// second the pool sits idle, and its time is not when the TXG was
+/// synced: taking the latest dated the newest TXG of an idle pool at
+/// its last heartbeat, and `--before` passed it over.
 pub fn uberblock_candidates(scans: &[Option<DeviceScan>], pool: &PoolAssembly) -> Vec<Candidate> {
-    let mut out: Vec<Candidate> = Vec::new();
+    // Per TXG: the uberblock OpenZFS would take, and for each tree met
+    // the uberblock its sync wrote.
+    struct OneTxg {
+        taken: Uberblock,
+        synced: Vec<Candidate>,
+    }
+    let mut by_txg: BTreeMap<u64, OneTxg> = BTreeMap::new();
     for &dev in &pool.devices {
         let Some(scan) = scans.get(dev).and_then(|s| s.as_ref()) else {
             continue;
@@ -746,15 +759,40 @@ pub fn uberblock_candidates(scans: &[Option<DeviceScan>], pool: &PoolAssembly) -
                     device: dev,
                     label: label.index,
                 };
-                match out.iter_mut().find(|c| c.ub.txg == slot.ub.txg) {
-                    Some(c) if preferred(&slot.ub, &c.ub) => *c = found,
+                let Some(one) = by_txg.get_mut(&slot.ub.txg) else {
+                    by_txg.insert(
+                        slot.ub.txg,
+                        OneTxg {
+                            taken: slot.ub.clone(),
+                            synced: vec![found],
+                        },
+                    );
+                    continue;
+                };
+                if preferred(&slot.ub, &one.taken) {
+                    one.taken = slot.ub.clone();
+                }
+                match one
+                    .synced
+                    .iter_mut()
+                    .find(|c| c.ub.rootbp == slot.ub.rootbp)
+                {
+                    Some(c) if written_first(&slot.ub, &c.ub) => *c = found,
                     Some(_) => {}
-                    None => out.push(found),
+                    None => one.synced.push(found),
                 }
             }
         }
     }
-    out.sort_by_key(|c| std::cmp::Reverse(c.ub.txg));
+    let out: Vec<Candidate> = by_txg
+        .into_values()
+        .rev()
+        .filter_map(|one| {
+            one.synced
+                .into_iter()
+                .find(|c| c.ub.rootbp == one.taken.rootbp)
+        })
+        .collect();
     trace!(
         "txg",
         "verified uberblocks: {}",
@@ -766,20 +804,29 @@ pub fn uberblock_candidates(scans: &[Option<DeviceScan>], pool: &PoolAssembly) -
     out
 }
 
+/// The multihost sequence of an uberblock: 0 for the one a sync wrote,
+/// counted up by each heartbeat after it.
+fn mmp_seq(u: &Uberblock) -> u64 {
+    const MMP_MAGIC: u64 = 0xa11c_ea11;
+    const MMP_SEQ_VALID: u64 = 0x2;
+    if u.mmp_magic == MMP_MAGIC && u.mmp_config & MMP_SEQ_VALID != 0 {
+        (u.mmp_config >> 32) & 0xffff
+    } else {
+        0
+    }
+}
+
+/// Whether `a` was written before `b`, both of one TXG and one tree: the
+/// sync's before any heartbeat, then the earlier.
+fn written_first(a: &Uberblock, b: &Uberblock) -> bool {
+    (mmp_seq(a), a.timestamp) < (mmp_seq(b), b.timestamp)
+}
+
 /// Whether `a` is the uberblock OpenZFS takes over `b` of the same TXG:
 /// the later timestamp, then the higher multihost sequence where both
 /// carry one.
 fn preferred(a: &Uberblock, b: &Uberblock) -> bool {
-    const MMP_MAGIC: u64 = 0xa11c_ea11;
-    const MMP_SEQ_VALID: u64 = 0x2;
-    let seq = |u: &Uberblock| {
-        if u.mmp_magic == MMP_MAGIC && u.mmp_config & MMP_SEQ_VALID != 0 {
-            (u.mmp_config >> 32) & 0xffff
-        } else {
-            0
-        }
-    };
-    (a.timestamp, seq(a)) > (b.timestamp, seq(b))
+    (a.timestamp, mmp_seq(a)) > (b.timestamp, mmp_seq(b))
 }
 
 /// Choose among `candidates` (newest first) per `sel`.
@@ -824,5 +871,93 @@ mod same_txg_tests {
             !preferred(&ub(10, None), &ub(10, None)),
             "a tie keeps the first"
         );
+    }
+
+    /// The candidates of a mirror whose two members carry `a` and `b` as
+    /// their uberblocks, `(txg, timestamp, multihost sequence, tree)`.
+    fn candidates_of(
+        a: &[(u64, u64, Option<u64>, u8)],
+        b: &[(u64, u64, Option<u64>, u8)],
+    ) -> Vec<Candidate> {
+        use crate::fixture::Pool;
+        use crate::vdev::scan_device;
+        use zfs_ondisk::label::{label_offsets, UBERBLOCK_RING_OFFSET};
+        use zvolrescue_io::MemSource;
+
+        let pool = Pool::mirror("tank", 0x7a11, 12);
+        let images: Vec<Vec<u8>> = [a, b]
+            .iter()
+            .enumerate()
+            .map(|(i, ubs)| {
+                let mut p = pool.clone();
+                p.uberblocks = ubs.iter().map(|u| (u.0, u.1)).collect();
+                let mut img = p.member_image(i, 64 << 20);
+                // The tree each names, and the multihost words: written
+                // over the slot the fixture made, and sealed again.
+                for label in label_offsets(img.len() as u64).expect("large enough") {
+                    for (n, (_, _, seq, tree)) in ubs.iter().enumerate() {
+                        let at = (label + UBERBLOCK_RING_OFFSET) as usize + n * 4096;
+                        let slot = &mut img[at..at + 4096];
+                        slot[40 + 96] = *tree;
+                        if let Some(seq) = seq {
+                            slot[40 + 128 + 8..][..8]
+                                .copy_from_slice(&0xa11c_ea11u64.to_le_bytes());
+                            slot[40 + 128 + 24..][..8]
+                                .copy_from_slice(&((seq << 32) | 0x2).to_le_bytes());
+                        }
+                        zfs_ondisk::checksum::seal_label(slot, at as u64);
+                    }
+                }
+                img
+            })
+            .collect();
+        let sources: Vec<MemSource> = images.into_iter().map(MemSource::new).collect();
+        let scans: Vec<_> = sources.iter().map(|s| scan_device(s).ok()).collect();
+        let assembly = assemble(&scans).into_iter().next().expect("one pool");
+        uberblock_candidates(&scans, &assembly)
+    }
+
+    /// A multihost heartbeat is the TXG's own tree written again, later:
+    /// the TXG is dated by the uberblock its sync wrote. Dated by the
+    /// heartbeat, the newest TXG of a pool idle for an hour was an hour
+    /// younger than it is, and `--before` took the one before it.
+    #[test]
+    fn a_heartbeat_does_not_date_the_txg() {
+        let synced = [(100, 1000, Some(0), 1), (101, 1010, Some(0), 1)];
+        let mut beaten = synced.to_vec();
+        beaten.push((101, 4610, Some(7), 1));
+        let c = candidates_of(&beaten, &synced);
+        assert_eq!(
+            c.iter()
+                .map(|c| (c.ub.txg, c.ub.timestamp))
+                .collect::<Vec<_>>(),
+            [(101, 1010), (100, 1000)]
+        );
+        assert_eq!(
+            select_uberblock(&c, TxgSelect::Before(1020)).map(|c| c.ub.txg),
+            Some(101),
+            "synced ten seconds before the time asked"
+        );
+        // Whichever member is read first.
+        let c = candidates_of(&synced, &beaten);
+        assert_eq!(c[0].ub.timestamp, 1010);
+    }
+
+    /// Two trees under one TXG number, as an import with rewind leaves
+    /// on members it did not write to: the tree is the one OpenZFS takes,
+    /// the later, and the date is that tree's own — not the earliest of
+    /// the TXG.
+    #[test]
+    fn of_two_trees_of_one_txg_the_date_is_that_of_the_one_taken() {
+        let c = candidates_of(&[(101, 1010, None, 1)], &[(101, 2000, None, 2)]);
+        assert_eq!(c.len(), 1);
+        assert_eq!((c[0].ub.timestamp, c[0].ub.rootbp[96]), (2000, 2));
+        // A heartbeat of the first tree, later than the second: the
+        // first is the one taken, and dated by its sync.
+        let c = candidates_of(
+            &[(101, 1010, Some(0), 1), (101, 4610, Some(3), 1)],
+            &[(101, 2000, Some(0), 2)],
+        );
+        assert_eq!((c[0].ub.timestamp, c[0].ub.rootbp[96]), (1010, 1));
     }
 }
