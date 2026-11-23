@@ -17,6 +17,22 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ### Fixed
 
+* **Promotions `zvoltimeline` read from one side only, or two at
+  once.** Read only from after a clone had been promoted over every
+  dataset under it, each of them was "created", though all but the
+  first were made as clones: what a dataset was before the promotion
+  was told by whether the promoted one is a clone still, and it no
+  longer is. A dataset is now a clone where the promoted one holds a
+  snapshot older than it. A clone promoted and renamed between the
+  same two transaction groups had its own snapshots "moved by the
+  promotion" along with those it took from its origin; they follow its
+  new name and were its own under the old one. And a clone made and
+  promoted between two groups read was no `promoted` event at all —
+  only "made a clone, and promoted since", the snapshots it took
+  plainly "renamed" — where the same state read as the oldest group
+  gives one: it is a `promoted` event at the later group, naming what
+  it is now the origin of.
+
 * **A clock set back took the pool's newest transaction groups out of
   its history; a rewind's line is now told by what it holds.**
   `zvoltimeline` took a group written before a lower-numbered one for

@@ -185,12 +185,20 @@ pub fn appeared_as(d: &Dataset, all: &[Dataset]) -> Kind {
         return Kind::Snapshot;
     }
     if let Some(o) = demoted(d, all) {
-        // What it was before the promotion: the dataset promoted over
-        // it took its origin, and is a clone still only if it had one.
+        // What it was before the promotion. The dataset promoted over
+        // it took its origin, and is a clone still if it had one — or,
+        // promoted again since, is one no longer and holds the snapshot
+        // this one was made from, which is older than this one. Told by
+        // "a clone still" alone, every dataset a clone was promoted
+        // over, once it had been promoted over them all, was "created".
         let promoter = head(&o.name);
-        let was_clone = all
-            .iter()
-            .any(|p| !p.snapshot && p.name == promoter && p.clone);
+        let was_clone = all.iter().any(|p| {
+            if p.snapshot {
+                head(&p.name) == promoter && p.creation_txg != 0 && p.creation_txg < d.creation_txg
+            } else {
+                p.name == promoter && p.clone
+            }
+        });
         return if was_clone {
             Kind::Clone
         } else {
@@ -238,12 +246,13 @@ pub fn diff(before: &[Dataset], after: &[Dataset], txg: u64, time: Option<u64>) 
     let new = by_guid(after);
     let mut events = Vec::new();
     // Clones that hold the snapshot they were made from: promoted at
-    // this TXG.
+    // this TXG. One made and promoted between the two is among them: it
+    // was not there before, and holds snapshots older than itself.
     let promoted: Vec<&Dataset> = new
         .iter()
-        .filter(|(g, d)| {
-            old.get(g)
-                .is_some_and(|was| promoted_between(was, d, after))
+        .filter(|(g, d)| match old.get(g) {
+            Some(was) => promoted_between(was, d, after),
+            None => promoted_since(d, after),
         })
         .map(|(_, d)| d)
         .collect();
@@ -260,15 +269,52 @@ pub fn diff(before: &[Dataset], after: &[Dataset], txg: u64, time: Option<u64>) 
                     details: joined(describe(d), appeared_details(d, after)),
                     last_seen_txg: None,
                 });
+                // Made a clone and promoted, both since the TXG before:
+                // the promotion is an event here as it is anywhere. It
+                // was none — only the snapshots it took were "renamed".
+                if promoted_since(d, after) {
+                    let over: Vec<&str> = after
+                        .iter()
+                        .filter(|n| demoted(n, after).is_some_and(|o| head(&o.name) == d.name))
+                        .map(|n| n.name.as_str())
+                        .collect();
+                    let mut details = format!(
+                        "at or before this transaction group, after it was made at txg {}: it holds snapshots older than itself",
+                        d.creation_txg
+                    );
+                    if !over.is_empty() {
+                        details.push_str(&format!("; now the origin of {}", over.join(", ")));
+                    }
+                    if let Some(o) = origin_of(d, after) {
+                        details.push_str(&format!(", and a clone of {}", o.name));
+                    }
+                    events.push(Event {
+                        txg,
+                        time,
+                        kind: Kind::Promoted,
+                        object: Some(d.name.clone()),
+                        guid: *guid,
+                        details,
+                        last_seen_txg: None,
+                    });
+                }
             }
             Some(was) => {
                 if was.name != d.name {
                     // A promotion moves the snapshots of the origin, up
                     // to the one the clone was made from, to the clone:
-                    // renamed, and said why.
+                    // renamed, and said why. The clone's own snapshots
+                    // are not moved by it: promoted and renamed between
+                    // the same two TXGs, they follow its new name, and
+                    // were its own under the old one.
                     let moved = d.snapshot
                         && head(&was.name) != head(&d.name)
-                        && promoted.iter().any(|p| p.name == head(&d.name));
+                        && promoted.iter().any(|p| {
+                            p.name == head(&d.name)
+                                && old
+                                    .get(&p.guid)
+                                    .is_none_or(|own| own.name != head(&was.name))
+                        });
                     events.push(Event {
                         txg,
                         time,
@@ -549,6 +595,127 @@ pub(crate) mod tests {
         let alone = vec![after[1].clone(), after[2].clone()];
         assert!(!promoted_since(&alone[1], &alone));
         assert_eq!(appeared_as(&alone[1], &alone), Kind::Created);
+    }
+
+    fn made(name: &str, guid: u64, txg: u64, object: u64) -> Dataset {
+        let mut d = ds(name, guid, name.contains('@'));
+        d.creation_txg = txg;
+        d.object = object;
+        d
+    }
+
+    fn clone_of(mut d: Dataset, origin: u64) -> Dataset {
+        d.clone = true;
+        d.origin_obj = origin;
+        d
+    }
+
+    /// A clone promoted over every dataset under it — `a`, `b` made
+    /// from `a@s1`, `c` made from `b@s2` — is a clone no longer, and
+    /// read only from after, `b` and `c` were "created": what each was
+    /// was told by whether the promoted one is a clone still. They were
+    /// made clones, of snapshots it now holds that are older than they
+    /// are; only `a` was created.
+    #[test]
+    fn what_a_clone_was_promoted_over_is_what_it_was_made_as() {
+        let all = vec![
+            clone_of(made("tank/a", 1, 5, 50), 60),
+            made("tank/d@s1", 2, 9, 60),
+            clone_of(made("tank/b", 3, 13, 51), 61),
+            made("tank/d@s2", 4, 20, 61),
+            clone_of(made("tank/c", 5, 24, 52), 62),
+            made("tank/d@s3", 6, 31, 62),
+            made("tank/d", 7, 35, 53),
+        ];
+        let as_what = |name: &str| appeared_as(all.iter().find(|d| d.name == name).unwrap(), &all);
+        assert_eq!(as_what("tank/a"), Kind::Created);
+        assert_eq!(as_what("tank/b"), Kind::Clone);
+        assert_eq!(as_what("tank/c"), Kind::Clone);
+        assert_eq!(as_what("tank/d"), Kind::Clone);
+        // Promoted over `c` and `b` only, it is a clone still, of
+        // `a@s1`: both were clones, and `a` is not touched.
+        let twice = vec![
+            made("tank/a", 1, 5, 50),
+            made("tank/a@s1", 2, 9, 60),
+            clone_of(made("tank/b", 3, 13, 51), 61),
+            made("tank/d@s2", 4, 20, 61),
+            clone_of(made("tank/c", 5, 24, 52), 62),
+            made("tank/d@s3", 6, 31, 62),
+            clone_of(made("tank/d", 7, 35, 53), 60),
+        ];
+        assert_eq!(appeared_as(&twice[0], &twice), Kind::Created);
+        assert_eq!(appeared_as(&twice[2], &twice), Kind::Clone);
+        assert_eq!(appeared_as(&twice[4], &twice), Kind::Clone);
+    }
+
+    /// A clone promoted and renamed between the same two TXGs: the
+    /// snapshots it took from its origin were moved by the promotion,
+    /// and its own were not — they follow its new name, and were "moved
+    /// by the promotion" too.
+    #[test]
+    fn a_promoted_clones_own_snapshots_are_not_moved_by_the_promotion() {
+        let before = vec![
+            made("tank/a", 1, 5, 50),
+            made("tank/a@s1", 2, 9, 60),
+            clone_of(made("tank/c", 3, 31, 51), 60),
+            made("tank/c@own", 4, 46, 61),
+        ];
+        let after = vec![
+            clone_of(made("tank/a", 1, 5, 50), 60),
+            made("tank/x@s1", 2, 9, 60),
+            made("tank/x", 3, 31, 51),
+            made("tank/x@own", 4, 46, 61),
+        ];
+        let events = diff(&before, &after, 57, None);
+        let said = |object: &str, kind: Kind| {
+            events
+                .iter()
+                .find(|e| e.kind == kind && e.object.as_deref() == Some(object))
+                .unwrap_or_else(|| panic!("no {kind:?} of {object}: {events:#?}"))
+                .details
+                .clone()
+        };
+        assert_eq!(
+            said("tank/x@s1", Kind::Renamed),
+            "was tank/a@s1, moved by the promotion of tank/x"
+        );
+        assert_eq!(said("tank/x@own", Kind::Renamed), "was tank/c@own");
+        assert_eq!(said("tank/x", Kind::Renamed), "was tank/c");
+        assert_eq!(
+            said("tank/x", Kind::Promoted),
+            "was a clone of tank/a@s1; now the origin of tank/a"
+        );
+    }
+
+    /// A clone made and promoted between two TXGs read: it was "clone …
+    /// made a clone, and promoted since" and nothing more — no
+    /// `promoted` event, and the snapshots it took plainly "renamed".
+    #[test]
+    fn a_clone_made_and_promoted_between_two_txgs_is_promoted() {
+        let before = vec![made("tank/a", 1, 5, 50), made("tank/a@s1", 2, 9, 60)];
+        let after = vec![
+            clone_of(made("tank/a", 1, 5, 50), 60),
+            made("tank/x@s1", 2, 9, 60),
+            made("tank/x", 3, 31, 51),
+        ];
+        let events = diff(&before, &after, 57, None);
+        assert_eq!(
+            kinds(&events),
+            [
+                ("clone", Some("tank/x")),
+                ("promoted", Some("tank/x")),
+                ("renamed", Some("tank/x@s1")),
+            ]
+        );
+        assert_eq!(events[0].details, "made a clone, and promoted since");
+        assert_eq!(
+            events[1].details,
+            "at or before this transaction group, after it was made at txg 31: it holds snapshots older than itself; now the origin of tank/a"
+        );
+        assert_eq!(
+            events[2].details,
+            "was tank/a@s1, moved by the promotion of tank/x"
+        );
     }
 
     /// A clone of a clone, promoted, is a clone still — of what the one

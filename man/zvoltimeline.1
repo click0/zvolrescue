@@ -22,9 +22,15 @@ event, a clone of a clone as much as any, naming the dataset it was
 promoted over; the snapshots the promotion moved to it are renamed,
 and say so.
 Read only from after a promotion, the dataset promoted is a clone
-promoted since, and the one it was promoted over was created, not
-cloned: a snapshot older than the dataset that holds it, which another
-dataset is a clone of, came with a promotion.
+promoted since, and each one it was promoted over is what it was made
+as: a clone where the promoted dataset holds a snapshot older than it
+or is a clone still, created otherwise.
+A snapshot older than the dataset that holds it, which another dataset
+is a clone of, came with a promotion.
+A clone made and promoted between two TXGs read is a
+.Ql promoted
+event at the later of them; the promoted dataset's own snapshots,
+renamed with it, are not said to have been moved by the promotion.
 It reads the members the way
 .Xr zvolrescue 1
 does, never writes to them, and can write an evidence log the same
