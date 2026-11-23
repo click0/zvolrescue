@@ -17,6 +17,21 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ### Fixed
 
+* **A failed disk that still reads no longer stands for its column under
+  raidz and dRAID.** A child OpenZFS puts a spare in for — a hot spare
+  or a dRAID's distributed one — or replaces is a `spare` or `replacing`
+  vdev with two sides, and the disk that failed, when it is among the
+  members given, holds what it held when it failed. OpenZFS knows by
+  the disk's dirty time log not to ask it; the reader took the first
+  side that answered, so the stale column was the block's, the parity
+  paid for it, and with one more member gone a pool `zdb` reads whole
+  lost 1024 of a volume's 1280 blocks, read an older image of another
+  with exit 0, and listed no datasets — while leaving the stale disk
+  out of the command line made the same pool read. A block that does
+  not match its checksum is now read with that child's columns from
+  its other side, before any column is distrusted and for every
+  combination that is; the first read is as it was, so a healthy pool
+  reads nothing twice.
 * **The port's `distinfo` held the hash of a 404 page for one crate.**
   `packaging/freebsd/distinfo.sh` cut `wasi-0.11.1+wasi-snapshot-preview1`
   at its last hyphen, asked crates.io for a crate of another name, and

@@ -35,6 +35,11 @@ type RawCandidate = (Option<usize>, Result<Vec<u8>, ReadError>);
 /// column indices, and the row map.
 type Columns = (Vec<Option<Vec<u8>>>, Vec<Vec<u8>>, Vec<usize>, raidz::Map);
 
+/// Which side to read first for the columns of a child that has more
+/// than one — a `spare` or `replacing` vdev under raidz or dRAID — by
+/// the child's index. A child not named is read from its first side.
+type Sides = BTreeMap<u64, usize>;
+
 /// A vdev as the reader sees it: the tree under one top-level vdev.
 #[derive(Debug, Clone)]
 enum Node {
@@ -217,6 +222,10 @@ const MAX_COMBREC_TRIES: usize = 10_000;
 /// the whole block assembled and checksummed again. 16 GiB is every
 /// subset of up to three columns of a 12-wide raidz3 at 16 MiB.
 const MAX_COMBREC_BYTES: u64 = 16 << 30;
+
+/// Choices of side tried for one block whose children have more than
+/// one: two vdevs being replaced at once, three sides each, is eight.
+const MAX_SIDE_CHOICES: usize = 16;
 
 /// How far a row's combinatorial tries may go, `spent` of `max` gone and
 /// `rows_left` rows to try, this one among them: its part of what is
@@ -852,13 +861,14 @@ impl<'a> PoolReader<'a> {
                     Node::Draid { children, cfg, .. } => (children.as_slice(), Some(cfg.as_ref())),
                     _ => unreachable!("the arm matched raidz or draid"),
                 };
+                let first = Sides::new();
                 let mut rows = self.read_rows(node, offset, size);
                 let mut out = Vec::with_capacity(size);
                 for row in rows.iter_mut() {
                     // A row that lost a column needs its parity; a row
                     // that read whole does not, and never fetches it.
                     if !row.2.is_empty() {
-                        self.read_parity(row, children, cfg);
+                        self.read_parity(row, children, cfg, &first);
                     }
                     let (parity, data, lost, _) = row;
                     if !lost.is_empty() {
@@ -1163,7 +1173,7 @@ impl<'a> PoolReader<'a> {
                 let unit = 1u64 << ashift;
                 let padded = (size as u64).div_ceil(unit) * unit;
                 let m = raidz::map(offset, padded, *ashift, children.len() as u64, *nparity);
-                vec![self.read_row(m, children, None)]
+                vec![self.read_row(m, children, None, &Sides::new())]
             }
             Node::Draid {
                 cfg,
@@ -1174,85 +1184,189 @@ impl<'a> PoolReader<'a> {
                 let padded = (size as u64).div_ceil(unit) * unit;
                 cfg.map(offset, padded, *ashift)
                     .into_iter()
-                    .map(|m| self.read_row(m, children, Some(cfg)))
+                    .map(|m| self.read_row(m, children, Some(cfg), &Sides::new()))
                     .collect()
             }
             _ => Vec::new(),
         }
     }
 
-    /// Read one column of a row. A distributed spare column is read
-    /// from the child the dRAID permutation assigns to it at that offset.
+    /// Read one column of a row: from side `prefer` of its child where
+    /// the child has that many, and from the first side that answers
+    /// otherwise, or when that one does not.
     fn read_column(
         &self,
         c: &raidz::Column,
         children: &[Node],
         cfg: Option<&draid::Config>,
+        prefer: usize,
     ) -> Result<Vec<u8>, ReadError> {
         if c.size == 0 {
             // An empty column (dRAID short row): nothing on disk, but
             // it keeps its place in the parity equations.
             return Ok(Vec::new());
         }
+        let sides = Self::column_sides(c, children, cfg)?;
+        let preferred = (prefer < sides.len()).then_some(prefer);
+        let order = preferred
+            .into_iter()
+            .chain((0..sides.len()).filter(|&i| Some(i) != preferred));
+        let mut last = ReadError::NoMember;
+        for i in order {
+            let read = match &sides[i] {
+                Ok(side) => self.read_first(side, c.offset, c.size as usize),
+                Err(e) => Err(e.clone()),
+            };
+            match read {
+                Ok(b) => return Ok(b),
+                Err(e) => last = more_telling(last, e),
+            }
+        }
+        Err(last)
+    }
+
+    /// Every side one column can be read from, in vdev order: the child
+    /// itself, or each side of the `spare` or `replacing` vdev it is —
+    /// the shape OpenZFS leaves over a disk it puts another in for, under
+    /// raidz and dRAID alike — with a distributed spare resolved to the
+    /// child the dRAID's permutation gives it at that offset.
+    ///
+    /// The sides are not copies to choose among by which answers. The
+    /// disk that failed and still reads holds what it held when it
+    /// failed; OpenZFS knows by its dirty time log not to ask it, and
+    /// this reader has only the block's checksum to tell by. The first
+    /// side that answered was the column, whatever it held: a stale one
+    /// cost the row a parity, and with one more member gone a pool `zdb`
+    /// reads whole was unreadable — unless the stale disk was left out.
+    fn column_sides<'n>(
+        c: &raidz::Column,
+        children: &'n [Node],
+        cfg: Option<&draid::Config>,
+    ) -> Result<Vec<Result<&'n Node, ReadError>>, ReadError> {
         let child = children
             .get(c.devidx as usize)
             .ok_or(ReadError::UnknownVdev(c.devidx as u32))?;
-        self.read_raid_child(child, c, children, cfg, 0)
+        let mut sides = Vec::new();
+        Self::sides_under(child, c, children, cfg, 0, &mut sides);
+        Ok(sides)
     }
 
-    /// One child of a raidz or dRAID at a column. A distributed spare is
-    /// read from the child the dRAID's permutation gives it at that
-    /// offset; a `spare` or `replacing` vdev over one — the shape OpenZFS
-    /// leaves when it puts a distributed spare in for a failed disk —
-    /// through whichever side answers. That shape was read as a mirror
-    /// of an ordinary disk and of "a distributed spare outside its
-    /// dRAID": with the failed disk gone, its column was lost on every
-    /// row, and a pool `zdb` reads whole was called unreadable.
-    fn read_raid_child(
-        &self,
-        child: &Node,
+    fn sides_under<'n>(
+        child: &'n Node,
         c: &raidz::Column,
-        children: &[Node],
+        children: &'n [Node],
         cfg: Option<&draid::Config>,
         hops: usize,
-    ) -> Result<Vec<u8>, ReadError> {
+        sides: &mut Vec<Result<&'n Node, ReadError>>,
+    ) {
         if hops > children.len() {
-            return Err(ReadError::Unsupported(
+            sides.push(Err(ReadError::Unsupported(
                 "distributed spare chain loops".into(),
-            ));
+            )));
+            return;
         }
         match (child, cfg) {
             (Node::Dspare { spare_id }, Some(cfg)) => {
                 let Some(target) = cfg.spare_child(*spare_id, c.offset) else {
-                    return Err(ReadError::Unsupported(format!(
+                    sides.push(Err(ReadError::Unsupported(format!(
                         "distributed spare {spare_id} of a dRAID with {} spare(s)",
                         cfg.nspares
-                    )));
+                    ))));
+                    return;
                 };
                 trace!(
                     "draid",
                     "    dspare#{spare_id} at {:#x} -> child {target}",
                     c.offset
                 );
-                let next = children
-                    .get(target as usize)
-                    .ok_or(ReadError::UnknownVdev(target as u32))?;
-                self.read_raid_child(next, c, children, Some(cfg), hops + 1)
+                match children.get(target as usize) {
+                    Some(next) => Self::sides_under(next, c, children, Some(cfg), hops + 1, sides),
+                    None => sides.push(Err(ReadError::UnknownVdev(target as u32))),
+                }
             }
             (Node::Dspare { .. }, None) => {
-                Err(ReadError::Unsupported("dspare outside dRAID".into()))
+                sides.push(Err(ReadError::Unsupported("dspare outside dRAID".into())))
             }
-            (Node::Mirror { children: sides }, Some(_)) => {
-                let mut last = ReadError::NoMember;
-                for side in sides {
-                    match self.read_raid_child(side, c, children, cfg, hops + 1) {
-                        Ok(b) => return Ok(b),
-                        Err(e) => last = more_telling(last, e),
-                    }
+            (Node::Mirror { children: under }, _) => {
+                for side in under {
+                    Self::sides_under(side, c, children, cfg, hops + 1, sides);
                 }
-                Err(last)
             }
-            _ => self.read_first(child, c.offset, c.size as usize),
+            _ => sides.push(Ok(child)),
+        }
+    }
+
+    /// The choices of side there are for a block with these rows, past
+    /// the one it was read with: for each child with more than one side
+    /// and a column here, each side in turn. Nothing for a pool with no
+    /// vdev being replaced, which is every pool but a few.
+    fn other_sides(rows: &[Columns], children: &[Node], cfg: Option<&draid::Config>) -> Vec<Sides> {
+        let mut counts: BTreeMap<u64, usize> = BTreeMap::new();
+        for (_, _, _, m) in rows {
+            for c in m.cols[..m.acols].iter().filter(|c| c.size != 0) {
+                let n = Self::column_sides(c, children, cfg).map_or(1, |s| s.len());
+                if n > 1 {
+                    let e = counts.entry(c.devidx).or_insert(n);
+                    *e = (*e).max(n);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        let mut choice: Vec<usize> = vec![0; counts.len()];
+        'next: while out.len() < MAX_SIDE_CHOICES {
+            // Count up, each child's digit running over its sides.
+            for (digit, &n) in choice.iter_mut().zip(counts.values()) {
+                *digit += 1;
+                if *digit < n {
+                    out.push(
+                        counts
+                            .keys()
+                            .copied()
+                            .zip(choice.iter().copied())
+                            .filter(|&(_, side)| side != 0)
+                            .collect(),
+                    );
+                    continue 'next;
+                }
+                *digit = 0;
+            }
+            break;
+        }
+        out
+    }
+
+    /// The columns of a row that `sides` names, read again from the side
+    /// it names for each: the data columns that read and the parity
+    /// columns that were read. What a side does not give stays as it was.
+    fn reread_row(
+        &self,
+        row: &mut Columns,
+        children: &[Node],
+        cfg: Option<&draid::Config>,
+        sides: &Sides,
+    ) {
+        let (parity, data, lost, m) = row;
+        for (i, c) in m.data().iter().enumerate() {
+            let Some(&side) = sides.get(&c.devidx) else {
+                continue;
+            };
+            if lost.contains(&i) {
+                continue;
+            }
+            if let Ok(b) = self.read_column(c, children, cfg, side) {
+                data[i] = b;
+            }
+        }
+        for (i, c) in m.parity().iter().enumerate() {
+            let Some(&side) = sides.get(&c.devidx) else {
+                continue;
+            };
+            if parity[i].is_none() {
+                continue;
+            }
+            if let Ok(b) = self.read_column(c, children, cfg, side) {
+                parity[i] = Some(b);
+            }
         }
     }
 
@@ -1261,12 +1375,19 @@ impl<'a> PoolReader<'a> {
     /// them: a row whose data columns all read and verify has no use
     /// for its parity, and on a device every read counts (SPEC N-10) —
     /// OpenZFS itself reads only the data columns of a healthy stripe.
-    fn read_row(&self, m: raidz::Map, children: &[Node], cfg: Option<&draid::Config>) -> Columns {
+    fn read_row(
+        &self,
+        m: raidz::Map,
+        children: &[Node],
+        cfg: Option<&draid::Config>,
+        sides: &Sides,
+    ) -> Columns {
         let parity = vec![None; m.nparity];
         let mut data = Vec::with_capacity(m.acols.saturating_sub(m.nparity));
         let mut lost = Vec::new();
         for (i, c) in m.data().iter().enumerate() {
-            match self.read_column(c, children, cfg) {
+            let side = sides.get(&c.devidx).copied().unwrap_or(0);
+            match self.read_column(c, children, cfg, side) {
                 Ok(b) => data.push(b),
                 Err(e) => {
                     trace!("raidz", "    data column {i} dev{}: {e}", c.devidx);
@@ -1280,13 +1401,20 @@ impl<'a> PoolReader<'a> {
 
     /// Read the parity columns of a row that needs them — a data column
     /// was lost, or the row read whole did not verify. Once.
-    fn read_parity(&self, row: &mut Columns, children: &[Node], cfg: Option<&draid::Config>) {
+    fn read_parity(
+        &self,
+        row: &mut Columns,
+        children: &[Node],
+        cfg: Option<&draid::Config>,
+        sides: &Sides,
+    ) {
         let (parity, _, _, m) = row;
         for (i, c) in m.parity().iter().enumerate() {
             if parity[i].is_some() {
                 continue;
             }
-            parity[i] = match self.read_column(c, children, cfg) {
+            let side = sides.get(&c.devidx).copied().unwrap_or(0);
+            parity[i] = match self.read_column(c, children, cfg, side) {
                 Ok(b) => Some(b),
                 Err(e) => {
                     trace!("raidz", "    parity column dev{}: {e}", c.devidx);
@@ -1298,9 +1426,10 @@ impl<'a> PoolReader<'a> {
 
     /// Read and verify the `psize` bytes behind a DVA on a raidz or dRAID
     /// node, reconstructing missing columns from parity and, if the
-    /// checksum still fails, distrusting every combination of up to
-    /// `nparity` readable columns of one row — parity rows and data
-    /// columns alike — as `vdev_raidz_combrec` does.
+    /// checksum still fails, reading the columns of a vdev being
+    /// replaced from its other side, then distrusting every combination
+    /// of up to `nparity` readable columns of one row — parity rows and
+    /// data columns alike — as `vdev_raidz_combrec` does.
     fn read_striped(
         &self,
         node: &Node,
@@ -1354,9 +1483,10 @@ impl<'a> PoolReader<'a> {
                 result,
             });
         };
+        let first = Sides::new();
         for row in rows.iter_mut() {
             if !row.2.is_empty() {
-                self.read_parity(row, children, cfg);
+                self.read_parity(row, children, cfg, &first);
             }
             let (parity, data, lost, _) = row;
             let available = parity.iter().filter(|p| p.is_some()).count();
@@ -1395,11 +1525,35 @@ impl<'a> PoolReader<'a> {
             Verify::Unsupported => return Err(ReadError::ChecksumUnsupported),
             Verify::Mismatch => {}
         }
-        // Combinatorial reconstruction, one row at a time (the other rows
-        // are kept as read). Now the parity is needed.
-        for row in rows.iter_mut() {
-            self.read_parity(row, children, cfg);
+        // The block as its other sides have it, where a child has more
+        // than one: the columns of that child read again from the side
+        // not taken, the lost ones rebuilt again, the rest kept as read.
+        let mut sets: Vec<(Sides, Vec<Columns>)> = Vec::new();
+        'sides: for sides in Self::other_sides(&rows, children, cfg) {
+            let mut other = rows.clone();
+            for row in other.iter_mut() {
+                self.reread_row(row, children, cfg, &sides);
+                let (parity, data, lost, _) = row;
+                if !lost.is_empty() && raidz::reconstruct(data, parity, lost).is_err() {
+                    continue 'sides;
+                }
+            }
+            let raw = assemble(&other);
+            let v = self.verify(bp, &raw);
+            trace!(
+                "raidz",
+                "    checksum with side(s) {sides:?} of the vdev(s) being replaced: {v:?}"
+            );
+            if matches!(v, Verify::Ok | Verify::NotChecked) {
+                record(attempts, Ok(v));
+                return Ok((raw, v));
+            }
+            sets.push((sides, other));
         }
+        sets.insert(0, (first, rows));
+        // Combinatorial reconstruction, one row at a time (the other rows
+        // are kept as read), for the block as each choice of side has
+        // it. Now the parity is needed.
         // One budget for the block. Counted per row it started again for
         // each row of a dRAID: sixteen rows, sixteen times the tries. And
         // shared among the rows, each taking its part of what is left:
@@ -1409,71 +1563,80 @@ impl<'a> PoolReader<'a> {
             MAX_COMBREC_TRIES.min((MAX_COMBREC_BYTES / (psize.max(1) as u64)).max(1) as usize);
         let mut tries = 0usize;
         let mut cut_short = false;
-        for r in 0..rows.len() {
-            let row_limit = row_share(tries, max_tries, rows.len() - r);
-            let (parity, data, lost, _) = &rows[r];
-            let available = parity.iter().filter(|p| p.is_some()).count();
-            let budget = available - lost.len();
-            let readable_parity: Vec<usize> =
-                (0..parity.len()).filter(|&i| parity[i].is_some()).collect();
-            let readable_data: Vec<usize> = (0..data.len()).filter(|i| !lost.contains(i)).collect();
-            let columns: Vec<(bool, usize)> = readable_parity
-                .iter()
-                .map(|&i| (true, i))
-                .chain(readable_data.iter().map(|&i| (false, i)))
-                .collect();
-            'row: for k in 1..=budget.min(columns.len()) {
-                for combo in Combinations::new(columns.len(), k) {
-                    if tries >= row_limit {
-                        cut_short = true;
-                        break 'row;
-                    }
-                    tries += 1;
-                    let mut bad_parity: Vec<usize> = Vec::new();
-                    let mut missing = lost.clone();
-                    for &j in &combo {
-                        match columns[j] {
-                            (true, i) => bad_parity.push(i),
-                            (false, i) => missing.push(i),
+        let nsets = sets.len();
+        let nrows = sets[0].1.len();
+        for (s, (sides, rows)) in sets.iter_mut().enumerate() {
+            for row in rows.iter_mut() {
+                self.read_parity(row, children, cfg, sides);
+            }
+            let set_limit = row_share(tries, max_tries, nsets - s);
+            for r in 0..rows.len() {
+                let row_limit = row_share(tries, set_limit, rows.len() - r);
+                let (parity, data, lost, _) = &rows[r];
+                let available = parity.iter().filter(|p| p.is_some()).count();
+                let budget = available.saturating_sub(lost.len());
+                let readable_parity: Vec<usize> =
+                    (0..parity.len()).filter(|&i| parity[i].is_some()).collect();
+                let readable_data: Vec<usize> =
+                    (0..data.len()).filter(|i| !lost.contains(i)).collect();
+                let columns: Vec<(bool, usize)> = readable_parity
+                    .iter()
+                    .map(|&i| (true, i))
+                    .chain(readable_data.iter().map(|&i| (false, i)))
+                    .collect();
+                'row: for k in 1..=budget.min(columns.len()) {
+                    for combo in Combinations::new(columns.len(), k) {
+                        if tries >= row_limit {
+                            cut_short = true;
+                            break 'row;
                         }
-                    }
-                    missing.sort_unstable();
-                    let usable: Vec<Option<Vec<u8>>> = parity
-                        .iter()
-                        .enumerate()
-                        .map(|(i, p)| {
-                            if bad_parity.contains(&i) {
-                                None
-                            } else {
-                                p.clone()
+                        tries += 1;
+                        let mut bad_parity: Vec<usize> = Vec::new();
+                        let mut missing = lost.clone();
+                        for &j in &combo {
+                            match columns[j] {
+                                (true, i) => bad_parity.push(i),
+                                (false, i) => missing.push(i),
                             }
-                        })
-                        .collect();
-                    let usable_count = usable.iter().filter(|p| p.is_some()).count();
-                    if missing.is_empty() || missing.len() > usable_count {
-                        continue;
-                    }
-                    // Only this row's data is rebuilt; the rest of the
-                    // block is as read, and is not copied for each try.
-                    let mut work = rows[r].1.clone();
-                    if raidz::reconstruct(&mut work, &usable, &missing).is_err() {
-                        continue;
-                    }
-                    let mut raw: Vec<u8> = Vec::with_capacity(psize);
-                    for (i, (_, data, _, _)) in rows.iter().enumerate() {
-                        for column in if i == r { &work } else { data } {
-                            raw.extend_from_slice(column);
                         }
-                    }
-                    raw.truncate(psize);
-                    let v = self.verify(bp, &raw);
-                    if matches!(v, Verify::Ok | Verify::NotChecked) {
-                        trace!(
-                            "raidz",
-                            "    combinatorial reconstruction succeeded (row {r}): data columns {missing:?} rebuilt, parity rows {bad_parity:?} distrusted"
-                        );
-                        record(attempts, Ok(v));
-                        return Ok((raw, v));
+                        missing.sort_unstable();
+                        let usable: Vec<Option<Vec<u8>>> = parity
+                            .iter()
+                            .enumerate()
+                            .map(|(i, p)| {
+                                if bad_parity.contains(&i) {
+                                    None
+                                } else {
+                                    p.clone()
+                                }
+                            })
+                            .collect();
+                        let usable_count = usable.iter().filter(|p| p.is_some()).count();
+                        if missing.is_empty() || missing.len() > usable_count {
+                            continue;
+                        }
+                        // Only this row's data is rebuilt; the rest of the
+                        // block is as read, and is not copied for each try.
+                        let mut work = rows[r].1.clone();
+                        if raidz::reconstruct(&mut work, &usable, &missing).is_err() {
+                            continue;
+                        }
+                        let mut raw: Vec<u8> = Vec::with_capacity(psize);
+                        for (i, (_, data, _, _)) in rows.iter().enumerate() {
+                            for column in if i == r { &work } else { data } {
+                                raw.extend_from_slice(column);
+                            }
+                        }
+                        raw.truncate(psize);
+                        let v = self.verify(bp, &raw);
+                        if matches!(v, Verify::Ok | Verify::NotChecked) {
+                            trace!(
+                                "raidz",
+                                "    combinatorial reconstruction succeeded (row {r}): data columns {missing:?} rebuilt, parity rows {bad_parity:?} distrusted"
+                            );
+                            record(attempts, Ok(v));
+                            return Ok((raw, v));
+                        }
                     }
                 }
             }
@@ -1481,8 +1644,7 @@ impl<'a> PoolReader<'a> {
         if cut_short {
             trace!(
                 "raidz",
-                "    combinatorial reconstruction gave up after {tries} of {max_tries} tries, shared among {} row(s)",
-                rows.len()
+                "    combinatorial reconstruction gave up after {tries} of {max_tries} tries, shared among {nrows} row(s)"
             );
         } else {
             trace!(
@@ -2555,6 +2717,101 @@ mod tests {
             .bytes(Endian::Little);
         let bp = BlkPtr::parse(&raw, Endian::Little).unwrap();
         assert_eq!(reader.read_block(&bp, false).unwrap().data, data);
+    }
+
+    /// A raidz child OpenZFS put a hot spare in for is `spare{failed
+    /// disk, spare}`, and the failed disk, when it still reads, holds
+    /// what it held when it failed. Its column was taken for the block's
+    /// because it answered first: with every other member there the
+    /// parity paid for it, and with one more gone the block was lost —
+    /// though the spare beside it had the column. The side the checksum
+    /// accepts is the one read.
+    #[test]
+    fn a_stale_disk_under_a_spare_vdev_does_not_stand_for_its_column() {
+        use zfs_ondisk::label::VdevNode;
+        let mut a = striped_by_hand("raidz", 3, 1, None);
+        let leaf = |id: u64, guid: u64| VdevNode {
+            kind: "file".into(),
+            id,
+            guid,
+            ..VdevNode::default()
+        };
+        a.tops[0].tree.children[1] = VdevNode {
+            kind: "spare".into(),
+            id: 1,
+            guid: 50,
+            children: vec![leaf(0, 2), leaf(1, 40)],
+            ..VdevNode::default()
+        };
+        a.tops[0].members.push(crate::pool::Member {
+            guid: 40,
+            path: None,
+            present: Some(3),
+        });
+        a.devices = (0..4).collect();
+
+        let data: Vec<u8> = (0..4096u32).map(|i| (i * 31 % 253) as u8).collect();
+        let offset = 0x2_0000u64;
+        let m = raidz::map(offset, data.len() as u64, 9, 3, 1);
+        let mut at = 0usize;
+        let cols: Vec<Vec<u8>> = m
+            .data()
+            .iter()
+            .map(|c| {
+                let col = data[at..at + c.size as usize].to_vec();
+                at += c.size as usize;
+                col
+            })
+            .collect();
+        let parity = raidz::generate_parity(&cols, 1);
+        // Device 1 is the disk that failed: what it has at the block's
+        // place is from before. Device 3 is the spare, and has the column.
+        let mut images = vec![vec![0u8; 5 << 20]; 4];
+        let mut on_the_spare = 0;
+        for (c, bytes) in m
+            .parity()
+            .iter()
+            .zip(parity.iter())
+            .chain(m.data().iter().zip(cols.iter()))
+        {
+            if c.devidx == 1 {
+                crate::fixture::write_at_dva(&mut images[3], c.offset, bytes);
+                let stale = vec![0x5au8; bytes.len()];
+                crate::fixture::write_at_dva(&mut images[1], c.offset, &stale);
+                on_the_spare += 1;
+            } else {
+                crate::fixture::write_at_dva(&mut images[c.devidx as usize], c.offset, bytes);
+            }
+        }
+        assert_eq!(on_the_spare, 1, "one column of the block is on the child");
+        let raw = Builder::new()
+            .dva(0, 0, offset, data.len() as u64 * 3 / 2, false)
+            .sizes(data.len() as u64, data.len() as u64)
+            .props(2, 7, ot::ZVOL, 0)
+            .births(0, 100, 1)
+            .cksum(zfs_ondisk::checksum::fletcher4(&data, Endian::Little))
+            .bytes(Endian::Little);
+        let bp = BlkPtr::parse(&raw, Endian::Little).unwrap();
+        let sources: Vec<MemSource> = images.into_iter().map(MemSource::new).collect();
+        // Every member, then each of the other two children gone in turn:
+        // the stale disk is given each time.
+        for gone in [None, Some(0usize), Some(2)] {
+            let mut a = a.clone();
+            if let Some(g) = gone {
+                a.tops[0].members[g].present = None;
+            }
+            let devs: Vec<Option<&dyn BlockSource>> = sources
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (Some(i) != gone).then_some(s as &dyn BlockSource))
+                .collect();
+            let reader = PoolReader::new(&a, devs);
+            assert_eq!(
+                reader.read_block(&bp, false).map(|b| b.data),
+                Ok(data.clone()),
+                "member {gone:?} gone"
+            );
+        }
     }
 
     /// A block no combination of columns repairs gives up in bounded
