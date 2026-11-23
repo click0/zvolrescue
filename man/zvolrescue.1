@@ -412,6 +412,10 @@ file still hashes to the SHA-256 recorded there; one that does not is
 extracted again, saying so.
 An image with blocks written as zeros is extracted again: what did not
 read then may read now.
+What is recorded of a kept image is this run's \(em the dataset's
+name, the time of its TXG, its intent log \(em and only its block
+counts are the manifest's, where they are that volume's; an entry
+whose sizes or counts are not is extracted again.
 .It Fl -hash Ar list
 Also hash the image with these, as it is written, for a toolchain
 that wants them:

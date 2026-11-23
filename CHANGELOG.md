@@ -17,6 +17,21 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ### Fixed
 
+* **`dump -r --resume`: the record of a kept image is the run's own.**
+  An image the run being resumed had finished is kept when the file
+  still hashes to what that run's manifest records — and the record of
+  it was the manifest's entry copied whole: its dataset name, its
+  time, its counts, checked for nothing but the GUID, the TXG, the
+  path, the length and the hash. An entry edited to name another
+  dataset at another time was printed, escape sequences and all, and
+  written to the evidence log as what this run found. The run says
+  what it has in hand itself — the name, the time of the TXG, the
+  intent log, the dataset's warnings — and takes the block counts from
+  the manifest only where they can be that volume's; an entry whose
+  sizes or counts are not is extracted again. An image was also
+  "whole" when its blocks written as zeros and its blocks salvaged
+  added up to none, which 2^64 − 1 and 1 do.
+
 * **`--resume` took a state that vouched for nothing, and kept what
   lay past the one it took.** A resume state says how many blocks are
   done and what they hash to, and a resume goes on only when the

@@ -174,7 +174,12 @@ fn earlier_run(dir: &Path, pool_guid: &str) -> Vec<DumpOut> {
                     && v.interrupted_at.is_none()
                     && v.output_failed.is_none()
                     && v.stopped_by_medium.is_none()
-                    && v.blocks_zeroed + v.blocks_salvaged == 0
+                    // Each of them none: added up, a count of
+                    // 2^64 - 1 zeroed and one salvaged came to 0, and
+                    // the image was whole.
+                    && v.blocks_zeroed == 0
+                    && v.blocks_salvaged == 0
+                    && v.bad.is_empty()
             })
             .collect(),
         Ok(run) => {
@@ -199,10 +204,24 @@ fn earlier_run(dir: &Path, pool_guid: &str) -> Vec<DumpOut> {
 /// finished: that run's manifest names it whole, at this TXG and for
 /// this dataset, nothing left for a resume state to take up, and the
 /// file hashes to what the manifest records.
+///
+/// The record of a kept image is this run's. The manifest's entry was
+/// copied whole — its dataset name, its time, its counts — checked for
+/// nothing but the GUID, the TXG, the path, the length and the hash,
+/// and so printed and written to the evidence log as what this run
+/// found: an entry edited to name another dataset, at another time,
+/// was this run's record of the volume. What the run has in hand it
+/// says itself — the name, the time of the TXG, the intent log — and
+/// what only reading the volume again would give, its block counts, is
+/// taken from the manifest where it is the volume's.
+#[allow(clippy::too_many_arguments)]
 fn keep_earlier(
+    reader: &PoolReader<'_>,
     earlier: &[DumpOut],
     ds: &Dataset,
     txg: u64,
+    newest: bool,
+    time: &str,
     output: &Path,
     extra: Extra,
 ) -> Earlier {
@@ -250,7 +269,42 @@ fn keep_earlier(
         );
         return Earlier::Extract;
     }
+    let its_own = ds.volsize.is_none_or(|size| size == was.volsize)
+        && ds.volblocksize.is_none_or(|b| b == was.blocksize)
+        && was.blocksize != 0
+        // The blocks counted are those up to the last one written;
+        // past it the volume is one hole.
+        && was.blocks_total <= was.volsize.div_ceil(was.blocksize)
+        && was
+            .blocks_read
+            .checked_add(was.blocks_holes)
+            .is_some_and(|n| n <= was.blocks_total)
+        && was.blocks_unverified <= was.blocks_read
+        && was.bytes_written <= was.volsize;
+    if !its_own {
+        eprintln!(
+            "zvolrescue: {}: what the manifest of the run being resumed says of it is not this volume's (its sizes or its block counts); extracting it again",
+            output.display()
+        );
+        return Earlier::Extract;
+    }
+    let log = zfs_read::zil::intent_log(reader, ds, txg);
     let mut v = was.clone();
+    v.dataset = ds.name.clone();
+    v.time = time.to_string();
+    v.encryption = ds.encryption.as_ref().map(Encryption::suite_name);
+    v.intent_log = zvol_common::intent_log_json(log.as_ref());
+    v.intent_log_says = log
+        .as_ref()
+        .filter(|l| l.unreplayed > 0)
+        .map(|l| l.says(&ds.name, txg, newest));
+    v.warnings = ds
+        .warnings
+        .iter()
+        .filter(|w| !(reader.has_keys() && w.contains("encrypted block: no key")))
+        .cloned()
+        .collect();
+    v.seconds = 0.0;
     v.kept = true;
     v.finished = true;
     v.image_bytes = len;
@@ -1202,7 +1256,9 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         }
         left.retain(|l| *l != output);
         if !earlier.is_empty() {
-            match keep_earlier(&earlier, ds, txg, &output, opts.hash) {
+            match keep_earlier(
+                &reader, &earlier, ds, txg, newest, &time, &output, opts.hash,
+            ) {
                 Earlier::Kept(v) => {
                     if !g.quiet {
                         eprintln!(

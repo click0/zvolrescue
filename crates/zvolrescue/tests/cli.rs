@@ -3223,6 +3223,60 @@ fn a_bulk_resume_keeps_the_images_already_finished() {
         assert_eq!(err.contains("keeping tank/vm/disk0"), kept, "{guid}: {err}");
         assert_eq!(err.contains("is of pool"), !kept, "{guid}: {err}");
     }
+
+    // The record of a kept image is this run's own. The manifest's
+    // entry was copied whole into it, and one edited to name another
+    // dataset at another time — an escape sequence in the name — was
+    // printed so and written to the evidence log as what this run
+    // found.
+    let mut m = manifest.clone();
+    m["volumes"][0]["dataset"] = "tank/secret\u{1b}[2K\rFORGED".into();
+    m["volumes"][0]["time"] = "1999-01-01T00:00:00Z".into();
+    m["volumes"][0]["warnings"] = serde_json::json!(["nothing to see"]);
+    std::fs::write(out.join("manifest.json"), m.to_string()).unwrap();
+    let (code, text, err) = run(&[
+        "-f", "json", "dump", "-r", "--resume", "tank", &paths[0], &paths[1], "-o", &o,
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(err.contains("keeping tank/vm/disk0"), "{err}");
+    assert!(!text.contains("FORGED") && !text.contains("1999"), "{text}");
+    let v = &json(&text)["volumes"][0];
+    assert_eq!(v["dataset"], "tank/vm/disk0", "{v}");
+    assert_eq!(v["kept"], true, "{v}");
+    assert_eq!(v["time"], manifest["volumes"][0]["time"], "{v}");
+    assert!(v.get("warnings").is_none(), "{v}");
+
+    // Counts that are not this volume's are not taken with it: the
+    // image is extracted again. Nor is an image whole whose blocks
+    // written as zeros and salvaged add up to none.
+    for (key, value, why) in [
+        (
+            "blocks_total",
+            serde_json::json!(4097),
+            "is not this volume's",
+        ),
+        ("blocksize", serde_json::json!(512), "is not this volume's"),
+        (
+            "blocks_read",
+            serde_json::json!(u64::MAX),
+            "is not this volume's",
+        ),
+        ("blocks_zeroed", serde_json::json!(u64::MAX), ""),
+    ] {
+        let mut m = manifest.clone();
+        m["volumes"][0][key] = value;
+        if key == "blocks_zeroed" {
+            m["volumes"][0]["blocks_salvaged"] = 1.into();
+        }
+        std::fs::write(out.join("manifest.json"), m.to_string()).unwrap();
+        let (code, _, err) = run(&[
+            "dump", "-r", "--resume", "tank", &paths[0], &paths[1], "-o", &o,
+        ]);
+        assert_eq!(code, 0, "{key}: {err}");
+        assert!(!err.contains("keeping"), "{key}: {err}");
+        assert!(err.contains(why), "{key}: {err}");
+        assert_eq!(std::fs::read(&image).unwrap(), whole, "{key}");
+    }
 }
 
 /// `dump -r VOL@SNAP` extracts that snapshot of every volume under VOL
