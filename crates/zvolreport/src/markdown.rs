@@ -194,10 +194,18 @@ pub fn render(r: &Report) -> String {
         );
         let _ = writeln!(s, "|---|---|---|---|---|---|---|");
         for (i, e) in r.extractions.iter().enumerate() {
-            let complete = if e.complete() {
+            // What the file holds now comes first: an image a later run
+            // wrote over is not there to be complete or not.
+            let complete = if e.overwritten_by.is_some() {
+                "no — written over by a later run"
+            } else if e.complete() && e.kept {
+                "yes — kept, as an earlier run left it"
+            } else if e.complete() {
                 "yes"
             } else if r.finished_later(i) {
                 "no — finished by a later run"
+            } else if e.ran_to_its_end() {
+                "no — not all of it could be read"
             } else {
                 "no"
             };

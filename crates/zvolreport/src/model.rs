@@ -17,9 +17,61 @@ fn is_zero(n: &u64) -> bool {
     *n == 0
 }
 
+/// A path under `path`, with `path_hex` beside it when it is not text
+/// ([`PathText`]).
+mod path_text {
+    use super::*;
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(p: &std::path::Path, s: S) -> Result<S::Ok, S::Error> {
+        PathText::of(p).serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<PathBuf, D::Error> {
+        PathText::deserialize(d).map(|t| t.path())
+    }
+}
+
+/// The same under `output`, with `output_hex`.
+mod output_text {
+    use super::*;
+    use serde::{Deserializer, Serializer};
+
+    #[derive(Serialize, Deserialize)]
+    struct Output {
+        output: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_hex: Option<String>,
+    }
+
+    pub fn serialize<S: Serializer>(p: &std::path::Path, s: S) -> Result<S::Ok, S::Error> {
+        let t = PathText::of(p);
+        Output {
+            output: t.path,
+            output_hex: t.path_hex,
+        }
+        .serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<PathBuf, D::Error> {
+        Output::deserialize(d).map(|o| {
+            PathText {
+                path: o.output,
+                path_hex: o.output_hex,
+            }
+            .path()
+        })
+    }
+}
+
 /// One evidence log the report was built from.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogRef {
+    /// Where the log is. Written as an evidence record writes a path:
+    /// one that is not text has its bytes beside it. Written plainly,
+    /// a build run from a directory whose name is not text ended in a
+    /// panic over a report it could not write.
+    #[serde(flatten, with = "path_text")]
     pub path: PathBuf,
     /// Records read from it.
     pub records: usize,
@@ -149,6 +201,7 @@ pub struct Pool {
 pub struct Extraction {
     pub dataset: String,
     pub txg: u64,
+    #[serde(flatten, with = "output_text")]
     pub output: PathBuf,
     pub size: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -193,6 +246,27 @@ pub struct Extraction {
     /// was born at, which no uberblock need lead to any more.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub carved: bool,
+    /// Kept, not extracted: a `dump -r --resume` found the image an
+    /// earlier run had finished, whole and hashing as that run's
+    /// manifest records, and left it. The run read nothing of the pool
+    /// for it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub kept: bool,
+    /// What the run could not look at: objects whose block of the
+    /// object array did not read, newer transaction groups passed over
+    /// because they did not read. What is there is whole, and is not
+    /// all there was to extract.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unread: Vec<String>,
+    /// A later run wrote over the output, and what this extraction
+    /// wrote is no longer in the file: which run did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overwritten_by: Option<String>,
+    /// Whether the output was finished to its length and flushed, where
+    /// the record says. Not part of the report: it decides what is said
+    /// of the hash of an output that failed.
+    #[serde(skip)]
+    pub finished: Option<bool>,
     /// The pool the run read, as its record names it: what R-06 holds
     /// the TXG against. Not part of the report — `verify` compares the
     /// extractions a report holds with those its logs give again, and a
@@ -202,14 +276,19 @@ pub struct Extraction {
 }
 
 impl Extraction {
-    /// Whether the image is the whole volume as it could be read: not
-    /// stopped by `--strict`, by a signal or by a device, and taken whole
-    /// by its output.
-    pub fn complete(&self) -> bool {
+    /// Whether the run went to its end: not stopped by `--strict`, by a
+    /// signal or by a device, and taken whole by its output.
+    pub fn ran_to_its_end(&self) -> bool {
         !self.aborted
             && self.interrupted_at.is_none()
             && self.stopped_by_medium.is_none()
             && self.output_failed.is_none()
+    }
+
+    /// Whether the image is the whole volume as it could be read: the
+    /// run went to its end, and left nothing it could not look at.
+    pub fn complete(&self) -> bool {
+        self.ran_to_its_end() && self.unread.is_empty()
     }
 
     /// Whether `later` finished what this one left: the same volume, at
@@ -217,11 +296,13 @@ impl Extraction {
     /// and then `--resume`d is two extractions, and only the first of
     /// them is not the whole volume.
     pub fn finished_by(&self, later: &Extraction) -> bool {
-        !self.complete()
-            && later.complete()
-            && later.dataset == self.dataset
-            && later.txg == self.txg
-            && later.output == self.output
+        !self.ran_to_its_end() && later.ran_to_its_end() && self.same_image(later)
+    }
+
+    /// The same volume, at the same TXG, into the same file: what a
+    /// `--resume` goes on with.
+    pub fn same_image(&self, other: &Extraction) -> bool {
+        other.dataset == self.dataset && other.txg == self.txg && other.output == self.output
     }
 }
 

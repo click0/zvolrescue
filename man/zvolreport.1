@@ -69,6 +69,19 @@ A log named twice is read once, and a record that is also in an
 earlier log \(em a copy of it \(em is counted once, with a warning.
 Each extraction is held to the TXG window of the pool it read, and one
 that a later run finished into the same file is not called partial.
+One whose output a later run wrote over \(em another TXG, another
+tool \(em is said to be no longer in the file, with the run that did;
+one that left objects unread or was taken at an older TXG because a
+newer one did not read is not complete, and says which; an image a
+.Fl -resume
+kept from an earlier run is marked as kept.
+What
+.Nm
+itself read \(em an earlier report, its signature, the keys, the
+logs, the files a
+.Cm verify
+hashed \(em is not evidence of the case, so a report built over one
+that was verified is checked back clean.
 A log with no record in it at all \(em an empty file,
 .Pa /dev/null
 \(em is not an evidence log (exit 2).
@@ -135,6 +148,7 @@ tools, hosts, evidence, commands, pools, outputs, extractions, warnings
 .Ql report
 fails \(em a report edited to match a changed file is caught here even
 when it is not signed.
+A report that names no log is borne out by nothing, and fails.
 A signature beside the report that
 .Fl -key
 was not given to check is listed as not checked.

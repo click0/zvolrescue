@@ -132,6 +132,10 @@ fn str_at(v: &serde_json::Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+fn flag(v: &serde_json::Value, key: &str) -> Option<bool> {
+    v.get(key).and_then(serde_json::Value::as_bool)
+}
+
 /// The pools a `scan` record described.
 fn pools_of(result: &serde_json::Value) -> Vec<Pool> {
     let Some(list) = result.get("pools").and_then(serde_json::Value::as_array) else {
@@ -221,6 +225,45 @@ fn tree_extraction(r: &Record) -> Option<Extraction> {
         .filter(|f| f.get("sha256").is_some_and(serde_json::Value::is_string))
         .collect();
     let count = |key: &str| u64_at(result, key).unwrap_or(0);
+    // What the run could not look at, in its own words: objects whose
+    // block of the object array did not read, and newer transaction
+    // groups it passed over because they did not read. Neither was in
+    // the report: an `objects` run short of 32 objects, and an `extract`
+    // that wrote the dataset as an older group had it — empty — were
+    // whole extractions, "0 errors", for the generic "exited 4" alone.
+    let list = |key: &str| {
+        result
+            .get(key)
+            .and_then(serde_json::Value::as_array)
+            .map_or(&[][..], Vec::as_slice)
+    };
+    let mut unread: Vec<String> = list("unread")
+        .iter()
+        .map(|u| {
+            let (first, last) = (u64_at(u, "first"), u64_at(u, "last"));
+            let why = str_at(u, "reason").unwrap_or_else(|| "did not read".into());
+            match (first, last) {
+                (Some(a), Some(b)) if a != b => {
+                    format!("objects {a}–{b} were not looked at: {why}")
+                }
+                (Some(a), _) => format!("object {a} was not looked at: {why}"),
+                _ => format!("part of it was not looked at: {why}"),
+            }
+        })
+        .collect();
+    unread.extend(
+        list("passed_over")
+            .iter()
+            .filter(|p| p.get("unread").and_then(serde_json::Value::as_bool) == Some(true))
+            .map(|p| {
+                format!(
+                    "a newer transaction group did not read and was passed over for an older one: {}",
+                    str_at(p, "reason").unwrap_or_else(|| {
+                        format!("txg {}", u64_at(p, "txg").unwrap_or(0))
+                    })
+                )
+            }),
+    );
     Some(Extraction {
         dataset: str_at(result, "dataset")?,
         txg: u64_at(result, "txg").unwrap_or(0),
@@ -242,6 +285,10 @@ fn tree_extraction(r: &Record) -> Option<Extraction> {
         stopped_by_medium: None,
         output_failed: None,
         carved: false,
+        kept: false,
+        unread,
+        overwritten_by: None,
+        finished: None,
         pool_guid: None,
         files: Some(written.len() as u64),
     })
@@ -284,10 +331,11 @@ fn extractions_of(result: &serde_json::Value) -> Vec<Extraction> {
                 interrupted_at: u64_at(v, "interrupted_at"),
                 stopped_by_medium: str_at(v, "stopped_by_medium"),
                 output_failed: str_at(v, "output_failed"),
-                carved: v
-                    .get("carved")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false),
+                carved: flag(v, "carved").unwrap_or(false),
+                kept: flag(v, "kept").unwrap_or(false),
+                unread: Vec::new(),
+                overwritten_by: None,
+                finished: flag(v, "output_finished"),
                 pool_guid: pool_guid.clone(),
                 files: None,
             })
@@ -307,6 +355,11 @@ pub fn assemble(records: &[(LogRef, Vec<Record>)], opts: &Options) -> Report {
     // A file written more than once (a `--resume`d dump) keeps the last
     // hash: that is what is on disk now.
     let mut outputs: BTreeMap<PathBuf, FileRef> = BTreeMap::new();
+    // The command that wrote each output last, and the command each
+    // extraction is of: what tells an extraction whose file a later run
+    // wrote over.
+    let mut last_writer: BTreeMap<PathBuf, usize> = BTreeMap::new();
+    let mut extracted_by: Vec<usize> = Vec::new();
     for (log, _) in records {
         for n in &log.left_out {
             warnings.push(format!(
@@ -375,6 +428,18 @@ pub fn assemble(records: &[(LogRef, Vec<Record>)], opts: &Options) -> Report {
         });
         for i in &r.inputs {
             let path = at_cwd(r, &i.path);
+            // What zvolreport read is the case's paperwork — a report,
+            // its signature, the key, the logs — and what a `verify`
+            // hashed, outputs among it. None of it is evidence of the
+            // case because zvolreport read it: taken as such, a report
+            // built over one a `verify` had read named the earlier
+            // report as evidence, at its earlier size, and failed its
+            // own check the moment it was written; and the private key
+            // a build signed with was listed, and hashed by `verify`.
+            // What is already evidence it adds itself to as a reader.
+            if r.tool == "zvolreport" && !evidence_by_path.contains_key(&path) {
+                continue;
+            }
             let e = evidence_by_path
                 .entry(path.clone())
                 .or_insert_with(|| Evidence {
@@ -432,6 +497,7 @@ pub fn assemble(records: &[(LogRef, Vec<Record>)], opts: &Options) -> Report {
         let written = (r.tool != "zvolreport").then_some(&r.outputs);
         for o in written.into_iter().flatten() {
             let path = at_cwd(r, &o.path);
+            last_writer.insert(path.clone(), commands.len() - 1);
             outputs.insert(
                 path.clone(),
                 FileRef {
@@ -462,11 +528,36 @@ pub fn assemble(records: &[(LogRef, Vec<Record>)], opts: &Options) -> Report {
         if r.tool == "zvolfiles" {
             extractions.extend(tree_extraction(r));
         } else {
-            extractions.extend(extractions_of(&r.result).into_iter().map(|mut e| {
-                e.output = at_cwd(r, &e.output);
-                e
-            }));
+            let of_run: Vec<Extraction> = extractions_of(&r.result)
+                .into_iter()
+                .map(|mut e| {
+                    e.output = at_cwd(r, &e.output);
+                    e
+                })
+                .collect();
+            // Newer transaction groups that name the dataset and do not
+            // read it, passed over for the one extracted: the image is
+            // of an older state than the pool's, and the report gave
+            // the group it was taken at without a word of why.
+            if let Some(first) = of_run.first() {
+                for u in r
+                    .result
+                    .get("unreadable_at")
+                    .and_then(serde_json::Value::as_array)
+                    .map_or(&[][..], Vec::as_slice)
+                {
+                    warnings.push(format!(
+                        "{}: txg {} names it and does not read it ({}); extracted at the older txg {}",
+                        first.dataset,
+                        u64_at(u, "txg").unwrap_or(0),
+                        str_at(u, "error").unwrap_or_else(|| "no reason recorded".into()),
+                        first.txg
+                    ));
+                }
+            }
+            extractions.extend(of_run);
         }
+        extracted_by.resize(extractions.len(), commands.len() - 1);
         if r.status != 0 {
             warnings.push(format!(
                 "{} exited {} : {}",
@@ -477,8 +568,49 @@ pub fn assemble(records: &[(LogRef, Vec<Record>)], opts: &Options) -> Report {
         }
     }
 
+    // An extraction whose output a later run wrote over: the file holds
+    // what that run wrote, under the hash that run recorded, and the
+    // extraction stayed in the report as it was — its size, its hash,
+    // "complete" — with `verify` passing the file. Not one stopped early
+    // that a later run of the same image went on with: that is the same
+    // image, and is said below.
+    for i in 0..extractions.len() {
+        let e = &extractions[i];
+        let (Some(&writer), Some(now)) = (last_writer.get(&e.output), outputs.get(&e.output))
+        else {
+            continue;
+        };
+        let changed = match (&e.sha256, &now.sha256) {
+            (Some(a), Some(b)) => a != b,
+            _ => false,
+        };
+        let gone_on_with =
+            !e.ran_to_its_end() && extractions[i + 1..].iter().any(|later| e.same_image(later));
+        if writer > extracted_by[i] && changed && !gone_on_with {
+            let by = &commands[writer];
+            extractions[i].overwritten_by = Some(format!(
+                "{} at {}",
+                by.tool,
+                zvol_common::timefmt::iso8601(by.ts)
+            ));
+        }
+    }
+
     // R-06: what a reader should not have to notice for themselves.
     for (i, e) in extractions.iter().enumerate() {
+        if let Some(by) = &e.overwritten_by {
+            warnings.push(format!(
+                "{}: {} was written again by {by}; what this extraction wrote there{} is no longer in it",
+                e.dataset,
+                e.output.display(),
+                e.sha256
+                    .as_ref()
+                    .map_or(String::new(), |h| format!(" (sha256 {h})"))
+            ));
+        }
+        for what in &e.unread {
+            warnings.push(format!("{}: {what}", e.dataset));
+        }
         // Interrupted, then finished by `--resume`: what is in the file
         // now is the whole volume, and saying it is not was wrong.
         if extractions[i + 1..]
@@ -513,10 +645,20 @@ pub fn assemble(records: &[(LogRef, Vec<Record>)], opts: &Options) -> Report {
                 ));
             }
             if let Some(why) = &e.output_failed {
+                // An output that refused a block was still finished to
+                // the blocks before it, and the hash recorded is that
+                // image's: "not that of the file" was said of it all the
+                // same, of a hash `verify` then passed. It is said where
+                // the record does not say the output was finished.
                 warnings.push(format!(
-                    "{}: {why}; {} is not the whole volume, and the hash recorded is not that of the file",
+                    "{}: {why}; {} is not the whole volume{}",
                     e.dataset,
-                    e.output.display()
+                    e.output.display(),
+                    if e.finished == Some(true) {
+                        ": it is the blocks before that, which is what the hash recorded is of"
+                    } else {
+                        ", and the hash recorded is not known to be that of the file"
+                    }
                 ));
             }
         }
@@ -1433,6 +1575,300 @@ mod tests {
                 .any(|w| w.contains("not the whole volume")),
             "{:?}",
             r.warnings
+        );
+    }
+
+    fn out(path: &str, sha256: &str) -> EvFileRef {
+        EvFileRef {
+            path: PathBuf::from(path),
+            kind: None,
+            size: 1024,
+            sha256: Some(sha256.into()),
+            sha1: None,
+            md5: None,
+        }
+    }
+
+    /// A dump record that wrote `/case/disk0.img` under `sha256`.
+    fn dumped(ts: u64, txg: u64, sha256: &str) -> Record {
+        let mut d = dump(txg, 0, false);
+        d["volumes"][0]["sha256"] = sha256.into();
+        let mut r = record("zvolrescue", ts, 0, d);
+        r.outputs.push(out("/case/disk0.img", sha256));
+        r
+    }
+
+    /// An extraction whose output a later run wrote over is not in the
+    /// file any more, and the report says which run did: it stayed there
+    /// with its size and hash, "complete", the file passing `verify`
+    /// under the later run's hash. A run stopped early that a later one
+    /// of the same image went on with is the same image still.
+    #[test]
+    fn an_output_a_later_run_wrote_over_is_no_longer_the_extractions() {
+        let mut timeline = record("zvoltimeline", 20, 0, serde_json::json!({"events": []}));
+        timeline.outputs.push(out("/case/disk0.img", "ee"));
+        let r = assemble(&log(vec![dumped(10, 9, "aa"), timeline]), &opts());
+        let e = &r.extractions[0];
+        assert_eq!(
+            e.overwritten_by.as_deref(),
+            Some("zvoltimeline at 1970-01-01T00:00:20Z")
+        );
+        assert!(
+            r.warnings.iter().any(|w| w.contains(
+                "/case/disk0.img was written again by zvoltimeline at 1970-01-01T00:00:20Z; what this extraction wrote there (sha256 aa) is no longer in it"
+            )),
+            "{:?}",
+            r.warnings
+        );
+        assert!(
+            crate::markdown::render(&r).contains("no — written over by a later run"),
+            "{}",
+            crate::markdown::render(&r)
+        );
+        // The same volume at another TXG into the same file: the first
+        // image is gone, the second is there.
+        let r = assemble(
+            &log(vec![dumped(10, 9, "aa"), dumped(20, 8, "bb")]),
+            &opts(),
+        );
+        assert!(r.extractions[0].overwritten_by.is_some());
+        assert!(r.extractions[1].overwritten_by.is_none());
+        // Written again as it was — a run repeated — it is there still.
+        let r = assemble(
+            &log(vec![dumped(10, 9, "aa"), dumped(20, 9, "aa")]),
+            &opts(),
+        );
+        assert!(r.extractions.iter().all(|e| e.overwritten_by.is_none()));
+        // Interrupted, then gone on with by `--resume`: one image.
+        let mut first = dumped(10, 9, "aa");
+        first.result["volumes"][0]["interrupted_at"] = 3.into();
+        let r = assemble(&log(vec![first, dumped(20, 9, "bb")]), &opts());
+        assert!(
+            r.extractions.iter().all(|e| e.overwritten_by.is_none()),
+            "{:?}",
+            r.warnings
+        );
+        assert!(r.finished_later(0));
+    }
+
+    /// What a `zvolfiles` run could not look at is in the report, and
+    /// the extraction is not whole: objects whose block of the object
+    /// array did not read, and newer transaction groups that did not
+    /// read and were passed over. Both were whole extractions, "0
+    /// errors", under the generic "exited 4".
+    #[test]
+    fn what_a_run_could_not_look_at_is_in_the_report() {
+        let objects = record(
+            "zvolfiles",
+            11,
+            4,
+            serde_json::json!({
+                "dataset": "sp/fs", "txg": 19, "output": "/case/objs",
+                "objects": [{"object": 2, "size": 10, "sha256": "aa"}],
+                "written": 1, "incomplete": 0,
+                "unread": [{"first": 32, "last": 63, "block": 1,
+                            "reason": "their dnode block 1 could not be read"}],
+            }),
+        );
+        let extract = record(
+            "zvolfiles",
+            12,
+            4,
+            serde_json::json!({
+                "dataset": "sp/fs", "txg": 6, "output": "/case/tree", "files": [],
+                "written": 0, "incomplete": 0, "failed": 0,
+                "passed_over": [
+                    {"txg": 19, "reason": "sp/fs at txg 19: every copy failed its checksum", "unread": true},
+                    {"txg": 7, "reason": "txg 7: no dataset sp/fs", "unread": false},
+                ],
+            }),
+        );
+        let r = assemble(&log(vec![objects, extract]), &opts());
+        let (o, x) = (&r.extractions[0], &r.extractions[1]);
+        assert_eq!(
+            o.unread,
+            ["objects 32–63 were not looked at: their dnode block 1 could not be read"]
+        );
+        assert_eq!(
+            x.unread,
+            ["a newer transaction group did not read and was passed over for an older one: sp/fs at txg 19: every copy failed its checksum"]
+        );
+        assert!(!o.complete() && !x.complete());
+        assert!(o.ran_to_its_end() && x.ran_to_its_end());
+        for said in [&o.unread[0], &x.unread[0]] {
+            assert!(
+                r.warnings.contains(&format!("sp/fs: {said}")),
+                "{:?}",
+                r.warnings
+            );
+        }
+        assert!(
+            crate::markdown::render(&r).contains("no — not all of it could be read"),
+            "{}",
+            crate::markdown::render(&r)
+        );
+    }
+
+    /// A newer transaction group that names a volume and does not read
+    /// it, passed over by `dump` for the one extracted, is said.
+    #[test]
+    fn a_dump_from_an_older_txg_than_the_one_that_did_not_read_says_so() {
+        let mut d = dump(9, 0, false);
+        d["unreadable_at"] = serde_json::json!([
+            {"txg": 12, "stage": "dataset", "error": "object set: every copy failed its checksum"}
+        ]);
+        let r = assemble(&log(vec![record("zvolrescue", 11, 0, d)]), &opts());
+        assert!(
+            r.warnings.contains(
+                &"tank/vm/disk0: txg 12 names it and does not read it (object set: every copy failed its checksum); extracted at the older txg 9"
+                    .to_string()
+            ),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    /// What zvolreport itself read is the case's paperwork, not its
+    /// evidence. A report built over one a `verify` had read took the
+    /// earlier report, its signature, the logs and — from the build's
+    /// own record — the private key for evidence, and an output `verify`
+    /// had hashed too: it failed its own check the moment it was
+    /// written. What is evidence already has zvolreport among its
+    /// readers.
+    #[test]
+    fn what_zvolreport_read_is_not_evidence_of_the_case() {
+        let read = |path: &str| EvFileRef {
+            path: PathBuf::from(path),
+            kind: None,
+            size: 100,
+            sha256: None,
+            sha1: None,
+            md5: None,
+        };
+        let mut build = record(
+            "zvolreport",
+            20,
+            0,
+            serde_json::json!({"report": "/case/report.json"}),
+        );
+        build.inputs = vec![read("/case/case.jsonl"), read("/case/k.key")];
+        build.outputs.push(out("/case/report.json", "r1"));
+        let mut verify = record(
+            "zvolreport",
+            30,
+            0,
+            serde_json::json!({"report": "/case/report.json"}),
+        );
+        verify.inputs = vec![
+            read("/case/report.json"),
+            read("/case/report.json.sig"),
+            read("/case/k.key.pub"),
+            read("/case/case.jsonl"),
+            read("/dev/sda1"),
+            read("/case/disk0.img"),
+        ];
+        let r = assemble(&log(vec![dumped(10, 9, "aa"), build, verify]), &opts());
+        let evidence: Vec<(&std::path::Path, &[String])> = r
+            .evidence
+            .iter()
+            .map(|e| (e.file.path.as_path(), e.read_by.as_slice()))
+            .collect();
+        assert_eq!(
+            evidence,
+            [(
+                std::path::Path::new("/dev/sda1"),
+                &["zvolrescue".to_string(), "zvolreport".to_string()][..]
+            )]
+        );
+        assert_eq!(r.outputs.len(), 1, "{:?}", r.outputs);
+        assert_eq!(r.commands.len(), 3);
+    }
+
+    /// An image a `dump -r --resume` kept is said to be kept: the run
+    /// read nothing of the pool for it, and it was one more extraction,
+    /// "complete", like the ones that did.
+    #[test]
+    fn a_kept_image_is_said_to_be_kept() {
+        let mut d = dump(9, 0, false);
+        d["volumes"][0]["kept"] = true.into();
+        let r = assemble(&log(vec![record("zvolrescue", 11, 0, d)]), &opts());
+        assert!(r.extractions[0].kept && r.extractions[0].complete());
+        assert!(
+            crate::markdown::render(&r).contains("yes — kept, as an earlier run left it"),
+            "{}",
+            crate::markdown::render(&r)
+        );
+        assert_eq!(
+            serde_json::to_value(&r.extractions[0]).unwrap()["kept"],
+            true
+        );
+        let plain = assemble(
+            &log(vec![record("zvolrescue", 11, 0, dump(9, 0, false))]),
+            &opts(),
+        );
+        let v = serde_json::to_value(&plain.extractions[0]).unwrap();
+        for absent in ["kept", "unread", "overwritten_by", "finished", "output_hex"] {
+            assert!(v.get(absent).is_none(), "{absent} in {v}");
+        }
+    }
+
+    /// An output that refused a block was still finished to the blocks
+    /// before it, and the hash recorded is that image's: it was said not
+    /// to be the file's all the same, of a hash `verify` then passed.
+    /// Where the record does not say the output was finished, the hash
+    /// is not known to be the file's — which is all that is known.
+    #[test]
+    fn what_is_said_of_the_hash_of_a_failed_output_is_what_the_record_bears_out() {
+        let said = |finished: Option<bool>| {
+            let mut d = dump(9, 0, false);
+            d["volumes"][0]["output_failed"] =
+                "the output refused block 12800, at byte 104857600: ENOSPC".into();
+            d["volumes"][0]["interrupted_at"] = 12800.into();
+            if let Some(f) = finished {
+                d["volumes"][0]["output_finished"] = f.into();
+            }
+            assemble(&log(vec![record("zvolrescue", 11, 6, d)]), &opts())
+                .warnings
+                .into_iter()
+                .find(|w| w.contains("refused block"))
+                .expect("a warning of it")
+        };
+        assert!(
+            said(Some(true)).ends_with(
+                "/case/disk0.img is not the whole volume: it is the blocks before that, which is what the hash recorded is of"
+            ),
+            "{}",
+            said(Some(true))
+        );
+        for unknown in [Some(false), None] {
+            assert!(
+                said(unknown)
+                    .ends_with("and the hash recorded is not known to be that of the file"),
+                "{}",
+                said(unknown)
+            );
+        }
+    }
+
+    /// A path that is not text is written with its bytes beside it and
+    /// read back as it was: a build run from a directory so named ended
+    /// in a panic over the report it could not write.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_that_is_not_text_is_written_and_read_back() {
+        use std::os::unix::ffi::OsStrExt;
+        let odd = PathBuf::from(std::ffi::OsStr::from_bytes(&[b'/', b'c', 0xfe, b'/', b'l']));
+        let mut logs = log(vec![record("zvolrescue", 11, 0, dump(9, 0, false))]);
+        logs[0].0.path = odd.clone();
+        let mut r = assemble(&logs, &opts());
+        r.extractions[0].output = odd.clone();
+        let json = serde_json::to_string(&r).expect("a report of it");
+        let back: Report = serde_json::from_str(&json).expect("read back");
+        assert_eq!(back.logs[0].path, odd);
+        assert_eq!(back.extractions[0].output, odd);
+        assert!(
+            json.contains("\"path_hex\":\"2f63fe2f6c\"") && json.contains("\"output_hex\""),
+            "{json}"
         );
     }
 

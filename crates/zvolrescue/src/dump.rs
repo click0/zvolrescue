@@ -82,6 +82,12 @@ struct DumpOut {
     /// run stopped there (exit 6): what it said.
     #[serde(skip_serializing_if = "Option::is_none")]
     output_failed: Option<String>,
+    /// For an output that failed: whether it was still finished and
+    /// flushed, so that the hash is the file's — the blocks before the
+    /// one it refused — or was not, and the hash is of nothing known to
+    /// be on it. What a report says of the hash goes by this.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_finished: Option<bool>,
     /// Where a `--resume` starts, for an image that stopped short: the
     /// block the state on disk names.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -719,6 +725,7 @@ fn dump_one(
         stopped_by_medium: report.stopped_by_medium.clone(),
         interrupted_at: report.interrupted_at,
         output_failed: report.output_failed.clone(),
+        output_finished: report.output_failed.as_ref().map(|_| report.finished),
         resume_at,
         intent_log: zvol_common::intent_log_json(log.as_ref()),
         intent_log_says: log

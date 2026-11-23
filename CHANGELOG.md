@@ -17,6 +17,38 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ### Fixed
 
+* **`zvolreport`: an image a later run wrote over, a tree not all
+  looked at, and its own paperwork taken for evidence.** Four things a
+  report said that its logs do not bear out:
+  - An extraction whose output a later recorded run wrote over — the
+    same volume at another TXG, another tool's `-o` — stayed in the
+    report with its size, its SHA-256 and "Complete: yes", and `verify`
+    passed the file under the later run's hash. It is now said to be
+    no longer in the file, with the run that wrote over it.
+  - What a `zvolfiles` record says it could not look at was not read:
+    an `objects` run short of 32 objects, and an `extract` that wrote
+    the dataset as an older TXG had it because the newer ones did not
+    read, were whole extractions with no errors. Both are now not
+    complete, and say which objects and which TXGs; a `dump` taken at
+    an older TXG than one that names the volume and does not read it
+    says so too.
+  - Everything a `zvolreport` run had read was evidence of the case: a
+    report built over one a `verify` had read named the earlier
+    report, its signature and the logs as evidence, at their earlier
+    sizes, and failed its own check the moment it was written — and
+    the private key a build signed with was listed, for `verify` to
+    hash. What `zvolreport` read is not evidence because it read it.
+  - An image a `dump -r --resume` kept from the run it resumed was one
+    more extraction, like those that read the pool. It is marked kept.
+
+  And three smaller ones. An output that refused a block was said to
+  have a hash "not that of the file", of a hash `verify` then passed;
+  the dump now records whether the output was still finished, and the
+  report says which it was. A build run from a directory whose name is
+  not text ended in a panic: a path in a report is written as an
+  evidence record writes one, with its bytes beside it. And a report
+  that names no log passed `verify`; it fails.
+
 * **Promotions `zvoltimeline` read from one side only, or two at
   once.** Read only from after a clone had been promoted over every
   dataset under it, each of them was "created", though all but the

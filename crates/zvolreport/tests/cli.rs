@@ -774,3 +774,84 @@ fn verify_reads_no_more_than_was_recorded() {
     assert_eq!(code, 4, "{out}");
     assert!(out.contains("not read: the report did not hold"), "{out}");
 }
+
+/// A report built over one a `verify` had read is checked back clean,
+/// signed and with every input hashed. It failed its own check the
+/// moment it was written: the earlier report, its signature and the logs
+/// were "evidence" at their earlier sizes and hashes, and the private
+/// key the build signed with was listed among them, for `verify` to
+/// read.
+#[test]
+fn a_report_built_over_one_that_was_verified_holds() {
+    let dir = scratch("rebuild-verified");
+    let img = dir.join("disk0.img");
+    std::fs::write(&img, vec![7u8; 4096]).unwrap();
+    let case = evidence_log(&dir, &img);
+    let (case, meta) = (case.to_str().unwrap(), dir.join("meta.jsonl"));
+    let meta = meta.to_str().unwrap();
+    let key = dir.join("k.key");
+    let (key, public) = (key.to_str().unwrap(), dir.join("k.key.pub"));
+    let public = public.to_str().unwrap();
+    let report = dir.join("report.json");
+    let report = report.to_str().unwrap();
+    assert_eq!(run(&["keygen", "-o", key]).0, 0);
+    let (code, _, err) = run(&[
+        "--evidence-log",
+        meta,
+        "--hash-inputs",
+        "build",
+        case,
+        "-o",
+        report,
+        "--sign",
+        key,
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let (code, out, err) = run(&[
+        "--evidence-log",
+        meta,
+        "--hash-inputs",
+        "verify",
+        "--key",
+        public,
+        report,
+    ]);
+    assert_eq!(code, 0, "{out}\n{err}");
+
+    let (code, out, err) = run(&["build", case, meta, "-o", report, "--sign", key]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    let built: serde_json::Value = serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
+    let evidence: Vec<&str> = built["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(evidence.len(), 1, "{evidence:?}");
+    assert!(evidence[0].ends_with("evidence.img"), "{evidence:?}");
+    let (code, out, err) = run(&["verify", "--key", public, report]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(!out.contains("FAIL") && !out.contains("k.key "), "{out}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A report that names no log is borne out by nothing, and is not one
+/// that holds: built again from no log it came out the same, and
+/// passed — "report PASS logs", exit 0 — whatever it said.
+#[test]
+fn a_report_of_no_log_does_not_hold() {
+    let dir = scratch("no-log");
+    let report = dir.join("e.json");
+    std::fs::write(
+        &report,
+        r#"{"report_version":1,"case":"42","notes":["all clean"],"logs":[],"tools":[],"evidence":[],"commands":[],"outputs":[],"extractions":[]}"#,
+    )
+    .unwrap();
+    let (code, out, err) = run(&["verify", report.to_str().unwrap()]);
+    assert_eq!(code, 4, "{out}\n{err}");
+    assert!(
+        out.contains("FAIL") && out.contains("it names no evidence log it was built from"),
+        "{out}"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}

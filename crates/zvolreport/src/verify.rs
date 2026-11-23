@@ -694,7 +694,23 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
     // evidence and outputs went on being hashed, gigabytes of whatever
     // an edited report named, after the answer was already no.
     let mut held = signature.as_ref().is_none_or(|s| s.status == Status::Pass);
-    if found_logs.len() == report.logs.len() {
+    if report.logs.is_empty() {
+        // No log, nothing to hold it against: a report of no log was
+        // built again from none, came out the same, and passed —
+        // whatever it said. `build` writes no such report.
+        held = false;
+        checked.push(Checked {
+            kind: "report",
+            algorithm: "logs",
+            path: opts.report.clone(),
+            status: Status::Fail,
+            recorded: None,
+            found: None,
+            detail: Some(
+                "it names no evidence log it was built from: nothing bears out what it says".into(),
+            ),
+        });
+    } else if found_logs.len() == report.logs.len() {
         let against = against_logs(&opts.report, &report, &found_logs);
         held &= against.status != Status::Fail;
         checked.push(against);

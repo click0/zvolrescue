@@ -332,6 +332,9 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     }
     if let Some(why) = &report.output_failed {
         volume["output_failed"] = why.clone().into();
+        // Whether it was finished and flushed all the same: what a
+        // report says of the hash goes by this.
+        volume["output_finished"] = report.finished.into();
     }
     if let Some(at) = resume_at {
         volume["resume_at"] = at.into();
