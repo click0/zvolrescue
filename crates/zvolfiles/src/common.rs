@@ -4,7 +4,6 @@
 use clap::Args;
 use zfs_read::crypt::{unwrap_keys, wrapping_key, DatasetKeys, KeyMaterial};
 use zfs_read::dsl::{open_mos, walk};
-use zfs_read::pool::uberblock_candidates;
 use zfs_read::zio::PoolReader;
 use zfs_read::zpl::{open_filesystem, open_objects, Filesystem};
 use zvol_common::errln;
@@ -216,6 +215,9 @@ pub struct Opened<'a> {
     /// Top-level vdevs removed from the pool since `txg` (`zpool
     /// remove`), which the dataset is read through the mapping of.
     pub removed_since: Vec<u64>,
+    /// The transaction group of the pool checkpoint, when the pool has
+    /// one; read at it, the dataset is as it was then.
+    pub checkpoint_txg: Option<u64>,
 }
 
 /// A transaction group newer than the one read, and why it was not.
@@ -265,8 +267,9 @@ pub fn with_dataset<T>(
     let reader = PoolReader::new(&pool, members.devices()).with_base_offsets(&members.bases());
 
     // Newest first; --txg picks one exactly.
-    let candidates = uberblock_candidates(&members.scans, &pool);
+    let candidates = zfs_read::dsl::txg_candidates(&reader, &members.scans, &pool);
     let newest = candidates.first().map(|c| c.ub.txg);
+    let checkpoint_txg = candidates.iter().find(|c| c.checkpoint).map(|c| c.ub.txg);
     let wanted: Vec<_> = match at.txg {
         None => candidates,
         Some(n) => candidates.into_iter().filter(|c| c.ub.txg == n).collect(),
@@ -380,12 +383,19 @@ pub fn with_dataset<T>(
                 log.says(name, c.ub.txg, newest == Some(c.ub.txg))
             );
         }
+        if c.checkpoint {
+            errln!(
+                "zvolfiles: {}",
+                zvol_common::members::checkpoint_said(c.ub.txg, c.ub.timestamp)
+            );
+        }
         let opened = Opened {
             txg: c.ub.txg,
             members: &members,
             passed_over: passed.clone(),
             intent_log: zvol_common::intent_log_json(log.as_ref()),
             removed_since: zvol_common::members::say_before_removal(false, &mos, &pool, c.ub.txg),
+            checkpoint_txg,
         };
         return f(&fs, &opened);
     }

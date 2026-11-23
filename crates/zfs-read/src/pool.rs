@@ -783,10 +783,18 @@ mod removed_tops_tests {
 pub struct Candidate {
     /// The uberblock.
     pub ub: Uberblock,
-    /// Scanned device index.
+    /// Scanned device index: of the label it is in, or — for a pool
+    /// checkpoint no ring holds any more — of the label whose uberblock
+    /// led to the MOS that keeps it.
     pub device: usize,
     /// Label index on that device.
     pub label: usize,
+    /// It is the pool checkpoint (`zpool checkpoint`): the pool as it
+    /// was at this transaction group is kept whole, nothing of it freed,
+    /// until the checkpoint is discarded.
+    /// [`uberblock_candidates`] reads labels and cannot know;
+    /// [`txg_candidates`](crate::dsl::txg_candidates) says.
+    pub checkpoint: bool,
 }
 
 /// Every checksum-verified uberblock of `pool` across its scanned members,
@@ -826,6 +834,7 @@ pub fn uberblock_candidates(scans: &[Option<DeviceScan>], pool: &PoolAssembly) -
                     ub: slot.ub.clone(),
                     device: dev,
                     label: label.index,
+                    checkpoint: false,
                 };
                 let Some(one) = by_txg.get_mut(&slot.ub.txg) else {
                     by_txg.insert(

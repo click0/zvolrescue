@@ -349,6 +349,10 @@ pub struct Alloc {
     /// the shape `zpool remove` leaves behind: the pointers are never
     /// rewritten, so they go on naming a vdev that is gone (SPEC F-69).
     pub removed_vdev: Option<u32>,
+    /// The uberblock of a pool checkpoint, as the MOS object directory
+    /// keeps one ([`checkpoint_words`]); the sample MOS is written with
+    /// it when set.
+    pub checkpoint: Option<Vec<u8>>,
     /// Write the pool's configuration object with no indirect vdev in
     /// it, whatever `removed_vdev` says: a root with no child, as a
     /// transaction group from before a removal has it. The pointers
@@ -527,6 +531,7 @@ impl Alloc {
             checksum: zfs_ondisk::blkptr::Checksum::Fletcher4,
             salt: None,
             removed_vdev: None,
+            checkpoint: None,
             plain_config: false,
             mapping: Vec::new(),
             removed_next: REMOVED_BASE,
@@ -1271,17 +1276,24 @@ pub fn build_sample_mos_variant(
         }
         .build()
     };
+    // An entry that is not one 64-bit integer — the salt's bytes, the
+    // words of a checkpointed uberblock — forces a fatzap: header block
+    // + one leaf.
+    let mut wide: Vec<(&str, u8, Vec<u8>)> = Vec::new();
     if let Some(salt) = a.salt {
-        // A byte-array entry forces a fatzap: header block + one leaf.
-        let hdr = zfs_ondisk::zap::encode::fat_header(4096, 1, 3);
-        let lf = zfs_ondisk::zap::encode::leaf(
-            4096,
-            &[
-                ("root_dataset", 8, 2u64.to_be_bytes().to_vec()),
-                ("config", 8, 11u64.to_be_bytes().to_vec()),
-                (crate::dsl::CHECKSUM_SALT, 1, salt.to_vec()),
-            ],
-        );
+        wide.push((crate::dsl::CHECKSUM_SALT, 1, salt.to_vec()));
+    }
+    if let Some(words) = &a.checkpoint {
+        wide.push((crate::dsl::ZPOOL_CHECKPOINT, 8, words.clone()));
+    }
+    if !wide.is_empty() {
+        let mut entries = vec![
+            ("root_dataset", 8, 2u64.to_be_bytes().to_vec()),
+            ("config", 8, 11u64.to_be_bytes().to_vec()),
+        ];
+        entries.extend(wide);
+        let hdr = zfs_ondisk::zap::encode::fat_header(4096, 1, entries.len() as u64);
+        let lf = zfs_ondisk::zap::encode::leaf(4096, &entries);
         let b0 = a.put(m, &hdr, ot::OBJECT_DIRECTORY, 0, 100);
         let b1 = a.put(m, &lf, ot::OBJECT_DIRECTORY, 0, 100);
         put(
@@ -1452,6 +1464,53 @@ pub fn removed_vdev_members_and_device(pool: &mut Pool, size: u64) -> (Vec<Vec<u
     let (members, mapping) = removed_vdev_build(pool, size);
     let gone = removed_device_image(pool, &members[0], &mapping, size);
     (members, gone)
+}
+
+/// An uberblock as `zpool checkpoint` puts it aside in the MOS object
+/// directory: its fields as 64-bit words, each big-endian as a ZAP
+/// keeps its integers. `ub_checkpoint_txg`, the last, is the group's
+/// own number.
+pub fn checkpoint_words(txg: u64, time: u64, rootbp: &[u8; blkptr::SIZE]) -> Vec<u8> {
+    let mut words = vec![MAGIC, 5000, txg, 0x5eed, time];
+    words.extend(
+        rootbp
+            .chunks_exact(8)
+            .map(|w| u64::from_le_bytes(w.try_into().expect("eight bytes"))),
+    );
+    words.extend([5000, 0, 0, 0, txg]);
+    words.iter().flat_map(|w| w.to_be_bytes()).collect()
+}
+
+/// A mirror with a pool checkpoint, taken at `at` (`(txg, time)`) while
+/// `tank/vm/disk0` was there. At the pool's newest transaction group
+/// the volume has been destroyed, and the MOS there keeps the
+/// checkpoint. Where `pool`'s uberblocks name `at`'s group it is still
+/// in the ring, as it is just after the checkpoint was taken; where
+/// they do not, the MOS is the only way to it.
+pub fn checkpointed_members(pool: &mut Pool, size: u64, at: (u64, u64)) -> Vec<Vec<u8>> {
+    let newest = pool.uberblocks.last().expect("an uberblock").0;
+    assert!(
+        at.0 < newest,
+        "a checkpoint is of a group before the newest"
+    );
+    let n = pool.members.len();
+    let mut members: Vec<Vec<u8>> = (0..n).map(|_| vec![0u8; size as usize]).collect();
+    let mut a = Alloc::new(0x20_0000);
+    let then = build_sample_mos_variant(&mut members, &mut a, true);
+    a.checkpoint = Some(checkpoint_words(at.0, at.1, &then));
+    a.born = Some(newest);
+    let now = build_sample_mos_variant(&mut members, &mut a, false);
+    pool.rootbp = Some(now);
+    pool.rootbp_by_txg = pool
+        .uberblocks
+        .iter()
+        .filter(|(txg, _)| *txg == at.0)
+        .map(|(txg, _)| (*txg, then))
+        .collect();
+    for (i, img) in members.iter_mut().enumerate() {
+        pool.write_labels(i, img);
+    }
+    members
 }
 
 /// A mirror at two transaction groups with a device removal between

@@ -1018,7 +1018,8 @@ fn like_dataset(
     pool: &zfs_read::pool::PoolAssembly,
     name: &str,
 ) -> Result<(u64, u8, u64), String> {
-    let candidates = zfs_read::pool::uberblock_candidates(scans, pool);
+    // With the pool checkpoint: a sibling destroyed since is whole there.
+    let candidates = zfs_read::dsl::txg_candidates(reader, scans, pool);
     if candidates.is_empty() {
         return Err("no verified uberblock".into());
     }

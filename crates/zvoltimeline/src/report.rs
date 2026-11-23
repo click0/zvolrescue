@@ -8,7 +8,7 @@ use zvol_common::errln;
 use serde::Serialize;
 use zfs_ondisk::dmu::ObjsetType;
 use zfs_read::dsl::{open_mos, walk, Dataset, Pending};
-use zfs_read::pool::{uberblock_candidates, Candidate};
+use zfs_read::pool::Candidate;
 use zfs_read::zio::PoolReader;
 use zvol_common::members::{choose_pool, open_members};
 use zvol_common::timefmt::iso8601;
@@ -58,8 +58,13 @@ struct TimelineOut {
     pool: String,
     pool_guid: String,
     members: Vec<PathBuf>,
-    /// Every TXG whose uberblock verified, oldest first.
+    /// Every TXG whose uberblock verified, oldest first: those of the
+    /// uberblock rings and the pool checkpoint.
     txgs: Vec<u64>,
+    /// The TXG of the pool checkpoint (`zpool checkpoint`), when the
+    /// pool has one and it is in the range read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checkpoint_txg: Option<u64>,
     /// TXGs that were read but whose MOS could not be walked.
     unreadable_txgs: Vec<u64>,
     /// TXGs whose MOS was walked but where part of the dataset tree
@@ -242,7 +247,7 @@ fn about(events: Vec<Event>, want: &str) -> Vec<Event> {
         .filter(|e| {
             matches!(
                 e.kind,
-                Kind::Pending | Kind::Unreadable | Kind::Abandoned | Kind::Clock
+                Kind::Pending | Kind::Unreadable | Kind::Abandoned | Kind::Clock | Kind::Checkpoint
             ) || e.object.as_deref() == Some(want)
                 || (e.guid != 0 && guids.contains(&e.guid))
         })
@@ -610,10 +615,13 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         Ok(p) => p,
         Err(code) => return zvol_common::end_early(g, "zvoltimeline", spec, code),
     };
-    // uberblock_candidates gives the newest first; history reads forward.
-    let mut candidates = uberblock_candidates(&members.scans, &pool);
-    candidates.reverse();
     let reader = PoolReader::new(&pool, members.devices()).with_base_offsets(&members.bases());
+    // The uberblock rings' transaction groups and the pool checkpoint,
+    // when the pool has one (T-01): the oldest the history can start
+    // from once the rings have gone round, and where what was destroyed
+    // since is whole. They come newest first; history reads forward.
+    let mut candidates = zfs_read::dsl::txg_candidates(&reader, &members.scans, &pool);
+    candidates.reverse();
     // The pool's line of history is found in the whole ring, and the
     // range asked for is taken from it afterwards: a range that began
     // on a group the pool did not go on from made it the baseline, and
@@ -627,6 +635,10 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         errln!("zvoltimeline: no verified uberblock in that range");
         return zvol_common::end_early(g, "zvoltimeline", spec, exit::UNRECOVERABLE);
     }
+    let checkpoint = candidates
+        .iter()
+        .find(|c| c.checkpoint)
+        .map(|c| (c.ub.txg, c.ub.timestamp));
 
     let mut history = History::default();
     let mut clock = Vec::new();
@@ -663,6 +675,19 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     } = history;
 
     events.extend(clock);
+    if let Some((txg, time)) = checkpoint {
+        events.push(Event {
+            txg,
+            time: Some(time),
+            kind: Kind::Checkpoint,
+            object: None,
+            guid: 0,
+            details: format!(
+                "the pool checkpoint (zpool checkpoint): the pool as it was at txg {txg} is kept whole until the checkpoint is discarded, and --txg {txg} reads it"
+            ),
+            last_seen_txg: None,
+        });
+    }
     for a in &abandoned {
         events.push(Event {
             txg: a.txg,
@@ -729,6 +754,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         pool_guid: format!("{:#018x}", pool.guid),
         members: members.paths.clone(),
         txgs: candidates.iter().map(|c| c.ub.txg).collect(),
+        checkpoint_txg: checkpoint.map(|(txg, _)| txg),
         unreadable_txgs: unreadable,
         partial_txgs: partial,
         dataset: opts.dataset.clone(),

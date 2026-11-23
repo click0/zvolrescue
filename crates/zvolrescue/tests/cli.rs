@@ -9,9 +9,9 @@ use zfs_ondisk::blkptr::LABEL_START_SIZE;
 use zfs_ondisk::checksum::seal_label;
 use zfs_ondisk::label::{label_offsets, LABEL_SIZE, UBERBLOCK_RING_OFFSET, UBERBLOCK_RING_SIZE};
 use zfs_read::fixture::{
-    build_sample_mos, destroyed_zvol_members, lose_children_list, objset_reused_members,
-    removed_since_members, removed_vdev_members, two_top_mirror_members, zpl_members, zvol_pattern,
-    Alloc, Pool, SAMPLE_ZVOL_BLOCK0_OFFSET,
+    build_sample_mos, checkpointed_members, destroyed_zvol_members, lose_children_list,
+    objset_reused_members, removed_since_members, removed_vdev_members, two_top_mirror_members,
+    zpl_members, zvol_pattern, Alloc, Pool, SAMPLE_ZVOL_BLOCK0_OFFSET,
 };
 use zfs_read::hash::{Digests, Extra};
 use zvol_common::scratch::Scratch;
@@ -999,6 +999,117 @@ fn scan_tells_a_removed_vdev_from_a_missing_one() {
         "{text}"
     );
     assert!(!text.contains("MISSING"), "{text}");
+}
+
+/// A pool checkpoint keeps the pool as it was: nothing it held then is
+/// freed until the checkpoint is discarded, and the uberblock of that
+/// moment is kept in the MOS, long after its transaction group has left
+/// every ring. Nothing looked there. A volume destroyed after the
+/// checkpoint was "not found at any of 32 verified TXG(s)" while `zdb
+/// -k` showed it whole, and `list --txg` of the group was "no verified
+/// uberblock matches". The checkpoint is one more group to read at:
+/// listed, named for what it is, and the last place a dataset is looked
+/// for.
+#[test]
+fn the_pool_checkpoint_is_a_txg_to_read_at() {
+    let dir = scratch("checkpoint");
+    let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(200, 2)]);
+    let members = checkpointed_members(&mut pool, SIZE, (100, 1));
+    let m = write_members(&dir, &members);
+    let names = |doc: &serde_json::Value| -> Vec<String> {
+        doc["datasets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    let (code, out, err) = run(&["-q", "-f", "json", "list", &m[0], &m[1]]);
+    assert_eq!(code, 0, "{err}");
+    let doc = json(&out);
+    assert_eq!(doc["txg"], 200, "{out}");
+    assert_eq!(
+        doc["available_txgs"],
+        serde_json::json!([200, 100]),
+        "{out}"
+    );
+    assert_eq!(doc["checkpoint_txg"], 100, "{out}");
+    assert_eq!(doc["checkpoint_time"], "1970-01-01T00:00:01Z", "{out}");
+    assert!(!names(&doc).contains(&"tank/vm/disk0".to_string()), "{out}");
+    let (_, text, _) = run(&["-q", "list", &m[0], &m[1]]);
+    assert!(
+        text.contains("2 verified txg(s) available")
+            && text.contains("pool checkpoint: txg 100 (1970-01-01T00:00:01Z)")
+            && text.contains("--txg 100"),
+        "{text}"
+    );
+
+    let (code, out, err) = run(&["-q", "-f", "json", "list", &m[0], &m[1], "--txg", "100"]);
+    assert_eq!(code, 0, "{err}");
+    let doc = json(&out);
+    assert_eq!(
+        (&doc["txg"], &doc["checkpoint_txg"]),
+        (&100.into(), &100.into()),
+        "{out}"
+    );
+    assert!(names(&doc).contains(&"tank/vm/disk0".to_string()), "{out}");
+    let (_, text, _) = run(&["-q", "list", &m[0], &m[1], "--txg", "100"]);
+    assert!(text.contains("this is the pool checkpoint"), "{text}");
+    // What was destroyed since it, with the way back.
+    let (code, text, err) = run(&["-q", "list", &m[0], &m[1], "--diff", "100"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        text.lines().any(|l| l.contains("destroyed")
+            && l.contains("tank/vm/disk0")
+            && l.contains("--txg 100")),
+        "{text}"
+    );
+
+    // Not named, the checkpoint is the last group the volume is looked
+    // for at, and the run says where it found it.
+    let image = dir.join("disk0.img");
+    let (code, out, err) = run(&[
+        "-f",
+        "json",
+        "dump",
+        "tank/vm/disk0",
+        &m[0],
+        &m[1],
+        "-o",
+        &image.to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let record = json(&out);
+    assert_eq!(record["checkpoint_txg"], 100, "{out}");
+    assert_eq!(
+        record["txgs_searched"],
+        serde_json::json!([200, 100]),
+        "{out}"
+    );
+    assert_eq!(record["volumes"][0]["txg"], 100, "{out}");
+    assert_eq!(record["volumes"][0]["blocks_zeroed"], 0, "{out}");
+    assert!(
+        err.contains("txg 100 (1970-01-01T00:00:01Z) is the pool checkpoint (zpool checkpoint)"),
+        "{err}"
+    );
+    let data = std::fs::read(&image).unwrap();
+    assert_eq!(&data[..8192], &zvol_pattern(0)[..]);
+    assert_eq!(&data[16384..24576], &zvol_pattern(2)[..]);
+}
+
+/// A pool without a checkpoint says nothing of one.
+#[test]
+fn a_pool_without_a_checkpoint_names_none() {
+    let dir = scratch("no-checkpoint");
+    let m = write_members(&dir, &plain_members());
+    let (code, out, err) = run(&["-q", "-f", "json", "list", &m[0], &m[1]]);
+    assert_eq!(code, 0, "{err}");
+    let doc = json(&out);
+    assert!(doc.get("checkpoint_txg").is_none(), "{out}");
+    assert_eq!(doc["available_txgs"], serde_json::json!([100]), "{out}");
+    let (_, text, _) = run(&["-q", "list", &m[0], &m[1]]);
+    assert!(!text.contains("checkpoint"), "{text}");
 }
 
 /// A transaction group from before a device removal has the vdev as a

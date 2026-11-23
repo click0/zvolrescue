@@ -7,9 +7,9 @@ use serde::Serialize;
 use zfs_ondisk::dmu::ObjsetType;
 use zfs_read::dmu::DnodeArray;
 use zfs_read::dsl::{
-    open_mos, read_properties, walk, Dataset, DatasetTree, Property, PropertyValue,
+    open_mos, read_properties, txg_candidates, walk, Dataset, DatasetTree, Property, PropertyValue,
 };
-use zfs_read::pool::{select_uberblock, uberblock_candidates, Candidate, TxgSelect};
+use zfs_read::pool::{select_uberblock, Candidate, TxgSelect};
 use zfs_read::zio::{PoolReader, ReadError};
 
 use zvol_common::members::{choose_pool, open_members};
@@ -104,8 +104,16 @@ struct ListOut {
     members: Vec<PathBuf>,
     txg: u64,
     time: String,
-    /// Verified TXGs available on the scanned members, newest first.
+    /// Verified TXGs available on the scanned members, newest first:
+    /// those of the uberblock rings and the pool checkpoint.
     available_txgs: Vec<u64>,
+    /// The TXG of the pool checkpoint (`zpool checkpoint`), when the
+    /// pool has one: the pool as it was then is kept whole, and `--txg`
+    /// reads it. It is among `available_txgs`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checkpoint_txg: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checkpoint_time: Option<String>,
     /// TXGs newer than `txg` at which the pool does not read (newest
     /// first), passed over for it.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -202,6 +210,15 @@ fn print_text(out: &ListOut) {
         out.time,
         out.available_txgs.len()
     );
+    match (out.checkpoint_txg, &out.checkpoint_time) {
+        (Some(txg), _) if txg == out.txg => {
+            outln!("  this is the pool checkpoint: the pool as it was then, kept whole")
+        }
+        (Some(txg), Some(time)) => outln!(
+            "  pool checkpoint: txg {txg} ({time}), the pool as it was then, kept whole: --txg {txg}"
+        ),
+        _ => {}
+    }
     let width = out
         .datasets
         .iter()
@@ -369,7 +386,14 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         Ok(p) => p,
         Err(code) => return zvol_common::end_early(g, "zvolrescue", spec, code),
     };
-    let candidates = uberblock_candidates(&members.scans, &pool);
+    let reader = PoolReader::new(&pool, members.devices()).with_base_offsets(&members.bases());
+    // The uberblock rings' and the pool checkpoint, which no ring holds
+    // once the pool has gone on for a while: a volume destroyed after a
+    // checkpoint was whole there, and no run knew of the place.
+    let candidates = txg_candidates(&reader, &members.scans, &pool);
+    let checkpoint = candidates.iter().find(|c| c.checkpoint).map(|c| &c.ub);
+    let checkpoint_txg = checkpoint.map(|u| u.txg);
+    let checkpoint_time = checkpoint.map(|u| iso8601(u.timestamp));
     // `--txg` means that one. The newest, or the newest before a time,
     // means the newest that *reads* (F-10): a TXG the rings carry and
     // no block matches — a sync whose uberblocks reached the members
@@ -413,7 +437,6 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         }
         return zvol_common::end_early(g, "zvolrescue", spec, exit::UNRECOVERABLE);
     }
-    let reader = PoolReader::new(&pool, members.devices()).with_base_offsets(&members.bases());
     let mut unreadable = Vec::new();
     let mut found = None;
     for (i, c) in pick.iter().enumerate() {
@@ -473,6 +496,8 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             txg: newest.ub.txg,
             time: iso8601(newest.ub.timestamp),
             available_txgs: candidates.iter().map(|c| c.ub.txg).collect(),
+            checkpoint_txg,
+            checkpoint_time,
             unreadable_at: unreadable,
             removed_since: Vec::new(),
             datasets: Vec::new(),
@@ -501,6 +526,8 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         txg: chosen.ub.txg,
         time: iso8601(chosen.ub.timestamp),
         available_txgs: candidates.iter().map(|c| c.ub.txg).collect(),
+        checkpoint_txg,
+        checkpoint_time,
         unreadable_at: unreadable,
         removed_since,
         datasets: tree

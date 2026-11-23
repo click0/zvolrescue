@@ -17,6 +17,30 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ### Fixed
 
+* **The pool checkpoint is a transaction group to read at.** From
+  `zpool checkpoint` until the checkpoint is discarded nothing the pool
+  held is freed, and the uberblock of that moment is kept in the MOS
+  object directory — long after its transaction group has left every
+  uberblock ring. Nothing read it. A volume destroyed after a
+  checkpoint, which `zdb -k` shows whole, was "not found at any of 32
+  verified TXG(s)"; `list --txg` of the checkpoint's group was "no
+  verified uberblock matches the requested TXG"; and `zvoltimeline`
+  began its history at the oldest group in the ring, where the volume
+  had never existed, though T-01 asks for "the checkpoint TXG if
+  present". The checkpoint is now one more group for every tool, asked
+  of the newest transaction group that reads: `list` names it
+  (`checkpoint_txg`, `checkpoint_time`, and it is among
+  `available_txgs`) and `--txg` reads it; `dump` and `zvolfiles` look
+  for a dataset there last and say when that is where they found it;
+  `zvoltimeline` reads it as the first group of the history and marks
+  it with a `checkpoint` event, so that what was destroyed since is
+  last seen at it and the command printed gets it back; and
+  `zvolcarve --like` finds a destroyed sibling there. On a pool made
+  by OpenZFS's own code, with a volume destroyed after the checkpoint
+  and the ring gone round, `dump` of the volume is the bytes it had.
+  A checkpoint that was discarded is not looked for: what it kept has
+  been freed since.
+
 * **A transaction group from before a device removal reads.** A pool
   that has had a top-level vdev removed (`zpool remove`) keeps a
   mapping from that vdev's addresses to where its blocks were copied,

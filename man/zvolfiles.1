@@ -281,6 +281,13 @@ pool went down \(em they are counted on standard error and as
 .Ql intent_log
 in the manifest, the index and the record.
 The exit status is not changed by it: 4 is for what could not be read.
+The pool checkpoint, where the pool has one, is one more transaction
+group, as for
+.Xr zvolrescue 1 :
+.Fl -txg
+reads it, a dataset in no newer one is looked for there, and a run
+that reads at it says so and records
+.Ql checkpoint_txg .
 A transaction group from before a top-level vdev was removed from the
 pool is read as
 .Xr zvolrescue 1

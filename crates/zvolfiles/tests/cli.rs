@@ -484,6 +484,70 @@ fn paths_are_taken_as_the_dataset_spells_them() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// A filesystem destroyed after a pool checkpoint is whole at the
+/// checkpoint, whose uberblock the MOS keeps when its transaction group
+/// has left the rings. It was "in none of the transaction group(s)
+/// read". The checkpoint is one more group: the dataset is looked for
+/// there last, `--txg` reads it, and the run says where it read.
+#[test]
+fn a_dataset_destroyed_since_the_checkpoint_is_read_at_it() {
+    use zfs_read::fixture::{build_sample_mos_variant, checkpoint_words, Alloc};
+    let dir = scratch("checkpoint");
+    let mut pool = Pool::mirror("tank", 0x5eed_0000_0000_0004, 12).txgs(&[(100, 1757100000)]);
+    let mut members = zpl_members(&mut pool, 64 * 1024 * 1024);
+    let then = pool.rootbp.expect("the MOS the filesystem is in");
+    // The pool went on: a tree without tank/fs, past what the first
+    // one wrote, that keeps the checkpoint; the ring holds it alone.
+    let mut a = Alloc::new(0x200_0000);
+    a.checkpoint = Some(checkpoint_words(100, 1757100000, &then));
+    a.born = Some(200);
+    let now = build_sample_mos_variant(&mut members, &mut a, false);
+    pool.uberblocks = vec![(200, 1757100005)];
+    pool.rootbp = Some(now);
+    let m: Vec<String> = members
+        .iter_mut()
+        .enumerate()
+        .map(|(i, img)| {
+            pool.write_labels(i, img);
+            let p = dir.join(format!("member{i}.img"));
+            std::fs::write(&p, img).expect("write member");
+            p.to_string_lossy().into_owned()
+        })
+        .collect();
+
+    let (code, doc) = json_of(&["-f", "json", "list", "tank/fs", &m[0], &m[1]]);
+    assert_eq!(code, 0, "{doc}");
+    assert_eq!(
+        (&doc["txg"], &doc["checkpoint_txg"]),
+        (&100.into(), &100.into()),
+        "{doc}"
+    );
+    assert_eq!(doc["passed_over"][0]["txg"], 200, "{doc}");
+    assert_eq!(doc["passed_over"][0]["unread"], false, "{doc}");
+    assert!(
+        doc["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["path"] == "hello.txt"),
+        "{doc}"
+    );
+    let (code, err) = run(&["list", "tank/fs", &m[0], &m[1]]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        err.contains("txg 200: no dataset tank/fs")
+            && err.contains("txg 100 (2025-09-05T19:20:00Z) is the pool checkpoint"),
+        "{err}"
+    );
+    // Asked for by number, it is that group.
+    let (code, doc) = json_of(&[
+        "-f", "json", "list", "tank/fs", &m[0], &m[1], "--txg", "100",
+    ]);
+    assert_eq!(code, 0, "{doc}");
+    assert_eq!(doc["txg"], 100, "{doc}");
+    assert!(doc.get("passed_over").is_none(), "{doc}");
+}
+
 /// Members whose first copy of `name`, on each, is flipped: the
 /// directory block holding the name no longer verifies.
 fn members_without(dir: &Path, name: &[u8]) -> Vec<String> {

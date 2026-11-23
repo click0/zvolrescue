@@ -269,6 +269,77 @@ fn printed(args: &[&str]) -> (i32, String) {
     )
 }
 
+/// The history takes in the pool checkpoint (T-01): the uberblock of
+/// the moment `zpool checkpoint` was run is kept in the MOS when its
+/// transaction group has long left the rings, and the pool reads there
+/// as it was. A volume destroyed after the checkpoint "never existed":
+/// the oldest group in the ring was the first the history knew, and the
+/// one place the volume is whole was not in it.
+#[test]
+fn the_history_takes_in_the_pool_checkpoint() {
+    let dir = scratch("checkpoint");
+    let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(200, 2)]);
+    let members = zfs_read::fixture::checkpointed_members(&mut pool, SIZE, (100, 1));
+    let m = written(&dir, &pool, members);
+    let (code, text) = printed(&[&m[0], &m[1]]);
+    assert_eq!(code, 0, "{text}");
+    assert!(
+        text.contains("2 transaction group(s) still readable"),
+        "{text}"
+    );
+    let checkpoint = text
+        .lines()
+        .find(|l| l.contains(" checkpoint "))
+        .unwrap_or_else(|| panic!("nothing about the checkpoint: {text}"));
+    assert!(
+        checkpoint.starts_with("100 ")
+            && checkpoint.contains("the pool checkpoint (zpool checkpoint)")
+            && checkpoint.contains("--txg 100"),
+        "{checkpoint}"
+    );
+    let destroyed = text
+        .lines()
+        .position(|l| l.contains(" destroyed ") && l.contains("tank/vm/disk0"))
+        .unwrap_or_else(|| panic!("the volume's destruction is not there: {text}"));
+    assert!(
+        text.lines().nth(destroyed).unwrap().starts_with("200 ")
+            && text
+                .lines()
+                .nth(destroyed)
+                .unwrap()
+                .contains("last seen at txg 100")
+            && text
+                .lines()
+                .nth(destroyed + 1)
+                .unwrap()
+                .contains("--txg 100"),
+        "{text}"
+    );
+
+    let (code, out) = printed(&["-f", "json", &m[0], &m[1]]);
+    assert_eq!(code, 0, "{out}");
+    let doc: serde_json::Value = serde_json::from_str(&out).expect("JSON");
+    assert_eq!(doc["txgs"], serde_json::json!([100, 200]), "{out}");
+    assert_eq!(doc["checkpoint_txg"], 100, "{out}");
+    assert!(
+        doc["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["event"] == "checkpoint" && e["txg"] == 100),
+        "{out}"
+    );
+
+    // Out of the range asked for, it is not in the history.
+    let (code, out) = printed(&["-f", "json", &m[0], &m[1], "--from", "150"]);
+    assert_eq!(code, 0, "{out}");
+    let doc: serde_json::Value = serde_json::from_str(&out).expect("JSON");
+    assert_eq!(doc["txgs"], serde_json::json!([200]), "{out}");
+    assert!(doc.get("checkpoint_txg").is_none(), "{out}");
+    assert!(!out.contains("\"checkpoint\""), "{out}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// A clock set back is not an import with rewind. The pool's newest
 /// group, dated two hours before the two it was made from, was "a line
 /// of history an import with rewind left behind; not read": the

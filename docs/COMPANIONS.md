@@ -144,7 +144,10 @@ bit-exact.
 the mirror fixture (three transaction groups, the volume destroyed at the
 newest): the event list is the scripted one, and the `dump` command the
 tool prints recovers the volume with the SHA-256 the end-to-end step
-already pins. `--pending` (T-07) reports how much space ZFS has finished with but has
+already pins. The pool checkpoint (T-01) is read from the MOS object
+directory of the newest transaction group that reads and is a
+`checkpoint` event; a fixture whose checkpoint has left the ring has the
+volume destroyed since last seen at it. `--pending` (T-07) reports how much space ZFS has finished with but has
 not freed: the pool's `free_bpobj` and every dataset's deadlist, read
 from their bonus buffers so the answer costs no walk. While a block is
 still accounted for there it has not been reallocated, which is the

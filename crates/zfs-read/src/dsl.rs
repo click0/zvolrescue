@@ -19,7 +19,7 @@ use zfs_ondisk::zap::Value;
 use zfs_ondisk::Endian;
 
 use crate::dmu::{DnodeArray, ObjectReader};
-use crate::pool::{select_uberblock, uberblock_candidates, PoolAssembly, TxgSelect};
+use crate::pool::{select_uberblock, uberblock_candidates, Candidate, PoolAssembly, TxgSelect};
 use crate::vdev::DeviceScan;
 use crate::zap::read_zap;
 use crate::zio::{PoolReader, ReadError};
@@ -32,6 +32,10 @@ pub const CHECKSUM_SALT: &str = "org.illumos:checksum_salt";
 /// Object-directory entry naming the packed nvlist of the pool's current
 /// configuration (`DMU_POOL_CONFIG`).
 pub const CONFIG: &str = "config";
+/// Object-directory entry holding the uberblock a pool checkpoint put
+/// aside (`DMU_POOL_ZPOOL_CHECKPOINT`): `uberblock_t` as an array of
+/// 64-bit words.
+pub const ZPOOL_CHECKPOINT: &str = "com.delphix:zpool_checkpoint";
 /// Object number of the data object inside a zvol objset (`ZVOL_OBJ`).
 pub const ZVOL_OBJ: u64 = 1;
 /// Object number of the properties ZAP inside a zvol objset (`ZVOL_ZAP_OBJ`).
@@ -588,6 +592,120 @@ pub fn load_removed_vdevs(reader: &PoolReader<'_>, mos: &DnodeArray<'_, '_>, con
             ),
         }
     }
+}
+
+/// The pool checkpoint this MOS holds, when it holds one: the uberblock
+/// `zpool checkpoint` put aside in the object directory.
+///
+/// From then until the checkpoint is discarded nothing the pool held is
+/// freed, so the pool reads at that uberblock exactly as it was — a
+/// volume destroyed since, whole — long after the transaction group has
+/// left every uberblock ring. No label says a pool has one: the feature
+/// is not among those a label names, and the uberblocks in the rings
+/// carry `ub_checkpoint_txg` only after a rewind to it.
+///
+/// The words are the uberblock's fields as the host that wrote them had
+/// them; a ZAP keeps integers in one byte order whatever the host's, so
+/// they are numbers here and are laid out little-endian to be parsed.
+/// The root pointer says for itself how the block it leads to is
+/// written.
+pub fn checkpoint_of(mos: &DnodeArray<'_, '_>) -> Result<Option<Uberblock>, ReadError> {
+    let entries = mos.object(OBJECT_DIRECTORY).and_then(|o| read_zap(&o))?;
+    let Some(entry) = entries.iter().find(|e| e.name == ZPOOL_CHECKPOINT) else {
+        return Ok(None);
+    };
+    let Value::U64Array(words) = &entry.value else {
+        return Err(ReadError::Io(format!(
+            "{ZPOOL_CHECKPOINT} is not an array of 64-bit words"
+        )));
+    };
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let ub =
+        Uberblock::parse(&bytes).map_err(|e| ReadError::Io(format!("{ZPOOL_CHECKPOINT}: {e}")))?;
+    if ub.txg == 0 {
+        return Err(ReadError::Io(format!(
+            "{ZPOOL_CHECKPOINT} is an uberblock of txg 0"
+        )));
+    }
+    Ok(Some(ub))
+}
+
+/// Every transaction group the pool can be read at, newest first: those
+/// of the uberblock rings ([`uberblock_candidates`]) and, when the pool
+/// has one, its checkpoint.
+///
+/// The checkpoint is asked of the newest transaction group whose MOS
+/// opens and whose object directory reads — the pool as an import would
+/// find it. That MOS is read through `reader`, which keeps what it
+/// reads: the run that goes on to read the same group asks no device
+/// for it again (SPEC N-10). A checkpoint that was discarded is not
+/// looked for in older groups: what it kept has been freed since.
+///
+/// Where the checkpoint's transaction group is still in a ring, that
+/// candidate is the checkpoint and is marked; otherwise it is one more,
+/// in its place by number.
+pub fn txg_candidates(
+    reader: &PoolReader<'_>,
+    scans: &[Option<DeviceScan>],
+    pool: &PoolAssembly,
+) -> Vec<Candidate> {
+    let mut candidates = uberblock_candidates(scans, pool);
+    let mut found = None;
+    for c in &candidates {
+        let kept = open_mos(reader, &c.ub).and_then(|mos| checkpoint_of(&mos));
+        match kept {
+            Ok(Some(ub)) if ub.txg >= c.ub.txg => trace!(
+                "txg",
+                "the MOS at txg {} keeps a checkpoint of txg {}, which is not before it: not taken",
+                c.ub.txg,
+                ub.txg
+            ),
+            Ok(Some(ub)) => found = Some((ub, c.device, c.label)),
+            Ok(None) => trace!("txg", "the MOS at txg {} keeps no checkpoint", c.ub.txg),
+            Err(e) => {
+                trace!(
+                    "txg",
+                    "txg {}: whether there is a checkpoint did not read: {e}",
+                    c.ub.txg
+                );
+                // A device that refused a read has stopped the run.
+                if reader.medium_stop().is_none() {
+                    continue;
+                }
+            }
+        }
+        break;
+    }
+    let Some((ub, device, label)) = found else {
+        return candidates;
+    };
+    trace!("txg", "pool checkpoint: txg {} ({})", ub.txg, ub.timestamp);
+    match candidates.iter_mut().find(|c| c.ub.txg == ub.txg) {
+        Some(c) if c.ub.rootbp == ub.rootbp => c.checkpoint = true,
+        // Two trees under one number, as an import with rewind leaves:
+        // the ring's is what that number has meant to every run so far.
+        Some(c) => trace!(
+            "txg",
+            "the ring holds another tree as txg {}: the checkpoint is not offered beside it",
+            c.ub.txg
+        ),
+        None => {
+            let at = candidates
+                .iter()
+                .position(|c| c.ub.txg < ub.txg)
+                .unwrap_or(candidates.len());
+            candidates.insert(
+                at,
+                Candidate {
+                    ub,
+                    device,
+                    label,
+                    checkpoint: true,
+                },
+            );
+        }
+    }
+    candidates
 }
 
 /// The top-level vdevs the configuration of this MOS has as removed:
@@ -1734,6 +1852,126 @@ mod pending_tests {
 }
 
 /// Telling a removed top-level vdev from a missing one (SPEC F-69).
+/// The pool checkpoint as one more transaction group to read at.
+#[cfg(test)]
+mod checkpoint_tests {
+    use super::*;
+    use crate::fixture::{build_sample_mos, checkpointed_members, Alloc, Pool};
+    use crate::pool::assemble;
+    use crate::vdev::scan_device;
+    use zfs_ondisk::label::LABEL_SIZE;
+    use zvolrescue_io::MemSource;
+
+    const SIZE: u64 = 64 * LABEL_SIZE;
+
+    fn candidates_of(members: Vec<Vec<u8>>) -> (Vec<Candidate>, Vec<String>) {
+        let sources: Vec<MemSource> = members.into_iter().map(MemSource::new).collect();
+        let scans: Vec<_> = sources.iter().map(|s| scan_device(s).ok()).collect();
+        let pool = assemble(&scans).into_iter().next().expect("one pool");
+        let devices: Vec<Option<&dyn BlockSource>> = sources
+            .iter()
+            .map(|s| Some(s as &dyn BlockSource))
+            .collect();
+        let reader = PoolReader::new(&pool, devices);
+        let candidates = txg_candidates(&reader, &scans, &pool);
+        // What the checkpoint has that the newest group has not.
+        let names = candidates
+            .iter()
+            .find(|c| c.checkpoint)
+            .map(|c| {
+                let mos = open_mos(&reader, &c.ub).expect("the checkpoint's MOS");
+                let tree = walk(&mos, "tank").expect("its dataset tree");
+                tree.datasets.into_iter().map(|d| d.name).collect()
+            })
+            .unwrap_or_default();
+        (candidates, names)
+    }
+
+    /// A checkpoint whose transaction group has left the ring is in no
+    /// label: the MOS keeps its uberblock, and the pool reads there as
+    /// it was — the volume destroyed since, among its datasets. Nothing
+    /// looked, and `zdb -k` showed whole what no run could reach.
+    #[test]
+    fn the_checkpoint_is_one_more_transaction_group() {
+        let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(200, 2)]);
+        let members = checkpointed_members(&mut pool, SIZE, (100, 1));
+        let (candidates, names) = candidates_of(members);
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|c| (c.ub.txg, c.ub.timestamp, c.checkpoint))
+                .collect::<Vec<_>>(),
+            [(200, 2, false), (100, 1, true)]
+        );
+        assert_eq!(candidates[1].ub.checkpoint_txg, 100);
+        assert!(names.iter().any(|n| n == "tank/vm/disk0"), "{names:?}");
+    }
+
+    /// Just after it was taken the checkpoint's group is still in the
+    /// ring: that candidate is the checkpoint, and is not there twice.
+    #[test]
+    fn a_checkpoint_still_in_the_ring_is_that_candidate() {
+        let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1), (200, 2)]);
+        let members = checkpointed_members(&mut pool, SIZE, (100, 1));
+        let (candidates, names) = candidates_of(members);
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|c| (c.ub.txg, c.checkpoint))
+                .collect::<Vec<_>>(),
+            [(200, false), (100, true)]
+        );
+        assert!(names.iter().any(|n| n == "tank/vm/disk0"), "{names:?}");
+    }
+
+    /// A pool without one has the ring's candidates and no other.
+    #[test]
+    fn a_pool_without_a_checkpoint_has_the_rings_alone() {
+        let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1)]);
+        let mut members = vec![vec![0u8; SIZE as usize], vec![0u8; SIZE as usize]];
+        let mut a = Alloc::new(0x20_0000);
+        build_sample_mos(&mut pool, &mut members, &mut a);
+        for (i, m) in members.iter_mut().enumerate() {
+            pool.write_labels(i, m);
+        }
+        let (candidates, _) = candidates_of(members);
+        assert_eq!(candidates.len(), 1);
+        assert!(!candidates[0].checkpoint);
+    }
+
+    /// What the directory keeps under the name is checked for what it
+    /// is: an uberblock of a group before the one that keeps it.
+    #[test]
+    fn a_checkpoint_that_is_not_before_its_keeper_is_not_taken() {
+        let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(200, 2)]);
+        let members = checkpointed_members(&mut pool, SIZE, (100, 1));
+        // The same pool, its newest group numbered below the checkpoint.
+        let mut early = Pool::mirror("tank", 0x4242, 12).txgs(&[(50, 2)]);
+        early.rootbp = pool.rootbp;
+        let members: Vec<Vec<u8>> = members
+            .into_iter()
+            .enumerate()
+            .map(|(i, mut m)| {
+                // Other uberblocks than the first pool's are in the way.
+                for off in zfs_ondisk::label::label_offsets(SIZE).expect("large enough") {
+                    let ring = (off + zfs_ondisk::label::UBERBLOCK_RING_OFFSET) as usize;
+                    m[ring..ring + zfs_ondisk::label::UBERBLOCK_RING_SIZE as usize].fill(0);
+                }
+                early.write_labels(i, &mut m);
+                m
+            })
+            .collect();
+        let (candidates, _) = candidates_of(members);
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|c| (c.ub.txg, c.checkpoint))
+                .collect::<Vec<_>>(),
+            [(50, false)]
+        );
+    }
+}
+
 #[cfg(test)]
 mod removed_tops_tests {
     use super::*;

@@ -75,6 +75,11 @@ struct ListOut {
     /// the removal left, and from the removed device where it is given.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     removed_since: Vec<u64>,
+    /// The transaction group of the pool checkpoint (`zpool
+    /// checkpoint`), when the pool has one: read at it, the dataset is
+    /// as it was then.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checkpoint_txg: Option<u64>,
     root: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     path: Option<String>,
@@ -253,6 +258,7 @@ pub fn run(
                 passed_over: opened.passed_over.clone(),
                 intent_log: opened.intent_log.clone(),
                 removed_since: opened.removed_since.clone(),
+                checkpoint_txg: opened.checkpoint_txg,
                 path: path.map(|p| p.to_string_lossy().into_owned()),
                 properties: fs.properties.clone(),
                 files,

@@ -266,6 +266,29 @@ A tree that reads in part is listed with what did not read named, and
 the exit status is 4: a dataset under that part is not in the list,
 and is not thereby absent.
 .Pp
+The TXGs to read at are those of the uberblock rings and, where the
+pool has one, its checkpoint
+.Pq Ql zpool checkpoint .
+From a checkpoint until it is discarded nothing the pool held is
+freed, and the uberblock of that moment is kept in the MOS when its
+TXG has long left every ring: the pool reads there as it was, a volume
+destroyed since whole.
+The checkpoint is asked of the newest TXG that reads.
+.Cm list
+names it, with
+.Ql checkpoint_txg
+and
+.Ql checkpoint_time
+in the record, and
+.Fl -txg
+reads it;
+.Cm dump
+without
+.Fl -txg
+looks for the dataset there last, and says when that is where it found
+it.
+A checkpoint that was discarded is not looked for.
+.Pp
 A TXG from before a top-level vdev was removed from the pool
 .Pq Ql zpool remove
 is read through the mapping the removal left, which holds what was

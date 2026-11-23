@@ -58,6 +58,14 @@ order of things.
 The hosts the labels name are
 .Ql host
 events, each at the newest label that names it.
+The pool checkpoint
+.Pq Ql zpool checkpoint ,
+where the pool has one, is read as one more TXG and is a
+.Ql checkpoint
+event: the uberblock of that moment is kept in the MOS when its TXG
+has long left the rings, and the pool reads there as it was, so that
+what was destroyed since is last seen at it and the command printed
+reads it there.
 One read in part \(em part of its dataset tree did not read \(em is
 counted as read in part, and what lies there is taken as it was at the
 TXG before; it is not destroyed there, and a dataset destroyed later is

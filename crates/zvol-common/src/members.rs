@@ -705,6 +705,15 @@ fn refuse_twins(
     }
 }
 
+/// What a run says when the transaction group it reads is the pool
+/// checkpoint.
+pub fn checkpoint_said(txg: u64, time: u64) -> String {
+    format!(
+        "txg {txg} ({}) is the pool checkpoint (zpool checkpoint): the pool as it was then, kept whole until the checkpoint is discarded",
+        crate::timefmt::iso8601(time)
+    )
+}
+
 /// Say, once, that the transaction group a run reads is from before a
 /// device removal (`zpool remove`), and give the top-level vdevs that
 /// were still devices at it, for the run's record. Empty, and nothing

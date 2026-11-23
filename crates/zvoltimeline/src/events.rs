@@ -35,6 +35,9 @@ pub enum Kind {
     Property,
     /// The pool's own facts: a host that had it imported.
     Host,
+    /// The pool checkpoint (`zpool checkpoint`): the pool as it was at
+    /// this TXG is kept whole.
+    Checkpoint,
     /// Space ZFS has finished with but has not freed yet.
     Pending,
     /// The MOS at this TXG could not be read.
@@ -60,6 +63,7 @@ impl Kind {
             Kind::SnapshotDestroyed => "snapshot-destroyed",
             Kind::Property => "property",
             Kind::Host => "host",
+            Kind::Checkpoint => "checkpoint",
             Kind::Pending => "pending",
             Kind::Unreadable => "unreadable",
             Kind::Abandoned => "abandoned",
