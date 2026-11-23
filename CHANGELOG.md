@@ -17,6 +17,31 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ### Fixed
 
+* **`zvolfiles extract`: over-long paths go under a name the dataset
+  does not have, and what was not written is not counted as written.**
+  An entry whose path is longer than the system takes is written under
+  `.zvolfiles-deep` in the output directory — a name nothing reserved.
+  A dataset with a file of that name in its root had every such entry
+  refused, "a file is in the way of a directory", exit 4 over a
+  dataset that was whole; one with a directory of that name had them
+  written into it, among its own. They go under `.zvolfiles-deep.1`,
+  or the first such name the dataset's root has no entry of, as the
+  manifest's own name is found. The count of entries written there,
+  and the summary line, took in the fifos and devices recorded and not
+  made and the entries that failed, each with a `written_as` naming a
+  path that does not exist: an entry nothing was made of says no
+  place. A second name of a file that falls on another filesystem than
+  the first — one mounted inside the output directory — went
+  unwritten (`EXDEV`, exit 4); it is written as a copy, as when the
+  filesystem takes no more names.
+* **`zvolfiles`: every path and link target that is not text has its
+  bytes beside it.** `path` has had `path_hex` since names were first
+  carried as bytes; `written_as`, and the first name in `hardlink_to`
+  and `copy_of`, were text alone, and so was a symbolic link's
+  `target`, in the manifest and in `list`: `\xff\xfe/bin` was
+  `"��/bin"`, which names nothing. `target_hex`, `written_as_hex`,
+  `hardlink_to_hex` and `copy_of_hex` are there when, and only when,
+  the text beside them is not the bytes.
 * **`dump -r --resume`: the record of a kept image is the run's own.**
   An image the run being resumed had finished is kept when the file
   still hashes to what that run's manifest records — and the record of

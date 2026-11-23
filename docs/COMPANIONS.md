@@ -525,7 +525,10 @@ must not do. So the bytes are carried from the directory ZAP through the
 walk to the output, and a file comes out called what it was called. What
 is printed and what goes in the JSON is still text, because a terminal
 needs one; alongside it, `path_hex` gives the exact bytes, and it is
-present only where printing lost something. The fixture holds
+present only where printing lost something. The same goes for every
+other path the manifest holds and for a symbolic link's target, which
+is bytes as much as a name is: `target_hex`, `written_as_hex`,
+`hardlink_to_hex`, `copy_of_hex`. The fixture holds
 `caf\xe9.txt` — `café.txt` as a Latin-1 machine wrote it — and CI checks
 that it is extracted under those bytes, found under those bytes, and
 *not* found under the text it prints as, which is a name no file has.

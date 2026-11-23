@@ -65,15 +65,27 @@ pub struct Extracted {
     pub sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
+    /// A symbolic link's target as the bytes it is, in hex, present only
+    /// when they are not UTF-8 and `target` therefore shows something
+    /// else. So with every `*_hex` below: a path beside it that is not
+    /// text, in its exact bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_hex: Option<String>,
     /// The earlier path this one is a hard link to (Z-07).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hardlink_to: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hardlink_to_hex: Option<String>,
     /// Where under the output directory this entry was written, when not
     /// at its path: the path is longer than the system takes, and the
     /// entry went under a short name instead — `.zvolfiles-deep`, its
     /// object number, its own name — or lies under a directory that did.
+    /// Absent where nothing was put there: an entry not made, or one
+    /// that failed before its file was.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub written_as: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub written_as_hex: Option<String>,
     /// Where it was written, for the evidence record.
     #[serde(skip)]
     pub written_to: Option<PathBuf>,
@@ -82,6 +94,8 @@ pub struct Extracted {
     /// names are links to this copy.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub copy_of: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub copy_of_hex: Option<String>,
     /// Extended attributes, recorded rather than applied (Z-04).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub xattrs: Vec<Xattr>,
@@ -181,6 +195,8 @@ pub struct Xattr {
 #[derive(Debug, Clone)]
 struct Written {
     path: String,
+    /// The path's bytes, where it is not text.
+    path_hex: Option<String>,
     /// Where it was written: at its path, or under a short name.
     out: PathBuf,
     sha256: Option<String>,
@@ -218,9 +234,13 @@ struct ManifestOut {
     #[serde(skip_serializing_if = "no_blocks")]
     unverified_blocks: u64,
     /// Entries written away from their paths (`written_as`), which are
-    /// longer than the system takes.
+    /// longer than the system takes: those that were written, not every
+    /// one that was to be.
     #[serde(skip_serializing_if = "is_zero")]
     written_short: usize,
+    /// The directory they went under, for the summary.
+    #[serde(skip)]
+    deep: Option<String>,
     /// Fifos, devices and sockets: recorded, not made.
     #[serde(skip_serializing_if = "is_zero")]
     special: usize,
@@ -422,8 +442,29 @@ fn safe_join(root: &Path, path: &[u8]) -> Option<PathBuf> {
 }
 
 /// Where entries whose paths are longer than the system takes are
-/// written instead, under the output directory.
+/// written instead, under the output directory — unless the dataset has
+/// an entry of that name in its root ([`deep_name`]).
 const DEEP: &str = ".zvolfiles-deep";
+
+/// The directory short names go under: [`DEEP`], or the first of
+/// `.zvolfiles-deep.1`, `.zvolfiles-deep.2`, … that no entry in the
+/// dataset's root is called, as the manifest's name is found. A dataset
+/// with a file of the name had every entry that was to go under it
+/// refused — "a file is in the way of a directory" — and one with a
+/// directory of the name had them written into it, among its own.
+/// Letter case is not told apart: the output may be on a filesystem
+/// that does not.
+fn deep_name(root_names: &[Vec<u8>]) -> String {
+    let free = |name: &str| {
+        !root_names
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case(name.as_bytes()))
+    };
+    std::iter::once(DEEP.to_string())
+        .chain((1u64..).map(|n| format!("{DEEP}.{n}")))
+        .find(|name| free(name))
+        .expect("an unbounded supply of names")
+}
 
 /// The longest path the system takes, in bytes, with its NUL.
 const PATH_MAX: usize = if cfg!(target_os = "linux") {
@@ -447,14 +488,13 @@ fn place(root: &Path, raw: &[u8], moved: &[(Vec<u8>, PathBuf)]) -> Option<(PathB
 }
 
 /// The short name for an entry whose path is longer than the system
-/// takes: `.zvolfiles-deep/OBJECT/NAME`, its own name kept under a
-/// directory named by its object number. A file with two names that are
-/// both too long is one object twice: the second goes under `OBJECT.2`,
-/// and so on — under `OBJECT` alone it came to the path of the first and
-/// was refused as "already written at this path".
-fn short_place(root: &Path, object: u64, raw: &[u8], taken: &BTreeSet<PathBuf>) -> Option<PathBuf> {
+/// takes: `.zvolfiles-deep/OBJECT/NAME` — `deep`, then its own name kept
+/// under a directory named by its object number. A file with two names
+/// that are both too long is one object twice: the second goes under
+/// `OBJECT.2`, and so on — under `OBJECT` alone it came to the path of
+/// the first and was refused as "already written at this path".
+fn short_place(deep: &Path, object: u64, raw: &[u8], taken: &BTreeSet<PathBuf>) -> Option<PathBuf> {
     let name = raw.rsplit(|&b| b == b'/').next()?;
-    let deep = root.join(DEEP);
     let mut n = 1u64;
     loop {
         let dir = if n == 1 {
@@ -477,6 +517,8 @@ fn too_long(path: &Path) -> bool {
 
 /// How a file's copy can end short of the file.
 enum CopyError {
+    /// The file could not be made: nothing is at its path.
+    NotMade(OutError),
     /// It could not be written, or the run was interrupted.
     Out(OutError),
     /// `--strict`, and a block that could not be read: the run ends.
@@ -552,7 +594,7 @@ fn copy_file(
             "zvolfiles: {shown}: {size} bytes, and its block pointers could not say where its last block with data is: every block to its size is looked for (SIGINT stops the run)"
         );
     }
-    let mut file = tree.create(to)?;
+    let mut file = tree.create(to).map_err(CopyError::NotMade)?;
     let mut hasher = Sha256::new();
     let mut written = 0u64;
     let mut zeroed = Vec::new();
@@ -688,6 +730,9 @@ struct Run {
     /// Directories written under a short name, as their path's bytes and
     /// where they went: what is under one goes under it.
     moved: Vec<(Vec<u8>, PathBuf)>,
+    /// The directory short names go under ([`deep_name`]), once one was
+    /// needed.
+    deep: Option<String>,
 }
 
 /// Run `extract`.
@@ -909,7 +954,12 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
             .filter(|f| f.hardlink_to.is_none())
             .map(|f| f.unverified)
             .sum();
-        let written_short = files.iter().filter(|f| f.written_as.is_some()).count();
+        // What was written there: a fifo recorded and not made, and an
+        // entry that failed, were counted as written under it.
+        let written_short = files
+            .iter()
+            .filter(|f| f.written_as.is_some() && f.error.is_none() && f.not_made.is_none())
+            .count();
         let special = files.iter().filter(|f| f.not_made.is_some()).count();
         Ok((
             ManifestOut {
@@ -925,6 +975,7 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
                 hardlinks,
                 unverified_blocks,
                 written_short,
+                deep: run.deep,
                 special,
                 stopped: run.stopped,
                 interrupted,
@@ -1022,8 +1073,9 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
             }
             if out.written_short > 0 {
                 println!(
-                    "  {} written under {DEEP}: their paths are longer than the system takes (the manifest's written_as)",
-                    entries(out.written_short)
+                    "  {} written under {}: their paths are longer than the system takes (the manifest's written_as)",
+                    entries(out.written_short),
+                    out.deep.as_deref().unwrap_or(DEEP)
                 );
             }
             if out.special > 0 {
@@ -1159,9 +1211,13 @@ fn record_of(fs: &Filesystem<'_, '_>, e: &Entry, z: &Znode) -> Extracted {
         rdev: Rdev::of(z),
         sha256: None,
         target: None,
+        target_hex: None,
         hardlink_to: None,
+        hardlink_to_hex: None,
         copy_of: None,
+        copy_of_hex: None,
         written_as: None,
+        written_as_hex: None,
         written_to: None,
         xattrs: xattrs.0,
         xattr_errors: xattrs.1,
@@ -1268,6 +1324,7 @@ fn write_entry(
     // Not written, and when it is a directory, nothing under it is.
     let reject = |run: &mut Run, mut record: Extracted, why: String| {
         record.error = Some(why);
+        nowhere(&mut record);
         if is_dir {
             run.unwritten_dirs
                 .push((e.raw_path.clone(), e.path.clone(), e.object));
@@ -1294,7 +1351,21 @@ fn write_entry(
     // a short name under the output directory instead, and what is under
     // it goes under that, by the names it has.
     if too_long(&to) {
-        let short = short_place(&opts.output, e.object, &e.raw_path, &run.taken);
+        let deep = run.deep.get_or_insert_with(|| {
+            // What the root holds, as far as it reads: what of it does
+            // not read is not written, and takes no name.
+            let names = fs
+                .read_dir_partial(fs.root)
+                .map(|read| read.entries.into_iter().map(|e| e.raw).collect::<Vec<_>>())
+                .unwrap_or_default();
+            deep_name(&names)
+        });
+        let short = short_place(
+            &opts.output.join(deep.as_str()),
+            e.object,
+            &e.raw_path,
+            &run.taken,
+        );
         if let Some(short) = short.filter(|s| !too_long(s)) {
             if is_dir {
                 run.moved.push((e.raw_path.clone(), short.clone()));
@@ -1306,10 +1377,14 @@ fn write_entry(
     // Every entry that is not at its path says where it is: one under a
     // directory that moved, as much as the directory.
     if elsewhere {
-        record.written_as = to
+        // With its bytes beside it where a name in it is not text, as
+        // `path` has them: the text alone named no file.
+        let at = to
             .strip_prefix(&opts.output)
             .ok()
-            .map(|p| p.to_string_lossy().into_owned());
+            .map(zvol_common::evidence::PathText::of);
+        record.written_as_hex = at.as_ref().and_then(|p| p.path_hex.clone());
+        record.written_as = at.map(|p| p.path);
     }
     record.written_to = Some(to.clone());
     if !run.taken.insert(to.clone()) {
@@ -1331,29 +1406,38 @@ fn write_entry(
             Ok(()) => run.directories += 1,
             Err(err) => {
                 fail(&mut record, err);
+                nowhere(&mut record);
                 run.unwritten_dirs
                     .push((e.raw_path.clone(), e.path.clone(), e.object));
             }
         },
         FileType::Symlink => match fs.symlink_target(e.object, z) {
             Ok(t) => {
-                let target = String::from_utf8_lossy(&t).into_owned();
-                record.target = Some(target.clone());
+                record.target = Some(String::from_utf8_lossy(&t).into_owned());
+                record.target_hex = hex_if_not_text(&t);
                 // Written as a file holding the target rather than as a
                 // symbolic link: a link out of a recovered tree would
                 // point at whatever happens to be there now.
-                let wrote = tree.create(&to).and_then(|mut f| {
-                    f.write_all(&t)
-                        .map_err(|err| OutError::Failed(format!("{}: {err}", to.display())))
-                });
-                match wrote {
-                    // The hash of what was written, as for a file: the
-                    // evidence record lists it among the outputs.
-                    Ok(()) => record.sha256 = Some(zvol_common::evidence::sha256_hex(&t)),
-                    Err(err) => fail(&mut record, err),
+                match tree.create(&to) {
+                    Ok(mut f) => match f.write_all(&t) {
+                        // The hash of what was written, as for a file:
+                        // the evidence record lists it among the outputs.
+                        Ok(()) => record.sha256 = Some(zvol_common::evidence::sha256_hex(&t)),
+                        Err(err) => fail(
+                            &mut record,
+                            OutError::Failed(format!("{}: {err}", to.display())),
+                        ),
+                    },
+                    Err(err) => {
+                        fail(&mut record, err);
+                        nowhere(&mut record);
+                    }
                 }
             }
-            Err(err) => record.error = Some(err.to_string()),
+            Err(err) => {
+                record.error = Some(err.to_string());
+                nowhere(&mut record);
+            }
         },
         FileType::Regular => {
             // The same object under a second name is a hard link, and
@@ -1367,6 +1451,7 @@ fn write_entry(
                         // said `errors 0` for a file the first name said
                         // had blocks written as zeros.
                         record.hardlink_to = Some(first.path.clone());
+                        record.hardlink_to_hex = first.path_hex.clone();
                         record.sha256 = first.sha256.clone();
                         record.errors = first.zeroed.len() as u64;
                         record.zeroed = first.zeroed;
@@ -1381,9 +1466,11 @@ fn write_entry(
                     Ok(Some(why)) => {
                         copied_for = Some(why);
                         record.copy_of = Some(first.path.clone());
+                        record.copy_of_hex = first.path_hex.clone();
                     }
                     Err(err) => {
                         fail(&mut record, err);
+                        nowhere(&mut record);
                         run.files.push(record);
                         return;
                     }
@@ -1420,6 +1507,7 @@ fn write_entry(
                             e.object,
                             Written {
                                 path: e.path.clone(),
+                                path_hex: path_hex(e),
                                 out: to.clone(),
                                 sha256: Some(copied.sha256),
                                 zeroed: copied.zeroed,
@@ -1427,6 +1515,10 @@ fn write_entry(
                             },
                         );
                     }
+                }
+                Err(CopyError::NotMade(err)) => {
+                    fail(&mut record, err);
+                    nowhere(&mut record);
                 }
                 Err(CopyError::Out(err)) => fail(&mut record, err),
                 // The run ends here: what is in the file is the bytes
@@ -1452,12 +1544,14 @@ fn write_entry(
                 _ => "a socket",
             };
             run.taken.remove(&to);
+            nowhere(&mut record);
             record.not_made = Some(format!(
                 "{what}: recorded here, not made (this build writes files, directories and links)"
             ));
         }
         other => {
             record.error = Some(format!("not written: {other:?}"));
+            nowhere(&mut record);
         }
     }
     if record.error.is_none() && record.not_made.is_none() {
@@ -1473,7 +1567,24 @@ fn write_entry(
 /// The exact bytes of a path, but only where printing them lost
 /// something; a name that is text needs no second spelling.
 fn path_hex(e: &Entry) -> Option<String> {
-    (!e.path_is_text()).then(|| e.raw_path.iter().map(|b| format!("{b:02x}")).collect())
+    hex_if_not_text(&e.raw_path)
+}
+
+/// Bytes from the pool as hex, where they are not UTF-8 and the text
+/// made of them is therefore not them.
+pub(crate) fn hex_if_not_text(raw: &[u8]) -> Option<String> {
+    std::str::from_utf8(raw)
+        .is_err()
+        .then(|| raw.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Nothing of this entry was put anywhere: it says no place it is at.
+/// A fifo recorded and not made, and an entry refused before its file
+/// was made, named a path under the short names that does not exist.
+fn nowhere(record: &mut Extracted) {
+    record.written_as = None;
+    record.written_as_hex = None;
+    record.written_to = None;
 }
 
 fn failed(e: &Entry, why: &str) -> Extracted {
@@ -1493,9 +1604,13 @@ fn failed(e: &Entry, why: &str) -> Extracted {
         rdev: None,
         sha256: None,
         target: None,
+        target_hex: None,
         hardlink_to: None,
+        hardlink_to_hex: None,
         copy_of: None,
+        copy_of_hex: None,
         written_as: None,
+        written_as_hex: None,
         written_to: None,
         xattrs: Vec::new(),
         xattr_errors: Vec::new(),
@@ -1561,7 +1676,10 @@ fn xattrs_of(fs: &Filesystem<'_, '_>, z: &Znode) -> (Vec<Xattr>, Vec<String>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{place, safe_join, short_place, too_long, Meta, Preserve, PATH_MAX};
+    use super::{
+        deep_name, hex_if_not_text, place, safe_join, short_place, too_long, Meta, Preserve,
+        PATH_MAX,
+    };
     use std::collections::BTreeSet;
     use std::path::{Path, PathBuf};
 
@@ -1598,16 +1716,53 @@ mod tests {
         ))));
 
         let mut taken = BTreeSet::new();
-        let first = short_place(root, 500, b"deep/dir/name", &taken).unwrap();
+        let deep = &root.join(deep_name(&[]));
+        let first = short_place(deep, 500, b"deep/dir/name", &taken).unwrap();
         assert_eq!(first, Path::new("/out/.zvolfiles-deep/500/name"));
         taken.insert(first);
         assert_eq!(
-            short_place(root, 500, b"other/dir/name", &taken).as_deref(),
+            short_place(deep, 500, b"other/dir/name", &taken).as_deref(),
             Some(Path::new("/out/.zvolfiles-deep/500.2/name"))
         );
         assert_eq!(
-            short_place(root, 500, b"deep/dir/other", &taken).as_deref(),
+            short_place(deep, 500, b"deep/dir/other", &taken).as_deref(),
             Some(Path::new("/out/.zvolfiles-deep/500/other"))
+        );
+    }
+
+    /// The directory short names go under is one the dataset's root has
+    /// no entry called: with a file of the name every entry that was to
+    /// go under it failed, and with a directory they went in among its
+    /// own. Not by letter case either, and not only the first name.
+    #[test]
+    fn short_names_go_under_a_name_the_dataset_does_not_have() {
+        let names =
+            |n: &[&str]| -> Vec<Vec<u8>> { n.iter().map(|s| s.as_bytes().to_vec()).collect() };
+        assert_eq!(
+            deep_name(&names(&["a", "manifest.json"])),
+            ".zvolfiles-deep"
+        );
+        assert_eq!(deep_name(&names(&[".zvolfiles-deep"])), ".zvolfiles-deep.1");
+        assert_eq!(
+            deep_name(&names(&[".ZVOLFILES-deep", ".zvolfiles-deep.1"])),
+            ".zvolfiles-deep.2"
+        );
+        // A name that only begins like it takes nothing.
+        assert_eq!(
+            deep_name(&names(&[".zvolfiles-deep.1", ".zvolfiles-deeper"])),
+            ".zvolfiles-deep"
+        );
+    }
+
+    /// Bytes that are text have no second spelling; bytes that are not
+    /// have their own beside the text made of them.
+    #[test]
+    fn what_is_not_text_has_its_bytes_beside_it() {
+        assert_eq!(hex_if_not_text(b"../etc/passwd"), None);
+        assert_eq!(hex_if_not_text("теки".as_bytes()), None);
+        assert_eq!(
+            hex_if_not_text(b"\xff\xfe/bin").as_deref(),
+            Some("fffe2f62696e")
         );
     }
 

@@ -2000,7 +2000,15 @@ pub enum ZplDamage {
     /// The pool went down with a write in the dataset's intent log: one
     /// `TX_WRITE` of the transaction group after the newest.
     LogLeft,
+    /// `link`'s target is [`ZPL_LINK_NOT_TEXT`]: bytes that are not
+    /// UTF-8, which a target may be as much as a name. Nothing is wrong
+    /// with such a dataset.
+    LinkNotText,
 }
+
+/// The target of `link` under [`ZplDamage::LinkNotText`], as long as the
+/// one it stands for.
+pub const ZPL_LINK_NOT_TEXT: &[u8] = b"sub/d\xe9\xffp.txt";
 
 /// What the ZPL fixture's spill block holds (Z-10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2237,7 +2245,11 @@ fn build_zpl_objset(
     // 8: a symbolic link whose target is in the attributes, not a block,
     // with a security label after it as a host with SELinux gives one:
     // twelve bytes of target, padded to sixteen before the label.
-    let target = b"sub/deep.txt".to_vec();
+    let target = if damage == Some(ZplDamage::LinkNotText) {
+        ZPL_LINK_NOT_TEXT.to_vec()
+    } else {
+        b"sub/deep.txt".to_vec()
+    };
     let mut symlink_fields = meta(0o120777, target.len() as u64, 3, 1);
     symlink_fields.push((zpl_attr::SYMLINK, target.clone()));
     symlink_fields.push((

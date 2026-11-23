@@ -1101,3 +1101,49 @@ fn what_the_intent_log_holds_is_said_and_is_not_the_exit_status() {
     assert_eq!(index["intent_log"]["unreplayed"], 1, "{index}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// A symbolic link's target is bytes, as a name is, and one that is not
+/// UTF-8 is recorded with its bytes beside the text made of them: the
+/// manifest and the list had the text alone, which names nothing. The
+/// file written holds the bytes.
+#[test]
+fn a_target_that_is_not_text_has_its_bytes_beside_it() {
+    use zfs_read::fixture::ZPL_LINK_NOT_TEXT;
+
+    let dir = scratch("target-bytes");
+    let m = damaged(&dir, ZplDamage::LinkNotText);
+    let hex: String = ZPL_LINK_NOT_TEXT
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+
+    let (code, v) = json_of(&["-q", "-f", "json", "list", "tank/fs", &m[0], &m[1]]);
+    assert_eq!(code, 0, "{v}");
+    let files = v["files"].as_array().unwrap();
+    let link = files.iter().find(|f| f["path"] == "link").unwrap();
+    assert_eq!(link["target"], "sub/d\u{fffd}\u{fffd}p.txt", "{link}");
+    assert_eq!(link["target_hex"], hex.as_str(), "{link}");
+    // What is text has no second spelling.
+    assert!(
+        files
+            .iter()
+            .all(|f| f["path"] == "link" || f.get("target_hex").is_none()),
+        "{v}"
+    );
+
+    let out = dir.join("out");
+    let (code, err) = run(&[
+        "-q",
+        "extract",
+        "tank/fs",
+        &m[0],
+        &m[1],
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let link = manifest_record(&out, "link");
+    assert_eq!(link["target_hex"], hex.as_str(), "{link}");
+    assert_eq!(std::fs::read(out.join("link")).unwrap(), ZPL_LINK_NOT_TEXT);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

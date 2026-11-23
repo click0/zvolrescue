@@ -40,6 +40,10 @@ struct FileOut {
     rdev: Option<Rdev>,
     #[serde(skip_serializing_if = "Option::is_none")]
     target: Option<String>,
+    /// A symbolic link's target as the bytes it is, in hex, present only
+    /// when they are not UTF-8 and `target` shows something else.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_hex: Option<String>,
     /// Extended attributes, in name order (Z-04).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     xattrs: Vec<String>,
@@ -79,7 +83,7 @@ struct ListOut {
 /// Turn one walked entry into the report's shape.
 fn describe(
     e: &Entry,
-    target: Option<String>,
+    target: Option<&[u8]>,
     xattrs: Vec<String>,
     xattr_errors: Vec<String>,
 ) -> FileOut {
@@ -100,7 +104,8 @@ fn describe(
         projid: z.and_then(|z| z.projid),
         mtime: z.map(|z| iso8601_ns(z.mtime.secs, z.mtime.nanos)),
         rdev: z.and_then(Rdev::of),
-        target,
+        target: target.map(|t| String::from_utf8_lossy(t).into_owned()),
+        target_hex: target.and_then(crate::extract::hex_if_not_text),
         xattrs,
         xattr_errors,
         contents_errors: e.contents_errors.clone(),
@@ -201,7 +206,7 @@ pub fn run(
                     .filter(|z| z.symlink.is_some())
                     .map(|z| fs.symlink_target(e.object, z));
                 let (target, target_error) = match read_target {
-                    Some(Ok(t)) => (Some(String::from_utf8_lossy(&t).into_owned()), None),
+                    Some(Ok(t)) => (Some(t), None),
                     Some(Err(err)) => (None, Some(format!("its target could not be read: {err}"))),
                     None => (None, None),
                 };
@@ -213,7 +218,7 @@ pub fn run(
                         .filter_map(|x| x.error.as_ref().map(|err| format!("{}: {err}", x.name))),
                 );
                 let xattrs = read.values.into_iter().map(|x| x.name).collect();
-                let mut f = describe(e, target, xattrs, xattr_errors);
+                let mut f = describe(e, target.as_deref(), xattrs, xattr_errors);
                 if f.error.is_none() {
                     f.error = target_error;
                 }

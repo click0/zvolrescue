@@ -136,7 +136,10 @@ A directory met a second time \(em damaged metadata, since a directory
 has one name \(em is named in the manifest and not walked again.
 A file's second and later names are hard links to the first; when the
 output's filesystem takes no more names for it (ext4 stops at 65 000),
-or takes no hard links at all, the next name is written as a copy
+or takes no hard links at all, or the name falls on another filesystem
+than the file \(em one mounted inside
+.Ar dir
+\(em the next name is written as a copy
 .Pq Li copy_of
 and the names after it are links to the copy.
 An entry whose path is longer than the system takes is written under
@@ -145,9 +148,24 @@ in
 .Ar dir
 instead \(em its object number, then its own name \(em and a
 directory so placed has everything under it by the names it has.
+When the dataset's root has an entry called
+.Pa .zvolfiles-deep ,
+they go under
+.Pa .zvolfiles-deep.1 ,
+or the first such name the root has no entry of.
 Each entry that is not at its path says where it is in the manifest
 .Pq Li written_as ,
-and the evidence record lists each file where it is.
+and the evidence record lists each file where it is; one that was not
+made \(em a fifo, or an entry that failed before its file was \(em
+says no place, and is not counted among those written there.
+A name is bytes, and so is a link's target: where one is not UTF-8
+the manifest and the list hold the text made of it and, beside it,
+the bytes in hex
+.Po
+.Li path_hex , target_hex , written_as_hex , hardlink_to_hex ,
+.Li copy_of_hex
+.Pc ,
+present only then.
 A fifo, a device or a socket is recorded in the manifest, with a
 device's major and minor number, and not made; it is no failure.
 The number is split as the system that made the node stored it \(em
