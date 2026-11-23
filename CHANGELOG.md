@@ -17,6 +17,17 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ### Fixed
 
+* **`--map`: a map longer than its image is counted to the image's end,
+  and said not to fit.** A ddrescue map shorter than its image has what
+  it says nothing of refused; one longer was taken without a word. Its
+  ranges past the image's end were summed into what was "never read" of
+  the image — 268 MB of an image of 96 MB, none of them in it — and an
+  image cut short of bytes its own map marks as read, which is the
+  labels at its end looked for in the wrong place, drew no note at
+  all. The counts are of the image's own bytes, and a second line says
+  how many bytes of the map lie past the end and how many of them it
+  marks as read: the map of a larger disk, or an image cut short.
+  `scan` has them in its record (`beyond_image`, `beyond_image_read`).
 * **`zvolfiles --path`: a name two entries answer to is neither.** A
   path that is on disk under no spelling of its own is matched by
   folding case where the dataset folds it, and a dataset with

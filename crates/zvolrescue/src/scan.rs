@@ -165,6 +165,22 @@ struct MapOut {
     /// What the map says was not read, in words.
     #[serde(skip)]
     said: String,
+    /// Bytes the map describes past the image's end: it is the map of
+    /// a larger disk, or the image was cut short. The counts above are
+    /// of the image's own bytes.
+    #[serde(skip_serializing_if = "is_zero")]
+    beyond_image: u64,
+    /// Those of them the map marks as read, which the image does not
+    /// hold.
+    #[serde(skip_serializing_if = "is_zero")]
+    beyond_image_read: u64,
+    /// That, in words.
+    #[serde(skip)]
+    misfit: Option<String>,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// What a GEOM class left in a provider's last sector (SPEC F-71).
@@ -785,6 +801,9 @@ fn print_text(out: &ScanOut, verbose: u8) {
                     "; they are refused, not trusted (SPEC F-72)"
                 }
             );
+            if let Some(misfit) = &m.misfit {
+                outln!("    {misfit}");
+            }
         }
         match &d.config {
             Some(c) => {
@@ -1265,6 +1284,9 @@ pub fn run(
                 unreadable: m.unreadable().to_vec(),
                 by_status: m.by_status.clone(),
                 labels_touched,
+                beyond_image: m.beyond,
+                beyond_image_read: m.beyond_read,
+                misfit: m.misfit(),
             }
         });
         let geom_at = |end: u64| src.and_then(|s| geom_metadata(s, end).ok().flatten());

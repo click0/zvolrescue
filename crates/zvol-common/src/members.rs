@@ -473,6 +473,11 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
                         "; they are refused, not trusted (SPEC F-72)"
                     }
                 );
+                // A map and an image that are not of one size are not
+                // known to be of one disk.
+                if let Some(misfit) = m.misfit() {
+                    say!("{}: the imager's map: {misfit}", p.display());
+                }
             }
             let scan = scan_with_recovered_base_opts(&src, open.surface_scan_on_device)?;
             if scan.surface_scan_refused {

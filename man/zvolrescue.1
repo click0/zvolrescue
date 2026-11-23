@@ -158,6 +158,10 @@ a block that crosses them is kept as far as the imager did read it and
 the rest is zeros with the reason, not a checksum failure with none.
 Bytes the map says nothing of \(em between its lines, or past its end
 in an image longer than it \(em are refused the same way.
+A map that describes more than the image holds is counted as far as
+the image goes, and said not to fit it: it is the map of a larger
+disk, or the image was cut short \(em of bytes the map marks as read,
+when it says so.
 .It Fl -device-may-fail
 Go on after a device refuses a read.
 Without this the first refused read on a device stops the run with

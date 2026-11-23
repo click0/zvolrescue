@@ -339,6 +339,75 @@ fn what_a_map_does_not_describe_is_not_trusted() {
     );
 }
 
+/// A map that describes more than its image holds is counted as far as
+/// the image goes, and said not to fit: its ranges past the end were
+/// "never read" of an image that has none of them — 268 MB of a 16 MB
+/// one — and an image cut short of bytes its own map calls read went
+/// without a word. The record has the bytes past the end.
+#[test]
+fn a_map_longer_than_its_image_is_said_not_to_fit() {
+    let dir = scratch("long-map");
+    let paths = write_members(&dir, &plain_members());
+    let map = dir.join("m0.map");
+    std::fs::write(
+        &map,
+        format!("0x0 +\n0x0 {SIZE:#x} +\n{SIZE:#x} 0x10000000 -\n"),
+    )
+    .unwrap();
+    let mapped = format!("{}={}", paths[0], map.display());
+    let (code, out, err) = run(&["-q", "list", &paths[0], &paths[1], "--map", &mapped]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(
+        err.contains("the imager's map says every byte was read")
+            && !err.contains("never read")
+            && err.contains(&format!(
+                "the imager's map: it describes {} byte(s) and the image holds {SIZE}: 268435456 byte(s) of the map are past the image's end — the map of a larger disk, or an image cut short",
+                SIZE + 0x1000_0000
+            )),
+        "{err}"
+    );
+
+    // The same member cut to half, under the map of the whole of it.
+    let cut = dir.join("cut.img");
+    std::fs::write(
+        &cut,
+        &std::fs::read(&paths[0]).unwrap()[..SIZE as usize / 2],
+    )
+    .unwrap();
+    std::fs::write(&map, format!("0x0 +\n0x0 {SIZE:#x} +\n")).unwrap();
+    let cut = cut.to_string_lossy().into_owned();
+    let mapped = format!("{cut}={}", map.display());
+    let (_, out, err) = run(&["scan", &cut, "--map", &mapped]);
+    assert!(
+        out.contains(&format!(
+            "{} of them marked as read, which this image does not hold",
+            SIZE / 2
+        )),
+        "{out}\n{err}"
+    );
+    let (_, out, _) = run(&["-f", "json", "scan", &cut, "--map", &mapped]);
+    let v = json(&out);
+    let m = &v["devices"][0]["map"];
+    assert_eq!(m["beyond_image"], SIZE / 2, "{v}");
+    assert_eq!(m["beyond_image_read"], SIZE / 2, "{v}");
+    assert_eq!(m["by_status"]["+"], SIZE / 2, "{v}");
+    // A map of the image's own size says nothing of the kind.
+    let (_, out, _) = run(&[
+        "-f",
+        "json",
+        "scan",
+        &paths[1],
+        "--map",
+        &format!("{}={}", paths[1], map.display()),
+    ]);
+    assert!(
+        json(&out)["devices"][0]["map"]
+            .get("beyond_image")
+            .is_none(),
+        "{out}"
+    );
+}
+
 /// A run read through `--hints` says so on its record: the hints file is
 /// one of its inputs, and the layout read through — every vdev with its
 /// members by name, in the order read — is there (SPEC F-65), as no

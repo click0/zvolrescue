@@ -146,10 +146,24 @@ pub mod ddrescue {
     pub struct Map {
         /// Ranges the imager did not finish, merged and in order.
         unreadable: Vec<(u64, u64)>,
-        /// Bytes per block status character, as the map has them.
+        /// Bytes per block status character, as the map has them — of
+        /// the image's own bytes, once the map is held against an image
+        /// ([`Map::for_size`]).
         pub by_status: BTreeMap<char, u64>,
         /// One past the last byte the map describes.
         pub extent: u64,
+        /// Its block lines, `(pos, size, status)`, in order: what the
+        /// counts are worked out from, again when the image turns out
+        /// shorter than the map.
+        lines: Vec<(u64, u64, char)>,
+        /// The size of the image the map was held against, when it was.
+        image: Option<u64>,
+        /// Bytes the map describes past the end of that image. Its
+        /// counts take in none of them.
+        pub beyond: u64,
+        /// Those of them it marks as read: bytes the imager took from
+        /// the disk that this image does not hold.
+        pub beyond_read: u64,
         /// Bytes it does not describe — between its lines, or past its
         /// end — which are refused as the unfinished ones are: what the
         /// imager says nothing of, it is not known to have read.
@@ -167,6 +181,7 @@ pub mod ddrescue {
             let mut map = Map::default();
             let mut seen_status_line = false;
             let mut last_end = 0u64;
+            let mut lines = Vec::new();
             for (n, raw) in text.lines().enumerate() {
                 let line = raw.split('#').next().unwrap_or("").trim();
                 if line.is_empty() {
@@ -198,36 +213,63 @@ pub mod ddrescue {
                 if pos < last_end {
                     return Err(format!("line {}: blocks out of order at {pos:#x}", n + 1));
                 }
-                // A gap between two lines is bytes the map says nothing
-                // of: they were trusted as read.
-                if pos > last_end {
-                    map.refuse(last_end, pos - last_end);
-                }
                 // A block that runs past the end of a 64-bit offset is
                 // no block: wrapped, it merged with one at the start of
                 // the disk, and the sectors there were not refused.
                 let end = pos.checked_add(size).ok_or_else(|| {
                     format!("line {}: {pos:#x} + {size:#x} runs past any offset", n + 1)
                 })?;
-                let total = map.by_status.entry(status).or_insert(0);
-                *total = total.saturating_add(size);
-                if status != '+' && size > 0 {
-                    if map.marked_end != Some(pos) {
-                        map.marked += 1;
-                    }
-                    map.marked_end = Some(end);
-                    match map.unreadable.last_mut() {
-                        Some((s, l)) if *s + *l == pos => *l += size,
-                        _ => map.unreadable.push((pos, size)),
-                    }
-                }
+                lines.push((pos, size, status));
                 last_end = end;
-                map.extent = last_end;
             }
             if !seen_status_line {
                 return Err("empty mapfile".into());
             }
+            map.extent = last_end;
+            map.lines = lines;
+            map.count(u64::MAX);
             Ok(map)
+        }
+
+        /// Work out what the lines say of the bytes before `end`: the
+        /// ranges not finished, the bytes per status, what they say
+        /// nothing of between them. Returns where the last line
+        /// counted ends.
+        fn count(&mut self, end: u64) -> u64 {
+            self.unreadable.clear();
+            self.by_status.clear();
+            self.undescribed = 0;
+            self.marked = 0;
+            self.marked_end = None;
+            let mut last_end = 0u64;
+            let lines = std::mem::take(&mut self.lines);
+            for &(pos, size, status) in &lines {
+                // In order, so nothing after this one is before `end`.
+                if pos >= end {
+                    break;
+                }
+                // A gap between two lines is bytes the map says nothing
+                // of: they were trusted as read.
+                if pos > last_end {
+                    self.refuse(last_end, pos - last_end);
+                }
+                let size = size.min(end - pos);
+                let total = self.by_status.entry(status).or_insert(0);
+                *total = total.saturating_add(size);
+                if status != '+' && size > 0 {
+                    if self.marked_end != Some(pos) {
+                        self.marked += 1;
+                    }
+                    self.marked_end = Some(pos + size);
+                    match self.unreadable.last_mut() {
+                        Some((s, l)) if *s + *l == pos => *l += size,
+                        _ => self.unreadable.push((pos, size)),
+                    }
+                }
+                last_end = pos + size;
+            }
+            self.lines = lines;
+            last_end
         }
 
         /// Ranges the imager did not finish, merged and in order.
@@ -266,12 +308,47 @@ pub mod ddrescue {
         /// end is refused. A map shorter than its image — 1 MiB of map for
         /// 64 MiB of image — said "0 bytes never read", and the rest was
         /// trusted as read.
+        ///
+        /// A map longer than its image is counted as far as the image
+        /// goes. Its ranges past the end were summed into what was
+        /// "never read" of the image — 268 MB of a 96 MB image, none of
+        /// them in it — and nothing said that the two are not of one
+        /// size ([`Map::misfit`]): the map of another disk, or an image
+        /// cut short of bytes its own map calls read.
         pub fn for_size(mut self, size: u64) -> Map {
+            self.image = Some(size);
+            self.beyond = self.extent.saturating_sub(size);
+            self.beyond_read = self
+                .lines
+                .iter()
+                .filter(|&&(_, _, status)| status == '+')
+                .map(|&(pos, len, _)| (pos + len).saturating_sub(pos.max(size)))
+                .sum();
+            let described = self.count(size);
+            if described < size {
+                self.refuse(described, size - described);
+            }
             if self.extent < size {
-                self.refuse(self.extent, size - self.extent);
                 self.extent = size;
             }
             self
+        }
+
+        /// How the map does not fit the image it was held against, in
+        /// words: it describes bytes past the image's end. `None` when
+        /// it ends where the image does, or before — which
+        /// [`Map::said`] says.
+        pub fn misfit(&self) -> Option<String> {
+            let image = self.image.filter(|_| self.beyond > 0)?;
+            Some(format!(
+                "it describes {} byte(s) and the image holds {image}: {} byte(s) of the map are past the image's end{} — the map of a larger disk, or an image cut short; what the map says is counted to the image's end only",
+                self.extent,
+                self.beyond,
+                match self.beyond_read {
+                    0 => String::new(),
+                    r => format!(", {r} of them marked as read, which this image does not hold"),
+                }
+            ))
         }
 
         /// Bytes the imager did not finish, in total.
@@ -1020,6 +1097,40 @@ mod tests {
         assert_eq!(
             ddrescue::Map::parse("0x0 +\n0x0 0x100 +\n").unwrap().said(),
             "every byte was read"
+        );
+        // Held against an image shorter than it, a map counts what it
+        // says of the image's own bytes: its ranges past the end were
+        // "never read" of an image that has none of them.
+        let long = ddrescue::Map::parse(
+            "0x0 +\n0x0 0x1000 +\n0x1000 0x800 -\n0x1800 0x2000 +\n0x3800 0x800 -\n",
+        )
+        .expect("a map");
+        assert_eq!(long.misfit(), None);
+        let cut = long.clone().for_size(0x1400);
+        assert_eq!(cut.unreadable(), &[(0x1000, 0x400)]);
+        assert_eq!(cut.said(), "1024 byte(s) in 1 range(s) were never read");
+        assert_eq!((cut.by_status[&'+'], cut.by_status[&'-']), (0x1000, 0x400));
+        assert_eq!((cut.beyond, cut.beyond_read), (0x2c00, 0x2000));
+        assert_eq!(
+            cut.misfit().as_deref(),
+            Some("it describes 16384 byte(s) and the image holds 5120: 11264 byte(s) of the map are past the image's end, 8192 of them marked as read, which this image does not hold — the map of a larger disk, or an image cut short; what the map says is counted to the image's end only")
+        );
+        // Nothing read lies past the end: a longer disk's map all the
+        // same, and no bytes of the image's are missing by it.
+        let tail = ddrescue::Map::parse("0x0 +\n0x0 0x1000 +\n0x1000 0x1000 -\n")
+            .expect("a map")
+            .for_size(0x1000);
+        assert_eq!(tail.said(), "every byte was read");
+        assert_eq!((tail.beyond, tail.beyond_read), (0x1000, 0));
+        assert!(tail.misfit().is_some_and(|m| !m.contains("marked as read")));
+        // A map of the image's own size fits, and one shorter is said
+        // as before.
+        assert_eq!(long.clone().for_size(0x4000).misfit(), None);
+        let short = long.for_size(0x5000);
+        assert_eq!(short.misfit(), None);
+        assert_eq!(
+            short.said(),
+            "4096 byte(s) in 2 range(s) were never read, and nothing of 4096 byte(s) more, between its lines or past its end"
         );
         assert!(ddrescue::Map::parse("# only comments\n").is_err());
         assert!(ddrescue::Map::parse("0x0 + 1\n0x0 0x100 x\n").is_err());
