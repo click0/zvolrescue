@@ -78,6 +78,21 @@ jobs:
               sys.exit("::error::distinfo is not Cargo.lock's for: " + "; ".join(bad))
           print(f"{seen} crates of distinfo checked against Cargo.lock")
           EOF
+          # And it names its files as `make makesum` does, in its
+          # order: the crates of Makefile.crates under rust/crates, then
+          # the GitHub tarball with no directory before it. The ports
+          # framework looks a checksum up by that name to the letter,
+          # and the committed file had the tarball as `rust/click0-…`,
+          # first, in every release since distinfo.sh was written. This
+          # is the shape as this repository states it; the FreeBSD job
+          # holds the same file to what makesum itself writes.
+          {
+            sed -n 's/^\t\t\([^ ]*\).*/SHA256 (rust\/crates\/\1.crate) = -/p' \
+              packaging/freebsd/sysutils/zvolrescue/Makefile.crates
+            echo "SHA256 (click0-zvolrescue-v0_GH0.tar.gz) = -"
+          } > /tmp/distinfo.shape
+          packaging/freebsd/check-distinfo.sh \
+            packaging/freebsd/sysutils/zvolrescue/distinfo /tmp/distinfo.shape
       - name: The .deb installs, and man zvolrescue is there (REALWORLD-TESTS E4)
         run: |
           v=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
@@ -1906,6 +1921,13 @@ jobs:
             cd /tmp/port
             export GH_TAGNAME="$(cat "$GITHUB_WORKSPACE/.build-commit")" BATCH=yes
             make makesum
+            # What makesum has just written here, for this commit, is
+            # how the framework names and orders the port's files: the
+            # committed distinfo, which is the last tag's, is held to
+            # it. Nothing compared the two, and the committed one named
+            # the tarball as the framework never looks it up.
+            sh "$GITHUB_WORKSPACE/packaging/freebsd/check-distinfo.sh" \
+              "$GITHUB_WORKSPACE/packaging/freebsd/sysutils/zvolrescue/distinfo" distinfo
             make stage check-plist package
             pkg add work/pkg/zvolrescue-*.pkg
             for b in zvolrescue zvoltimeline zvolreport zvolcarve zvolfiles; do "$b" --version; done

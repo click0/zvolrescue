@@ -17,6 +17,22 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ### Fixed
 
+* **The port's `distinfo` named the GitHub tarball as the ports
+  framework never looks it up.** `packaging/freebsd/distinfo.sh` wrote
+  it as `rust/click0-zvolrescue-vX_GH0.tar.gz`, first; the framework
+  looks a checksum up by the file's name to the letter, and for this
+  port that name is `click0-zvolrescue-vX_GH0.tar.gz` — only crates go
+  under `rust/crates` — written after them. `make checksum` on the
+  committed file found no checksum for the tarball, in every release
+  since the script was written, and any `make makesum` rewrote the
+  file. The hash and the size were the tag's all along; the name and
+  the place are now what `make makesum` writes. CI did not see it: the
+  port's job writes its own `distinfo` in the VM, and the check added
+  in v0.9.16 looked at crate lines only. `check-distinfo.sh` now holds
+  the committed file to the names and the order of the one makesum has
+  just written there, and to the same shape on every Linux run. The
+  `distinfo` inside the v0.9.16 tag and the tags before it is as it
+  was: a port made from one of them needs `make makesum`.
 * **`--map`: a map longer than its image is counted to the image's end,
   and said not to fit.** A ddrescue map shorter than its image has what
   it says nothing of refused; one longer was taken without a word. Its

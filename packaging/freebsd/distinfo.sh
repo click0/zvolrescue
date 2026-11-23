@@ -1,10 +1,20 @@
 #!/bin/sh
 # packaging/freebsd/distinfo.sh VERSION — the port's distinfo for tag
-# vVERSION, without a FreeBSD box: the GitHub tarball the ports
-# framework fetches (codeload, named the way USE_GITHUB names it) and
-# every crate of Makefile.crates, hashed and sized in the order and the
-# form `make makesum` writes them. Run after the tag exists; the
-# result is committed as sysutils/zvolrescue/distinfo.
+# vVERSION, without a FreeBSD box: every crate of Makefile.crates and
+# then the GitHub tarball the ports framework fetches (codeload), hashed
+# and sized in the order and under the names `make makesum` writes
+# them. Run after the tag exists; the result is committed as
+# sysutils/zvolrescue/distinfo.
+#
+# The names are what the framework looks a checksum up by, to the
+# letter: a crate is `rust/crates/NAME-VERSION.crate` (USES=cargo puts
+# crates under that directory of DISTDIR), and the tarball is
+# `click0-zvolrescue-vVERSION_GH0.tar.gz` with no directory before it —
+# the port sets no DIST_SUBDIR. It was written `rust/click0-…` and
+# first, in every release since this script was: `make checksum` on the
+# committed file found no checksum for the tarball, and any `make
+# makesum` rewrote the file. check-distinfo.sh holds the committed file
+# to what makesum writes.
 #
 # A download that fails stops the script, and a crate is held to the
 # checksum Cargo.lock records for it: what was written down for
@@ -31,8 +41,9 @@ locked() { # locked NAME VERSION — the checksum Cargo.lock has for it
 }
 {
     printf 'TIMESTAMP = %s\n' "$(date +%s)"
+    # Fetched first, so a tag that is not there stops the run before a
+    # hundred crates are; written last, where makesum has it.
     curl -fsSL -o "$tmp/gh" "https://codeload.github.com/click0/zvolrescue/tar.gz/v$v"
-    line "rust/click0-zvolrescue-v${v}_GH0.tar.gz" "$tmp/gh"
     for c in $(sed -n 's/^\t\t\([^ ]*\).*/\1/p' "$port/Makefile.crates"); do
         # The name ends where the version begins, at the first -N.N.N:
         # a name has no dot in it, and a version may have hyphens of
@@ -49,6 +60,7 @@ locked() { # locked NAME VERSION — the checksum Cargo.lock has for it
         fi
         line "rust/crates/$c.crate" "$tmp/crate"
     done
+    line "click0-zvolrescue-v${v}_GH0.tar.gz" "$tmp/gh"
 } > "$tmp/distinfo"
 # Whole or not at all: a run that stopped half way leaves the file as
 # it was.

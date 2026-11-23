@@ -115,9 +115,10 @@ moment of tagging, and everything below follows from that:
    companion tool means a new line there, not a release that ships a
    binary its own notes never mention.
 
-   After the release is published, one more job hashes the tag's
-   tarball and every crate for the port's `distinfo`
-   (`packaging/freebsd/distinfo.sh`) and the PKGBUILD's `sha256sums`
+   After the release is published, one more job hashes every crate
+   and the tag's tarball for the port's `distinfo`
+   (`packaging/freebsd/distinfo.sh`, in the order and under the names
+   `make makesum` writes them) and the PKGBUILD's `sha256sums`
    (`packaging/aur/update.sh`), and pushes the result to `main` as a
    commit of its own — only while `main` is still at the released
    version, so a re-cut of an old tag never rewrites the packaging of a
