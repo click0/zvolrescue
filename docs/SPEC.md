@@ -186,7 +186,7 @@ Priority: **M** = must (v1), **S** = should (v1 if time permits), **C** = could 
 
 | ID | Pri | Requirement |
 |---|---|---|
-| F-10 | M | Select a TXG explicitly (`--txg N`), by timestamp (`--before "2026-09-01 12:00"`), or "latest valid" (default). Latest valid is the newest verified uberblock whose object set *reads*: a slot every ring carries, that verifies, and that no block is behind — what a sync leaves when its uberblocks reached the members and its MOS did not, or a slot forged outright — is passed over for the next older one, said on stderr and listed under `unreadable_at` (`stage: "pool"` in `dump`'s record), by `list` and `dump` alike. `--txg N` means that one or nothing. |
+| F-10 | M | Select a TXG explicitly (`--txg N`), by timestamp (`--before "2026-09-01 12:00"`), or "latest valid" (default). Latest valid is the newest verified uberblock whose object set *reads*: a slot every ring carries, that verifies, and that no block is behind — what a sync leaves when its uberblocks reached the members and its MOS did not, or a slot forged outright — is passed over for the next older one, said on stderr and listed under `unreadable_at` (`stage: "pool"` in `dump`'s record), by `list` and `dump` alike. So is one whose pool reads and whose dataset tree does not, at its root for `list` or where the dataset would be for `dump` (`stage: "tree"`): a dataset under a part that did not read is not thereby absent. `--txg N` means that one or nothing. |
 | F-11 | M | Walk the MOS from the chosen uberblock: object directory, DSL directories, DSL datasets, snapshots, bookmarks, clones. |
 | F-12 | M | List datasets with type (filesystem / zvol / snapshot), GUID, creation TXG and time, referenced size, `volsize`/`volblocksize` for zvols, compression, checksum, encryption, dedup properties. |
 | F-13 | M | Diff dataset lists between two TXGs to show what was created or destroyed in between. |
@@ -409,7 +409,8 @@ KEYSPEC:   raw:FILE | hex:HEX | hex:@FILE | passphrase:FILE | prompt   (prompt r
 Exit codes: `0` success, `1` usage error, `2` evidence unreadable, `3` pool
 unrecoverable at requested TXG, `4` the image is not the whole volume —
 blocks that could not be read were written as zeros, or `--strict`
-aborted at the first one — `5` refused (would write to evidence, or would
+aborted at the first one — or `list` could not read part of the dataset
+tree, `5` refused (would write to evidence, or would
 scan a device), `6` interrupted by a signal, the state written (`--resume` continues), `7` the medium refused
 a read: a device, not an image, returned an I/O error and the run stopped
 there (F-33, N-10).

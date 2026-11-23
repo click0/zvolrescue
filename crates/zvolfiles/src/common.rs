@@ -288,11 +288,25 @@ pub fn with_dataset<T>(
             }
         };
         let Some(ds) = tree.datasets.iter().find(|d| d.name == name) else {
-            pass(
-                c.ub.txg,
-                format!("txg {}: no dataset {name}", c.ub.txg),
-                false,
-            );
+            // Not there, or not known to be: where the tree did not
+            // read — the dataset's own directory, the list it would be
+            // in — it was "no dataset", the run read an older
+            // transaction group and ended 0, five files of eleven.
+            match tree.unread_why(name) {
+                Some(why) => pass(
+                    c.ub.txg,
+                    format!(
+                        "txg {}: the dataset tree does not read where {name} would be ({why})",
+                        c.ub.txg
+                    ),
+                    true,
+                ),
+                None => pass(
+                    c.ub.txg,
+                    format!("txg {}: no dataset {name}", c.ub.txg),
+                    false,
+                ),
+            }
             continue;
         };
         // A dataset of another kind is the wrong command, not damage: it

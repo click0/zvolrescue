@@ -232,6 +232,10 @@ or
 and so on when an earlier run left one there.
 A transaction group at which the dataset does not open is passed over
 for an older one, by every subcommand.
+So is one at which the dataset tree does not read where the dataset
+would be \(em its own directory, or the list it would be in: it is
+named as one that did not read, with the reason, and the exit status
+is 4, as for any newer transaction group that did not read.
 .Bl -tag -width Ds
 .It Fl o , Fl -output Ar dir
 Write the objects here, by the same rules as

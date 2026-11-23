@@ -9,8 +9,9 @@ use zfs_ondisk::blkptr::LABEL_START_SIZE;
 use zfs_ondisk::checksum::seal_label;
 use zfs_ondisk::label::{label_offsets, LABEL_SIZE, UBERBLOCK_RING_OFFSET, UBERBLOCK_RING_SIZE};
 use zfs_read::fixture::{
-    build_sample_mos, destroyed_zvol_members, objset_reused_members, removed_vdev_members,
-    two_top_mirror_members, zpl_members, zvol_pattern, Alloc, Pool, SAMPLE_ZVOL_BLOCK0_OFFSET,
+    build_sample_mos, destroyed_zvol_members, lose_children_list, objset_reused_members,
+    removed_vdev_members, two_top_mirror_members, zpl_members, zvol_pattern, Alloc, Pool,
+    SAMPLE_ZVOL_BLOCK0_OFFSET,
 };
 use zfs_read::hash::{Digests, Extra};
 use zvol_common::scratch::Scratch;
@@ -1666,6 +1667,97 @@ fn a_txg_whose_object_set_was_reused_is_passed_over_for_an_older_one() {
         !dir.join("exact.img").exists(),
         "nothing written on a refusal"
     );
+}
+
+/// A transaction group at which the pool reads and the dataset tree
+/// does not, where the dataset would be, is not one without the dataset.
+/// `dump` took it for that and went on to an older one without a word:
+/// an older image, exit 0, and a record naming no reason. It is said,
+/// recorded at the `tree` stage, and refused by name with `--txg`.
+#[test]
+fn a_txg_whose_dataset_tree_does_not_read_is_not_one_without_the_dataset() {
+    let dir = scratch("tree-unread");
+    let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1), (200, 2), (300, 3)]);
+    let mut members = objset_reused_members(&mut pool, SIZE).members;
+    assert!(lose_children_list(&mut members, 200, "tank/vm") > 0);
+    let paths = write_members(&dir, &members);
+    let (code, out, err) = run(&[
+        "-f",
+        "json",
+        "dump",
+        "tank/vm/disk0",
+        &paths[0],
+        &paths[1],
+        "-o",
+        &dir.join("older.img").to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    let v = json(&out);
+    assert_eq!(v["volumes"][0]["txg"], 100, "{v}");
+    assert_eq!(v["unreadable_at"][0]["txg"], 200, "{v}");
+    assert_eq!(v["unreadable_at"][0]["stage"], "tree", "{v}");
+    assert!(
+        err.contains("txg 200: the dataset tree does not read there")
+            && err.contains("tank/vm: children ZAP")
+            && err.contains("trying an older TXG"),
+        "{err}"
+    );
+
+    let (code, out, err) = run(&[
+        "-q",
+        "-f",
+        "json",
+        "dump",
+        "tank/vm/disk0",
+        &paths[0],
+        &paths[1],
+        "--txg",
+        "200",
+        "-o",
+        &dir.join("exact.img").to_string_lossy(),
+    ]);
+    assert_eq!(code, 3, "{out}");
+    assert!(
+        err.contains("at txg 200 the dataset tree does not"),
+        "{err}"
+    );
+    assert!(!err.contains("not found"), "{err}");
+    assert!(!dir.join("exact.img").exists());
+}
+
+/// A dataset tree that reads in part is listed, with what did not read
+/// said — and is not a list that succeeded: it was exit 0, the datasets
+/// under the part that did not read missing from it like datasets that
+/// were never there.
+#[test]
+fn a_list_that_is_not_all_there_is_ends_4() {
+    let dir = scratch("list-tree-unread");
+    let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1), (200, 2), (300, 3)]);
+    let mut members = objset_reused_members(&mut pool, SIZE).members;
+    assert!(lose_children_list(&mut members, 200, "tank/vm") > 0);
+    let paths = write_members(&dir, &members);
+    let (code, out, err) = run(&["-f", "json", "list", &paths[0], &paths[1], "--txg", "200"]);
+    assert_eq!(code, 4, "{out}\n{err}");
+    let v = json(&out);
+    let names: Vec<&str> = v["datasets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"tank/vm"), "{v}");
+    assert!(!names.contains(&"tank/vm/disk0"), "{v}");
+    assert!(
+        v["errors"][0]
+            .as_str()
+            .unwrap()
+            .contains("tank/vm: children ZAP"),
+        "{v}"
+    );
+    assert!(err.contains("what is listed is not all there is"), "{err}");
+    // The transaction group before it lists the volume, exit 0.
+    let (code, out, _) = run(&["-f", "json", "list", &paths[0], &paths[1], "--txg", "100"]);
+    assert_eq!(code, 0, "{out}");
 }
 
 /// The blocks a destroy frees are reused in no particular order: the

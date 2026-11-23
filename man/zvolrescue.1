@@ -246,6 +246,14 @@ As under
 List the datasets, volumes and snapshots of the pool at one TXG, with
 type, GUID, creation TXG and time, referenced size, and for volumes
 their size and block size.
+Without
+.Fl -txg
+the TXG is the newest at which the pool and the root of its dataset
+tree read; one at which they do not is passed over for an older one
+and named on standard error and in the record.
+A tree that reads in part is listed with what did not read named, and
+the exit status is 4: a dataset under that part is not in the list,
+and is not thereby absent.
 .Bl -tag -width Ds
 .It Fl -txg Ar n
 Transaction group to read; default the newest that verifies.
@@ -284,6 +292,9 @@ Without
 the TXG is the newest verified one that names the dataset and still
 reads its object set; one whose object set has been reused since a
 destroy is passed over for an older one, and the record says so.
+So is one at which the dataset tree does not read where the dataset
+would be: whether it is there cannot be told, which is not the same as
+its not being there.
 .Bl -tag -width Ds
 .It Fl o , Fl -output Ar out.img
 The output image; a directory with
@@ -432,6 +443,10 @@ The image is not the whole volume: blocks that could not be read were
 written as zeros and counted, or
 .Fl -strict
 aborted at the first one.
+Or
+.Cm list
+could not read part of the dataset tree: what it lists is not all
+there is.
 .It 5
 Refused: the output would land on an input, or a device would have
 been surface-scanned without leave.

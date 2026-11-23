@@ -1544,6 +1544,61 @@ pub fn objset_reused_members(pool: &mut Pool, size: u64) -> Reused {
     }
 }
 
+/// Overwrite, on every member of a mirror, each copy of the block that
+/// lists the datasets under `name` at `txg` — what a write over a block
+/// freed since leaves of an older transaction group: the pool reads
+/// there, `name` reads, and what is below it cannot be told. Returns
+/// how many copies there were.
+pub fn lose_children_list(members: &mut [Vec<u8>], txg: u64, name: &str) -> usize {
+    use crate::dsl::{open_mos, read_dir, walk};
+    use crate::pool::{assemble, uberblock_candidates};
+    use crate::vdev::scan_device;
+    use crate::zio::PoolReader;
+    use zvolrescue_io::{BlockSource, MemSource};
+
+    let offsets: Vec<u64> = {
+        let sources: Vec<MemSource> = members.iter().cloned().map(MemSource::new).collect();
+        let scans: Vec<_> = sources.iter().map(|s| scan_device(s).ok()).collect();
+        let pool = assemble(&scans).into_iter().next().expect("one pool");
+        let ub = uberblock_candidates(&scans, &pool)
+            .into_iter()
+            .find(|c| c.ub.txg == txg)
+            .expect("an uberblock of that txg")
+            .ub;
+        let devs: Vec<Option<&dyn BlockSource>> = sources
+            .iter()
+            .map(|s| Some(s as &dyn BlockSource))
+            .collect();
+        let reader = PoolReader::new(&pool, devs);
+        let mos = open_mos(&reader, &ub).expect("the MOS reads");
+        let tree = walk(&mos, &pool.name).expect("the tree reads");
+        let dir = tree.get(name).expect("the dataset is there").dir_object;
+        let children = read_dir(&mos, dir)
+            .expect("its directory reads")
+            .child_dir_zapobj;
+        let bp = mos
+            .object(children)
+            .expect("the list's dnode reads")
+            .locate(0)
+            .expect("the path to its block reads")
+            .expect("the block is there");
+        bp.dva
+            .iter()
+            .filter(|d| d.asize != 0)
+            .map(|d| d.offset)
+            .collect()
+    };
+    for m in members.iter_mut() {
+        for &offset in &offsets {
+            let at = (blkptr::LABEL_START_SIZE + offset) as usize;
+            for b in &mut m[at..at + 512] {
+                *b ^= 0x5a;
+            }
+        }
+    }
+    offsets.len()
+}
+
 /// [`destroyed_zvol_members`] with `tank/vm/disk0` deduplicated (SPEC
 /// F-28): the same bytes under pointers that carry the dedup bit and
 /// sha256 checksums, and `dedup=sha256,verify` set on the volume.

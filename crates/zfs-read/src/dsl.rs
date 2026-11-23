@@ -381,17 +381,54 @@ pub enum Unread {
 impl DatasetTree {
     /// Whether `name` lies where this tree could not be read.
     pub fn unread_at(&self, name: &str) -> bool {
-        self.unread.iter().any(|(u, what)| {
-            let rest = name.strip_prefix(u.as_str());
-            let own = rest.is_some_and(|r| r.is_empty() || r.starts_with('@'));
-            let below = rest.is_some_and(|r| r.starts_with('/'));
-            match what {
-                Unread::All => own || below,
-                Unread::Head => own,
-                Unread::Children => below,
-                Unread::Snapshots => rest.is_some_and(|r| r.starts_with('@')),
-            }
-        })
+        self.unread_part(name).is_some()
+    }
+
+    /// The part of the tree that could not be read and that `name` lies
+    /// in, if it does.
+    fn unread_part(&self, name: &str) -> Option<&str> {
+        self.unread
+            .iter()
+            .find(|(u, what)| {
+                let rest = name.strip_prefix(u.as_str());
+                let own = rest.is_some_and(|r| r.is_empty() || r.starts_with('@'));
+                let below = rest.is_some_and(|r| r.starts_with('/'));
+                match what {
+                    Unread::All => own || below,
+                    Unread::Head => own,
+                    Unread::Children => below,
+                    Unread::Snapshots => rest.is_some_and(|r| r.starts_with('@')),
+                }
+            })
+            .map(|(u, _)| u.as_str())
+    }
+
+    /// Why `name` cannot be told from this tree, when it lies where the
+    /// tree did not read: what the walk said of that part. A dataset
+    /// that is not among [`datasets`](Self::datasets) is absent only
+    /// when this is `None`; where it is not, a run that took the
+    /// dataset for absent went on to an older transaction group and
+    /// read that one as though it were the newest there is.
+    pub fn unread_why(&self, name: &str) -> Option<String> {
+        let part = self.unread_part(name)?;
+        let prefix = format!("{part}: ");
+        Some(
+            self.errors
+                .iter()
+                .find(|e| e.starts_with(&prefix))
+                .cloned()
+                .unwrap_or_else(|| format!("{part}: that part of the dataset tree did not read")),
+        )
+    }
+
+    /// The error the walk met at the root of the tree, when nothing of
+    /// it read: no dataset at all, the pool's own among them. Such a
+    /// tree is not a pool with no datasets.
+    pub fn root_unread(&self) -> Option<&str> {
+        match self.datasets.is_empty() {
+            true => self.errors.first().map(String::as_str),
+            false => None,
+        }
     }
 }
 
@@ -1053,6 +1090,47 @@ mod tests {
     use zvolrescue_io::{BlockSource, MemSource};
 
     const SIZE: u64 = 64 * LABEL_SIZE;
+
+    /// A dataset that is not in the tree is absent only where the tree
+    /// read: where it did not, the walk's own word for that part is why
+    /// the dataset cannot be told. And a tree with nothing in it and an
+    /// error at its root is not a pool with no datasets.
+    #[test]
+    fn what_did_not_read_says_why_a_name_cannot_be_told() {
+        let tree = DatasetTree {
+            pool_name: "tank".to_string(),
+            datasets: Vec::new(),
+            errors: vec![
+                "tank/other: dataset 9: every copy failed its checksum".to_string(),
+                "tank/vm: DSL directory 71: every copy failed its checksum".to_string(),
+            ],
+            unread: vec![
+                ("tank/other".to_string(), Unread::Head),
+                ("tank/vm".to_string(), Unread::All),
+            ],
+        };
+        assert_eq!(
+            tree.unread_why("tank/vm/disk0").as_deref(),
+            Some("tank/vm: DSL directory 71: every copy failed its checksum")
+        );
+        assert_eq!(
+            tree.unread_why("tank/other@s").as_deref(),
+            Some("tank/other: dataset 9: every copy failed its checksum")
+        );
+        assert_eq!(tree.unread_why("tank/other/below"), None);
+        assert_eq!(tree.unread_why("tank/vmx"), None);
+        assert_eq!(
+            tree.root_unread(),
+            Some("tank/other: dataset 9: every copy failed its checksum")
+        );
+        let empty = DatasetTree {
+            pool_name: "tank".to_string(),
+            datasets: Vec::new(),
+            errors: Vec::new(),
+            unread: Vec::new(),
+        };
+        assert_eq!(empty.root_unread(), None, "a pool with nothing in it");
+    }
 
     /// What did not read covers what it says and no more: a name that
     /// only starts the same, `tank/vm2` beside `tank/vm`, is not under it.

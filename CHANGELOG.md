@@ -17,6 +17,30 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ### Fixed
 
+* **A dataset under a part of the tree that did not read is no longer
+  taken for absent.** At a transaction group where the pool reads and
+  the dataset's own directory, or the list it would be in, does not,
+  the dataset is not among those the walk found — and that was "no
+  dataset": `zvolfiles` passed the group over as one the dataset was
+  not in and read an older one with exit 0, five files of eleven on a
+  pool where `zdb` says "Invalid exchange"; `zvolrescue dump` went on
+  to an older image without a word. Such a group is now one that did
+  not read, with the walk's own reason: `zvolfiles` names it on
+  standard error and in `passed_over` with `unread: true` and ends 4;
+  `dump` says "the dataset tree does not read there", records it in
+  `unreadable_at` at a new `tree` stage, and with `--txg` refuses it
+  by that name instead of "not found".
+* **`zvolrescue list` no longer calls a transaction group whose
+  dataset tree did not read the newest that reads.** A group whose MOS
+  opened was taken, whatever the tree under it: with the root
+  directory unreadable that was an empty table, a line of `error:`
+  and exit 0, while older groups that list every dataset were never
+  tried — `dump` on the same members went on to them. A group whose
+  tree does not read at its root is now passed over like one whose
+  pool does not, said on standard error and in `unreadable_at`, and
+  refused with exit 3 when asked for by `--txg`. A tree that reads in
+  part is listed as before, with what did not read, and the exit
+  status is 4: what is listed is not all there is.
 * **A failed disk that still reads no longer stands for its column under
   raidz and dRAID.** A child OpenZFS puts a spare in for — a hot spare
   or a dRAID's distributed one — or replaces is a `spare` or `replacing`

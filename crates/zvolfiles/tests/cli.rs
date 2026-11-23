@@ -164,6 +164,41 @@ fn objects_does_not_need_the_master_node() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// A transaction group at which the dataset tree does not read where
+/// the dataset would be is passed over as one that did not read, with
+/// the reason: it was "no dataset", as at the group where the dataset
+/// truly is not, and a run that then read an older one ended 0.
+#[test]
+fn a_dataset_under_a_part_of_the_tree_that_did_not_read_is_not_absent() {
+    use zfs_ondisk::label::LABEL_SIZE;
+    use zfs_read::fixture::{lose_children_list, objset_reused_members, Pool};
+    let dir = scratch("tree-unread");
+    let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1), (200, 2), (300, 3)]);
+    // The volume is destroyed at 300 and there at 200 and 100.
+    let mut images = objset_reused_members(&mut pool, 64 * LABEL_SIZE).members;
+    assert!(lose_children_list(&mut images, 200, "tank/vm") > 0);
+    let m: Vec<String> = images
+        .iter()
+        .enumerate()
+        .map(|(i, img)| {
+            let p = dir.join(format!("member{i}.img"));
+            std::fs::write(&p, img).unwrap();
+            p.to_string_lossy().into_owned()
+        })
+        .collect();
+    let (code, err) = run(&["list", "tank/vm/disk0", &m[0], &m[1]]);
+    assert!(err.contains("txg 300: no dataset tank/vm/disk0"), "{err}");
+    assert!(
+        err.contains("txg 200: the dataset tree does not read where tank/vm/disk0 would be")
+            && err.contains("tank/vm: children ZAP"),
+        "{err}"
+    );
+    assert!(!err.contains("txg 200: no dataset"), "{err}");
+    // At 100 it is there, and is a volume: the wrong command.
+    assert_eq!(code, 1, "{err}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// A block of the dataset's dnodes that does not read loses every
 /// object in it, and `objects` says which: it passed over each without a
 /// word, "0 object(s)", exit 0 — with `--strict` too.

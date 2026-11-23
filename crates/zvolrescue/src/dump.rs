@@ -267,7 +267,10 @@ fn unreached(earlier: &[DumpOut], left: &[PathBuf]) -> Vec<DumpOut> {
 /// the pool itself does not read there: the object set the uberblock
 /// points at matches no block, which is what a sync leaves behind when
 /// its uberblocks reached the members and its MOS did not — or a ring
-/// slot forged outright.
+/// slot forged outright. At the `tree` stage the pool reads and the
+/// dataset tree does not, where the dataset would be: its directory, or
+/// the list it would be in. Whether the dataset is there is not known,
+/// which was taken for "not there" and passed over without a word.
 #[derive(Debug, Serialize)]
 struct UnreadableAt {
     txg: u64,
@@ -279,6 +282,7 @@ struct UnreadableAt {
 #[serde(rename_all = "lowercase")]
 enum Stage {
     Pool,
+    Tree,
     Dataset,
 }
 
@@ -386,7 +390,22 @@ fn find_dataset<'c>(
         searched.txgs.push(c.ub.txg);
         match open_mos(reader, &c.ub).and_then(|mos| walk(&mos, pool_name)) {
             Ok(tree) => {
-                let Some(ds) = tree.get(name) else { continue };
+                let Some(ds) = tree.get(name) else {
+                    if let Some(why) = tree.unread_why(name) {
+                        if !quiet {
+                            eprintln!(
+                                "zvolrescue: {name}: txg {}: the dataset tree does not read there ({why}); trying an older TXG",
+                                c.ub.txg
+                            );
+                        }
+                        searched.unreadable.push(UnreadableAt {
+                            txg: c.ub.txg,
+                            stage: Stage::Tree,
+                            error: why,
+                        });
+                    }
+                    continue;
+                };
                 match dataset_reads(reader, ds) {
                     Ok(()) => return Ok((c, tree)),
                     Err(e) => {
@@ -446,6 +465,15 @@ fn find_dataset<'c>(
             u.txg,
             u.error,
             searched.txgs.len()
+        );
+        return Err(exit::UNRECOVERABLE);
+    }
+    if let Some(u) = searched.unreadable.iter().find(|u| u.stage == Stage::Tree) {
+        eprintln!(
+            "zvolrescue: dataset {name:?} is at none of the {} verified TXG(s) that read where it would be; at txg {} the dataset tree does not ({})",
+            searched.txgs.len(),
+            u.txg,
+            u.error
         );
         return Err(exit::UNRECOVERABLE);
     }

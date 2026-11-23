@@ -270,13 +270,44 @@ fn print_text(out: &ListOut) {
     }
 }
 
+/// Why a transaction group does not list.
+enum NoList {
+    /// The pool does not read there.
+    Read(ReadError),
+    /// The pool reads, and the root of its dataset tree does not.
+    Tree(String),
+}
+
+impl NoList {
+    /// A device refused a read and the run stops (N-10).
+    fn stopped(&self) -> bool {
+        matches!(self, NoList::Read(ReadError::Medium { .. }))
+    }
+}
+
+impl std::fmt::Display for NoList {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NoList::Read(e) => write!(f, "{e}"),
+            NoList::Tree(why) => write!(f, "the dataset tree does not read: {why}"),
+        }
+    }
+}
+
 fn walk_at<'r, 'a>(
     reader: &'r PoolReader<'a>,
     ub: &zfs_ondisk::uberblock::Uberblock,
     name: &str,
-) -> Result<(DnodeArray<'r, 'a>, DatasetTree), ReadError> {
-    let mos = open_mos(reader, ub)?;
-    let tree = walk(&mos, name)?;
+) -> Result<(DnodeArray<'r, 'a>, DatasetTree), NoList> {
+    let mos = open_mos(reader, ub).map_err(NoList::Read)?;
+    let tree = walk(&mos, name).map_err(NoList::Read)?;
+    // A tree whose root did not read lists nothing, and is not a pool
+    // with no datasets: taken for the newest that reads it was an
+    // empty table, a line of error and exit 0, with older transaction
+    // groups that list everything never tried.
+    if let Some(why) = tree.root_unread() {
+        return Err(NoList::Tree(why.to_string()));
+    }
     Ok((mos, tree))
 }
 
@@ -375,7 +406,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             Err(e) => {
                 // A device that refused a read has stopped the run
                 // (N-10): no older TXG is tried on it.
-                let stopped = matches!(e, ReadError::Medium { .. });
+                let stopped = e.stopped();
                 let more = !stopped && i + 1 < pick.len();
                 // One TXG asked for by name gets the verdict below and
                 // not a progress line first.
@@ -495,6 +526,18 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             serde_json::to_string_pretty(&json).expect("serialisable")
         ),
         Format::Text => print_text(&out),
+    }
+    // What is listed is not all there is: a part of the tree that did
+    // not read is named in the list and is not a list that succeeded.
+    if !out.errors.is_empty() {
+        eprintln!(
+            "zvolrescue: {} part(s) of the dataset tree did not read at txg {}; what is listed is not all there is (exit 4). An older TXG may list them: --txg",
+            out.errors.len(),
+            out.txg
+        );
+        if code == 0 {
+            code = exit::PARTIAL;
+        }
     }
     finish(g, &members, &json, code)
 }
