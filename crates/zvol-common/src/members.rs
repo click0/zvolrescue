@@ -705,6 +705,57 @@ fn refuse_twins(
     }
 }
 
+/// Say, once, that the transaction group a run reads is from before a
+/// device removal (`zpool remove`), and give the top-level vdevs that
+/// were still devices at it, for the run's record. Empty, and nothing
+/// said, when the group is from after every removal the pool has had —
+/// as nearly every one is.
+///
+/// Such a group reads, where it was refused before: through the mapping
+/// the removal left, and from the removed device when that is among the
+/// members. What that covers and what it does not is not something a
+/// run should leave to be found out block by block.
+pub fn say_before_removal(
+    quiet: bool,
+    mos: &zfs_read::dmu::DnodeArray<'_, '_>,
+    pool: &PoolAssembly,
+    txg: u64,
+) -> Vec<u64> {
+    let ids = zfs_read::dsl::removed_since(mos, pool);
+    if !ids.is_empty() && !quiet {
+        say!("{}", before_removal_said(&ids, pool, txg));
+    }
+    ids
+}
+
+/// The sentence [`say_before_removal`] says.
+pub fn before_removal_said(ids: &[u64], pool: &PoolAssembly, txg: u64) -> String {
+    let names = |ids: &[u64]| {
+        ids.iter()
+            .map(|id| format!("#{id}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let (given, absent): (Vec<u64>, Vec<u64>) = ids.iter().partition(|id| pool.former_of(**id));
+    let device = match (given.is_empty(), absent.is_empty()) {
+        (false, true) => "which is among the members and is read for it".to_string(),
+        (true, _) => {
+            "and that device is not among the members — name it with them to have such a block read"
+                .to_string()
+        }
+        (false, false) => format!(
+            "which for {} is among the members and is read for it, and for {} is not",
+            names(&given),
+            names(&absent)
+        ),
+    };
+    format!(
+        "txg {txg} is from before top-level vdev {} {} removed from the pool (zpool remove): what it has there is read through the mapping the removal left, which holds what was still allocated when the removal ended. A block freed before that was never copied: it is on the removed device only, {device}",
+        names(ids),
+        if ids.len() == 1 { "was" } else { "were" },
+    )
+}
+
 /// Pick the pool named by `--pool-guid`, or the only one found.
 pub fn choose_pool(pools: Vec<PoolAssembly>, guid: Option<&str>) -> Result<PoolAssembly, u8> {
     match guid {
@@ -763,6 +814,8 @@ mod assume_member_tests {
                 })
                 .collect(),
             removed_tops: Vec::new(),
+            removed_maps: Default::default(),
+            former: Vec::new(),
             hosts: Vec::new(),
             host_txgs: Vec::new(),
             devices: Vec::new(),

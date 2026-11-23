@@ -265,6 +265,18 @@ and named on standard error and in the record.
 A tree that reads in part is listed with what did not read named, and
 the exit status is 4: a dataset under that part is not in the list,
 and is not thereby absent.
+.Pp
+A TXG from before a top-level vdev was removed from the pool
+.Pq Ql zpool remove
+is read through the mapping the removal left, which holds what was
+still allocated when the removal ended; the run says so, here and in
+.Cm dump ,
+and its record names the vdevs as
+.Ql removed_since .
+A block freed before the removal ended was never copied.
+It is on the removed device only, which the removal leaves as it was
+under a label of TXG 0: named among the members, that device is read
+for such blocks and for nothing else.
 .Bl -tag -width Ds
 .It Fl -txg Ar n
 Transaction group to read; default the newest that verifies.

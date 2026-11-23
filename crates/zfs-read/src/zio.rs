@@ -284,9 +284,15 @@ pub struct PoolReader<'a> {
     /// Keys of the encrypted dataset currently being read, if any.
     keys: RefCell<Option<DatasetKeys>>,
     /// Mappings of top-level vdevs that were removed, by vdev id (F-69).
-    /// Filled from the MOS configuration once it has been read; empty
-    /// on a pool that never had a vdev removed, which is most of them.
+    /// It starts with what the pool's newest configuration says, when
+    /// the assembly was told, and takes the mapping of every MOS that is
+    /// opened; empty on a pool that never had a vdev removed, which is
+    /// most of them.
     removed: RefCell<BTreeMap<u32, Rc<Mapping>>>,
+    /// The devices a removed top-level vdev was made of, when they are
+    /// among the members, by vdev id: each is the vdev's whole space as
+    /// the removal left it.
+    former: BTreeMap<u32, Vec<Node>>,
 }
 
 /// Why a block could not be produced.
@@ -558,6 +564,26 @@ impl<'a> PoolReader<'a> {
                 "dynamic_gang_header is active: gang headers are sized by their vdev"
             );
         }
+        let mut former: BTreeMap<u32, Vec<Node>> = BTreeMap::new();
+        for f in &pool.former {
+            let Ok(top) = u32::try_from(f.top) else {
+                continue;
+            };
+            trace!(
+                "zio",
+                "device {} was top-level vdev {top} until it was removed: read for what the removal did not copy",
+                f.device
+            );
+            former.entry(top).or_default().push(Node::Leaf {
+                device: Some(f.device),
+                guid: f.guid,
+            });
+        }
+        let removed = pool
+            .removed_maps
+            .iter()
+            .filter_map(|(id, m)| Some((u32::try_from(*id).ok()?, Rc::clone(m))))
+            .collect();
         let bases = vec![0u64; devices.len()];
         let reads = RefCell::new(vec![0u64; devices.len()]);
         PoolReader {
@@ -572,7 +598,8 @@ impl<'a> PoolReader<'a> {
             dynamic_gang,
             salt: Cell::new(None),
             keys: RefCell::new(None),
-            removed: RefCell::new(BTreeMap::new()),
+            removed: RefCell::new(removed),
+            former,
         }
     }
 
@@ -638,6 +665,15 @@ impl<'a> PoolReader<'a> {
         self.removed.borrow_mut().insert(vdev, Rc::new(mapping));
     }
 
+    /// Removed top-level vdevs and the mapping each left.
+    pub fn removed_mappings(&self) -> Vec<(u32, Rc<Mapping>)> {
+        self.removed
+            .borrow()
+            .iter()
+            .map(|(v, m)| (*v, Rc::clone(m)))
+            .collect()
+    }
+
     /// Removed top-level vdevs and how many mapping entries each has.
     pub fn removed_vdevs(&self) -> Vec<(u32, usize)> {
         self.removed
@@ -647,18 +683,27 @@ impl<'a> PoolReader<'a> {
             .collect()
     }
 
-    /// Where a DVA's vdev id leads.
+    /// Where a DVA's vdev id leads: every place that may hold what was
+    /// written there, in the order they are tried.
     ///
-    /// A removed vdev wins over a top-level vdev of the same id built
-    /// from the labels. The mapping comes from the configuration object
-    /// of the MOS being read, written at the transaction group this
-    /// read is working from; a label that still describes that vdev was
-    /// last written before it was removed and is the older account.
-    fn locate_vdev(&self, vdev: u32) -> Option<Where<'_>> {
+    /// The mapping of a removed vdev comes first. It is the pool's own
+    /// account, from the configuration of a MOS that was read; a label
+    /// that still describes that vdev was last written before it was
+    /// removed and is the older one. Then the vdev's own devices: a top
+    /// the labels describe, and a device the removal emptied. The
+    /// mapping has what was allocated when the removal ended, so a
+    /// transaction group from before it may point at a block that was
+    /// freed in between and never copied — only the vdev's own device
+    /// has that one. The mapping alone was looked at, and such a block
+    /// was refused with the device that holds it among the members.
+    fn locate_vdev(&self, vdev: u32) -> Vec<Where<'_>> {
+        let mut at = Vec::new();
         if let Some(m) = self.removed.borrow().get(&vdev) {
-            return Some(Where::Removed(Rc::clone(m)));
+            at.push(Where::Removed(Rc::clone(m)));
         }
-        self.tops.get(&vdev).map(Where::Top)
+        at.extend(self.tops.get(&vdev).map(Where::Top));
+        at.extend(self.former.get(&vdev).into_iter().flatten().map(Where::Top));
+        at
     }
 
     /// Every independent, unverified way to read `size` bytes at
@@ -671,11 +716,17 @@ impl<'a> PoolReader<'a> {
         size: usize,
         depth: usize,
     ) -> Vec<RawCandidate> {
-        match self.locate_vdev(vdev) {
-            Some(Where::Top(node)) => self.read_candidates(node, offset, size),
-            Some(Where::Removed(m)) => self.remapped_candidates(vdev, &m, offset, size, depth),
-            None => vec![(None, Err(ReadError::UnknownVdev(vdev)))],
+        let places = self.locate_vdev(vdev);
+        if places.is_empty() {
+            return vec![(None, Err(ReadError::UnknownVdev(vdev)))];
         }
+        places
+            .iter()
+            .flat_map(|place| match place {
+                Where::Top(node) => self.read_candidates(node, offset, size),
+                Where::Removed(m) => self.remapped_candidates(vdev, m, offset, size, depth),
+            })
+            .collect()
     }
 
     /// The same, for a range that lives on a vdev that was removed: the
@@ -972,8 +1023,8 @@ impl<'a> PoolReader<'a> {
         if dva.gang {
             return Err(ReadError::Gang("a gang block is not salvaged".into()));
         }
-        let node = match self.locate_vdev(dva.vdev) {
-            Some(Where::Top(n)) => n,
+        let node = match self.locate_vdev(dva.vdev).first() {
+            Some(Where::Top(n)) => *n,
             Some(Where::Removed(_)) => {
                 return Err(ReadError::Unsupported(
                     "salvage through a removed vdev's mapping".into(),
@@ -2004,7 +2055,8 @@ impl<'a> PoolReader<'a> {
             if dva.is_empty() {
                 continue;
             }
-            let Some(location) = self.locate_vdev(dva.vdev) else {
+            let places = self.locate_vdev(dva.vdev);
+            if places.is_empty() {
                 last = ReadError::UnknownVdev(dva.vdev);
                 attempts.push(Attempt {
                     dva: i,
@@ -2013,7 +2065,7 @@ impl<'a> PoolReader<'a> {
                     result: Err(last.clone()),
                 });
                 continue;
-            };
+            }
             if dva.gang {
                 match self.read_gang(dva, bp, depth) {
                     Ok(raw) => {
@@ -2043,13 +2095,15 @@ impl<'a> PoolReader<'a> {
                 }
                 continue;
             }
-            let read = match &location {
-                Where::Top(top) => self.read_verified(top, dva, bp, attempts, i),
-                Where::Removed(m) => self.read_verified_remapped(dva, m, bp, attempts, i),
-            };
-            match read {
-                Ok((raw, _)) => return Ok(raw),
-                Err(e) => last = more_telling(last, e),
+            for place in &places {
+                let read = match place {
+                    Where::Top(top) => self.read_verified(top, dva, bp, attempts, i),
+                    Where::Removed(m) => self.read_verified_remapped(dva, m, bp, attempts, i),
+                };
+                match read {
+                    Ok((raw, _)) => return Ok(raw),
+                    Err(e) => last = more_telling(last, e),
+                }
             }
         }
         Err(last)
@@ -2534,6 +2588,8 @@ mod tests {
                 tree,
             }],
             removed_tops: vec![],
+            removed_maps: Default::default(),
+            former: Vec::new(),
             hosts: vec![],
             host_txgs: Vec::new(),
             devices: (0..width).collect(),
@@ -2980,6 +3036,8 @@ mod tests {
                 tree: Default::default(),
             }],
             removed_tops: Vec::new(),
+            removed_maps: Default::default(),
+            former: Vec::new(),
             hosts: Vec::new(),
             host_txgs: Vec::new(),
             devices: Vec::new(),
@@ -3863,6 +3921,133 @@ mod removed_vdev_tests {
                 .all(|b| b.reason.contains("unknown top-level vdev 1")),
             "expected refusals naming the removed vdev, got {:?}",
             r.bad.iter().map(|b| b.reason.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    /// A reader made for a pool that was told of the removal starts
+    /// with the mapping: a transaction group from before the removal has
+    /// the vdev as a device in its configuration and installs none, and
+    /// its blocks there were refused as on an unknown vdev — 283 of the
+    /// 512 blocks of a volume, on a pool the removal had left whole.
+    #[test]
+    fn a_txg_from_before_the_removal_reads_through_the_mapping_it_left() {
+        let (s, mut a, ub) = build();
+        let devices = || vec![Some(&s[0] as &dyn BlockSource)];
+        let newest = PoolReader::new(&a, devices());
+        open_mos(&newest, &ub).expect("the newest MOS");
+        a.note_removed_tops(
+            newest
+                .removed_mappings()
+                .into_iter()
+                .map(|(v, m)| (u64::from(v), m)),
+        );
+        assert_eq!(a.removed_tops, vec![1]);
+        drop(newest);
+
+        let reader = PoolReader::new(&a, devices());
+        assert_eq!(reader.removed_vdevs(), vec![(1, 4)]);
+        // The MOS, without its configuration being asked: what opening
+        // one from before the removal comes to.
+        let rootbp =
+            zfs_ondisk::blkptr::BlkPtr::parse(&ub.rootbp, ub.endian).expect("root pointer");
+        let block = reader.read_block(&rootbp, false).expect("MOS objset");
+        let os = ObjsetPhys::parse(&block.data, rootbp.endian).expect("objset");
+        let mos = DnodeArray::new(&reader, os.meta_dnode, rootbp.endian);
+        let tree = walk(&mos, "tank").expect("dataset tree");
+        let ds = tree.get("tank/vm/disk0").expect("the volume");
+        let (obj, _) = open_volume(&reader, ds).expect("volume opens");
+        let mut sink = MemSink::default();
+        let r = extract(
+            &obj,
+            ds.volsize.expect("volsize"),
+            &mut sink,
+            OnError::Zero,
+            |_, _| {},
+        )
+        .expect("extraction");
+        assert!(r.bad.is_empty() && !r.aborted, "{:?}", r.bad);
+        assert_eq!(&sink.data[..8192], &zvol_pattern(0)[..]);
+        assert_eq!(&sink.data[16384..24576], &zvol_pattern(2)[..]);
+        assert_eq!(reader.mismatches(), 0);
+    }
+
+    /// The mapping holds what was allocated when the removal ended. A
+    /// block freed before that — which a transaction group from before
+    /// the removal still points at — was never copied: the device the
+    /// vdev was made of has it, and nothing else does. That device,
+    /// named as a member, is read for it; it was set aside as one that
+    /// "was being attached", and the block was lost with it at hand.
+    #[test]
+    fn what_the_removal_did_not_copy_is_read_from_the_removed_device() {
+        let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1)]);
+        let (members, gone) = crate::fixture::removed_vdev_members_and_device(&mut pool, SIZE);
+        let sources: Vec<MemSource> = members
+            .into_iter()
+            .chain([gone])
+            .map(MemSource::new)
+            .collect();
+        let scans: Vec<_> = sources.iter().map(|s| scan_device(s).ok()).collect();
+        let ub = scans[0].as_ref().expect("member scans").labels[0]
+            .best()
+            .expect("a verified uberblock")
+            .ub
+            .clone();
+        let mut a = assemble(&scans).into_iter().next().expect("one pool");
+        assert_eq!(a.tops.len(), 1, "the removed device describes no vdev");
+        assert_eq!(a.former.len(), 1);
+        assert_eq!((a.former[0].device, a.former[0].top), (2, 1));
+        assert!(a.former_of(1) && !a.former_of(0));
+        assert!(
+            a.stale[0].reason.contains("removed from the pool"),
+            "{}",
+            a.stale[0].reason
+        );
+        // As if nothing of the vdev had been allocated any more when
+        // the removal ended: a mapping without an entry.
+        a.note_removed_tops([(1, Rc::new(Mapping::default()))]);
+
+        let read = |devices: Vec<Option<&dyn BlockSource>>| {
+            let reader = PoolReader::new(&a, devices);
+            let rootbp =
+                zfs_ondisk::blkptr::BlkPtr::parse(&ub.rootbp, ub.endian).expect("root pointer");
+            let block = reader.read_block(&rootbp, false).expect("MOS objset");
+            let os = ObjsetPhys::parse(&block.data, rootbp.endian).expect("objset");
+            let mos = DnodeArray::new(&reader, os.meta_dnode, rootbp.endian);
+            let tree = walk(&mos, "tank").expect("dataset tree");
+            let ds = tree.get("tank/vm/disk0").expect("the volume");
+            let (obj, _) = open_volume(&reader, ds).expect("volume opens");
+            let mut sink = MemSink::default();
+            let r = extract(
+                &obj,
+                ds.volsize.expect("volsize"),
+                &mut sink,
+                OnError::Zero,
+                |_, _| {},
+            )
+            .expect("extraction");
+            (r, sink.data, reader.mismatches())
+        };
+        let all: Vec<Option<&dyn BlockSource>> = sources
+            .iter()
+            .map(|s| Some(s as &dyn BlockSource))
+            .collect();
+        let (r, data, mismatches) = read(all.clone());
+        assert!(r.bad.is_empty() && !r.aborted, "{:?}", r.bad);
+        assert_eq!(&data[..8192], &zvol_pattern(0)[..]);
+        assert_eq!(&data[16384..24576], &zvol_pattern(2)[..]);
+        assert_eq!(mismatches, 0);
+
+        // Without the device the blocks are in no mapping, and are said
+        // to be.
+        let (r, _, _) = read(vec![all[0], all[1], None]);
+        assert_eq!(r.bad.len(), 2, "{:?}", r.bad);
+        assert!(
+            r.bad
+                .iter()
+                .all(|b| b.reason.contains("not in the removed vdev's mapping")
+                    || b.reason.contains("no present member")),
+            "{:?}",
+            r.bad
         );
     }
 

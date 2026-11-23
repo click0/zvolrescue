@@ -110,6 +110,11 @@ struct ListOut {
     /// first), passed over for it.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     unreadable_at: Vec<UnreadableAt>,
+    /// Top-level vdevs removed from the pool (`zpool remove`) since
+    /// `txg`: what that group has on them is read through the mapping
+    /// the removal left, and from the removed device where it is given.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    removed_since: Vec<u64>,
     datasets: Vec<DatasetOut>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     errors: Vec<String>,
@@ -469,6 +474,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             time: iso8601(newest.ub.timestamp),
             available_txgs: candidates.iter().map(|c| c.ub.txg).collect(),
             unreadable_at: unreadable,
+            removed_since: Vec::new(),
             datasets: Vec::new(),
             errors: Vec::new(),
             diff: None,
@@ -483,6 +489,11 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         return finish(g, &members, &json, exit::UNRECOVERABLE);
     };
     let keep = |d: &Dataset| opts.recursive || !d.snapshot;
+    // A transaction group from before a device removal listed without a
+    // word, exit 0, while half the blocks of its volumes were on a vdev
+    // the run did not know.
+    let removed_since =
+        zvol_common::members::say_before_removal(g.quiet, &mos, &pool, chosen.ub.txg);
     let mut out = ListOut {
         pool: pool.name.clone(),
         pool_guid: format!("{:#018x}", pool.guid),
@@ -491,6 +502,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         time: iso8601(chosen.ub.timestamp),
         available_txgs: candidates.iter().map(|c| c.ub.txg).collect(),
         unreadable_at: unreadable,
+        removed_since,
         datasets: tree
             .datasets
             .iter()

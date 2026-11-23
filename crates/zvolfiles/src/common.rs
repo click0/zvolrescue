@@ -213,6 +213,9 @@ pub struct Opened<'a> {
     /// acknowledged as safe that are not in what is read. `None` when
     /// there are none.
     pub intent_log: Option<serde_json::Value>,
+    /// Top-level vdevs removed from the pool since `txg` (`zpool
+    /// remove`), which the dataset is read through the mapping of.
+    pub removed_since: Vec<u64>,
 }
 
 /// A transaction group newer than the one read, and why it was not.
@@ -293,7 +296,9 @@ pub fn with_dataset<T>(
         });
     };
     for c in &wanted {
-        let tree = match open_mos(&reader, &c.ub).and_then(|mos| walk(&mos, &pool.name)) {
+        let opened =
+            open_mos(&reader, &c.ub).and_then(|mos| walk(&mos, &pool.name).map(|tree| (mos, tree)));
+        let (mos, tree) = match opened {
             Ok(t) => t,
             Err(e) => {
                 pass(
@@ -380,6 +385,7 @@ pub fn with_dataset<T>(
             members: &members,
             passed_over: passed.clone(),
             intent_log: zvol_common::intent_log_json(log.as_ref()),
+            removed_since: zvol_common::members::say_before_removal(false, &mos, &pool, c.ub.txg),
         };
         return f(&fs, &opened);
     }

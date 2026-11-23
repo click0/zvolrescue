@@ -10,8 +10,8 @@ use zfs_ondisk::checksum::seal_label;
 use zfs_ondisk::label::{label_offsets, LABEL_SIZE, UBERBLOCK_RING_OFFSET, UBERBLOCK_RING_SIZE};
 use zfs_read::fixture::{
     build_sample_mos, destroyed_zvol_members, lose_children_list, objset_reused_members,
-    removed_vdev_members, two_top_mirror_members, zpl_members, zvol_pattern, Alloc, Pool,
-    SAMPLE_ZVOL_BLOCK0_OFFSET,
+    removed_since_members, removed_vdev_members, two_top_mirror_members, zpl_members, zvol_pattern,
+    Alloc, Pool, SAMPLE_ZVOL_BLOCK0_OFFSET,
 };
 use zfs_read::hash::{Digests, Extra};
 use zvol_common::scratch::Scratch;
@@ -999,6 +999,150 @@ fn scan_tells_a_removed_vdev_from_a_missing_one() {
         "{text}"
     );
     assert!(!text.contains("MISSING"), "{text}");
+}
+
+/// A transaction group from before a device removal has the vdev as a
+/// device in its configuration, and no mapping. Its blocks there were
+/// refused as on an unknown vdev — 283 of a volume's 512, on a pool the
+/// removal had left whole — and `list --txg` of it said nothing, exit 0.
+/// They are read through the mapping the removal left, and the run says
+/// which group it is reading.
+#[test]
+fn a_txg_from_before_a_removal_reads_through_the_mapping_it_left() {
+    let dir = scratch("before-removal");
+    let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1), (200, 2)]);
+    let (members, _, older, newest) = removed_since_members(&mut pool, SIZE, true);
+    let m = write_members(&dir, &members);
+    let older = older.to_string();
+
+    let (code, out, err) = run(&["-f", "json", "list", &m[0], &m[1], "--txg", &older]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(json(&out)["removed_since"], serde_json::json!([1]), "{out}");
+    assert!(
+        err.contains("is from before top-level vdev #1 was removed from the pool")
+            && err.contains("is not among the members"),
+        "{err}"
+    );
+    // Not said where it is not so, nor under -q.
+    let (code, out, err) = run(&["-f", "json", "list", &m[0], &m[1]]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(json(&out)["txg"], newest, "{out}");
+    assert!(json(&out).get("removed_since").is_none(), "{out}");
+    assert!(!err.contains("is from before"), "{err}");
+    let (_, _, err) = run(&["-q", "list", &m[0], &m[1], "--txg", &older]);
+    assert!(!err.contains("is from before"), "{err}");
+
+    let image = dir.join("disk0.img");
+    let (code, out, err) = run(&[
+        "-f",
+        "json",
+        "dump",
+        "tank/vm/disk0",
+        &m[0],
+        &m[1],
+        "--txg",
+        &older,
+        "-o",
+        &image.to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let record = json(&out);
+    assert_eq!(record["removed_since"], serde_json::json!([1]), "{out}");
+    assert_eq!(record["volumes"][0]["blocks_zeroed"], 0, "{out}");
+    assert!(err.contains("is from before top-level vdev #1"), "{err}");
+    let data = std::fs::read(&image).unwrap();
+    assert_eq!(&data[..8192], &zvol_pattern(0)[..]);
+    assert_eq!(&data[16384..24576], &zvol_pattern(2)[..]);
+}
+
+/// The mapping has what was allocated when the removal ended. A block
+/// the older group points at that was freed before then is on the
+/// removed device only: said to be, when that device is not given, and
+/// read from it when it is — it was "NOT USED: … never part of a
+/// committed configuration".
+#[test]
+fn what_a_removal_did_not_copy_is_read_from_the_removed_device() {
+    let dir = scratch("removed-device");
+    let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1), (200, 2)]);
+    let (members, gone, older, _) = removed_since_members(&mut pool, SIZE, false);
+    let mut m = write_members(&dir, &members);
+    let removed = dir.join("removed.img");
+    std::fs::write(&removed, gone).unwrap();
+    let older = older.to_string();
+
+    let image = dir.join("without.img");
+    let (code, out, err) = run(&[
+        "-f",
+        "json",
+        "dump",
+        "tank/vm/disk0",
+        &m[0],
+        &m[1],
+        "--txg",
+        &older,
+        "-o",
+        &image.to_string_lossy(),
+    ]);
+    assert_eq!(code, 4, "{err}");
+    let record = json(&out);
+    assert_eq!(record["volumes"][0]["blocks_zeroed"], 2, "{out}");
+    assert!(
+        record["volumes"][0]["bad"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("not in the removed vdev's mapping"),
+        "{out}"
+    );
+    assert!(err.contains("is not among the members"), "{err}");
+
+    m.push(removed.to_string_lossy().into_owned());
+    let (_, text, _) = run(&["-q", "scan", &m[0], &m[1], &m[2]]);
+    assert!(
+        text.contains(
+            "NOT USED: label txg 0 naming indirect vdev #1: the device was removed from the pool"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("READABLE from scanned members"), "{text}");
+    let image = dir.join("with.img");
+    let (code, out, err) = run(&[
+        "-f",
+        "json",
+        "dump",
+        "tank/vm/disk0",
+        &m[0],
+        &m[1],
+        &m[2],
+        "--txg",
+        &older,
+        "-o",
+        &image.to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(json(&out)["volumes"][0]["blocks_zeroed"], 0, "{out}");
+    assert!(
+        err.contains("which is among the members and is read for it"),
+        "{err}"
+    );
+    let data = std::fs::read(&image).unwrap();
+    assert_eq!(&data[..8192], &zvol_pattern(0)[..]);
+    assert_eq!(&data[16384..24576], &zvol_pattern(2)[..]);
+    // The newest group has its own blocks, which the removal did copy.
+    let image = dir.join("newest.img");
+    let (code, _, err) = run(&[
+        "-q",
+        "dump",
+        "tank/vm/disk0",
+        &m[0],
+        &m[1],
+        "-o",
+        &image.to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        &std::fs::read(&image).unwrap()[..8192],
+        &zvol_pattern(0)[..]
+    );
 }
 
 #[test]

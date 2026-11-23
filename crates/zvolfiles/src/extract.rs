@@ -220,6 +220,11 @@ struct ManifestOut {
     /// dataset as `txg` left it, without these.
     #[serde(skip_serializing_if = "Option::is_none")]
     intent_log: Option<serde_json::Value>,
+    /// Top-level vdevs removed from the pool (`zpool remove`) since
+    /// `txg`: what that group has on them is read through the mapping
+    /// the removal left, and from the removed device where it is given.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    removed_since: Vec<u64>,
     output: PathBuf,
     files: Vec<Extracted>,
     directories: usize,
@@ -969,6 +974,7 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
                 output: opts.output.clone(),
                 passed_over: opened.passed_over.clone(),
                 intent_log: opened.intent_log.clone(),
+                removed_since: opened.removed_since.clone(),
                 files,
                 directories: run.directories,
                 incomplete,

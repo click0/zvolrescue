@@ -396,6 +396,12 @@ struct RunOut {
     /// first), passed over for an older one.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     unreadable_at: Vec<UnreadableAt>,
+    /// Top-level vdevs removed from the pool (`zpool remove`) since the
+    /// transaction group read: what it has on them is read through the
+    /// mapping the removal left, and from the removed device where it is
+    /// given.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    removed_since: Vec<u64>,
     recursive: bool,
     volumes: Vec<DumpOut>,
     /// Datasets under the tree that were skipped (not volumes) or failed.
@@ -1114,6 +1120,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 members: members.paths.clone(),
                 txgs_searched: searched.txgs,
                 unreadable_at: searched.unreadable,
+                removed_since: Vec::new(),
                 recursive: opts.recursive,
                 volumes: Vec::new(),
                 skipped: Vec::new(),
@@ -1135,6 +1142,10 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     // intent log what an import would replay.
     let newest = candidates.first().is_some_and(|c| c.ub.txg == txg);
     let time = iso8601(chosen.ub.timestamp);
+    // The MOS was read to find the dataset, and is read from memory.
+    let removed_since = open_mos(&reader, &chosen.ub)
+        .map(|mos| zvol_common::members::say_before_removal(g.quiet, &mos, &pool, txg))
+        .unwrap_or_default();
 
     // Which datasets, and where each one goes.
     let targets: Vec<(&Dataset, PathBuf)> = if opts.recursive {
@@ -1275,6 +1286,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         members: members.paths.clone(),
         txgs_searched: searched.txgs,
         unreadable_at: searched.unreadable,
+        removed_since,
         recursive: opts.recursive,
         volumes: Vec::new(),
         skipped: Vec::new(),

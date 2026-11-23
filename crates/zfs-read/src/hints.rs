@@ -113,6 +113,8 @@ impl LayoutHints {
             features_for_read: Vec::new(),
             tops,
             removed_tops: Vec::new(),
+            removed_maps: Default::default(),
+            former: Vec::new(),
             hosts: Vec::new(),
             host_txgs: Vec::new(),
             devices,

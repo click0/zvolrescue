@@ -17,6 +17,32 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ### Fixed
 
+* **A transaction group from before a device removal reads.** A pool
+  that has had a top-level vdev removed (`zpool remove`) keeps a
+  mapping from that vdev's addresses to where its blocks were copied,
+  and the reader took it from the configuration of the transaction
+  group it was reading. One from before the removal has the vdev as a
+  device there and no mapping: `dump --txg` of such a group refused
+  every block on that vdev as "DVA names unknown top-level vdev 1" —
+  283 of a volume's 512, exit 4, on a pool the removal had left whole —
+  and `list --txg` listed it without a word, exit 0. Every reader now
+  starts with the mapping of the pool's newest configuration, and such
+  a group is read through it; a block read that way is verified by its
+  checksum like any other, so a mapping written after the pointer
+  misleads no read. The mapping holds what was still allocated when the
+  removal ended. A block freed before that was never copied and is on
+  the removed device only, which the removal leaves as it was under a
+  label of txg 0 naming the indirect vdev: `scan` called such a device
+  one that "was being attached/replaced, never part of a committed
+  configuration", and nothing read it. Named among the members it is
+  now read for those blocks, and for nothing else — on a pool made by
+  OpenZFS's own code, a volume rewritten before the removal came back
+  at the older group with 7 of its 512 blocks lost, against 73 without
+  the device.
+  `list`, `dump` and `zvolfiles` say when the group they read is from
+  before a removal, and their records name the vdevs as
+  `removed_since`.
+
 * **`dump`: unreadable blocks are listed as ranges, and the list has an
   end.** Every block that could not be read was a record kept in
   memory, a line of the summary and an entry of the JSON and of the

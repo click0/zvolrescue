@@ -1,8 +1,10 @@
 //! Assemble scanned members into pools and report their topology.
 
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use zfs_ondisk::checksum::ChecksumStatus;
+use zfs_ondisk::indirect::Mapping;
 use zfs_ondisk::label::{LabelConfig, VdevNode};
 use zfs_ondisk::uberblock::Uberblock;
 
@@ -100,6 +102,22 @@ pub struct PoolAssembly {
     /// the MOS knows; empty until [`PoolAssembly::note_removed_tops`]
     /// has been told.
     pub removed_tops: Vec<u64>,
+    /// The mapping each of [`removed_tops`](Self::removed_tops) left
+    /// behind, as the newest configuration that reads has it. A reader
+    /// starts with these: a transaction group from before the removal
+    /// has the vdev as a device in its own configuration and no mapping,
+    /// and its blocks there were refused as on an unknown vdev though
+    /// the removal had copied them to the vdevs that remain. Every block
+    /// read through a mapping is verified by its checksum like any
+    /// other, so a mapping written later than the pointer misleads no
+    /// read: what it does not have, or has differently, does not verify.
+    pub removed_maps: BTreeMap<u64, Rc<Mapping>>,
+    /// Scanned devices that were a top-level vdev's own until `zpool
+    /// remove` took the vdev out of the pool. The removal copies what is
+    /// allocated and leaves the device as it was, under a label of txg 0
+    /// that names the indirect vdev standing in its place: a block freed
+    /// before the removal ended was never copied, and is here only.
+    pub former: Vec<FormerMember>,
     /// Distinct `(hostid, hostname)` pairs seen in labels.
     pub hosts: Vec<(Option<u64>, Option<String>)>,
     /// The newest label TXG each of [`hosts`](Self::hosts) was seen at,
@@ -126,6 +144,17 @@ pub struct StaleMember {
     pub txg: Option<u64>,
     /// Why it was set aside.
     pub reason: String,
+}
+
+/// A scanned device `zpool remove` took out of the pool.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormerMember {
+    /// Index into the scanned device list.
+    pub device: usize,
+    /// `id` of the top-level vdev it was a device of, indirect now.
+    pub top: u64,
+    /// Leaf vdev GUID from its label.
+    pub guid: u64,
 }
 
 /// Top-level vdev ids a DVA can name: its vdev field is 24 bits wide
@@ -169,17 +198,22 @@ impl PoolAssembly {
         n - known.len() as u64
     }
 
-    /// Record which of the undescribed top-level vdevs were removed.
-    /// Ids that a label does describe are ignored: a label is a member
-    /// that exists, and the MOS is believed only about what none does.
-    pub fn note_removed_tops(&mut self, removed: impl IntoIterator<Item = u64>) {
-        let mut ids: Vec<u64> = removed
+    /// Record which of the undescribed top-level vdevs were removed,
+    /// and the mapping each left. Ids that a label does describe are
+    /// ignored: a label is a member that exists, and the MOS is believed
+    /// only about what none does.
+    pub fn note_removed_tops(&mut self, removed: impl IntoIterator<Item = (u64, Rc<Mapping>)>) {
+        self.removed_maps = removed
             .into_iter()
-            .filter(|id| !self.tops.iter().any(|t| t.id == *id))
+            .filter(|(id, _)| !self.tops.iter().any(|t| t.id == *id))
             .collect();
-        ids.sort_unstable();
-        ids.dedup();
-        self.removed_tops = ids;
+        self.removed_tops = self.removed_maps.keys().copied().collect();
+    }
+
+    /// Whether a device removed from top-level vdev `top` is among the
+    /// scanned ones.
+    pub fn former_of(&self, top: u64) -> bool {
+        self.former.iter().any(|f| f.top == top)
     }
 
     /// True when every top-level vdev is known and readable.
@@ -301,15 +335,38 @@ pub fn assemble(scans: &[Option<DeviceScan>]) -> Vec<PoolAssembly> {
         // vdev_label_init for a device being attached, replaced or added
         // as a spare and never committed: it describes nothing.
         let mut stale = Vec::new();
+        let mut former = Vec::new();
         let mut tops: BTreeMap<u64, (u64, &VdevNode)> = BTreeMap::new();
         for (i, c) in &entries {
             let txg = c.txg.unwrap_or(0);
             if txg == 0 {
+                // `zpool remove` relabels the device it has emptied the
+                // same way, and the tree that label carries is the
+                // indirect vdev left in its place. Such a device was
+                // said never to have been part of the pool; it was, and
+                // it still holds what the pool had on it.
+                let removed_from = c.tree.as_ref().filter(|t| t.kind == "indirect");
+                let reason = match removed_from {
+                    Some(t) => {
+                        if let Some(guid) = c.guid {
+                            former.push(FormerMember {
+                                device: *i,
+                                top: t.id,
+                                guid,
+                            });
+                        }
+                        format!(
+                            "label txg 0 naming indirect vdev #{}: the device was removed from the pool (zpool remove); it is read only for blocks of transaction groups from before the removal that the removal did not copy",
+                            t.id
+                        )
+                    }
+                    None => "label txg 0: device was being attached/replaced, never part of a committed configuration".into(),
+                };
                 stale.push(StaleMember {
                     device: *i,
                     guid: c.guid,
                     txg: c.txg,
-                    reason: "label txg 0: device was being attached/replaced, never part of a committed configuration".into(),
+                    reason,
                 });
                 continue;
             }
@@ -458,6 +515,8 @@ pub fn assemble(scans: &[Option<DeviceScan>]) -> Vec<PoolAssembly> {
             features_for_read: newest.features_for_read.clone(),
             tops,
             removed_tops: Vec::new(),
+            removed_maps: BTreeMap::new(),
+            former,
             hosts,
             host_txgs,
             devices: entries.iter().map(|(i, _)| *i).collect(),
@@ -677,11 +736,19 @@ mod removed_tops_tests {
                 })
                 .collect(),
             removed_tops: Vec::new(),
+            removed_maps: BTreeMap::new(),
+            former: Vec::new(),
             hosts: Vec::new(),
             host_txgs: Vec::new(),
             devices: Vec::new(),
             stale: Vec::new(),
         }
+    }
+
+    fn gone(ids: &[u64]) -> Vec<(u64, Rc<Mapping>)> {
+        ids.iter()
+            .map(|id| (*id, Rc::new(Mapping::default())))
+            .collect()
     }
 
     /// Counted, undescribed, and — once the pool has said so — not
@@ -691,8 +758,9 @@ mod removed_tops_tests {
     fn a_removed_top_is_not_missing_and_a_described_one_is_not_removed() {
         let mut p = pool(4, &[0, 2]);
         assert_eq!(p.missing_tops(), vec![1, 3]);
-        p.note_removed_tops([3, 0, 3]);
+        p.note_removed_tops(gone(&[3, 0, 3]));
         assert_eq!(p.removed_tops, vec![3]);
+        assert_eq!(p.removed_maps.keys().copied().collect::<Vec<_>>(), [3]);
         assert_eq!(p.missing_tops(), vec![1]);
         assert_eq!(p.missing_top_count(), 1);
     }

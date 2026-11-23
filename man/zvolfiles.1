@@ -281,6 +281,14 @@ pool went down \(em they are counted on standard error and as
 .Ql intent_log
 in the manifest, the index and the record.
 The exit status is not changed by it: 4 is for what could not be read.
+A transaction group from before a top-level vdev was removed from the
+pool is read as
+.Xr zvolrescue 1
+reads one, through the mapping the removal left and from the removed
+device where it is among the members; it is said on standard error,
+and the vdevs are
+.Ql removed_since
+in the manifest, the index and the record.
 .Bl -tag -width Ds
 .It Fl o , Fl -output Ar dir
 Write the objects here, by the same rules as

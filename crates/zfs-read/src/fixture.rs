@@ -199,7 +199,8 @@ impl Pool {
         }
         if self.kind == "disk" {
             pairs.push(("path", Value::String(self.members[0].path.clone())));
-        } else {
+        } else if self.kind != "indirect" {
+            // An indirect vdev has no children: what stood there is gone.
             pairs.push(("children", Value::ListArray(children)));
         }
         list(pairs)
@@ -348,6 +349,11 @@ pub struct Alloc {
     /// the shape `zpool remove` leaves behind: the pointers are never
     /// rewritten, so they go on naming a vdev that is gone (SPEC F-69).
     pub removed_vdev: Option<u32>,
+    /// Write the pool's configuration object with no indirect vdev in
+    /// it, whatever `removed_vdev` says: a root with no child, as a
+    /// transaction group from before a removal has it. The pointers
+    /// still name `removed_vdev`, which was a device then.
+    pub plain_config: bool,
     /// What it takes to translate those addresses back, in source order.
     pub mapping: Vec<indirect::Entry>,
     /// Next address to hand out in the removed vdev's own space.
@@ -521,6 +527,7 @@ impl Alloc {
             checksum: zfs_ondisk::blkptr::Checksum::Fletcher4,
             salt: None,
             removed_vdev: None,
+            plain_config: false,
             mapping: Vec::new(),
             removed_next: REMOVED_BASE,
             vdev: 0,
@@ -1352,24 +1359,33 @@ pub fn build_sample_mos_variant(
     // away, so no label describes it — but the live vdevs are described
     // by the labels already, and writing a second, unchecked account of
     // them here would be inventing evidence rather than providing it.
-    if let Some(vdev) = a.removed_vdev {
-        let mut entries = a.mapping_entries();
-        let bonus = a.mapping_phys();
-        // A whole block of the object, its entries first.
-        entries.resize(entries.len().next_multiple_of(4096), 0);
-        let blk = a.put(m, &entries, MAPPING_OT, 0, 100);
-        put(
-            MAPPING_OBJECT,
-            DnodeSpec {
-                object_type: MAPPING_OT,
-                datablksz: 4096,
-                blkptrs: vec![blk],
-                bonus_type: MAPPING_OT,
-                bonus,
-                ..DnodeSpec::default()
-            }
-            .build(),
-        );
+    if a.removed_vdev.is_some() || a.plain_config {
+        let mut children = Vec::new();
+        if let Some(vdev) = a.removed_vdev.filter(|_| !a.plain_config) {
+            let mut entries = a.mapping_entries();
+            let bonus = a.mapping_phys();
+            // A whole block of the object, its entries first.
+            entries.resize(entries.len().next_multiple_of(4096), 0);
+            let blk = a.put(m, &entries, MAPPING_OT, 0, 100);
+            put(
+                MAPPING_OBJECT,
+                DnodeSpec {
+                    object_type: MAPPING_OT,
+                    datablksz: 4096,
+                    blkptrs: vec![blk],
+                    bonus_type: MAPPING_OT,
+                    bonus,
+                    ..DnodeSpec::default()
+                }
+                .build(),
+            );
+            children.push(list(vec![
+                ("type", Value::String("indirect".into())),
+                ("id", Value::Uint64(u64::from(vdev))),
+                ("guid", Value::Uint64(0x1de_0000 + u64::from(vdev))),
+                ("com.delphix:indirect_object", Value::Uint64(MAPPING_OBJECT)),
+            ]));
+        }
         let config = pack(&list(vec![
             ("name", Value::String("tank".into())),
             (
@@ -1377,15 +1393,7 @@ pub fn build_sample_mos_variant(
                 Value::List(list(vec![
                     ("type", Value::String("root".into())),
                     ("id", Value::Uint64(0)),
-                    (
-                        "children",
-                        Value::ListArray(vec![list(vec![
-                            ("type", Value::String("indirect".into())),
-                            ("id", Value::Uint64(u64::from(vdev))),
-                            ("guid", Value::Uint64(0x1de_0000 + u64::from(vdev))),
-                            ("com.delphix:indirect_object", Value::Uint64(MAPPING_OBJECT)),
-                        ])]),
-                    ),
+                    ("children", Value::ListArray(children)),
                 ])),
             ),
         ]));
@@ -1432,6 +1440,98 @@ pub fn build_sample_mos_variant(
 /// removed vdev in `vdev_children`, because removing a vdev is not the
 /// same as forgetting it, and name `device_removal` as active.
 pub fn removed_vdev_members(pool: &mut Pool, size: u64) -> Vec<Vec<u8>> {
+    removed_vdev_build(pool, size).0
+}
+
+/// The same, and with it the device the removed vdev was made of, as
+/// `zpool remove` leaves one: everything it held is still at the vdev's
+/// own addresses, under labels of txg 0 that name the indirect vdev
+/// standing in its place and carry no uberblock. The pool is a mirror.
+pub fn removed_vdev_members_and_device(pool: &mut Pool, size: u64) -> (Vec<Vec<u8>>, Vec<u8>) {
+    assert_eq!(pool.kind, "mirror", "the bytes are taken from one side");
+    let (members, mapping) = removed_vdev_build(pool, size);
+    let gone = removed_device_image(pool, &members[0], &mapping, size);
+    (members, gone)
+}
+
+/// A mirror at two transaction groups with a device removal between
+/// them. At the older the volume's blocks are on a second top-level
+/// vdev that the configuration there still has as a device; by the
+/// newer the pool has had it removed, and the MOS there carries the
+/// mapping. With `copied`, the mapping has the older group's blocks:
+/// they were allocated when the removal ended. Without, it has not —
+/// the volume was rewritten first, and its old blocks were freed and
+/// never copied.
+///
+/// Returns the members, the device the vdev was made of as the removal
+/// leaves it (see [`removed_vdev_members_and_device`]), and the older
+/// and the newer transaction group.
+pub fn removed_since_members(
+    pool: &mut Pool,
+    size: u64,
+    copied: bool,
+) -> (Vec<Vec<u8>>, Vec<u8>, u64, u64) {
+    assert_eq!(pool.kind, "mirror", "the bytes are taken from one side");
+    let txgs: Vec<u64> = pool.uberblocks.iter().map(|(t, _)| *t).collect();
+    assert!(txgs.len() >= 2, "need at least two uberblocks");
+    let newest = *txgs.last().expect("non-empty");
+    let older = txgs[txgs.len() - 2];
+    let n = pool.members.len();
+    let mut members: Vec<Vec<u8>> = (0..n).map(|_| vec![0u8; size as usize]).collect();
+    let mut a = Alloc::new(0x20_0000);
+    a.removed_vdev = Some(1);
+    a.plain_config = true;
+    let before = build_sample_mos_variant(&mut members, &mut a, true);
+    let mut on_device = a.mapping.clone();
+    if !copied {
+        a.mapping.clear();
+    }
+    a.plain_config = false;
+    a.born = Some(newest);
+    let after = build_sample_mos_variant(&mut members, &mut a, true);
+    on_device.extend(
+        a.mapping
+            .iter()
+            .skip(if copied { on_device.len() } else { 0 }),
+    );
+    pool.rootbp = Some(before);
+    pool.rootbp_by_txg = vec![(newest, after)];
+    pool.vdev_children = 2;
+    pool.features_for_read
+        .push("com.delphix:device_removal".into());
+    for (i, img) in members.iter_mut().enumerate() {
+        pool.write_labels(i, img);
+    }
+    let gone = removed_device_image(pool, &members[0], &on_device, size);
+    (members, gone, older, newest)
+}
+
+/// The device a removed top-level vdev was made of, holding at the
+/// vdev's own addresses what `entries` say `side` has of it.
+fn removed_device_image(
+    pool: &Pool,
+    side: &[u8],
+    entries: &[indirect::Entry],
+    size: u64,
+) -> Vec<u8> {
+    let mut label = pool.clone();
+    label.kind = "indirect".into();
+    label.top_id = 1;
+    label.uberblocks = Vec::new();
+    label.members = vec![Member {
+        guid: Member::guid_for(pool.guid, 0x7e),
+        path: "/dev/gpt/removed".into(),
+    }];
+    let mut gone = label.member_image(0, size);
+    for e in entries {
+        let from = (LABEL_START_SIZE + e.dst_offset) as usize;
+        let bytes = side[from..from + e.size as usize].to_vec();
+        write_at_dva(&mut gone, e.src, &bytes);
+    }
+    gone
+}
+
+fn removed_vdev_build(pool: &mut Pool, size: u64) -> (Vec<Vec<u8>>, Vec<indirect::Entry>) {
     let n = pool.members.len();
     let mut members: Vec<Vec<u8>> = (0..n).map(|_| vec![0u8; size as usize]).collect();
     let layout = match pool.nparity {
@@ -1450,7 +1550,7 @@ pub fn removed_vdev_members(pool: &mut Pool, size: u64) -> Vec<Vec<u8>> {
     for (i, img) in members.iter_mut().enumerate() {
         pool.write_labels(i, img);
     }
-    members
+    (members, a.mapping)
 }
 
 /// Where the volume's first data block lives on the *second* top-level

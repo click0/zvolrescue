@@ -7,6 +7,7 @@
 //! its snapshots.
 
 use std::collections::BTreeSet;
+use std::rc::Rc;
 
 use zfs_ondisk::dmu::{ObjsetPhys, ObjsetType, OT_NEWTYPE};
 use zfs_ondisk::dsl::{BpobjPhys, DeadlistPhys, DslDatasetPhys, DslDirPhys};
@@ -535,10 +536,11 @@ pub fn open_mos_objset<'r, 'a>(
 /// No label describes a removed vdev — removing it is what took its
 /// members away — so the only account of it is the pool's own: the
 /// packed configuration nvlist in the MOS, written at the transaction
-/// group this MOS belongs to. Reading it here rather than from the
-/// labels is also what keeps an older transaction group honest: asked
-/// for a txg from before the removal, the configuration of *that* txg
-/// has no indirect vdev in it and nothing is translated.
+/// group this MOS belongs to. A transaction group from before the
+/// removal has no indirect vdev in its configuration and installs
+/// nothing here; what its pointers into that vdev are read through is
+/// the mapping the reader began with, the newest configuration's
+/// ([`PoolAssembly::removed_maps`]).
 ///
 /// Failure is not fatal and not silent. A pool that never had a vdev
 /// removed has nothing here to find, and one that did but whose
@@ -588,6 +590,51 @@ pub fn load_removed_vdevs(reader: &PoolReader<'_>, mos: &DnodeArray<'_, '_>, con
     }
 }
 
+/// The top-level vdevs the configuration of this MOS has as removed:
+/// the ids of its indirect vdevs.
+pub fn removed_at(mos: &DnodeArray<'_, '_>) -> Result<Vec<u64>, ReadError> {
+    let dir = object_directory(mos)?;
+    let config = dir
+        .iter()
+        .find(|(n, _)| n == CONFIG)
+        .map(|(_, v)| *v)
+        .ok_or_else(|| ReadError::Io("object directory has no config".into()))?;
+    let nv = read_packed_nvlist(mos, config)?;
+    let tree = nv
+        .list("vdev_tree")
+        .ok_or_else(|| ReadError::Io(format!("config object {config} has no vdev_tree")))?;
+    Ok(tree
+        .list_array("children")
+        .unwrap_or(&[])
+        .iter()
+        .map(VdevNode::from_nvlist)
+        .filter(|n| n.kind == "indirect")
+        .map(|n| n.id)
+        .collect())
+}
+
+/// Which of the pool's removed top-level vdevs were still devices at
+/// the transaction group `mos` is of: the pool says they were removed,
+/// and this configuration does not yet. What that group has on them is
+/// read through a mapping written after it, which holds what was
+/// allocated when the removal ended and nothing that was freed before.
+///
+/// Empty when the configuration here does not read: nothing is said of
+/// a removal that cannot be dated.
+pub fn removed_since(mos: &DnodeArray<'_, '_>, pool: &PoolAssembly) -> Vec<u64> {
+    if pool.removed_tops.is_empty() {
+        return Vec::new();
+    }
+    let Ok(at) = removed_at(mos) else {
+        return Vec::new();
+    };
+    pool.removed_tops
+        .iter()
+        .copied()
+        .filter(|id| !at.contains(id))
+        .collect()
+}
+
 /// Which of a pool's undescribed top-level vdevs were removed, asked of
 /// the pool itself (SPEC F-69).
 ///
@@ -609,7 +656,7 @@ pub fn removed_tops_of(
     devices: Vec<Option<&dyn BlockSource>>,
     bases: &[u64],
     pool: &PoolAssembly,
-) -> Vec<u64> {
+) -> Vec<(u64, Rc<Mapping>)> {
     let removal_active = pool
         .features_for_read
         .iter()
@@ -629,18 +676,19 @@ pub fn removed_tops_of(
     let reader = PoolReader::new(pool, devices).with_base_offsets(bases);
     match open_mos(&reader, &chosen.ub) {
         Ok(_) => {
-            let ids: Vec<u64> = reader
-                .removed_vdevs()
+            let removed: Vec<(u64, Rc<Mapping>)> = reader
+                .removed_mappings()
                 .into_iter()
-                .map(|(v, _)| u64::from(v))
+                .map(|(v, m)| (u64::from(v), m))
                 .collect();
             trace!(
                 "indirect",
-                "pool {:?}: the MOS at txg {} says top-level vdev(s) {ids:?} were removed",
+                "pool {:?}: the MOS at txg {} says top-level vdev(s) {:?} were removed",
                 pool.name,
-                chosen.ub.txg
+                chosen.ub.txg,
+                removed.iter().map(|(v, _)| *v).collect::<Vec<_>>()
             );
-            ids
+            removed
         }
         Err(e) => {
             trace!(
@@ -1704,13 +1752,21 @@ mod removed_tops_tests {
         (sources, scans)
     }
 
-    fn ask(sources: &[MemSource], scans: &[Option<DeviceScan>], pool: &PoolAssembly) -> Vec<u64> {
+    fn ask(
+        sources: &[MemSource],
+        scans: &[Option<DeviceScan>],
+        pool: &PoolAssembly,
+    ) -> Vec<(u64, Rc<Mapping>)> {
         let devices: Vec<Option<&dyn BlockSource>> = sources
             .iter()
             .map(|s| Some(s as &dyn BlockSource))
             .collect();
         let bases = vec![0u64; sources.len()];
         removed_tops_of(scans, devices, &bases, pool)
+    }
+
+    fn ids(removed: &[(u64, Rc<Mapping>)]) -> Vec<u64> {
+        removed.iter().map(|(id, _)| *id).collect()
     }
 
     /// From the labels alone vdev 1 is missing; the MOS says it was
@@ -1725,10 +1781,60 @@ mod removed_tops_tests {
         assert!(!assembly.readable());
 
         let removed = ask(&sources, &scans, &assembly);
-        assert_eq!(removed, vec![1]);
+        assert_eq!(ids(&removed), vec![1]);
         assembly.note_removed_tops(removed);
         assert_eq!(assembly.missing_tops(), Vec::<u64>::new());
         assert!(assembly.readable());
+
+        // The configuration that says so is this transaction group's
+        // own: nothing was removed since it.
+        let devices: Vec<Option<&dyn BlockSource>> = sources
+            .iter()
+            .map(|s| Some(s as &dyn BlockSource))
+            .collect();
+        let reader = PoolReader::new(&assembly, devices);
+        let ub = scans[0].as_ref().unwrap().labels[0]
+            .best()
+            .unwrap()
+            .ub
+            .clone();
+        let mos = open_mos(&reader, &ub).unwrap();
+        assert_eq!(removed_at(&mos).unwrap(), vec![1]);
+        assert_eq!(removed_since(&mos, &assembly), Vec::<u64>::new());
+    }
+
+    /// A transaction group whose configuration has no indirect vdev,
+    /// read on a pool that has had one removed since: it is from before
+    /// the removal, and is said to be.
+    #[test]
+    fn a_txg_from_before_the_removal_is_told_from_one_after() {
+        let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1)]);
+        let mut members = vec![vec![0u8; SIZE as usize], vec![0u8; SIZE as usize]];
+        let mut a = Alloc::new(0x20_0000);
+        a.plain_config = true;
+        build_sample_mos(&mut pool, &mut members, &mut a);
+        for (i, m) in members.iter_mut().enumerate() {
+            pool.write_labels(i, m);
+        }
+        let (sources, scans) = scan_all(members);
+        let mut assembly = assemble(&scans).into_iter().next().expect("one pool");
+        let devices: Vec<Option<&dyn BlockSource>> = sources
+            .iter()
+            .map(|s| Some(s as &dyn BlockSource))
+            .collect();
+        let reader = PoolReader::new(&assembly, devices);
+        let ub = scans[0].as_ref().unwrap().labels[0]
+            .best()
+            .unwrap()
+            .ub
+            .clone();
+        let mos = open_mos(&reader, &ub).unwrap();
+        assert_eq!(removed_at(&mos).unwrap(), Vec::<u64>::new());
+        assert_eq!(removed_since(&mos, &assembly), Vec::<u64>::new());
+        // What a newer configuration would have said of the pool.
+        assembly.vdev_children = Some(2);
+        assembly.note_removed_tops([(1, Rc::new(Mapping::default()))]);
+        assert_eq!(removed_since(&mos, &assembly), vec![1]);
     }
 
     /// A pool whose name nothing gave is named by its configuration in
@@ -1783,7 +1889,7 @@ mod removed_tops_tests {
         assert_eq!(assembly.missing_tops(), vec![1]);
 
         let removed = ask(&sources, &scans, &assembly);
-        assert_eq!(removed, Vec::<u64>::new());
+        assert_eq!(ids(&removed), Vec::<u64>::new());
         assembly.note_removed_tops(removed);
         assert_eq!(assembly.missing_tops(), vec![1]);
         assert!(!assembly.readable());
@@ -1806,7 +1912,7 @@ mod removed_tops_tests {
         let (sources, scans) = scan_all(members);
         let assembly = assemble(&scans).into_iter().next().expect("one pool");
         assert!(assembly.missing_tops().is_empty());
-        assert_eq!(ask(&sources, &scans, &assembly), Vec::<u64>::new());
+        assert_eq!(ids(&ask(&sources, &scans, &assembly)), Vec::<u64>::new());
     }
 }
 
