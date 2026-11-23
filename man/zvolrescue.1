@@ -437,6 +437,10 @@ The state holds the SHA-256 of the blocks it counts;
 reads them back from the output and starts over, saying so, when they
 no longer come to it: another disk under the device's name, or an image
 written since.
+A state that holds no such hash \(em one an earlier version left, or
+one edited \(em vouches for nothing, and starts over too.
+A file that is resumed is cut to the blocks the state counts before
+the run goes on: what an earlier run wrote past them is read again.
 .It Pa manifest.json
 Under the output directory of
 .Cm dump Fl r :

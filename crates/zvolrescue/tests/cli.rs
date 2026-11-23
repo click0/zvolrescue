@@ -1290,8 +1290,10 @@ fn a_resumed_dump_reports_what_the_run_before_it_lost() {
     let bad = first["bad"].clone();
     assert_eq!(bad[0]["blkid"], 0, "{first}");
 
-    // The state a run interrupted after block 1 leaves: block 0 is lost.
+    // The state a run interrupted after block 1 leaves: block 0 is lost,
+    // and the two blocks before it are what they came to.
     let state_path = dir.join("vol.img.resume.json");
+    let two_blocks = 2 * first["blocksize"].as_u64().unwrap() as usize;
     let state = serde_json::json!({
         "version": 1,
         "dataset": "tank/vm/disk0",
@@ -1301,6 +1303,7 @@ fn a_resumed_dump_reports_what_the_run_before_it_lost() {
         "blocksize": first["blocksize"],
         "blocks_done": 2,
         "lost": { "bad": bad, "blocks_zeroed": 1 },
+        "prefix_sha256": zvol_common::evidence::sha256_hex(&std::fs::read(&img).unwrap()[..two_blocks]),
     });
     std::fs::write(&state_path, state.to_string()).unwrap();
     let (code, v, err) = dump(&["--resume"]);
@@ -1875,6 +1878,9 @@ fn a_resume_state_the_output_does_not_back_up_is_set_aside() {
     assert_eq!(first["resumed_from_block"], 0);
     assert!(!state_path.exists(), "a finished dump leaves no state");
     let want = (first["sha256"].clone(), first["md5"].clone());
+    let whole = std::fs::read(&img).unwrap();
+    let blocksize = first["blocksize"].as_u64().unwrap();
+    // A state as a run leaves it: how far, and what those blocks came to.
     let state = |dataset: &str, blocks_done: u64| {
         serde_json::json!({
             "version": 1,
@@ -1882,8 +1888,10 @@ fn a_resume_state_the_output_does_not_back_up_is_set_aside() {
             "dataset_guid": first["dataset_guid"],
             "txg": first["txg"],
             "volsize": first["volsize"],
-            "blocksize": first["blocksize"],
+            "blocksize": blocksize,
             "blocks_done": blocks_done,
+            "prefix_sha256":
+                zvol_common::evidence::sha256_hex(&whole[..(blocks_done * blocksize) as usize]),
         })
         .to_string()
     };
@@ -1895,6 +1903,25 @@ fn a_resume_state_the_output_does_not_back_up_is_set_aside() {
     assert_eq!(v["resumed_from_block"], 2, "{err}");
     assert_eq!((v["sha256"].clone(), v["md5"].clone()), want);
     assert_eq!(v["blocks_read"], 1, "only block 2 is read now; 3 is a hole");
+
+    // A state that does not say what its blocks came to — one an
+    // earlier version left, or one edited — vouches for nothing: it was
+    // taken up with no check of the output at all, and whatever was
+    // under the name was the image.
+    let mut unvouched: serde_json::Value =
+        serde_json::from_str(&state("tank/vm/disk0", 2)).unwrap();
+    unvouched.as_object_mut().unwrap().remove("prefix_sha256");
+    std::fs::write(&state_path, unvouched.to_string()).unwrap();
+    std::fs::write(&img, vec![0xffu8; whole.len()]).unwrap();
+    let (v, err) = dump(&["--resume"]);
+    assert!(
+        err.contains("records no hash of the 16384 bytes it counts")
+            && err.contains("starting over"),
+        "{err}"
+    );
+    assert_eq!(v["resumed_from_block"], 0);
+    assert_eq!((v["sha256"].clone(), v["md5"].clone()), want);
+    assert_eq!(std::fs::read(&img).unwrap(), whole);
 
     // A state for some other dataset.
     std::fs::write(&state_path, state("tank/other", 2)).unwrap();

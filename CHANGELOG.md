@@ -17,6 +17,23 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ### Fixed
 
+* **`--resume` took a state that vouched for nothing, and kept what
+  lay past the one it took.** A resume state says how many blocks are
+  done and what they hash to, and a resume goes on only when the
+  output still gives that back. A state with no hash — one v0.9.15
+  left, or one edited — was taken up with no check at all: over a
+  device of other bytes, with every block counted done, the run read
+  nothing of the pool, hashed the device and ended 0, "0 read". Such a
+  state now starts over, saying why. And a resumed file kept whatever
+  it held past the blocks the state counts — what a run killed after
+  its last state had gone on to write. Where the resuming run had
+  zeros to write there, a hole or a block that no longer read, it
+  wrote nothing, as a sparse file is written: the image was the
+  earlier run's bytes under a hash of zeros, and `zvolreport verify`
+  failed an image nobody had touched. The file is cut to what the
+  state counts before the run goes on. `zvolcarve dump --resume` is
+  the same code.
+
 * **`zvolreport verify` and `build` took time that grew with the
   square of what they were given.** After `verify` had printed its
   table and its totals it listed the files it had read, looking each

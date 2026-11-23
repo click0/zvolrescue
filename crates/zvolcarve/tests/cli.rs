@@ -508,9 +508,12 @@ fn a_carved_dump_resumes_from_its_state_file() {
         "candidate, dnode sha256 {}",
         zvol_common::evidence::sha256_hex(&dnode)
     );
+    // And by what its blocks came to: a state that does not say is
+    // taken up on nothing.
     let state = serde_json::json!({
         "version": 1, "dataset": id, "dataset_guid": known_as, "txg": 0,
         "volsize": 32 << 20, "blocksize": blocksize, "blocks_done": 2,
+        "prefix_sha256": zvol_common::evidence::sha256_hex(&image[..2 * blocksize as usize]),
     });
     std::fs::write(dir.join("cut.img.resume.json"), state.to_string()).expect("state");
     let (code, out, err) = run(&[

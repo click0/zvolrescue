@@ -603,8 +603,8 @@ pub fn open(
                             left -= n as u64;
                         }
                         let read_back = digests.clone().finish().sha256;
-                        if let Some(was) = s.prefix_sha256.as_ref().filter(|_| start_block > 0) {
-                            if *was != read_back {
+                        match s.prefix_sha256.as_ref().filter(|_| start_block > 0) {
+                            Some(was) if *was != read_back => {
                                 eprintln!(
                                     "{tool}: {}: its first {prefix} bytes are not the ones the resume state counted (another disk under that name, or written since); starting over",
                                     output.display()
@@ -612,6 +612,25 @@ pub fn open(
                                 start_block = 0;
                                 digests = Digests::new(extra);
                             }
+                            Some(_) => {}
+                            // A state that says how far and not what
+                            // those blocks came to — one an earlier
+                            // version left, or one edited — gives
+                            // nothing to hold the output against, and
+                            // whatever was under the name was taken as
+                            // the image: a disk of 0xFF bytes with such
+                            // a state counting every block done was
+                            // "0 read", hashed, and exit 0.
+                            None if start_block > 0 => {
+                                eprintln!(
+                                    "{tool}: {} records no hash of the {prefix} bytes it counts (a state an earlier version left, or one edited): nothing says {} still holds them; starting over",
+                                    state_path.display(),
+                                    output.display()
+                                );
+                                start_block = 0;
+                                digests = Digests::new(extra);
+                            }
+                            None => {}
                         }
                     }
                     Err(e) => {
@@ -722,6 +741,13 @@ mod tests {
         crate::scratch::Scratch::new("zvol-common-resume", name)
     }
 
+    /// What `bytes` come to: what a state counts its blocks as.
+    fn counted(bytes: &[u8]) -> String {
+        let mut d = Digests::new(Extra::none());
+        d.update(bytes);
+        d.finish().sha256
+    }
+
     fn expected() -> State {
         State {
             version: 1,
@@ -788,7 +814,17 @@ mod tests {
         let out = dir.join("out.img");
         let exp = expected();
         std::fs::write(&out, [9u8; 4096]).unwrap();
-        write(&out, &path(&out), &exp, 3, &Lost::default(), None).unwrap();
+        let mut three = vec![9u8; 4096];
+        three.resize(3 * 4096, 0);
+        write(
+            &out,
+            &path(&out),
+            &exp,
+            3,
+            &Lost::default(),
+            Some(&counted(&three)),
+        )
+        .unwrap();
         assert_eq!(std::fs::metadata(&out).unwrap().len(), 3 * 4096);
         let (start, ..) = open(
             "test",
@@ -802,7 +838,16 @@ mod tests {
         .unwrap();
         assert_eq!(start, 3);
 
-        write(&out, &path(&out), &exp, 99, &Lost::default(), None).unwrap();
+        three.resize(exp.volsize as usize, 0);
+        write(
+            &out,
+            &path(&out),
+            &exp,
+            99,
+            &Lost::default(),
+            Some(&counted(&three)),
+        )
+        .unwrap();
         assert_eq!(std::fs::metadata(&out).unwrap().len(), exp.volsize);
         let (start, ..) = open(
             "test",
@@ -829,7 +874,15 @@ mod tests {
         // Two blocks of a four-block image, then a state that says so.
         let prefix: Vec<u8> = (0..8192u32).map(|i| (i % 251) as u8).collect();
         std::fs::write(&out, &prefix).unwrap();
-        write(&out, &path(&out), &exp, 2, &Lost::default(), None).unwrap();
+        write(
+            &out,
+            &path(&out),
+            &exp,
+            2,
+            &Lost::default(),
+            Some(&counted(&prefix)),
+        )
+        .unwrap();
 
         let (start, digests, mut sink, lost) = open(
             "test",
@@ -864,7 +917,15 @@ mod tests {
         assert_eq!(std::fs::metadata(&out).unwrap().len(), 0);
 
         // Not asked to resume: from the start, whatever the state says.
-        write(&out, &path(&out), &exp, 2, &Lost::default(), None).unwrap();
+        write(
+            &out,
+            &path(&out),
+            &exp,
+            2,
+            &Lost::default(),
+            Some(&counted(&prefix)),
+        )
+        .unwrap();
         let (start, _, _, _) = open(
             "test",
             "tank/vm/disk0",
@@ -879,7 +940,15 @@ mod tests {
 
         // A state whose prefix the image no longer holds starts over
         // rather than hashing bytes that are not there.
-        write(&out, &path(&out), &exp, 2, &Lost::default(), None).unwrap();
+        write(
+            &out,
+            &path(&out),
+            &exp,
+            2,
+            &Lost::default(),
+            Some(&counted(&prefix)),
+        )
+        .unwrap();
         std::fs::write(&out, &prefix[..100]).unwrap();
         let (start, _, _, _) = open(
             "test",
@@ -895,6 +964,86 @@ mod tests {
 
         clear(&path(&out));
         assert!(!path(&out).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A state that says how far the image got and not what those blocks
+    /// came to gives nothing to hold the output against: it starts over.
+    /// It was taken up on whatever had the output's name — a state an
+    /// earlier version left, or an edited one, counting every block
+    /// done over a disk of other bytes was "0 read", hashed, exit 0.
+    #[test]
+    fn a_state_with_no_hash_of_what_it_counts_starts_over() {
+        let dir = scratch("no-prefix-hash");
+        let out = dir.join("out.img");
+        let exp = expected();
+        for blocks_done in [2, 4] {
+            std::fs::write(&out, vec![0xffu8; exp.volsize as usize]).unwrap();
+            write(&out, &path(&out), &exp, blocks_done, &Lost::default(), None).unwrap();
+            let (start, digests, _, _) = open(
+                "test",
+                "tank/vm/disk0",
+                &out,
+                &exp,
+                Extra::none(),
+                true,
+                true,
+            )
+            .unwrap();
+            assert_eq!(start, 0, "{blocks_done} blocks counted, none vouched for");
+            // Nothing of what was there is in the hash, or in the file.
+            assert_eq!(digests.finish().sha256, counted(&[]));
+            assert_eq!(std::fs::metadata(&out).unwrap().len(), 0);
+            assert!(!path(&out).exists(), "the state is gone with the image");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A resumed file is cut to the blocks the state counts. A run
+    /// killed after its last state had written blocks past it, and they
+    /// stayed in the file: where the run that took it up had zeros to
+    /// write — a hole, a block it could not read this time — it wrote
+    /// nothing, as a sparse file is written, and the image was the first
+    /// run's bytes under a hash of zeros.
+    #[test]
+    fn a_resumed_file_keeps_nothing_past_what_its_state_counts() {
+        let dir = scratch("past-prefix");
+        let out = dir.join("out.img");
+        let exp = expected();
+        let prefix: Vec<u8> = (0..8192u32).map(|i| (i % 251) as u8).collect();
+        // The state counts two blocks; the killed run had written a
+        // third.
+        let mut on_disk = prefix.clone();
+        on_disk.extend_from_slice(&[0xaau8; 4096]);
+        std::fs::write(&out, &on_disk).unwrap();
+        write(
+            &out,
+            &path(&out),
+            &exp,
+            2,
+            &Lost::default(),
+            Some(&counted(&prefix)),
+        )
+        .unwrap();
+        let (start, _, mut sink, _) = open(
+            "test",
+            "tank/vm/disk0",
+            &out,
+            &exp,
+            Extra::none(),
+            true,
+            true,
+        )
+        .unwrap();
+        assert_eq!(start, 2);
+        // This time block 2 does not read and is zeros; block 3 does.
+        sink.zeros(8192, 4096).unwrap();
+        sink.write_at(12288, &[7u8; 4096]).unwrap();
+        sink.finish(exp.volsize).unwrap();
+        let mut whole = prefix.clone();
+        whole.extend_from_slice(&[0u8; 4096]);
+        whole.extend_from_slice(&[7u8; 4096]);
+        assert_eq!(std::fs::read(&out).unwrap(), whole);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -995,7 +1144,8 @@ mod tests {
         let dir = scratch("lost");
         let out = dir.join("out.img");
         std::fs::write(&out, [0u8; 8192]).unwrap();
-        write(&out, &path(&out), &expected(), 2, &lost, None).unwrap();
+        let zeros = counted(&[0u8; 8192]);
+        write(&out, &path(&out), &expected(), 2, &lost, Some(&zeros)).unwrap();
         let (start, _, _, back) = open(
             "test",
             "tank/vm/disk0",

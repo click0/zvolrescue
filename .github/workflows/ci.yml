@@ -318,7 +318,9 @@ jobs:
           cmp /tmp/disk0.img /tmp/bulk/tank_vm_disk0.img
           # Resume: pretend a run stopped after block 2 (16 KiB written), continue, same hash.
           head -c 16384 /tmp/disk0.img > /tmp/resume.img
-          printf '{"version":1,"dataset":"tank/vm/disk0","dataset_guid":"0x00000000000000a3","txg":4816229,"volsize":33554432,"blocksize":8192,"blocks_done":2}' > /tmp/resume.img.resume.json
+          # The state says what the blocks it counts came to: one that
+          # does not is taken up on nothing, and starts over.
+          printf '{"version":1,"dataset":"tank/vm/disk0","dataset_guid":"0x00000000000000a3","txg":4816229,"volsize":33554432,"blocksize":8192,"blocks_done":2,"prefix_sha256":"%s"}' "$(sha256sum < /tmp/resume.img | cut -d" " -f1)" > /tmp/resume.img.resume.json
           ./target/release/zvolrescue -f json dump tank/vm/disk0 /tmp/fx/member0.img /tmp/fx/member1.img -o /tmp/resume.img --resume | python3 -c 'import json,sys; d=json.load(sys.stdin)["volumes"][0]; assert d["resumed_from_block"] == 2, d; assert d["blocks_read"] == 1, d; assert d["sha256"] == "febfe0108392728dbde89ee63f9f25419a0192ac04420db3ad88b0032a088585"'
           cmp /tmp/disk0.img /tmp/resume.img
           test ! -e /tmp/resume.img.resume.json

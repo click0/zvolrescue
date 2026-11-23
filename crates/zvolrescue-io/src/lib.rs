@@ -1135,10 +1135,21 @@ impl SparseFile {
         SparseFile::with(file, 0)
     }
 
-    /// Open `path` for resuming: existing contents are kept, and its first
-    /// `prefix` bytes are what an earlier run wrote.
+    /// Open `path` for resuming: its first `prefix` bytes are what an
+    /// earlier run wrote and are kept, and nothing after them is.
+    ///
+    /// A file is cut to the prefix. A run killed after its last state
+    /// had written blocks past it, and they stayed: where the resuming
+    /// run came to write zeros — a hole, a block it could not read this
+    /// time — it wrote nothing, as a sparse file is written, and the
+    /// earlier run's bytes were the image under a hash of zeros. A
+    /// device cannot be cut; there the zeros are written
+    /// ([`zeros`](BlockSink::zeros), [`finish`](BlockSink::finish)).
     pub fn open_existing(path: impl AsRef<Path>, prefix: u64) -> io::Result<SparseFile> {
         let file = OpenOptions::new().write(true).open(path)?;
+        if file.metadata()?.is_file() {
+            file.set_len(prefix)?;
+        }
         SparseFile::with(file, prefix)
     }
 
