@@ -17,6 +17,7 @@
 //! other command can read the member through it.
 
 use std::path::PathBuf;
+use zvol_common::{errln, outln};
 
 use serde::Serialize;
 use zfs_read::carve::{scan_member, Codec, Options as ScanOptions};
@@ -100,7 +101,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             .flatten()
             .find(|p| zvol_common::evidence::Kind::of(p).is_device())
         {
-            eprintln!(
+            errln!(
                 "zvolcarve: {}: a block device is not scanned (SPEC N-10): a surface scan is what a disk with defects survives least. \
                  Image it with a tool for failing media and scan the image; --surface-scan-on-device overrides.",
                 dev.display()
@@ -120,7 +121,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             match Codec::named(name) {
                 Some(c) => v.push(c),
                 None => {
-                    eprintln!(
+                    errln!(
                         "zvolcarve: --compressed {name}: not a compression this build knows (lz4, lzjb, gzip, zstd, none)"
                     );
                     return exit::USAGE;
@@ -133,7 +134,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         Some(s) => match byte_range(s) {
             Ok(w) => Some(w),
             Err(e) => {
-                eprintln!("zvolcarve: {e}");
+                errln!("zvolcarve: {e}");
                 return exit::USAGE;
             }
         },
@@ -149,7 +150,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             }
         }
         if let Err(e) = std::fs::create_dir_all(dir) {
-            eprintln!("zvolcarve: {}: {e}", dir.display());
+            errln!("zvolcarve: {}: {e}", dir.display());
             return exit::USAGE;
         }
     }
@@ -170,7 +171,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             continue;
         };
         if !g.quiet {
-            eprintln!("zvolcarve: reading {}", members.paths[i].display());
+            errln!("zvolcarve: reading {}", members.paths[i].display());
         }
         // Where the vdev starts is the question, so no boundary can be
         // counted from it: every 512-byte sector is tried. At 4 KiB a
@@ -179,7 +180,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         let scan = match scan_member(src, i, 9, &scan_opts) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("zvolcarve: {}: {e}", members.paths[i].display());
+                errln!("zvolcarve: {}: {e}", members.paths[i].display());
                 return exit::UNRECOVERABLE;
             }
         };
@@ -195,7 +196,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         ) {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("zvolcarve: {}: {e}", members.paths[i].display());
+                errln!("zvolcarve: {}: {e}", members.paths[i].display());
                 return exit::UNRECOVERABLE;
             }
         };
@@ -223,14 +224,14 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     let json = match serde_json::to_string_pretty(&doc) {
         Ok(j) => j + "\n",
         Err(e) => {
-            eprintln!("zvolcarve: {e}");
+            errln!("zvolcarve: {e}");
             return exit::USAGE;
         }
     };
     if let Some(dir) = &opts.output {
         let path = dir.join(ZEROPOINT);
         if let Err(e) = std::fs::write(&path, &json) {
-            eprintln!("zvolcarve: {}: {e}", path.display());
+            errln!("zvolcarve: {}: {e}", path.display());
             return exit::USAGE;
         }
     }
@@ -272,7 +273,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
 
 fn print(doc: &ZeroPointOut) {
     for m in &doc.members {
-        println!(
+        outln!(
             "{}: {} probe(s) in {} bytes{}",
             m.member,
             m.probes,
@@ -284,12 +285,10 @@ fn print(doc: &ZeroPointOut) {
             }
         );
         if m.probes == 0 {
-            println!(
-                "  nothing to probe with: no block pointer this build can recompute was found"
-            );
+            outln!("  nothing to probe with: no block pointer this build can recompute was found");
             continue;
         }
-        println!(
+        outln!(
             "  alignment allows ashift {}",
             m.shifts
                 .iter()
@@ -298,12 +297,15 @@ fn print(doc: &ZeroPointOut) {
                 .join(", ")
         );
         if m.bases.is_empty() {
-            println!("  no base in the window is consistent with those probes");
+            outln!("  no base in the window is consistent with those probes");
         }
         for b in &m.bases {
-            println!(
+            outln!(
                 "  base {:#x} ({} bytes): {} of {} probe(s) agreed",
-                b.base, b.base, b.confirmed, b.tried
+                b.base,
+                b.base,
+                b.confirmed,
+                b.tried
             );
         }
     }

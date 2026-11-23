@@ -17,6 +17,21 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ### Fixed
 
+* **Every line of text is printed with its names shown as text.**
+  v0.9.16 showed control and invisible characters as their codes where
+  a name from the pool was printed — in `zvolreport verify`, `zvolfiles
+  list` and `zvoltimeline`, the three places that remembered to. The
+  rest printed names as they were: `zvolfiles extract`, the run that
+  says what was lost, on both streams — a file named
+  `evil\n  STOPPED (--strict, exit 4) at nothing` printed that line —
+  and `zvolrescue list` and `dump`, where a volume named with `ESC [2J`
+  cleared the screen above it; `zvolcarve` and the warnings of
+  `zvolreport build` the same. Text now goes out through two macros
+  that show the whole line (`outln!`, `errln!`), and a test holds every
+  print in the five programs to them: JSON, which escapes for itself,
+  is the one thing printed otherwise. `dump -r` named its image after
+  the volume, escape sequence and all; in a file's name such a
+  character is `_`, as `/` is.
 * **`zvolfiles extract`: over-long paths go under a name the dataset
   does not have, and what was not written is not counted as written.**
   An entry whose path is longer than the system takes is written under

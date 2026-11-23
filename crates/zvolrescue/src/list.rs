@@ -1,6 +1,7 @@
 //! `list`: datasets, volumes and snapshots of a pool at a TXG.
 
 use std::path::PathBuf;
+use zvol_common::{errln, outln};
 
 use serde::Serialize;
 use zfs_ondisk::dmu::ObjsetType;
@@ -188,7 +189,7 @@ fn human(bytes: u64) -> String {
 }
 
 fn print_text(out: &ListOut) {
-    println!(
+    outln!(
         "pool {:?} guid {}: txg {} ({}), {} verified txg(s) available",
         out.pool,
         out.pool_guid,
@@ -203,12 +204,19 @@ fn print_text(out: &ListOut) {
         .max()
         .unwrap_or(4)
         .max(4);
-    println!(
+    outln!(
         "{:<width$}  {:<18}  {:<18}  {:>12}  {:<20}  {:>8}  {:>8}  {:>6}  ENCRYPTION",
-        "NAME", "TYPE", "GUID", "CREATED_TXG", "CREATED", "REFER", "VOLSIZE", "VOLBLK"
+        "NAME",
+        "TYPE",
+        "GUID",
+        "CREATED_TXG",
+        "CREATED",
+        "REFER",
+        "VOLSIZE",
+        "VOLBLK"
     );
     for d in &out.datasets {
-        println!(
+        outln!(
             "{:<width$}  {:<18}  {:<18}  {:>12}  {:<20}  {:>8}  {:>8}  {:>6}  {}",
             d.name,
             d.kind,
@@ -228,7 +236,7 @@ fn print_text(out: &ListOut) {
             )),
         );
         for p in d.properties.iter().flatten() {
-            println!(
+            outln!(
                 "{:<width$}  property: {} = {}{}",
                 "",
                 p.name,
@@ -243,28 +251,34 @@ fn print_text(out: &ListOut) {
             );
         }
         for w in &d.warnings {
-            println!("{:<width$}  warning: {w}", "");
+            outln!("{:<width$}  warning: {w}", "");
         }
     }
     for e in &out.errors {
-        println!("error: {e}");
+        outln!("error: {e}");
     }
     if let Some(diff) = &out.diff {
-        println!();
-        println!("compared with txg {} ({}):", diff.txg, diff.time);
+        outln!();
+        outln!("compared with txg {} ({}):", diff.txg, diff.time);
         if diff.created_since.is_empty() && diff.destroyed_since.is_empty() {
-            println!("  no datasets created or destroyed");
+            outln!("  no datasets created or destroyed");
         }
         for d in &diff.created_since {
-            println!(
+            outln!(
                 "  created    {:<width$}  {}  txg {}",
-                d.name, d.kind, d.creation_txg
+                d.name,
+                d.kind,
+                d.creation_txg
             );
         }
         for d in &diff.destroyed_since {
-            println!(
+            outln!(
                 "  destroyed  {:<width$}  {}  guid {}  -> zvolrescue dump {} … --txg {}",
-                d.name, d.kind, d.guid, d.name, diff.txg
+                d.name,
+                d.kind,
+                d.guid,
+                d.name,
+                diff.txg
             );
         }
     }
@@ -334,7 +348,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         (None, Some(b)) => match parse_timestamp(b) {
             Some(ts) => TxgSelect::Before(ts),
             None => {
-                eprintln!(
+                errln!(
                     "zvolrescue: --before wants an RFC 3339 time (YYYY-MM-DDTHH:MM[:SS][Z|±HH:MM]; UTC without an offset), a date that exists, or Unix seconds"
                 );
                 return exit::USAGE;
@@ -368,7 +382,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             // Nothing was asked for that could not be had: there is no
             // verified uberblock at all, and "matches the requested TXG;
             // available: " with an empty list said neither.
-            eprintln!("zvolrescue: no verified uberblock on these members");
+            errln!("zvolrescue: no verified uberblock on these members");
         } else if let TxgSelect::Before(ts) = sel {
             // A time was asked for, and the answer is in times: it
             // named the TXGs there are, which said nothing of when.
@@ -376,14 +390,14 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 .iter()
                 .min_by_key(|c| (c.ub.timestamp, c.ub.txg))
                 .expect("not empty");
-            eprintln!(
+            errln!(
                 "zvolrescue: no verified uberblock at or before {}; the oldest is txg {} at {}",
                 iso8601(ts),
                 oldest.ub.txg,
                 iso8601(oldest.ub.timestamp)
             );
         } else {
-            eprintln!(
+            errln!(
                 "zvolrescue: no verified uberblock matches the requested TXG; available: {}",
                 candidates
                     .iter()
@@ -411,7 +425,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 // One TXG asked for by name gets the verdict below and
                 // not a progress line first.
                 if !g.quiet && pick.len() > 1 {
-                    eprintln!(
+                    errln!(
                         "zvolrescue: txg {}: unreadable ({e}){}",
                         c.ub.txg,
                         if more { "; trying an older TXG" } else { "" }
@@ -431,12 +445,13 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         let newest = &pick[0];
         let first = unreadable.first().expect("one TXG was tried");
         if unreadable.len() == 1 {
-            eprintln!(
+            errln!(
                 "zvolrescue: cannot read the pool at txg {}: {}",
-                first.txg, first.error
+                first.txg,
+                first.error
             );
         } else {
-            eprintln!(
+            errln!(
                 "zvolrescue: cannot read the pool at any of {} verified TXG(s) (newest: txg {}: {})",
                 unreadable.len(),
                 first.txg,
@@ -489,12 +504,12 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     if let Some(other_txg) = opts.diff {
         match select_uberblock(&candidates, TxgSelect::Exact(other_txg)) {
             None => {
-                eprintln!("zvolrescue: --diff txg {other_txg} has no verified uberblock");
+                errln!("zvolrescue: --diff txg {other_txg} has no verified uberblock");
                 code = exit::UNRECOVERABLE;
             }
             Some(other) => match walk_at(&reader, &other.ub, &pool.name).map(|(_, t)| t) {
                 Err(e) => {
-                    eprintln!("zvolrescue: cannot read the pool at txg {other_txg}: {e}");
+                    errln!("zvolrescue: cannot read the pool at txg {other_txg}: {e}");
                     code = exit::UNRECOVERABLE;
                 }
                 Ok(other_tree) => {
@@ -530,7 +545,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     // What is listed is not all there is: a part of the tree that did
     // not read is named in the list and is not a list that succeeded.
     if !out.errors.is_empty() {
-        eprintln!(
+        errln!(
             "zvolrescue: {} part(s) of the dataset tree did not read at txg {}; what is listed is not all there is (exit 4). An older TXG may list them: --txg",
             out.errors.len(),
             out.txg

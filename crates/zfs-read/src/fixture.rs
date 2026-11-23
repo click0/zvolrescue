@@ -399,6 +399,10 @@ pub struct Alloc {
     /// that went down between a `fsync` and the sync of its transaction
     /// group holds ([`intent_log_left`]).
     pub log_left: Option<u64>,
+    /// The sample volume's name under `tank/vm`, where a fixture wants
+    /// another than `disk0`. A name is whatever the pool says: one
+    /// written by something other than ZFS may hold an escape sequence.
+    pub volume_name: Option<&'static str>,
 }
 
 /// A dense volume for measurements (SPEC N-03, N-08): `bytes` of data
@@ -529,6 +533,7 @@ impl Alloc {
             dedup: false,
             born: None,
             log_left: None,
+            volume_name: None,
         }
     }
 
@@ -1293,7 +1298,8 @@ pub fn build_sample_mos_variant(
     put(6, ds_obj(&dataset_phys(5, 0, &os_fs, 20, 0xa2, 0)));
     put(9, dir_obj(0, 0, 2));
     if with_disk0 {
-        put(7, zap_obj(a, m, &[("disk0", 12)]));
+        let volume = a.volume_name.unwrap_or("disk0");
+        put(7, zap_obj(a, m, &[(volume, 12)]));
         // Properties set on the volume (SPEC F-14). A byte-array value
         // forces a fatzap, which is what a ZAP holding a user property
         // really is: a microzap entry is one 64-bit integer and cannot
@@ -2004,7 +2010,16 @@ pub enum ZplDamage {
     /// UTF-8, which a target may be as much as a name. Nothing is wrong
     /// with such a dataset.
     LinkNotText,
+    /// `hello.txt` is called [`ZPL_NAME_OF_CODES`] instead: a newline
+    /// and an escape sequence, which a name may hold as much as any
+    /// other byte. Nothing is wrong with such a dataset either.
+    NameOfCodes,
 }
+
+/// The name `hello.txt` has under [`ZplDamage::NameOfCodes`]: printed
+/// as it is, a line of its own that says the run found nothing wrong,
+/// and the erasing of the line above.
+pub const ZPL_NAME_OF_CODES: &[u8] = b"hello\n  STOPPED at nothing\x1b[1A\x1b[2K.txt";
 
 /// The target of `link` under [`ZplDamage::LinkNotText`], as long as the
 /// one it stands for.
@@ -2159,6 +2174,11 @@ fn build_zpl_objset(
         Matching::Exact => ZPL_LATIN1_NAME,
         Matching::NormalizedFormD => ZPL_COMPOSED_NAME,
     };
+    let hello: &[u8] = if damage == Some(ZplDamage::NameOfCodes) {
+        ZPL_NAME_OF_CODES
+    } else {
+        b"hello.txt"
+    };
     let root_entries: [(&[u8], u64); 7] = [
         // A large dnode: its attributes fit, but only because it owns
         // two slots instead of one (Z-10).
@@ -2167,7 +2187,7 @@ fn build_zpl_objset(
         (odd_name, dirent_value(10, 8)),
         // Two names for one object: a hard link (Z-07).
         (b"hardlink.txt", dirent_value(6, 8)),
-        (b"hello.txt", dirent_value(6, 8)),
+        (hello, dirent_value(6, 8)),
         (b"link", dirent_value(8, 10)),
         // An attribute that did not fit the bonus and went to the spill
         // block (Z-10).

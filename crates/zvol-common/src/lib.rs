@@ -6,13 +6,47 @@
 //! same evidence records. That contract lives here so there is one copy
 //! of it, and so a companion cannot drift from it by accident.
 
+/// A line of text on standard output, as `println!` writes one, with
+/// whatever is in it that is not seen as itself shown as its code
+/// ([`text::shown`]).
+///
+/// Every line of text a tool prints goes through this or [`errln!`]. A
+/// line may hold a name from the pool — a dataset's, a file's, a
+/// property's, a vdev's path — or from a log, and such a name is
+/// whatever its bytes say: one with a newline printed a line of its own
+/// choosing, and one with an escape sequence erased the line above it.
+/// Names were shown as text where each print site remembered to, and
+/// most did not. JSON, which escapes for itself, is the one thing
+/// printed with `println!`: the `print_sites` test holds every other
+/// print in these crates to the two macros.
+#[macro_export]
+macro_rules! outln {
+    () => {
+        println!()
+    };
+    ($($arg:tt)*) => {
+        println!("{}", $crate::text::shown(&format!($($arg)*)))
+    };
+}
+
+/// [`outln!`], on standard error.
+#[macro_export]
+macro_rules! errln {
+    () => {
+        eprintln!()
+    };
+    ($($arg:tt)*) => {
+        eprintln!("{}", $crate::text::shown(&format!($($arg)*)))
+    };
+}
+
 /// Print a message on standard error under the running program's name
 /// ([`tool`]): the messages this crate prints on a tool's behalf used to
 /// say `zvolrescue:` whichever of the five had printed them.
 #[macro_export]
 macro_rules! say {
     ($($arg:tt)*) => {
-        eprintln!("{}: {}", $crate::tool(), format_args!($($arg)*))
+        $crate::errln!("{}: {}", $crate::tool(), format_args!($($arg)*))
     };
 }
 
@@ -505,7 +539,7 @@ impl Global {
     /// checked it.
     pub fn refuse_logs_over(&self, tool: &str, more: &[PathBuf]) -> Result<(), u8> {
         if let Some(word) = file_name_not_text(std::env::args_os().skip(1)) {
-            eprintln!(
+            errln!(
                 "{tool}: {:?} is not valid UTF-8. The JSON output and the evidence record name every file as text, and this name cannot be written as one without changing it; reach the file through a link whose name is (ln -s)",
                 word.to_string_lossy()
             );
@@ -527,7 +561,7 @@ impl Global {
             // as where the log goes (exit 5), and the record of that
             // written into the file the operator asked for the image in.
             if let Some(file) = named.iter().find(|n| same_file(log, n)) {
-                eprintln!(
+                errln!(
                     "{tool}: refusing {flag} {}: it is {}, which this run reads or writes",
                     log.display(),
                     file.display()
@@ -536,14 +570,14 @@ impl Global {
             }
             if let Err(e) = zvolrescue_io::refuse_if_evidence(log, &named) {
                 if !zvolrescue_io::is_refusal(&e) {
-                    eprintln!("{tool}: {flag} {}: {e}", log.display());
+                    errln!("{tool}: {flag} {}: {e}", log.display());
                     return Err(exit::USAGE);
                 }
-                eprintln!("{tool}: refusing {flag} {}: {e}", log.display());
+                errln!("{tool}: refusing {flag} {}: {e}", log.display());
                 return Err(exit::REFUSED);
             }
             if let Some(file) = more.iter().find(|m| same_file(log, m)) {
-                eprintln!(
+                errln!(
                     "{tool}: refusing {flag} {}: it is {}, which this run reads or writes",
                     log.display(),
                     file.display()
@@ -555,7 +589,7 @@ impl Global {
             // Neither may exist yet, so the paths are compared as well as
             // the files.
             if same_file(d, e) {
-                eprintln!(
+                errln!(
                     "{tool}: refusing --debug-log {}: it is the evidence log, which the trace would overwrite",
                     d.display()
                 );
@@ -573,7 +607,7 @@ impl Global {
                 .append(true)
                 .open(log)
             {
-                eprintln!("{tool}: cannot write evidence log {}: {e}", log.display());
+                errln!("{tool}: cannot write evidence log {}: {e}", log.display());
                 return Err(exit::USAGE);
             }
         }
@@ -602,7 +636,7 @@ impl Global {
             Some(p) => match std::fs::File::create(p) {
                 Ok(f) => Some(f),
                 Err(e) => {
-                    eprintln!("{tool}: cannot create debug log {}: {e}", p.display());
+                    errln!("{tool}: cannot create debug log {}: {e}", p.display());
                     return Err(exit::USAGE);
                 }
             },
@@ -650,7 +684,7 @@ impl Global {
             .with_outputs(outputs)
             .with_incidents(incidents);
         if let Err(e) = evidence::append(log, &rec) {
-            eprintln!("{tool}: cannot write evidence log {}: {e}", log.display());
+            errln!("{tool}: cannot write evidence log {}: {e}", log.display());
             // What the run found stays its exit status: an image with
             // zeroed blocks (4), a refusal (5), an interruption (6) must
             // not read as a usage error because the record failed.
@@ -934,11 +968,11 @@ impl WriteGuard {
     pub fn refuse(&self, tool: &str, what: &str, path: &Path) -> Result<(), u8> {
         self.check(path).map_err(|b| match b {
             Blocked::Refused(why) => {
-                eprintln!("{tool}: refusing {what} {}: {why}", path.display());
+                errln!("{tool}: refusing {what} {}: {why}", path.display());
                 exit::REFUSED
             }
             Blocked::Unchecked(why) => {
-                eprintln!("{tool}: {what} {}: {why}", path.display());
+                errln!("{tool}: {what} {}: {why}", path.display());
                 exit::USAGE
             }
         })

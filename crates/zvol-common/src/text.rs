@@ -67,4 +67,115 @@ mod tests {
         assert_eq!(shown("ab\u{202e}cd"), "ab\\u{202e}cd");
         assert_eq!(shown("tab\there"), "tab\\u{9}here");
     }
+
+    /// Showing twice is showing once: a print site that shows a name
+    /// and then prints the line through `outln!` says the same.
+    #[test]
+    fn what_is_shown_is_shown_once() {
+        let once = shown("a\nb\u{1b}[2K\u{202e}").into_owned();
+        assert_eq!(shown(&once), once);
+    }
+
+    /// Every line of text the tools print goes through `outln!` or
+    /// `errln!`, which show what is in it as text. What is printed with
+    /// the standard macros is JSON, which escapes for itself, or shows
+    /// what it prints itself. Names were shown as text where a print
+    /// site remembered to: `zvolfiles list` did, and `extract`, which
+    /// says what was lost, did not.
+    #[test]
+    fn print_sites() {
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates/");
+        // Spelled so that this file holds none of them.
+        let macros = ["println", "eprintln", "print", "eprint"].map(|m| format!("{m}!("));
+        let mut wrong = Vec::new();
+        let mut seen = 0;
+        for name in [
+            "zvol-common",
+            "zvolrescue",
+            "zvolcarve",
+            "zvolfiles",
+            "zvolreport",
+            "zvoltimeline",
+        ] {
+            let src = crates.join(name).join("src");
+            for file in std::fs::read_dir(&src).expect("src/") {
+                let path = file.expect("entry").path();
+                if path.extension().is_none_or(|e| e != "rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).expect("source");
+                let mut line = 0;
+                let mut at = 0;
+                for l in text.split_inclusive('\n') {
+                    line += 1;
+                    let start = at;
+                    at += l.len();
+                    if l.trim_start().starts_with("//") {
+                        continue;
+                    }
+                    for m in &macros {
+                        let Some(col) = l.find(m.as_str()) else {
+                            continue;
+                        };
+                        // By its whole name: `eprintln!(` holds the
+                        // other three.
+                        if l[..col].ends_with(|c: char| c.is_alphanumeric() || c == '_') {
+                            continue;
+                        }
+                        seen += 1;
+                        let call = call_at(&text[start + col + m.len()..]);
+                        let own = name == "zvol-common" && call.contains("$crate::text::shown");
+                        if !(own
+                            || call.is_empty()
+                            || call.contains("json")
+                            || call.contains("shown("))
+                        {
+                            wrong.push(format!("{}:{line}", path.display()));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            seen > 10,
+            "the sources were not found: {seen} print site(s)"
+        );
+        assert!(
+            wrong.is_empty(),
+            "printed and not shown as text (use outln!/errln!): {wrong:#?}"
+        );
+    }
+
+    /// The arguments of a macro call, from just past its `(` to the `)`
+    /// that closes it.
+    fn call_at(rest: &str) -> &str {
+        let mut depth = 1;
+        let mut quoted = false;
+        let mut escaped = false;
+        for (i, c) in rest.char_indices() {
+            if quoted {
+                match c {
+                    _ if escaped => escaped = false,
+                    '\\' => escaped = true,
+                    '"' => quoted = false,
+                    _ => {}
+                }
+                continue;
+            }
+            match c {
+                '"' => quoted = true,
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &rest[..i];
+                    }
+                }
+                _ => {}
+            }
+        }
+        rest
+    }
 }

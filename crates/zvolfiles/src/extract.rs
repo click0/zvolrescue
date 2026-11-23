@@ -8,6 +8,7 @@
 use std::collections::BTreeSet;
 use std::io::{Seek, SeekFrom, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
+use zvol_common::{errln, outln};
 
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -586,11 +587,11 @@ fn copy_file(
         crate::common::data_end(&obj, bs)
     };
     if size.saturating_sub(blocks_end) > TAIL_NOTE {
-        eprintln!(
+        errln!(
             "zvolfiles: {shown}: {size} bytes, and its last block with data ends at byte {blocks_end}: the rest is a hole, hashed as zeros (a sparse file, or a damaged size or block count; SIGINT stops the run)"
         );
     } else if !known && size.min(blocks_end) > TAIL_NOTE {
-        eprintln!(
+        errln!(
             "zvolfiles: {shown}: {size} bytes, and its block pointers could not say where its last block with data is: every block to its size is looked for (SIGINT stops the run)"
         );
     }
@@ -743,7 +744,7 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
     let preserve = match Preserve::parse(&opts.preserve) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("zvolfiles: {e}");
+            errln!("zvolfiles: {e}");
             return exit::USAGE;
         }
     };
@@ -759,7 +760,7 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
             match resolve_path_or_why(fs, p, opened.txg) {
                 Ok(r) => found.push((p, r)),
                 Err(why) => {
-                    eprintln!("zvolfiles: {why}");
+                    errln!("zvolfiles: {why}");
                     not_found.push(why);
                 }
             }
@@ -788,7 +789,7 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
         };
         for (p, (obj, raw)) in found {
             if let Some((_, outer)) = roots.iter().find(|(_, r)| *r == raw || under(r, &raw)) {
-                eprintln!(
+                errln!(
                     "zvolfiles: --path {}: {} --path {}; written once",
                     p.to_string_lossy(),
                     if *outer == raw {
@@ -803,7 +804,7 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
             roots.retain(|(_, r)| {
                 let inside = under(&raw, r);
                 if inside {
-                    eprintln!(
+                    errln!(
                         "zvolfiles: --path {}: within --path {}; written once",
                         shown(r),
                         p.to_string_lossy()
@@ -861,7 +862,7 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
                 let note = format!(
                     "the dataset's root, object {obj}, does not read as a directory ({why}); its objects come out with zvolfiles objects"
                 );
-                eprintln!("zvolfiles: {note}");
+                errln!("zvolfiles: {note}");
                 run.files.push(failed(&e, &note));
                 if opts.strict {
                     run.stopped = Some(note);
@@ -917,16 +918,16 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
         // What `--preserve` could not restore is in the manifest; `-q`
         // leaves the notes out.
         for n in run.not_restored.iter().filter(|_| !g.quiet) {
-            eprintln!("zvolfiles: --preserve: {n} (the manifest records what each file had)");
+            errln!("zvolfiles: --preserve: {n} (the manifest records what each file had)");
         }
         let interrupted = interrupt.load(Ordering::Relaxed);
         if interrupted {
-            eprintln!(
+            errln!(
                 "zvolfiles: interrupted; the manifest lists what was written, re-run with --path for the rest (exit 6)"
             );
         }
         if let Some(at) = &run.stopped {
-            eprintln!(
+            errln!(
                 "zvolfiles: --strict: {at}; the run stops here, and the manifest lists what was written (exit 4)"
             );
         }
@@ -943,7 +944,7 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
         let failed = files.iter().filter(|f| f.error.is_some()).count();
         let refused = files.iter().filter(|f| f.refused).count();
         if refused > 0 {
-            eprintln!(
+            errln!(
                 "zvolfiles: {} refused: the path holds something this run reads (exit 5)",
                 entries(refused)
             );
@@ -1021,7 +1022,7 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
     let manifest_failed = match wrote {
         Ok(()) => None,
         Err(e) => {
-            eprintln!("zvolfiles: the manifest was not written: {e}");
+            errln!("zvolfiles: the manifest was not written: {e}");
             Some(if matches!(e, OutError::Refused(_)) {
                 exit::REFUSED
             } else {
@@ -1043,7 +1044,7 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
                 .iter()
                 .filter(|f| f.kind != "d" && f.error.is_none() && f.not_made.is_none())
                 .count();
-            println!(
+            outln!(
                 "{} at txg {}: {} file(s), {} director{} -> {}",
                 out.dataset,
                 out.txg,
@@ -1053,58 +1054,58 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
                 out.output.display()
             );
             if out.incomplete > 0 {
-                println!(
+                outln!(
                     "  {} not read whole: blocks written as zeros, extended attributes or directory entries missing",
                     entries(out.incomplete)
                 );
             }
             if out.failed > 0 {
-                println!("  {} could not be written", entries(out.failed));
+                outln!("  {} could not be written", entries(out.failed));
             }
             if out.hardlinks > 0 {
-                println!("  {} hard link(s)", out.hardlinks);
+                outln!("  {} hard link(s)", out.hardlinks);
             }
             if out.unverified_blocks > 0 {
-                println!(
+                outln!(
                     "  UNVERIFIED: {} block(s) of {} carry no checksum (checksum=off): written as the members gave them, and checked by nothing (the manifest's unverified)",
                     out.unverified_blocks,
                     entries(out.files.iter().filter(|f| f.unverified > 0).count())
                 );
             }
             if out.written_short > 0 {
-                println!(
+                outln!(
                     "  {} written under {}: their paths are longer than the system takes (the manifest's written_as)",
                     entries(out.written_short),
                     out.deep.as_deref().unwrap_or(DEEP)
                 );
             }
             if out.special > 0 {
-                println!(
+                outln!(
                     "  {} fifo(s), device(s) or socket(s) recorded in the manifest, not made",
                     out.special
                 );
             }
             if let Some(at) = &out.stopped {
-                println!("  STOPPED (--strict, exit 4) at {at}");
+                outln!("  STOPPED (--strict, exit 4) at {at}");
             }
             if out.interrupted {
-                println!("  INTERRUPTED (exit 6): the entries above are what was written; re-run with --path for the rest");
+                outln!("  INTERRUPTED (exit 6): the entries above are what was written; re-run with --path for the rest");
             }
             for n in &out.not_found {
-                println!("  NOT FOUND (exit 3): {n}");
+                outln!("  NOT FOUND (exit 3): {n}");
             }
             // `-v` names each entry the counts above are of.
             if g.verbose > 0 {
                 for f in &out.files {
                     if let Some(why) = not_whole(f) {
-                        println!("    {}: {why}", f.path);
+                        outln!("    {}: {why}", f.path);
                     }
                 }
             }
             if manifest_failed.is_some() {
-                println!("  manifest: NOT WRITTEN ({})", manifest.display());
+                outln!("  manifest: NOT WRITTEN ({})", manifest.display());
             } else {
-                println!("  manifest: {}", manifest.display());
+                outln!("  manifest: {}", manifest.display());
             }
         }
     }
@@ -1479,13 +1480,13 @@ fn write_entry(
             match copy_file(fs, tree, e.object, z.size, &to, &e.path, opts.strict, stop) {
                 Ok(copied) => {
                     if let (Some(why), Some(first)) = (&copied_for, &record.copy_of) {
-                        eprintln!(
+                        errln!(
                             "zvolfiles: {}: no link to {first} ({why}); written as a copy, its later names linked to the copy",
                             e.path
                         );
                     }
                     if let Some(first) = copied.zeroed.first() {
-                        eprintln!(
+                        errln!(
                             "zvolfiles: {}: {} run(s) of bytes written as zeros, the first {}–{}: {} (the manifest lists each)",
                             e.path,
                             copied.zeroed.len(),

@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
+use zvol_common::errln;
 
 use clap::Args;
 use zfs_ondisk::carve::{Profile, Reject};
@@ -249,7 +250,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             .flatten()
             .find(|p| zvol_common::evidence::Kind::of(p).is_device())
         {
-            eprintln!(
+            errln!(
                 "zvolcarve: {}: a block device is not scanned (SPEC N-10): a surface scan is what a disk with defects survives least. \
                  Image it with a tool for failing media and scan the image; --surface-scan-on-device overrides.",
                 dev.display()
@@ -273,13 +274,13 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             match like_dataset(&reader, &members.scans, p, name) {
                 Ok(v) => Some(v),
                 Err(e) => {
-                    eprintln!("zvolcarve: --like {name}: {e}");
+                    errln!("zvolcarve: --like {name}: {e}");
                     return exit::USAGE;
                 }
             }
         }
         (Some(name), None) => {
-            eprintln!("zvolcarve: --like {name}: no pool assembled from these members");
+            errln!("zvolcarve: --like {name}: no pool assembled from these members");
             return exit::UNRECOVERABLE;
         }
         (None, _) => None,
@@ -288,7 +289,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     let (mut profile, mut profile_out) = match build_profile(&opts.profile, like) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("zvolcarve: {e}");
+            errln!("zvolcarve: {e}");
             return exit::USAGE;
         }
     };
@@ -307,7 +308,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             match Codec::named(name) {
                 Some(c) => v.push(c),
                 None => {
-                    eprintln!(
+                    errln!(
                         "zvolcarve: --compressed {name}: not a compression this build knows (lz4, lzjb, gzip, zstd, none)"
                     );
                     return exit::USAGE;
@@ -323,7 +324,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         Some(s) => match byte_range(s) {
             Ok((a, b)) => Some((a / 512 * 512, b)),
             Err(e) => {
-                eprintln!("zvolcarve: {e}");
+                errln!("zvolcarve: {e}");
                 return exit::USAGE;
             }
         },
@@ -345,7 +346,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             (Some((a, b)), recorded) => {
                 let started = recorded.map_or(0, |[a, _]| a);
                 if a != started {
-                    eprintln!(
+                    errln!(
                         "zvolcarve: --resume --range {a}-{b}: the scan began at byte {started}; a resume goes on from where it got to, to the end of a range that starts there (scan into another directory for another range)"
                     );
                     return exit::USAGE;
@@ -366,7 +367,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         .max()
         .unwrap_or(0);
     if let Some((a, _)) = range.filter(|(a, _)| *a >= largest) {
-        eprintln!(
+        errln!(
             "zvolcarve: --range starts at byte {a}, past the end of every member (the largest is {largest} bytes)"
         );
         return exit::USAGE;
@@ -391,7 +392,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         }
     }
     if let Err(e) = std::fs::create_dir_all(&opts.output) {
-        eprintln!("zvolcarve: {}: {e}", opts.output.display());
+        errln!("zvolcarve: {}: {e}", opts.output.display());
         return exit::USAGE;
     }
 
@@ -403,7 +404,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     let state_path = opts.output.join(STATE);
     let index_path = opts.output.join(INDEX);
     let unreadable = |path: &std::path::Path, why: String| {
-        eprintln!(
+        errln!(
             "zvolcarve: --resume: {}: {why}; it says where the scan got to, and is left as it is (scan into another directory to start over)",
             path.display()
         );
@@ -419,7 +420,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 if !g.quiet {
-                    eprintln!(
+                    errln!(
                         "zvolcarve: --resume: no {} to go on from; scanning from the start",
                         state_path.display()
                     );
@@ -471,7 +472,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             None
         };
         if let Some(why) = differs {
-            eprintln!(
+            errln!(
                 "zvolcarve: --resume: {} is a scan of something else ({why}); resume it as it was started, or scan into another directory",
                 opts.output.display()
             );
@@ -493,7 +494,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     });
     if !g.quiet {
         for w in space.iter().flat_map(|s| &s.skipped) {
-            eprintln!("zvolcarve: {w}");
+            errln!("zvolcarve: {w}");
         }
     }
 
@@ -572,7 +573,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 continue;
             }
             if let Some(b) = start_by_pointers(src, i, &codecs, range, &interrupt) {
-                eprintln!(
+                errln!(
                     "zvolcarve: {}: no label says where the vdev starts; its block pointers put it at byte {} ({} of {} probes agree, as `zvolcarve zeropoint` would say), and compressed blocks are looked for from there. Reading a candidate needs the same base in --hints",
                     members.paths[i].display(),
                     b.base,
@@ -612,7 +613,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             (None, f) => Some((f, src.size())),
         };
         if let Some((a, _)) = range.filter(|(a, _)| *a >= src.size()) {
-            eprintln!(
+            errln!(
                 "zvolcarve: {}: --range starts at byte {a}, past its end ({} bytes); not scanned",
                 members.paths[i].display(),
                 src.size()
@@ -621,7 +622,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             continue;
         }
         if !g.quiet {
-            eprintln!(
+            errln!(
                 "zvolcarve: scanning {} ({} bytes){}",
                 members.paths[i].display(),
                 src.size(),
@@ -651,7 +652,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 s
             }
             Err(e) => {
-                eprintln!("zvolcarve: {}: {e}", members.paths[i].display());
+                errln!("zvolcarve: {}: {e}", members.paths[i].display());
                 return exit::EVIDENCE;
             }
         };
@@ -712,13 +713,13 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 let by = limited_at.map_or(scan.resume_at, |[o, _]| o);
                 if opts.sample.is_some() {
                     if !g.quiet {
-                        eprintln!(
+                        errln!(
                             "zvolcarve: {}: a sample of the first {limit} hit(s), to byte {by}",
                             members.paths[i].display()
                         );
                     }
                 } else {
-                    eprintln!(
+                    errln!(
                         "zvolcarve: {}: {limit} hit(s), the --max-hits limit, by byte {by}; the rest of it was not scanned, and --resume continues there (exit 6)",
                         members.paths[i].display()
                     );
@@ -901,11 +902,11 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         &index_path,
         serde_json::to_string_pretty(&index).expect("serialisable") + "\n",
     ) {
-        eprintln!("zvolcarve: {}: {e}", index_path.display());
+        errln!("zvolcarve: {}: {e}", index_path.display());
         return exit::USAGE;
     }
     if interrupt.load(Ordering::Relaxed) {
-        eprintln!(
+        errln!(
             "zvolcarve: interrupted; the state file says where each member's scan stopped, --resume continues there (exit 6)"
         );
     }
@@ -926,7 +927,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         &state_path,
         serde_json::to_string_pretty(&state).expect("serialisable") + "\n",
     ) {
-        eprintln!("zvolcarve: {}: {e}", state_path.display());
+        errln!("zvolcarve: {}: {e}", state_path.display());
         return exit::USAGE;
     }
 
@@ -957,7 +958,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     // The code it says is the code it exits with: "(exit 4)" was said
     // over a run that found nothing and exited 3.
     if unreadable > 0 {
-        eprintln!(
+        errln!(
             "zvolcarve: {unreadable} byte(s) could not be read and were not searched; a candidate there is missed (exit {code})"
         );
     }

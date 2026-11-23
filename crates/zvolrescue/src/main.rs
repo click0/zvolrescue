@@ -10,6 +10,7 @@ mod scan;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use zvol_common::errln;
 
 use clap::{Parser, Subcommand};
 use zvol_common::{exit, Global, PoolSpec};
@@ -216,7 +217,7 @@ fn main() -> ExitCode {
             Some(p) => match std::fs::File::create(p) {
                 Ok(f) => Some(f),
                 Err(e) => {
-                    eprintln!("zvolrescue: cannot create debug log {}: {e}", p.display());
+                    errln!("zvolrescue: cannot create debug log {}: {e}", p.display());
                     return ExitCode::from(exit::USAGE);
                 }
             },
@@ -245,7 +246,7 @@ fn main() -> ExitCode {
             surface_scan_on_device,
         } => match zvol_common::OpenOpts::parse(device_may_fail, surface_scan_on_device, &map) {
             Err(e) => {
-                eprintln!("zvolrescue: {e}");
+                errln!("zvolrescue: {e}");
                 exit::USAGE
             }
             Ok(open) => scan::run(
@@ -298,7 +299,7 @@ fn main() -> ExitCode {
                 None => zfs_read::hash::Extra::none(),
                 Some(Ok(e)) => e,
                 Some(Err(e)) => {
-                    eprintln!("zvolrescue: --hash: {e}");
+                    errln!("zvolrescue: --hash: {e}");
                     return ExitCode::from(exit::USAGE);
                 }
             };

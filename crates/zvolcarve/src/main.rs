@@ -21,6 +21,7 @@ mod zeropoint;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use zvol_common::errln;
 
 use clap::{Parser, Subcommand};
 use zvol_common::{exit, Global, PoolSpec};
@@ -216,7 +217,7 @@ fn main() -> ExitCode {
         _ => None,
     };
     if let Some(flag) = zero {
-        eprintln!("zvolcarve: {flag} 0 keeps nothing; give at least 1");
+        errln!("zvolcarve: {flag} 0 keeps nothing; give at least 1");
         return ExitCode::from(exit::USAGE);
     }
     // The files a carve reads and writes in its workspace are named by no
@@ -319,7 +320,7 @@ fn main() -> ExitCode {
                 None => zfs_read::hash::Extra::none(),
                 Some(Ok(e)) => e,
                 Some(Err(e)) => {
-                    eprintln!("zvolcarve: --hash: {e}");
+                    errln!("zvolcarve: --hash: {e}");
                     return ExitCode::from(exit::USAGE);
                 }
             };

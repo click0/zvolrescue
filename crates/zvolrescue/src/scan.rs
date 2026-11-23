@@ -6,6 +6,7 @@
 //! label.
 
 use std::path::{Path, PathBuf};
+use zvol_common::{errln, outln};
 
 use serde::Serialize;
 use serde_json::{json, Map, Value as Json};
@@ -702,30 +703,30 @@ fn print_geom(indent: &str, m: &GeomOut, vdev_size: Option<u64>) {
         }
         _ => {}
     }
-    println!("{line}");
+    outln!("{line}");
 }
 
 fn print_text(out: &ScanOut, verbose: u8) {
     for d in &out.devices {
-        println!("{}: {} bytes", d.path.display(), d.size);
+        outln!("{}: {} bytes", d.path.display(), d.size);
         if let Some(e) = &d.error {
-            println!("  error: {e}");
+            outln!("  error: {e}");
             if d.surface_scan_refused {
-                println!(
+                outln!(
                     "  zero point: not searched — a block device is not searched for anchors (SPEC N-10); image it and scan the image, or --surface-scan-on-device"
                 );
             }
             continue;
         }
         if let Some(t) = &d.partitions {
-            println!(
+            outln!(
                 "  {} table, {}-byte sectors, {} partition(s):",
                 t.scheme,
                 t.sector,
                 t.partitions.len()
             );
             for p in &t.partitions {
-                println!(
+                outln!(
                     "    {:>2}  {:>14} + {:>14}  {}{}{}",
                     p.index,
                     p.start,
@@ -746,7 +747,7 @@ fn print_text(out: &ScanOut, verbose: u8) {
             }
         }
         if let (Some(base), Some(from)) = (d.vdev_base, d.vdev_base_from) {
-            println!("  this member's vdev begins at byte {base} ({from})");
+            outln!("  this member's vdev begins at byte {base} ({from})");
         }
         if let Some(m) = &d.geom {
             print_geom("  ", m, d.vdev_size);
@@ -759,10 +760,10 @@ fn print_text(out: &ScanOut, verbose: u8) {
             }
         }
         if !d.names.is_empty() {
-            println!("  named: {}", d.names.join("  "));
+            outln!("  named: {}", d.names.join("  "));
         }
         if let Some(m) = &d.map {
-            println!(
+            outln!(
                 "  imager's map {}: it says {}{}{}",
                 m.path.display(),
                 m.said,
@@ -787,7 +788,7 @@ fn print_text(out: &ScanOut, verbose: u8) {
         }
         match &d.config {
             Some(c) => {
-                println!(
+                outln!(
                     "  pool {:?} guid {}  state {}  label txg {}  host {:?} ({})",
                     c.name.as_deref().unwrap_or("?"),
                     c.pool_guid.as_deref().unwrap_or("?"),
@@ -796,7 +797,7 @@ fn print_text(out: &ScanOut, verbose: u8) {
                     c.hostname.as_deref().unwrap_or("?"),
                     c.hostid.as_deref().unwrap_or("?"),
                 );
-                println!(
+                outln!(
                     "  vdev guid {}  ashift {}  in {} (top guid {}, pool has {} top-level vdev(s))",
                     c.vdev_guid.as_deref().unwrap_or("?"),
                     c.ashift.map_or("?".to_string(), |a| a.to_string()),
@@ -805,27 +806,27 @@ fn print_text(out: &ScanOut, verbose: u8) {
                     c.vdev_children.map_or("?".to_string(), |n| n.to_string()),
                 );
                 if verbose >= 1 && !c.features_for_read.is_empty() {
-                    println!("  features_for_read: {}", c.features_for_read.join(" "));
+                    outln!("  features_for_read: {}", c.features_for_read.join(" "));
                 }
                 // Not behind -v: a feature in use that this build cannot
                 // account for is the difference between an answer and a
                 // guess, and `scan` is where an operator looks first.
                 if !c.unaccounted_features.is_empty() {
-                    println!(
+                    outln!(
                         "  NOT ACCOUNTED FOR: {} — reading this pool needs \
                          --ignore-unknown-features, and may be wrong (SPEC F-70)",
                         c.unaccounted_features.join(" ")
                     );
                 }
             }
-            None => println!("  no readable ZFS label configuration"),
+            None => outln!("  no readable ZFS label configuration"),
         }
         for l in &d.labels {
             let best = match (l.best_txg, &l.best_time) {
                 (Some(t), Some(ts)) => format!("best txg {t} ({ts})"),
                 _ => "no valid uberblocks".to_string(),
             };
-            println!(
+            outln!(
                 "  L{} @ {:>12}: config {}{}, uberblocks {}/{} valid ({} verified, {} empty, {} corrupt), {}{}",
                 l.index,
                 l.offset,
@@ -840,13 +841,13 @@ fn print_text(out: &ScanOut, verbose: u8) {
                 if d.best_label == Some(l.index) { "  <- best" } else { "" },
             );
             if let Some(e) = &l.config_error {
-                println!("      config: {e}");
+                outln!("      config: {e}");
             }
             for c in &l.corrupt {
-                println!("      slot {:>3}  {}", c.slot, c.reason);
+                outln!("      slot {:>3}  {}", c.slot, c.reason);
             }
             for u in &l.uberblocks {
-                println!(
+                outln!(
                     "      slot {:>3}  txg {:>12}  {}  v{}  rootbp birth {}  checksum {}{}{}",
                     u.slot,
                     u.txg,
@@ -864,11 +865,11 @@ fn print_text(out: &ScanOut, verbose: u8) {
             }
         }
         match (d.oldest_txg, d.newest_txg) {
-            (Some(lo), Some(hi)) => println!("  verified txg window: {lo}..={hi}"),
-            _ => println!("  no verified ZFS uberblocks found"),
+            (Some(lo), Some(hi)) => outln!("  verified txg window: {lo}..={hi}"),
+            _ => outln!("  no verified ZFS uberblocks found"),
         }
         for z in &d.zero_point {
-            println!(
+            outln!(
                 "  zero point: base {} confirmed by {} uberblock checksum(s) in {}, txg {}..={}, vdev size {}, root pointer born txg {}",
                 z.base,
                 z.anchors,
@@ -881,23 +882,23 @@ fn print_text(out: &ScanOut, verbose: u8) {
             );
         }
         if d.surface_scan_refused {
-            println!(
+            outln!(
                 "  zero point: not searched — a block device is not searched for anchors (SPEC N-10); image it and scan the image, or --surface-scan-on-device"
             );
         } else if d.config.is_none() && d.zero_point.is_empty() && d.error.is_none() {
-            println!("  zero point: no uberblock anchor found either");
+            outln!("  zero point: no uberblock anchor found either");
         }
         if let Some(nv) = &d.nvlist {
-            println!("  label nvlist (L{}):", d.best_label.unwrap_or(0));
+            outln!("  label nvlist (L{}):", d.best_label.unwrap_or(0));
             let pretty = serde_json::to_string_pretty(nv).expect("serialisable");
             for line in pretty.lines() {
-                println!("    {line}");
+                outln!("    {line}");
             }
         }
     }
     for p in &out.pools {
-        println!();
-        println!(
+        outln!();
+        outln!(
             "pool {:?} guid {}: state {}, newest label txg {}, {} top-level vdev(s), {}",
             p.name,
             p.guid,
@@ -911,14 +912,14 @@ fn print_text(out: &ScanOut, verbose: u8) {
             }
         );
         for h in &p.hosts {
-            println!(
+            outln!(
                 "  seen on host {:?} ({})",
                 h.hostname.as_deref().unwrap_or("?"),
                 h.hostid.as_deref().unwrap_or("?")
             );
         }
         for t in &p.tops {
-            println!(
+            outln!(
                 "  {} (guid {}, ashift {}){}",
                 t.name,
                 t.guid,
@@ -926,7 +927,7 @@ fn print_text(out: &ScanOut, verbose: u8) {
                 if t.readable() { "" } else { "  NOT READABLE" }
             );
             for m in &t.members {
-                println!(
+                outln!(
                     "    {} {:<24} {}",
                     m.guid,
                     m.path.as_deref().unwrap_or("-"),
@@ -948,25 +949,25 @@ fn print_text(out: &ScanOut, verbose: u8) {
             }
         }
         for h in &p.name_hints {
-            println!(
+            outln!(
                 "  hint: {} is named {}, which contains this pool's name; a name says where a disk was, not what it is — nothing binds on it",
                 h.device.display(),
                 h.name
             );
         }
         for id in &p.removed_tops {
-            println!(
+            outln!(
                 "  top-level vdev #{id}: removed; its blocks live on the vdevs that remain and are read through the mapping it left in the MOS (SPEC F-69)"
             );
         }
         for id in &p.missing_tops {
-            println!("  top-level vdev #{id}: no scanned member describes it  MISSING");
+            outln!("  top-level vdev #{id}: no scanned member describes it  MISSING");
         }
         let unlisted = p
             .missing_top_count
             .saturating_sub(p.missing_tops.len() as u64);
         if unlisted > 0 {
-            println!("  … and {unlisted} more top-level vdev(s) MISSING");
+            outln!("  … and {unlisted} more top-level vdev(s) MISSING");
         }
         // A removed vdev is counted by `vdev_children` like any other and
         // has no member to find. The pool's configuration object is what
@@ -975,12 +976,12 @@ fn print_text(out: &ScanOut, verbose: u8) {
         // not vouch for — because it could not be read, or because the
         // vdev really is missing.
         if p.device_removal && !p.missing_tops.is_empty() {
-            println!(
+            outln!(
                 "  note: device_removal is active and the MOS could not say whether the vdev(s) above were removed; reading the pool at a txg whose MOS survives is what settles it (SPEC F-69)"
             );
         }
         for m in &p.stale {
-            println!(
+            outln!(
                 "  {} {} NOT USED: {}",
                 m.guid.as_deref().unwrap_or("?"),
                 m.device.display(),
@@ -1149,7 +1150,7 @@ fn emit_label(
     )
     .map_err(|e| format!("{}: {e}", meta.display()))?;
     if !g.quiet {
-        eprintln!(
+        errln!(
             "zvolrescue: wrote L{index} of {}:{} to {} ({} bytes) and its geometry to {}",
             top,
             leaf,
@@ -1184,7 +1185,7 @@ pub fn run(
     let mut once: Vec<PathBuf> = Vec::with_capacity(devices.len());
     for p in devices {
         match once.iter().find(|k| zvol_common::same_file(k, p)) {
-            Some(first) => eprintln!(
+            Some(first) => errln!(
                 "zvolrescue: {} is {} again; read once",
                 p.display(),
                 first.display()
@@ -1196,7 +1197,7 @@ pub fn run(
     let open = &match open.for_inputs(devices, "devices") {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("zvolrescue: {e}");
+            errln!("zvolrescue: {e}");
             return exit::USAGE;
         }
     };
@@ -1412,7 +1413,7 @@ pub fn run(
                     .filter_map(|p| evidence::FileRef::hashed(p).ok()),
             ),
             Err(e) => {
-                eprintln!("zvolrescue: {e}");
+                errln!("zvolrescue: {e}");
                 return exit::USAGE;
             }
         }

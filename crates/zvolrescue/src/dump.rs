@@ -4,6 +4,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
+use zvol_common::{errln, outln};
 
 use serde::{Deserialize, Serialize};
 use zfs_read::crypt::{unwrap_keys, wrapping_key, DatasetKeys, KeyMaterial};
@@ -183,7 +184,7 @@ fn earlier_run(dir: &Path, pool_guid: &str) -> Vec<DumpOut> {
             })
             .collect(),
         Ok(run) => {
-            eprintln!(
+            errln!(
                 "zvolrescue: {} is of pool {}, not {pool_guid}; every volume is extracted",
                 manifest.display(),
                 run.pool_guid
@@ -191,7 +192,7 @@ fn earlier_run(dir: &Path, pool_guid: &str) -> Vec<DumpOut> {
             Vec::new()
         }
         Err(e) => {
-            eprintln!(
+            errln!(
                 "zvolrescue: {} is not a manifest this reads ({e}); every volume is extracted",
                 manifest.display()
             );
@@ -258,7 +259,7 @@ fn keep_earlier(
     }
     let sums = digests.finish();
     if len != was.volsize || sums.sha256 != was.sha256 {
-        eprintln!(
+        errln!(
             "zvolrescue: {}: not the image the run being resumed finished ({}); extracting it again",
             output.display(),
             if len != was.volsize {
@@ -282,7 +283,7 @@ fn keep_earlier(
         && was.blocks_unverified <= was.blocks_read
         && was.bytes_written <= was.volsize;
     if !its_own {
-        eprintln!(
+        errln!(
             "zvolrescue: {}: what the manifest of the run being resumed says of it is not this volume's (its sizes or its block counts); extracting it again",
             output.display()
         );
@@ -444,7 +445,7 @@ fn find_dataset<'c>(
         Some(txg) => match select_uberblock(candidates, TxgSelect::Exact(txg)) {
             Some(c) => vec![c],
             None => {
-                eprintln!(
+                errln!(
                     "zvolrescue: no verified uberblock for txg {txg}; available: {}",
                     candidates
                         .iter()
@@ -465,7 +466,7 @@ fn find_dataset<'c>(
                 let Some(ds) = tree.get(name) else {
                     if let Some(why) = tree.unread_why(name) {
                         if !quiet {
-                            eprintln!(
+                            errln!(
                                 "zvolrescue: {name}: txg {}: the dataset tree does not read there ({why}); trying an older TXG",
                                 c.ub.txg
                             );
@@ -485,7 +486,7 @@ fn find_dataset<'c>(
                         // run (N-10): no older TXG is tried on it.
                         let stopped = matches!(e, ReadError::Medium { .. });
                         if !quiet {
-                            eprintln!(
+                            errln!(
                                 "zvolrescue: {name}: txg {}: unreadable ({e}){}",
                                 c.ub.txg,
                                 if stopped { "" } else { "; trying an older TXG" }
@@ -509,7 +510,7 @@ fn find_dataset<'c>(
                 // the pool's newest state when nothing is behind it.
                 let stopped = matches!(e, ReadError::Medium { .. });
                 if !quiet {
-                    eprintln!(
+                    errln!(
                         "zvolrescue: txg {}: unreadable ({e}){}",
                         c.ub.txg,
                         if stopped { "" } else { "; trying an older TXG" }
@@ -532,7 +533,7 @@ fn find_dataset<'c>(
         .iter()
         .find(|u| u.stage == Stage::Dataset)
     {
-        eprintln!(
+        errln!(
             "zvolrescue: dataset {name:?} is named at txg {} but does not read there ({}); readable at none of {} verified TXG(s)",
             u.txg,
             u.error,
@@ -541,7 +542,7 @@ fn find_dataset<'c>(
         return Err(exit::UNRECOVERABLE);
     }
     if let Some(u) = searched.unreadable.iter().find(|u| u.stage == Stage::Tree) {
-        eprintln!(
+        errln!(
             "zvolrescue: dataset {name:?} is at none of the {} verified TXG(s) that read where it would be; at txg {} the dataset tree does not ({})",
             searched.txgs.len(),
             u.txg,
@@ -552,7 +553,7 @@ fn find_dataset<'c>(
     let pool_unreadable = searched.unreadable.len();
     if pool_unreadable > 1 && pool_unreadable == searched.txgs.len() {
         let u = &searched.unreadable[0];
-        eprintln!(
+        errln!(
             "zvolrescue: cannot read the pool at any of {pool_unreadable} verified TXG(s) (newest: txg {}: {})",
             u.txg, u.error
         );
@@ -560,9 +561,9 @@ fn find_dataset<'c>(
     }
     match last_err {
         Some(e) if searched.txgs.len() == 1 => {
-            eprintln!("zvolrescue: cannot read the pool at {e}")
+            errln!("zvolrescue: cannot read the pool at {e}")
         }
-        _ => eprintln!(
+        _ => errln!(
             "zvolrescue: dataset {name:?} not found at any of {} verified TXG(s){}",
             searched.txgs.len(),
             last_err
@@ -578,7 +579,7 @@ fn find_dataset<'c>(
 /// are all exit `USAGE`: the pool is fine, the input is not.
 fn unlock(ds: &Dataset, enc: &Encryption, spec: Option<&str>) -> Result<DatasetKeys, u8> {
     let Some(spec) = spec else {
-        eprintln!(
+        errln!(
             "zvolrescue: {} is encrypted ({}, keyformat {}{}); supply --key raw:FILE | hex:HEX | passphrase:FILE | prompt",
             ds.name,
             enc.suite_name(),
@@ -590,7 +591,11 @@ fn unlock(ds: &Dataset, enc: &Encryption, spec: Option<&str>) -> Result<DatasetK
         return Err(exit::USAGE);
     };
     let material = if spec == "prompt" {
-        eprint!("{} ({}) key: ", ds.name, enc.keyformat_name());
+        eprint!(
+            "{} ({}) key: ",
+            zvol_common::text::shown(&ds.name),
+            enc.keyformat_name()
+        );
         KeyMaterial::prompt(enc.keyformat)
     } else {
         KeyMaterial::from_spec(spec)
@@ -599,7 +604,7 @@ fn unlock(ds: &Dataset, enc: &Encryption, spec: Option<&str>) -> Result<DatasetK
         .and_then(|m| wrapping_key(&m, enc))
         .and_then(|w| unwrap_keys(enc, &w))
         .map_err(|e| {
-            eprintln!("zvolrescue: {}: {e}", ds.name);
+            errln!("zvolrescue: {}: {e}", ds.name);
             exit::USAGE
         })
 }
@@ -622,7 +627,7 @@ fn dump_one(
     let (obj, _) = match open_volume(reader, ds) {
         Ok(x) => x,
         Err(e) => {
-            eprintln!("zvolrescue: {}: {e}", ds.name);
+            errln!("zvolrescue: {}: {e}", ds.name);
             return Err(exit::UNRECOVERABLE);
         }
     };
@@ -633,12 +638,12 @@ fn dump_one(
         None if reader.has_keys() => match volume_facts(reader, ds) {
             Ok((v, _)) => v,
             Err(e) => {
-                eprintln!("zvolrescue: {}: volume size: {e}", ds.name);
+                errln!("zvolrescue: {}: volume size: {e}", ds.name);
                 return Err(exit::UNRECOVERABLE);
             }
         },
         None => {
-            eprintln!(
+            errln!(
                 "zvolrescue: {}: volsize unknown ({})",
                 ds.name,
                 ds.warnings.join("; ")
@@ -670,7 +675,7 @@ fn dump_one(
         g.quiet,
     )
     .map_err(|e| {
-        eprintln!("zvolrescue: {e}");
+        errln!("zvolrescue: {e}");
         exit::USAGE
     })?;
 
@@ -685,7 +690,10 @@ fn dump_one(
     let interrupt = zvol_common::interrupt_flag();
     let progress = |done: u64, total: u64, so_far: &Report, digests: &Digests| {
         if !quiet && (last_report.elapsed().as_secs() >= 2 || done == total) {
-            eprint!("\r  {} {done}/{total} blocks", ds.name);
+            eprint!(
+                "\r  {} {done}/{total} blocks",
+                zvol_common::text::shown(&ds.name)
+            );
             let _ = std::io::stderr().flush();
             last_report = Instant::now();
         }
@@ -721,14 +729,14 @@ fn dump_one(
         Ok(r) => r,
         Err(e) => {
             if !quiet {
-                eprintln!();
+                errln!();
             }
-            eprintln!("zvolrescue: {}: extraction failed: {e}", ds.name);
+            errln!("zvolrescue: {}: extraction failed: {e}", ds.name);
             return Err(exit::UNRECOVERABLE);
         }
     };
     if !quiet {
-        eprintln!();
+        errln!();
     }
     if let Some(e) = saver.unflushed() {
         report
@@ -749,11 +757,12 @@ fn dump_one(
         saver.words("--resume continues after a repair")
     };
     if let Some(why) = &report.output_failed {
-        eprintln!("zvolrescue: {}: {why}; {resume_words} (exit 6)", ds.name);
+        errln!("zvolrescue: {}: {why}; {resume_words} (exit 6)", ds.name);
     } else if let Some(at) = report.interrupted_at {
-        eprintln!(
+        errln!(
             "zvolrescue: {}: interrupted at block {at} of {}; {resume_words} (exit 6)",
-            ds.name, report.blocks_total
+            ds.name,
+            report.blocks_total
         );
     }
     // What the run that was resumed lost is this image's too.
@@ -816,7 +825,7 @@ fn dump_one(
 
 fn print_text(out: &RunOut) {
     for v in &out.volumes {
-        println!(
+        outln!(
             "{}: {} bytes from {} at txg {} ({}) -> {}{}",
             v.dataset,
             v.volsize,
@@ -843,67 +852,70 @@ fn print_text(out: &RunOut) {
         } else {
             format!("{} bytes written", v.bytes_written)
         };
-        println!(
+        outln!(
             "  blocks: {} total, {} read, {} holes, {} zeroed (unreadable), {} salvaged (unreadable sectors zeroed); {written} in {:.1}s",
             v.blocks_total, v.blocks_read, v.blocks_holes, v.blocks_zeroed, v.blocks_salvaged, v.seconds
         );
         if v.blocks_unverified > 0 {
-            println!(
+            outln!(
                 "  UNVERIFIED: {} of the {} block(s) read carry no checksum (checksum=off): written as the members gave them, and checked by nothing",
                 v.blocks_unverified, v.blocks_read
             );
         }
         if let Some(says) = &v.intent_log_says {
-            println!("  INTENT LOG NOT APPLIED: {says}");
+            outln!("  INTENT LOG NOT APPLIED: {says}");
         }
-        println!("  sha256: {}", v.sha256);
+        outln!("  sha256: {}", v.sha256);
         if let Some(h) = &v.sha1 {
-            println!("  sha1:   {h}");
+            outln!("  sha1:   {h}");
         }
         if let Some(h) = &v.md5 {
-            println!("  md5:    {h}");
+            outln!("  md5:    {h}");
         }
         if let Some(e) = &v.encryption {
-            println!("  decrypted: {e}");
+            outln!("  decrypted: {e}");
         }
         for w in &v.warnings {
-            println!("  warning: {w}");
+            outln!("  warning: {w}");
         }
         for b in &v.bad {
-            println!(
+            outln!(
                 "  unreadable: blkid {} offset {} len {}: {}",
-                b.blkid, b.offset, b.len, b.reason
+                b.blkid,
+                b.offset,
+                b.len,
+                b.reason
             );
         }
         if let Some(why) = &v.output_failed {
-            println!(
+            outln!(
                 "  OUTPUT FAILED (exit 6): {why}; the image is incomplete: {}",
                 v.resume_words
             );
         } else if v.stopped_by_medium.is_some() {
-            println!("  STOPPED: a device refused a read (exit 7); the image is incomplete. Image the disk with a map, then --map and --resume continue on the image (SPEC F-33, N-10)");
+            outln!("  STOPPED: a device refused a read (exit 7); the image is incomplete. Image the disk with a map, then --map and --resume continue on the image (SPEC F-33, N-10)");
         } else if let Some(at) = v.interrupted_at {
-            println!(
+            outln!(
                 "  INTERRUPTED at block {at} (exit 6); the image is incomplete: {}",
                 v.resume_words
             );
         } else if v.aborted {
-            println!(
+            outln!(
                 "  ABORTED at the first unreadable block (--strict); the image is incomplete: {}",
                 v.resume_words
             );
         } else if !v.bad.is_empty() {
-            println!(
+            outln!(
                 "  WARNING: {} unreadable range(s) were written as zeros (exit 4); rerun with --strict to refuse partial output",
                 v.bad.len()
             );
         }
     }
     for s in &out.skipped {
-        println!("skipped: {s}");
+        outln!("skipped: {s}");
     }
     if !out.finished_before.is_empty() {
-        println!(
+        outln!(
             "{} volume(s) the run being resumed finished were not reached; --resume checks and keeps them",
             out.finished_before.len()
         );
@@ -911,12 +923,12 @@ fn print_text(out: &RunOut) {
     if out.recursive {
         let kept = out.volumes.iter().filter(|v| v.kept).count();
         if kept > 0 {
-            println!(
+            outln!(
                 "{} volume(s) written, {kept} kept from the run being resumed; manifest in the output directory",
                 out.volumes.len() - kept
             );
         } else {
-            println!(
+            outln!(
                 "{} volume(s) written; manifest in the output directory",
                 out.volumes.len()
             );
@@ -953,9 +965,11 @@ fn finish(
     )
 }
 
-/// Run `dump`.
 /// The file each volume of a `-r` run goes to: its name with `/` as `_`
-/// and `.img` after it.
+/// and `.img` after it. So with every character that is not seen as
+/// itself — a control character, a bidirectional override: a dataset
+/// named with an escape sequence gave a file named with one, which
+/// cleared the screen of whoever listed the directory.
 ///
 /// Two names can come out the same — `tank/vm/web_1` and `tank/vm_web/1`
 /// are both `tank_vm_web_1.img` — and the second extraction used to
@@ -965,7 +979,17 @@ fn finish(
 /// datasets are walked in; a name that still repeats after that (a
 /// dataset named like another's GUID-suffixed file) gets a counter.
 fn image_file_names(datasets: &[(&str, u64)]) -> Vec<String> {
-    let flat: Vec<String> = datasets.iter().map(|(n, _)| n.replace('/', "_")).collect();
+    let plain = |c: char| {
+        if c == '/' || c.is_control() || zvol_common::text::unseen(c) {
+            '_'
+        } else {
+            c
+        }
+    };
+    let flat: Vec<String> = datasets
+        .iter()
+        .map(|(n, _)| n.chars().map(plain).collect())
+        .collect();
     let mut used = std::collections::BTreeSet::new();
     datasets
         .iter()
@@ -987,6 +1011,7 @@ fn image_file_names(datasets: &[(&str, u64)]) -> Vec<String> {
         .collect()
 }
 
+/// Run `dump`.
 pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     // From here a SIGINT sets the flag the extraction looks at between
     // blocks: one that comes while the members are still being opened is
@@ -1011,7 +1036,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     };
     let candidates = uberblock_candidates(&members.scans, &pool);
     if candidates.is_empty() {
-        eprintln!("zvolrescue: no verified uberblocks on the scanned members");
+        errln!("zvolrescue: no verified uberblocks on the scanned members");
         return zvol_common::end_early(g, "zvolrescue", spec, exit::UNRECOVERABLE);
     }
     let reader = PoolReader::new(&pool, members.devices()).with_base_offsets(&members.bases());
@@ -1087,14 +1112,14 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             .iter()
             .any(|d| under(d) && d.kind == Some(zfs_ondisk::dmu::ObjsetType::Zvol));
         if !any {
-            eprintln!(
+            errln!(
                 "zvolrescue: no volume under {} at txg {txg}; `zvolrescue list --diff OLDER_TXG` names the volumes destroyed since, and --txg reads one where they are (exit 3)",
                 opts.dataset
             );
             return zvol_common::end_early(g, "zvolrescue", spec, exit::UNRECOVERABLE);
         }
         if let Err(e) = std::fs::create_dir_all(&opts.output) {
-            eprintln!(
+            errln!(
                 "zvolrescue: cannot create directory {}: {e}",
                 opts.output.display()
             );
@@ -1173,7 +1198,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     };
     for w in &links {
         if let Err(why) = guard.check_name(w) {
-            eprintln!("zvolrescue: refusing to write {}: {why}", w.display());
+            errln!("zvolrescue: refusing to write {}: {why}", w.display());
             return zvol_common::end_early(g, "zvolrescue", spec, exit::REFUSED);
         }
     }
@@ -1184,7 +1209,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     }
     for w in &links {
         if let Err(e) = std::fs::remove_file(w) {
-            eprintln!("zvolrescue: {}: {e}", w.display());
+            errln!("zvolrescue: {}: {e}", w.display());
             return zvol_common::end_early(g, "zvolrescue", spec, exit::USAGE);
         }
         if let Err(code) = guard.refuse("zvolrescue", "to write", w) {
@@ -1261,7 +1286,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             ) {
                 Earlier::Kept(v) => {
                     if !g.quiet {
-                        eprintln!(
+                        errln!(
                             "  keeping {}: {} is whole, as the run being resumed left it",
                             ds.name,
                             output.display()
@@ -1272,7 +1297,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                     continue;
                 }
                 Earlier::Interrupted => {
-                    eprintln!(
+                    errln!(
                         "zvolrescue: {}: interrupted while checking {}; --resume checks it again (exit 6)",
                         ds.name,
                         output.display()
@@ -1307,7 +1332,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 },
             };
             if !g.quiet && g.format == Format::Text {
-                println!(
+                outln!(
                     "  {}: unlocked ({}, key guid {:#x})",
                     ds.name,
                     enc.suite_name(),
@@ -1321,7 +1346,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         // after the key, so that a key given for an encrypted dataset is
         // still checked, whatever the dataset turns out to be.
         if let Some(kind) = ds.kind.filter(|k| *k != zfs_ondisk::dmu::ObjsetType::Zvol) {
-            eprintln!(
+            errln!(
                 "zvolrescue: {} is {}, not a volume{}",
                 ds.name,
                 kind.described(),
@@ -1396,7 +1421,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 .expect("serialisable")
                 .as_bytes(),
         ) {
-            eprintln!("zvolrescue: cannot write {}: {e}", manifest.display());
+            errln!("zvolrescue: cannot write {}: {e}", manifest.display());
             code = code.max(exit::USAGE);
         }
     }
@@ -1468,5 +1493,21 @@ mod tests {
         let odd = image_file_names(&[("t/a_b", 1), ("t_a/b", 2), ("t/a_b.0000000000000001", 3)]);
         let unique: std::collections::BTreeSet<_> = odd.iter().collect();
         assert_eq!(unique.len(), 3, "{odd:?}");
+    }
+
+    /// What is not seen as itself is no part of a file's name: a volume
+    /// named with an escape sequence gave a file named with one. Two
+    /// names that differ only there are told apart as two that differ
+    /// only in a `/` are.
+    #[test]
+    fn a_file_is_not_named_with_what_is_not_seen() {
+        assert_eq!(
+            image_file_names(&[("np/x\u{1b}[2Jy", 1), ("np/a\nb\u{202e}c", 2)]),
+            ["np_x_[2Jy.img", "np_a_b_c.img"]
+        );
+        assert_eq!(
+            image_file_names(&[("t/a\u{1b}b", 0xa), ("t/a\u{7}b", 0xb)]),
+            ["t_a_b.000000000000000a.img", "t_a_b.000000000000000b.img"]
+        );
     }
 }

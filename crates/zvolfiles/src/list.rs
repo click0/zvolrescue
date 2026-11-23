@@ -4,6 +4,7 @@ use serde::Serialize;
 use zfs_ondisk::zpl::{FileType, Znode};
 use zfs_read::zpl::{walk_from, Entry};
 use zvol_common::timefmt::iso8601_ns;
+use zvol_common::{errln, outln};
 use zvol_common::{exit, Format, Global, PoolSpec};
 
 use crate::common::{resolve_path, with_dataset, AtArgs, PassedOver, Rdev};
@@ -277,7 +278,7 @@ pub fn run(
             // newline in it printed an entry of its own, and an escape
             // sequence reached the terminal (`zvol_common::text`).
             use zvol_common::text::shown;
-            println!(
+            outln!(
                 "{} at txg {}: {} entr{}",
                 shown(&out.dataset),
                 out.txg,
@@ -285,7 +286,7 @@ pub fn run(
                 if listed == 1 { "y" } else { "ies" }
             );
             for f in &out.files {
-                println!(
+                outln!(
                     "{}{:<5} {:>4}/{:<4} {:>12} {:<22} {}{}",
                     f.kind,
                     f.mode.as_deref().unwrap_or("????"),
@@ -300,25 +301,25 @@ pub fn run(
                 );
                 if !f.xattrs.is_empty() {
                     let names: Vec<_> = f.xattrs.iter().map(|x| shown(x)).collect();
-                    println!("       xattrs: {}", names.join(", "));
+                    outln!("       xattrs: {}", names.join(", "));
                 }
                 if let Some(r) = &f.rdev {
-                    println!("       device {},{}", r.major, r.minor);
+                    outln!("       device {},{}", r.major, r.minor);
                 }
                 for x in &f.xattr_errors {
-                    println!("       xattrs: {}", shown(x));
+                    outln!("       xattrs: {}", shown(x));
                 }
                 for c in &f.contents_errors {
-                    println!("       {}", shown(c));
+                    outln!("       {}", shown(c));
                 }
                 if let Some(e) = &f.error {
-                    println!("       {}", shown(e));
+                    outln!("       {}", shown(e));
                 }
             }
         }
     }
     let code = if out.interrupted {
-        eprintln!("zvolfiles: interrupted; what is listed is what was walked (exit 6)");
+        errln!("zvolfiles: interrupted; what is listed is what was walked (exit 6)");
         exit::INTERRUPTED
     } else if unreadable > 0 || PassedOver::any_unread(&out.passed_over) {
         exit::PARTIAL

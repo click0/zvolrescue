@@ -8,6 +8,7 @@
 
 use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
+use zvol_common::{errln, outln};
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -151,7 +152,7 @@ pub fn run(
                 Ok(b) => (&b.0, b.1),
                 Err(e) => {
                     let last = (blk + 1).saturating_mul(per).saturating_sub(1).min(max);
-                    eprintln!(
+                    errln!(
                         "zvolfiles: objects {obj}–{last}: their dnode block {blk} could not be read: {e}"
                     );
                     if strict {
@@ -219,7 +220,7 @@ pub fn run(
             match write_object(fs, &tree, obj, record.size, output, strict, &interrupt) {
                 Ok((hash, zeroed, unverified)) => {
                     if let Some(first) = zeroed.first() {
-                        eprintln!(
+                        errln!(
                             "zvolfiles: object {obj}: {} run(s) of bytes written as zeros, the first {}–{} (block {}): {} (the index lists each)",
                             zeroed.len(),
                             first.offset,
@@ -299,7 +300,7 @@ pub fn run(
     let index_failed = match wrote {
         Ok(()) => None,
         Err(e) => {
-            eprintln!("zvolfiles: the index was not written: {e}");
+            errln!("zvolfiles: the index was not written: {e}");
             Some(if matches!(e, OutError::Refused(_)) {
                 exit::REFUSED
             } else {
@@ -313,7 +314,7 @@ pub fn run(
             serde_json::to_string_pretty(&json).expect("serialisable")
         ),
         Format::Text => {
-            println!(
+            outln!(
                 "{} at txg {}: {} object(s), {} written -> {}",
                 out.dataset,
                 out.txg,
@@ -322,13 +323,13 @@ pub fn run(
                 out.output.display()
             );
             if out.unverified_blocks > 0 {
-                println!(
+                outln!(
                     "  UNVERIFIED: {} block(s) carry no checksum (checksum=off): written as the members gave them, and checked by nothing (the index's unverified)",
                     out.unverified_blocks
                 );
             }
             for o in &out.objects {
-                println!(
+                outln!(
                     "  {:>6} {:<28} {:>10} bytes{}",
                     o.object,
                     o.kind,
@@ -339,7 +340,7 @@ pub fn run(
                 );
             }
             for u in &out.unread {
-                println!(
+                outln!(
                     "  {:>6} not read{}: {} (dnode block {})",
                     u.first,
                     if u.last > u.first {
@@ -352,23 +353,23 @@ pub fn run(
                 );
             }
             if index_failed.is_some() {
-                println!("  index: NOT WRITTEN ({})", index.display());
+                outln!("  index: NOT WRITTEN ({})", index.display());
             } else {
-                println!("  index: {}", index.display());
+                outln!("  index: {}", index.display());
             }
         }
     }
     let refused = out.objects.iter().filter(|o| o.refused).count();
     if refused > 0 {
-        eprintln!(
+        errln!(
             "zvolfiles: {refused} object(s) refused: the path holds something this run reads (exit 5)"
         );
     }
     if out.interrupted {
-        eprintln!("zvolfiles: interrupted; the index lists the objects written (exit 6)");
+        errln!("zvolfiles: interrupted; the index lists the objects written (exit 6)");
     }
     if let Some(at) = &out.stopped {
-        eprintln!("zvolfiles: --strict: {at}; the run stops here, and the index lists the objects written (exit 4)");
+        errln!("zvolfiles: --strict: {at}; the run stops here, and the index lists the objects written (exit 4)");
     }
     let code = if let Some(c) = index_failed {
         c
@@ -436,11 +437,11 @@ fn write_object(
     // block count of 2^40 hashed for weeks without a word.
     let (data_end, known) = crate::common::data_end(&obj, bs);
     if size.saturating_sub(data_end) > crate::common::TAIL_NOTE {
-        eprintln!(
+        errln!(
             "zvolfiles: object {object}: {size} bytes by its block count, and its last block with data ends at byte {data_end}: the rest is a hole, hashed as zeros (a sparse object, or a damaged block count; SIGINT stops the run)"
         );
     } else if !known && size.min(data_end) > crate::common::TAIL_NOTE {
-        eprintln!(
+        errln!(
             "zvolfiles: object {object}: {size} bytes by its block count, and its block pointers could not say where its last block with data is: every block is looked for (SIGINT stops the run)"
         );
     }

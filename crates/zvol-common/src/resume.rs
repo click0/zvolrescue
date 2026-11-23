@@ -575,7 +575,7 @@ pub fn open(
                 start_block = s.blocks_done;
                 let blocks = expected.volsize.div_ceil(expected.blocksize.max(1));
                 if start_block > blocks {
-                    eprintln!(
+                    errln!(
                         "{tool}: {} counts {start_block} blocks done of a volume of {blocks}; starting over",
                         state_path.display()
                     );
@@ -591,7 +591,7 @@ pub fn open(
                         while left > 0 {
                             let n = (left as usize).min(buf.len());
                             if f.read_exact(&mut buf[..n]).is_err() {
-                                eprintln!(
+                                errln!(
                                     "{tool}: {}: shorter than the {prefix} bytes the resume state claims; starting over",
                                     output.display()
                                 );
@@ -605,7 +605,7 @@ pub fn open(
                         let read_back = digests.clone().finish().sha256;
                         match s.prefix_sha256.as_ref().filter(|_| start_block > 0) {
                             Some(was) if *was != read_back => {
-                                eprintln!(
+                                errln!(
                                     "{tool}: {}: its first {prefix} bytes are not the ones the resume state counted (another disk under that name, or written since); starting over",
                                     output.display()
                                 );
@@ -622,7 +622,7 @@ pub fn open(
                             // a state counting every block done was
                             // "0 read", hashed, and exit 0.
                             None if start_block > 0 => {
-                                eprintln!(
+                                errln!(
                                     "{tool}: {} records no hash of the {prefix} bytes it counts (a state an earlier version left, or one edited): nothing says {} still holds them; starting over",
                                     state_path.display(),
                                     output.display()
@@ -634,7 +634,7 @@ pub fn open(
                         }
                     }
                     Err(e) => {
-                        eprintln!(
+                        errln!(
                             "{tool}: cannot read {} to resume: {e}; starting over",
                             output.display()
                         );
@@ -642,7 +642,7 @@ pub fn open(
                     }
                 }
                 if !quiet {
-                    eprintln!("  resuming {name} at block {start_block}");
+                    errln!("  resuming {name} at block {start_block}");
                 }
                 if start_block > 0 {
                     lost = s.lost;
@@ -652,14 +652,14 @@ pub fn open(
                 }
             }
             Ok(_) => {
-                eprintln!(
+                errln!(
                     "{tool}: {} describes a different dataset/txg/size than {name}; starting over",
                     state_path.display()
                 );
                 SparseFile::create(output)
             }
             Err(why) => {
-                eprintln!("{tool}: {why}; starting from block 0");
+                errln!("{tool}: {why}; starting from block 0");
                 SparseFile::create(output)
             }
         }

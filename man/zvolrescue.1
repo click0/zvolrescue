@@ -54,6 +54,13 @@ turns those logs into one checkable report.
 .It Fl f , Fl -format Ar text | json
 Output format: human-readable text (the default), or one JSON document
 on standard output.
+In text, and in every message on standard error, a name is shown as
+text: a control character, or one that is not seen as itself, as its
+code
+.Pq Ql \eu{1b} .
+A name is whatever the pool holds, and one with a newline or an escape
+sequence in it would otherwise print a line of its own choosing.
+The JSON holds the name itself.
 .It Fl v , Fl -verbose
 Increase verbosity; repeatable.
 .It Fl q , Fl -quiet
@@ -389,7 +396,8 @@ An image is named after its volume with
 .Ql /
 as
 .Ql _
-and
+\(em and so with any control character, or one not seen as itself
+\(em and
 .Ql .img
 added; volumes whose names come out the same that way also carry their
 GUID, so that no image is written over another.

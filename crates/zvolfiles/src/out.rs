@@ -20,6 +20,7 @@
 use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
+use zvol_common::errln;
 
 use zfs_read::crypt::KeyMaterial;
 use zvol_common::{exit, Blocked, Global, PoolSpec, WriteGuard};
@@ -79,7 +80,7 @@ impl OutTree {
         let guard = WriteGuard::new(g, &reads);
         guard.refuse("zvolfiles", "-o", root)?;
         std::fs::create_dir_all(root).map_err(|e| {
-            eprintln!("zvolfiles: {}: {e}", root.display());
+            errln!("zvolfiles: {}: {e}", root.display());
             exit::USAGE
         })?;
         Ok(OutTree {

@@ -7,6 +7,7 @@ use zfs_read::dsl::{open_mos, walk};
 use zfs_read::pool::uberblock_candidates;
 use zfs_read::zio::PoolReader;
 use zfs_read::zpl::{open_filesystem, open_objects, Filesystem};
+use zvol_common::errln;
 use zvol_common::members::{choose_pool, open_members, Members};
 use zvol_common::{exit, PoolSpec};
 
@@ -148,7 +149,7 @@ pub fn resolve_path(
     txg: u64,
 ) -> Result<(u64, Vec<u8>), u8> {
     resolve_path_or_why(fs, asked, txg).map_err(|why| {
-        eprintln!("zvolfiles: {why}");
+        errln!("zvolfiles: {why}");
         exit::UNRECOVERABLE
     })
 }
@@ -258,8 +259,8 @@ pub fn with_dataset<T>(
     };
     if wanted.is_empty() {
         match at.txg {
-            Some(n) => eprintln!("zvolfiles: no verified uberblock at txg {n}"),
-            None => eprintln!("zvolfiles: no verified uberblock on these members"),
+            Some(n) => errln!("zvolfiles: no verified uberblock at txg {n}"),
+            None => errln!("zvolfiles: no verified uberblock on these members"),
         }
         return Err(exit::UNRECOVERABLE);
     }
@@ -272,7 +273,7 @@ pub fn with_dataset<T>(
     let older = wanted.len();
     let mut pass = |txg: u64, why: String, unread: bool| {
         if passed.len() + 1 < older {
-            eprintln!("zvolfiles: {why}; passed over for an older one");
+            errln!("zvolfiles: {why}; passed over for an older one");
         }
         passed.push(PassedOver {
             txg,
@@ -318,7 +319,7 @@ pub fn with_dataset<T>(
         // was tried at every txg as "I/O error: … is a volume", and the
         // run ended "in none of the 3 transaction group(s) read", exit 3.
         if let Some(kind) = ds.kind.filter(|k| *k != zfs_ondisk::dmu::ObjsetType::Zfs) {
-            eprintln!(
+            errln!(
                 "zvolfiles: {name} is {}, not a filesystem{}",
                 kind.described(),
                 if kind == zfs_ondisk::dmu::ObjsetType::Zvol {
@@ -348,7 +349,7 @@ pub fn with_dataset<T>(
             }
         };
         for d in &fs.damaged {
-            eprintln!("zvolfiles: {name} at txg {}: {d}", c.ub.txg);
+            errln!("zvolfiles: {name} at txg {}: {d}", c.ub.txg);
         }
         // Nothing of the intent log is applied, and what it holds that
         // an import would replay is said: after a crash the dataset as
@@ -358,7 +359,7 @@ pub fn with_dataset<T>(
         // status: that is for what did not read.
         let log = zfs_read::zil::intent_log(&reader, ds, c.ub.txg);
         if let Some(log) = log.as_ref().filter(|l| l.unreplayed > 0) {
-            eprintln!(
+            errln!(
                 "zvolfiles: {}",
                 log.says(name, c.ub.txg, newest == Some(c.ub.txg))
             );
@@ -371,7 +372,7 @@ pub fn with_dataset<T>(
         };
         return f(&fs, &opened);
     }
-    eprintln!(
+    errln!(
         "zvolfiles: {name} is in none of the {} transaction group(s) read{}",
         wanted.len(),
         passed
@@ -389,7 +390,7 @@ fn unlock(
     spec: Option<&str>,
 ) -> Result<DatasetKeys, u8> {
     let Some(spec) = spec else {
-        eprintln!(
+        errln!(
             "zvolfiles: {name} is encrypted ({}, keyformat {}); supply --key raw:FILE | hex:HEX | passphrase:FILE | prompt",
             enc.suite_name(),
             enc.keyformat_name()
@@ -397,7 +398,11 @@ fn unlock(
         return Err(exit::USAGE);
     };
     let material = if spec == "prompt" {
-        eprint!("{name} ({}) key: ", enc.keyformat_name());
+        eprint!(
+            "{} ({}) key: ",
+            zvol_common::text::shown(name),
+            enc.keyformat_name()
+        );
         KeyMaterial::prompt(enc.keyformat)
     } else {
         KeyMaterial::from_spec(spec)
@@ -406,7 +411,7 @@ fn unlock(
         .and_then(|m| wrapping_key(&m, enc))
         .and_then(|w| unwrap_keys(enc, &w))
         .map_err(|e| {
-            eprintln!("zvolfiles: {name}: {e}");
+            errln!("zvolfiles: {name}: {e}");
             exit::USAGE
         })
 }

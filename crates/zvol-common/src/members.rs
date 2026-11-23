@@ -316,7 +316,7 @@ fn bind_assumed(
                         first
                     );
                     for b in &fits {
-                        eprintln!("  {:#018x}  {}", b.guid, pools[pool].tops[b.top].name);
+                        errln!("  {:#018x}  {}", b.guid, pools[pool].tops[b.top].name);
                     }
                     if pools[pool].bind_member(device, Some(first)).is_err() {
                         return Err(exit::USAGE);
@@ -723,7 +723,7 @@ pub fn choose_pool(pools: Vec<PoolAssembly>, guid: Option<&str>) -> Result<PoolA
             n => {
                 say!("{n} pools found; choose one with --pool-guid:");
                 for p in &pools {
-                    eprintln!("  {:#018x}  {:?}", p.guid, p.name);
+                    errln!("  {:#018x}  {:?}", p.guid, p.name);
                 }
                 Err(exit::USAGE)
             }

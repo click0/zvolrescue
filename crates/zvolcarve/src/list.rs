@@ -1,6 +1,7 @@
 //! `zvolcarve list` — the candidates a scan found.
 
 use std::path::Path;
+use zvol_common::{errln, outln};
 
 use zvol_common::{exit, Format, Global};
 
@@ -23,7 +24,7 @@ fn size(bytes: u64) -> String {
 
 /// Print an index the way `scan` and `list` both do.
 pub fn print(index: &Index) {
-    println!(
+    outln!(
         "{} candidate(s) from {} slot(s) in {} bytes of {}",
         index.candidates.len(),
         index.slots_examined,
@@ -33,7 +34,7 @@ pub fn print(index: &Index) {
     // C-14: an empty list has to say whether the filter rejected
     // everything or there was nothing to reject.
     if index.candidates.is_empty() && index.rejected_by_profile > 0 {
-        println!(
+        outln!(
             "  none matched the profile: {} candidate(s) were rejected by it",
             index.rejected_by_profile
         );
@@ -42,7 +43,7 @@ pub fn print(index: &Index) {
     // what happens next rather than about what is there now.
     if let Some(sp) = &index.space {
         if sp.vdevs_read > 0 {
-            println!(
+            outln!(
                 "  space maps: {} vdev(s) read, {} byte(s) still given out{}",
                 sp.vdevs_read,
                 sp.allocated_bytes,
@@ -54,17 +55,17 @@ pub fn print(index: &Index) {
             );
         }
         for w in &sp.skipped {
-            println!("  space maps: {w}");
+            outln!("  space maps: {w}");
         }
     }
     if index.datasets_met > 0 {
-        println!(
+        outln!(
             "  {} dataset dnode(s) met, which is what can name a candidate",
             index.datasets_met
         );
     }
     for r in index.rejected.iter().take(10) {
-        println!(
+        outln!(
             "  rejected {:>12} by {}{}",
             r.count,
             r.reason,
@@ -75,17 +76,17 @@ pub fn print(index: &Index) {
     // from it. Printed before the candidates, because with a sample the
     // candidates are the raw material of the histograms, not an answer.
     if let Some(h) = &index.histograms {
-        println!();
-        println!("what {} sampled hit(s) look like:", h.sampled);
+        outln!();
+        outln!("what {} sampled hit(s) look like:", h.sampled);
         let bars = |title: &str, buckets: &[crate::model::Bucket]| {
             if buckets.is_empty() {
                 return;
             }
-            println!("  {title}");
+            outln!("  {title}");
             let widest = buckets.iter().map(|b| b.count).max().unwrap_or(1).max(1);
             for b in buckets.iter().take(8) {
                 let bar = (b.count * 40).div_ceil(widest) as usize;
-                println!(
+                outln!(
                     "    {:>16} {:>8}  {}",
                     b.value,
                     b.count,
@@ -93,15 +94,15 @@ pub fn print(index: &Index) {
                 );
             }
             if buckets.len() > 8 {
-                println!("    {:>16} {} more", "…", buckets.len() - 8);
+                outln!("    {:>16} {} more", "…", buckets.len() - 8);
             }
         };
         bars("object type", &h.dnode_type);
         bars("block size", &h.volblocksize);
         bars("tree depth", &h.levels);
         bars("birth txg", &h.txg);
-        println!();
-        println!(
+        outln!();
+        outln!(
             "Pick a profile from these, then scan again with --volblocksize / --levels / --txg."
         );
         return;
@@ -109,17 +110,24 @@ pub fn print(index: &Index) {
     if index.candidates.is_empty() {
         return;
     }
-    println!();
-    println!(
+    outln!();
+    outln!(
         "{:<8} {:>6} {:<20} {:>9} {:>6} {:>10} {:>12} {:>9} WHERE",
-        "ID", "SCORE", "TYPE", "BLOCKSIZE", "LEVELS", "SIZE", "BIRTH", "VERIFIED"
+        "ID",
+        "SCORE",
+        "TYPE",
+        "BLOCKSIZE",
+        "LEVELS",
+        "SIZE",
+        "BIRTH",
+        "VERIFIED"
     );
     for c in &index.candidates {
         let verified = match &c.assessment {
             None => "—".to_string(),
             Some(a) => format!("{:.0}%", a.agreement * 100.0),
         };
-        println!(
+        outln!(
             "{:<8} {:>6.2} {:<20} {:>9} {:>6} {:>10} {:>12} {:>9} {}:{:#x}+{} {}",
             c.id,
             c.score,
@@ -135,7 +143,7 @@ pub fn print(index: &Index) {
             c.found
         );
         for f in &c.contents {
-            println!(
+            outln!(
                 "         holds {}{}{}",
                 f.kind,
                 f.size
@@ -147,7 +155,7 @@ pub fn print(index: &Index) {
         }
         if let Some(a) = &c.assessment {
             if a.blocks_allocated + a.blocks_free + a.blocks_unknown > 0 {
-                println!(
+                outln!(
                     "         space: {} block(s) still given out, {} released{}",
                     a.blocks_allocated,
                     a.blocks_free,
@@ -160,18 +168,18 @@ pub fn print(index: &Index) {
             }
         }
         if let Some(g) = &c.dataset_guid {
-            println!(
+            outln!(
                 "         belonged to dataset {g}{}",
                 c.dataset_creation_txg
                     .map_or(String::new(), |t| format!(" (created at txg {t})"))
             );
         }
         if !c.profile_misses.is_empty() {
-            println!("         did not match: {}", c.profile_misses.join(", "));
+            outln!("         did not match: {}", c.profile_misses.join(", "));
         }
     }
-    println!();
-    println!(
+    outln!();
+    outln!(
         "Extract one with: zvolcarve dump DIR {} MEMBER... -o out.img",
         index.candidates[0].id
     );
@@ -182,7 +190,7 @@ pub fn run(g: &Global, dir: &Path) -> u8 {
     let index = match load_index(dir) {
         Ok(i) => i,
         Err(e) => {
-            eprintln!("zvolcarve: {e}");
+            errln!("zvolcarve: {e}");
             return exit::EVIDENCE;
         }
     };

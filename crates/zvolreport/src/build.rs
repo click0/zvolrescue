@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use zvol_common::{errln, outln};
 
 use zvol_common::evidence::{self, Record, FORMAT_VERSION};
 use zvol_common::{exit, Format, Global};
@@ -778,7 +779,7 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
             .iter()
             .find(|(_, o)| zvol_common::same_file(path, o))
         {
-            eprintln!(
+            errln!(
                 "zvolreport: {flag} {} is also where {other} goes",
                 path.display()
             );
@@ -792,7 +793,7 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
             .iter()
             .find(|e| zvol_common::same_file(path, e))
         {
-            eprintln!(
+            errln!(
                 "zvolreport: {} is {} again; read once",
                 path.display(),
                 earlier.display()
@@ -802,12 +803,12 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
         let read = match read_log(path) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("zvolreport: {e}");
+                errln!("zvolreport: {e}");
                 return exit::EVIDENCE;
             }
         };
         for (n, why) in &read.left_out {
-            eprintln!(
+            errln!(
                 "zvolreport: {}:{n}: {why}; left out of the report",
                 path.display()
             );
@@ -865,7 +866,7 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
     let guard = zvol_common::WriteGuard::new(g, &all);
     for (flag, path) in &writes {
         if let Some(n) = named.iter().find(|n| zvol_common::same_file(path, n)) {
-            eprintln!(
+            errln!(
                 "zvolreport: refusing {flag} {}: it is {}, which the logs name as evidence or as an output of the case",
                 path.display(),
                 n.display()
@@ -889,12 +890,12 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
         Some(keyfile) => match crate::sign::read_private(keyfile) {
             Ok(k) => Some(k),
             Err(e) => {
-                eprintln!("zvolreport: {e}");
+                errln!("zvolreport: {e}");
                 return exit::USAGE;
             }
         },
         None if opts.signature.is_some() => {
-            eprintln!("zvolreport: --signature says where to write one; --sign says what with");
+            errln!("zvolreport: --signature says where to write one; --sign says what with");
             return exit::USAGE;
         }
         None => None,
@@ -903,12 +904,12 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
 
     let json = serde_json::to_string_pretty(&report).expect("serialisable") + "\n";
     if let Err(e) = std::fs::write(&opts.output, &json) {
-        eprintln!("zvolreport: {}: {e}", opts.output.display());
+        errln!("zvolreport: {}: {e}", opts.output.display());
         return exit::USAGE;
     }
     if let Some(md) = &opts.md {
         if let Err(e) = std::fs::write(md, crate::markdown::render(&report)) {
-            eprintln!("zvolreport: {}: {e}", md.display());
+            errln!("zvolreport: {}: {e}", md.display());
             return exit::USAGE;
         }
     }
@@ -918,7 +919,7 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
     let mut signed = None;
     if let (Some(key), Some(to)) = (&key, &signature) {
         if let Err(e) = crate::sign::write_signature(key, json.as_bytes(), to) {
-            eprintln!("zvolreport: {e}");
+            errln!("zvolreport: {e}");
             return exit::USAGE;
         }
         signed = Some(to.clone());
@@ -926,7 +927,7 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
     match g.format {
         Format::Json => print!("{json}"),
         Format::Text => {
-            println!(
+            outln!(
                 "{} record(s) from {} log(s): {} command(s), {} piece(s) of evidence, {} extraction(s)",
                 report.commands.len(),
                 report.logs.len(),
@@ -935,14 +936,14 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
                 report.extractions.len()
             );
             for w in &report.warnings {
-                println!("  warning: {w}");
+                outln!("  warning: {w}");
             }
-            println!("wrote {}", opts.output.display());
+            outln!("wrote {}", opts.output.display());
             if let Some(md) = &opts.md {
-                println!("wrote {}", md.display());
+                outln!("wrote {}", md.display());
             }
             if let Some(sig) = &signed {
-                println!("wrote {}", sig.display());
+                outln!("wrote {}", sig.display());
             }
         }
     }

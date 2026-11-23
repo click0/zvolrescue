@@ -15,6 +15,7 @@ mod sign;
 mod verify;
 
 use std::path::PathBuf;
+use zvol_common::{errln, outln};
 
 use std::process::ExitCode;
 
@@ -182,7 +183,7 @@ fn keygen(g: &Global, private: &std::path::Path, public: Option<PathBuf>, force:
         PathBuf::from(p)
     });
     if zvol_common::same_file(private, &public) {
-        eprintln!(
+        errln!(
             "zvolreport: --public {} is the private key's own path",
             public.display()
         );
@@ -194,7 +195,7 @@ fn keygen(g: &Global, private: &std::path::Path, public: Option<PathBuf>, force:
     let there = |p: &std::path::Path| std::fs::symlink_metadata(p).is_ok();
     if !force {
         if let Some(p) = [private, public.as_path()].into_iter().find(|p| there(p)) {
-            eprintln!(
+            errln!(
                 "zvolreport: {} already exists; --force replaces the key pair",
                 p.display()
             );
@@ -206,14 +207,14 @@ fn keygen(g: &Global, private: &std::path::Path, public: Option<PathBuf>, force:
     for p in [private, public.as_path()] {
         if std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()) {
             if let Err(e) = std::fs::remove_file(p) {
-                eprintln!("zvolreport: {}: {e}", p.display());
+                errln!("zvolreport: {}: {e}", p.display());
                 return exit::USAGE;
             }
         }
     }
     match sign::keygen(private, &public) {
         Err(e) => {
-            eprintln!("zvolreport: {e}");
+            errln!("zvolreport: {e}");
             exit::USAGE
         }
         Ok(key) => {
@@ -226,8 +227,8 @@ fn keygen(g: &Global, private: &std::path::Path, public: Option<PathBuf>, force:
                     })
                 ),
                 zvol_common::Format::Text => {
-                    println!("wrote {} (mode 0600)", private.display());
-                    println!("wrote {}", public.display());
+                    outln!("wrote {} (mode 0600)", private.display());
+                    outln!("wrote {}", public.display());
                 }
             }
             0

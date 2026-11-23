@@ -1147,3 +1147,56 @@ fn a_target_that_is_not_text_has_its_bytes_beside_it() {
     assert_eq!(std::fs::read(out.join("link")).unwrap(), ZPL_LINK_NOT_TEXT);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// A file's name is bytes, and they may be a newline and an escape
+/// sequence. `list` shows such a name as text; `extract`, the run that
+/// says what was lost, printed it as it was: a line of the name's own
+/// choosing, and the erasing of the line above it. The file is still
+/// written under the name it has.
+#[cfg(unix)]
+#[test]
+fn a_name_of_codes_is_printed_as_text() {
+    use std::os::unix::ffi::OsStrExt;
+    use zfs_read::fixture::ZPL_NAME_OF_CODES;
+
+    let dir = scratch("name-of-codes");
+    let m = damaged(&dir, ZplDamage::NameOfCodes);
+    let name = std::ffi::OsStr::from_bytes(ZPL_NAME_OF_CODES);
+    let shown = "hello\\u{a}  STOPPED at nothing\\u{1b}[1A\\u{1b}[2K.txt";
+    let clean =
+        |text: &[u8]| !text.contains(&0x1b) && !text.windows(10).any(|w| w == b"\n  STOPPED");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_zvolfiles"))
+        .args(["list", "tank/fs", &m[0], &m[1]])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(
+        clean(&out.stdout) && String::from_utf8_lossy(&out.stdout).contains(shown),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    // The name given twice is written once, and said: with the name.
+    let tree = dir.join("out");
+    let out = Command::new(env!("CARGO_BIN_EXE_zvolfiles"))
+        .args(["-v", "extract", "tank/fs", &m[0], &m[1], "-o"])
+        .arg(&tree)
+        .arg("--path")
+        .arg(name)
+        .arg("--path")
+        .arg(name)
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert!(
+        clean(&out.stdout) && clean(&out.stderr) && err.contains(shown),
+        "{err}"
+    );
+    assert_eq!(
+        std::fs::read(tree.join(name)).unwrap(),
+        zfs_read::fixture::zpl_hello()
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}

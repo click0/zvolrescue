@@ -8,6 +8,7 @@
 
 use std::path::PathBuf;
 use std::time::Instant;
+use zvol_common::{errln, outln};
 
 use zfs_ondisk::dmu::DnodePhys;
 use zfs_ondisk::Endian;
@@ -64,12 +65,12 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     let index = match load_index(&opts.dir) {
         Ok(i) => i,
         Err(e) => {
-            eprintln!("zvolcarve: {e}");
+            errln!("zvolcarve: {e}");
             return exit::EVIDENCE;
         }
     };
     let Some(c) = index.candidates.iter().find(|c| c.id == opts.candidate) else {
-        eprintln!(
+        errln!(
             "zvolcarve: no candidate {} in {} ({}){}",
             opts.candidate,
             opts.dir.display(),
@@ -83,14 +84,14 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     let bytes = match from_hex(&c.dnode_hex) {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("zvolcarve: {}: dnode: {e}", opts.candidate);
+            errln!("zvolcarve: {}: dnode: {e}", opts.candidate);
             return exit::EVIDENCE;
         }
     };
     let dnode = match DnodePhys::parse(&bytes, Endian::Little) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("zvolcarve: {}: dnode: {e}", opts.candidate);
+            errln!("zvolcarve: {}: dnode: {e}", opts.candidate);
             return exit::EVIDENCE;
         }
     };
@@ -137,7 +138,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     let guid = format!("{:#018x}", pool.guid);
     let unknown = ["-", zvol_common::NO_POOL_GUID].contains(&index.pool_guid.as_str());
     if !unknown && index.pool_guid != guid {
-        eprintln!(
+        errln!(
             "zvolcarve: {} was made from pool {} ({}); these members are pool {} ({guid}): give the members that scan read",
             opts.dir.display(),
             index.pool,
@@ -179,7 +180,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         (None, None) => (c.implied_size, "implied by the dnode".to_string()),
     };
     if !g.quiet {
-        eprintln!(
+        errln!(
             "zvolcarve: {}: {} block(s) of {} bytes, {size} bytes ({why})",
             c.id,
             c.maxblkid.saturating_add(1),
@@ -219,7 +220,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     ) {
         Ok(x) => x,
         Err(e) => {
-            eprintln!("zvolcarve: {e}");
+            errln!("zvolcarve: {e}");
             return exit::USAGE;
         }
     };
@@ -257,7 +258,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     ) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("zvolcarve: {}: {e}", c.id);
+            errln!("zvolcarve: {}: {e}", c.id);
             return exit::UNRECOVERABLE;
         }
     };
@@ -275,11 +276,12 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         saver.words("--resume continues after a repair")
     };
     if let Some(why) = &report.output_failed {
-        eprintln!("zvolcarve: {}: {why}; {resume_words} (exit 6)", c.id);
+        errln!("zvolcarve: {}: {why}; {resume_words} (exit 6)", c.id);
     } else if let Some(at) = report.interrupted_at {
-        eprintln!(
+        errln!(
             "zvolcarve: {}: interrupted at block {at} of {}; {resume_words} (exit 6)",
-            c.id, report.blocks_total
+            c.id,
+            report.blocks_total
         );
     }
     // What the run that was resumed lost is this image's too.
@@ -375,8 +377,8 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             serde_json::to_string_pretty(&out).expect("serialisable")
         ),
         Format::Text => {
-            println!("{}: {} bytes -> {}", c.id, size, opts.output.display());
-            println!(
+            outln!("{}: {} bytes -> {}", c.id, size, opts.output.display());
+            outln!(
                 "  blocks: {} total, {} read, {} holes, {} zeroed (unreadable), {} salvaged (unreadable sectors zeroed)",
                 report.blocks_total,
                 report.blocks_read,
@@ -385,20 +387,20 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 report.blocks_salvaged
             );
             if report.blocks_unverified > 0 {
-                println!(
+                outln!(
                     "  UNVERIFIED: {} of the {} block(s) read carry no checksum (checksum=off): written as the members gave them, and checked by nothing",
                     report.blocks_unverified, report.blocks_read
                 );
             }
-            println!("  sha256: {}", report.sha256);
+            outln!("  sha256: {}", report.sha256);
             if let Some(h) = &report.sha1 {
-                println!("  sha1:   {h}");
+                outln!("  sha1:   {h}");
             }
             if let Some(h) = &report.md5 {
-                println!("  md5:    {h}");
+                outln!("  md5:    {h}");
             }
             if let Some(b) = report.bad.first() {
-                println!(
+                outln!(
                     "  {} unreadable range(s), the first at byte {} (block {}): {}",
                     report.bad.len(),
                     b.offset,
@@ -407,18 +409,16 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 );
             }
             if let Some(why) = &report.output_failed {
-                println!(
-                    "  OUTPUT FAILED (exit 6): {why}; the image is incomplete: {resume_words}"
-                );
+                outln!("  OUTPUT FAILED (exit 6): {why}; the image is incomplete: {resume_words}");
             } else if let Some(at) = report.interrupted_at {
-                println!(
+                outln!(
                     "  INTERRUPTED at block {at} (exit 6); the image is incomplete: {resume_words}"
                 );
             } else if report.aborted {
-                println!("  ABORTED (--strict, exit 4): the image is incomplete: {resume_words}");
+                outln!("  ABORTED (--strict, exit 4): the image is incomplete: {resume_words}");
             }
             if let Some(why) = &report.stopped_by_medium {
-                println!("  STOPPED by the medium: {why}");
+                outln!("  STOPPED by the medium: {why}");
             }
         }
     }

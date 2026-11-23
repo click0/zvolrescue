@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::PathBuf;
+use zvol_common::errln;
 
 use serde::Serialize;
 use zfs_ondisk::dmu::ObjsetType;
@@ -623,7 +624,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     candidates.retain(|c| in_range(c.ub.txg) && !abandoned.iter().any(|a| a.txg == c.ub.txg));
     abandoned.retain(|a| in_range(a.txg));
     if candidates.is_empty() && abandoned.is_empty() {
-        eprintln!("zvoltimeline: no verified uberblock in that range");
+        errln!("zvoltimeline: no verified uberblock in that range");
         return zvol_common::end_early(g, "zvoltimeline", spec, exit::UNRECOVERABLE);
     }
 
@@ -761,7 +762,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         Some(path) => match std::fs::File::create(path) {
             Ok(f) => Box::new(f),
             Err(e) => {
-                eprintln!("zvoltimeline: {}: {e}", path.display());
+                errln!("zvoltimeline: {}: {e}", path.display());
                 return zvol_common::end_run(
                     g,
                     "zvoltimeline",
@@ -791,7 +792,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         if zvol_common::is_broken_pipe(&e) {
             return 0;
         }
-        eprintln!("zvoltimeline: writing the report: {e}");
+        errln!("zvoltimeline: writing the report: {e}");
         return zvol_common::end_run(
             g,
             "zvoltimeline",
@@ -811,7 +812,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     // change between them", exit 0, said that it had been there all
     // along and stayed as it was.
     if let Some(want) = &none_about {
-        eprintln!(
+        errln!(
             "zvoltimeline: --dataset {want}: no dataset or snapshot of that name or GUID in transaction groups {}–{}",
             out.txgs.first().copied().unwrap_or(0),
             out.txgs.last().copied().unwrap_or(0)

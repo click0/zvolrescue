@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use zvol_common::{errln, outln};
 
 use serde::Serialize;
 use zvol_common::evidence::{digests_of_prefix, Extra};
@@ -523,7 +524,7 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
     let bytes = match std::fs::read(&opts.report) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("zvolreport: {}: {e}", opts.report.display());
+            errln!("zvolreport: {}: {e}", opts.report.display());
             return exit::EVIDENCE;
         }
     };
@@ -534,7 +535,7 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
     let signature = match (&opts.key, &opts.signature) {
         (None, None) => None,
         (None, Some(_)) => {
-            eprintln!("zvolreport: --signature says where to look; --key says what to check with");
+            errln!("zvolreport: --signature says where to look; --key says what to check with");
             return exit::USAGE;
         }
         (Some(keyfile), sig) => {
@@ -544,7 +545,7 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
             let key = match crate::sign::read_public(keyfile) {
                 Ok(k) => k,
                 Err(e) => {
-                    eprintln!("zvolreport: {e}");
+                    errln!("zvolreport: {e}");
                     return exit::USAGE;
                 }
             };
@@ -594,7 +595,7 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
         Err(e) => {
             if let Some(s) = &signature {
                 if s.status != Status::Pass {
-                    eprintln!(
+                    errln!(
                         "zvolreport: {}: signature {} — {}",
                         opts.report.display(),
                         s.status.as_str(),
@@ -602,15 +603,15 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
                     );
                     return exit::PARTIAL;
                 }
-                eprintln!(
+                errln!(
                     "zvolreport: {}: the signature matches, but the document is not one this build reads",
                     opts.report.display()
                 );
             }
             if e.starts_with("report format version") {
-                eprintln!("zvolreport: {}: {e}", opts.report.display());
+                errln!("zvolreport: {}: {e}", opts.report.display());
             } else {
-                eprintln!("zvolreport: {}: not a report: {e}", opts.report.display());
+                errln!("zvolreport: {}: not a report: {e}", opts.report.display());
             }
             return exit::EVIDENCE;
         }
@@ -807,22 +808,22 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
             // pool's, and one with an escape sequence in it erased the
             // FAIL printed before it (`zvol_common::text`).
             use zvol_common::text::{shown, shown_path};
-            println!("{:<9} {:<9} {:<7} FILE", "KIND", "RESULT", "DIGEST");
+            outln!("{:<9} {:<9} {:<7} FILE", "KIND", "RESULT", "DIGEST");
             if let Some(s) = &out.signature {
-                println!(
+                outln!(
                     "{:<9} {:<9} {:<7} {}",
                     "signature",
                     s.status.as_str(),
                     "ed25519",
                     shown_path(&s.path)
                 );
-                println!("{:<9} {:<9} {:<7}   key {}", "", "", "", shown_path(&s.key));
+                outln!("{:<9} {:<9} {:<7}   key {}", "", "", "", shown_path(&s.key));
                 if let Some(d) = &s.detail {
-                    println!("{:<9} {:<9} {:<7}   {}", "", "", "", shown(d));
+                    outln!("{:<9} {:<9} {:<7}   {}", "", "", "", shown(d));
                 }
             }
             for c in &out.checked {
-                println!(
+                outln!(
                     "{:<9} {:<9} {:<7} {}",
                     c.kind,
                     c.status.as_str(),
@@ -830,20 +831,20 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
                     shown_path(&c.path)
                 );
                 if let Some(d) = &c.detail {
-                    println!("{:<9} {:<9} {:<7}   {}", "", "", "", shown(d));
+                    outln!("{:<9} {:<9} {:<7}   {}", "", "", "", shown(d));
                 }
                 // Only where there is something to show: a report that
                 // no longer matches its logs has no one value of each,
                 // and printed "recorded —" and "found —" under its reason.
                 if c.status == Status::Fail && (c.recorded.is_some() || c.found.is_some()) {
-                    println!(
+                    outln!(
                         "{:<9} {:<9} {:<7}   recorded {}",
                         "",
                         "",
                         "",
                         c.recorded.as_deref().unwrap_or("—")
                     );
-                    println!(
+                    outln!(
                         "{:<9} {:<9} {:<7}   found    {}",
                         "",
                         "",
@@ -852,9 +853,12 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
                     );
                 }
             }
-            println!(
+            outln!(
                 "{} passed, {} failed, {} missing, {} with nothing to check against",
-                out.passed, out.failed, out.missing, out.unhashed
+                out.passed,
+                out.failed,
+                out.missing,
+                out.unhashed
             );
         }
     }

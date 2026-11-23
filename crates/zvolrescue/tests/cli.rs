@@ -3407,3 +3407,73 @@ fn what_the_intent_log_holds_is_said_and_is_not_the_exit_status() {
         "{said}"
     );
 }
+
+/// A dataset's name is whatever the pool says, and one written by
+/// something other than ZFS may hold an escape sequence or a newline.
+/// `list` and `dump` print it as text — it reached the terminal as it
+/// was, where `ESC [2J` cleared the screen above it — and `dump -r`
+/// names no file with it. The JSON has the name itself.
+#[test]
+fn a_name_from_the_pool_is_printed_as_text() {
+    let name = "x\u{1b}[2Jy\nnp";
+    let dir = scratch("name-of-codes");
+    let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1)]);
+    let mut members = vec![vec![0u8; SIZE as usize], vec![0u8; SIZE as usize]];
+    let mut a = Alloc::new(0x20_0000);
+    a.volume_name = Some(name);
+    build_sample_mos(&mut pool, &mut members, &mut a);
+    for (i, m) in members.iter_mut().enumerate() {
+        pool.write_labels(i, m);
+    }
+    let paths = write_members(&dir, &members);
+    let full = format!("tank/vm/{name}");
+    let shown = "tank/vm/x\\u{1b}[2Jy\\u{a}np";
+    let clean = |text: &str| !text.contains('\u{1b}') && !text.contains("y\nnp");
+
+    let (code, out, err) = run(&["list", &paths[0], &paths[1]]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(
+        out.contains(shown) && clean(&out) && clean(&err),
+        "{out}\n{err}"
+    );
+    let (code, out, _) = run(&["-f", "json", "list", &paths[0], &paths[1]]);
+    assert_eq!(code, 0, "{out}");
+    let v = json(&out);
+    assert!(
+        v["datasets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["name"] == full.as_str()),
+        "{v}"
+    );
+
+    let image = dir.join("one.img").to_string_lossy().into_owned();
+    let (code, out, err) = run(&["dump", &full, &paths[0], &paths[1], "-o", &image]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(
+        out.contains(shown) && clean(&out) && clean(&err),
+        "{out}\n{err}"
+    );
+
+    let tree = dir.join("all");
+    let (code, out, err) = run(&[
+        "dump",
+        "-r",
+        "tank/vm",
+        &paths[0],
+        &paths[1],
+        "-o",
+        tree.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(clean(&out) && clean(&err), "{out}\n{err}");
+    assert!(tree.join("tank_vm_x_[2Jy_np.img").is_file(), "{out}");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(tree.join("manifest.json")).unwrap()).unwrap();
+    assert!(
+        manifest.to_string().contains("tank_vm_x_[2Jy_np.img"),
+        "{manifest}"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}

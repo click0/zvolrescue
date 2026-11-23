@@ -14,6 +14,7 @@
 //! unreadable" and "not found" are different answers to the operator.
 
 use std::path::PathBuf;
+use zvol_common::{errln, outln};
 
 use serde::Serialize;
 use zfs_ondisk::Endian;
@@ -115,7 +116,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             .flatten()
             .find(|p| zvol_common::evidence::Kind::of(p).is_device())
         {
-            eprintln!(
+            errln!(
                 "zvolcarve: {}: a block device is not scanned (SPEC N-10): a surface scan is what a disk with defects survives least. \
                  Image it with a tool for failing media and scan the image; --surface-scan-on-device overrides.",
                 dev.display()
@@ -141,7 +142,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             match Codec::named(name) {
                 Some(c) => v.push(c),
                 None => {
-                    eprintln!(
+                    errln!(
                         "zvolcarve: --compressed {name}: not a compression this build knows (lz4, lzjb, gzip, zstd, none)"
                     );
                     return exit::USAGE;
@@ -156,7 +157,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         Some(s) => match byte_range(s) {
             Ok((a, b)) => Some((a / 512 * 512, b)),
             Err(e) => {
-                eprintln!("zvolcarve: {e}");
+                errln!("zvolcarve: {e}");
                 return exit::USAGE;
             }
         },
@@ -175,7 +176,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         }
     }
     if let Err(e) = std::fs::create_dir_all(&opts.output) {
-        eprintln!("zvolcarve: {}: {e}", opts.output.display());
+        errln!("zvolcarve: {}: {e}", opts.output.display());
         return exit::USAGE;
     }
 
@@ -196,7 +197,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             continue;
         };
         if !g.quiet {
-            eprintln!("zvolcarve: reading {}", members.paths[i].display());
+            errln!("zvolcarve: reading {}", members.paths[i].display());
         }
         let opts_here = ScanOptions {
             vdev_start: members.base_offsets.get(i).copied().unwrap_or(0),
@@ -209,7 +210,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 found.extend(s.roots);
             }
             Err(e) => {
-                eprintln!("zvolcarve: {}: {e}", members.paths[i].display());
+                errln!("zvolcarve: {}: {e}", members.paths[i].display());
                 return exit::UNRECOVERABLE;
             }
         }
@@ -323,12 +324,12 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     let json = match serde_json::to_string_pretty(&doc) {
         Ok(j) => j + "\n",
         Err(e) => {
-            eprintln!("zvolcarve: {e}");
+            errln!("zvolcarve: {e}");
             return exit::USAGE;
         }
     };
     if let Err(e) = std::fs::write(&path, &json) {
-        eprintln!("zvolcarve: {}: {e}", path.display());
+        errln!("zvolcarve: {}: {e}", path.display());
         return exit::USAGE;
     }
 
@@ -367,32 +368,37 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
 }
 
 fn print(doc: &RootsOut, path: &std::path::Path) {
-    println!(
+    outln!(
         "{} object-set header(s) in {} bytes of {}",
         doc.roots.len(),
         doc.bytes_read,
         doc.members.join(", ")
     );
     if doc.truncated {
-        println!("  more headers were found than the cap allowed; the rest were dropped");
+        outln!("  more headers were found than the cap allowed; the rest were dropped");
     }
     if doc.roots.is_empty() {
-        println!("  no MOS header was found: the pool's root is not in the range that was read");
+        outln!("  no MOS header was found: the pool's root is not in the range that was read");
     }
     for r in &doc.roots {
-        println!(
+        outln!(
             "  [{}] {} at {:#x}  {}  birth {}  {} dataset(s)",
-            r.id, r.member, r.offset, r.found, r.birth, r.datasets
+            r.id,
+            r.member,
+            r.offset,
+            r.found,
+            r.birth,
+            r.datasets
         );
         if !r.sample.is_empty() {
-            println!("      {}", r.sample.join(", "));
+            outln!("      {}", r.sample.join(", "));
         }
         if !r.also_on.is_empty() {
-            println!("      also on {}", r.also_on.join(", "));
+            outln!("      also on {}", r.also_on.join(", "));
         }
         if let Some(e) = &r.error {
-            println!("      {e}");
+            outln!("      {e}");
         }
     }
-    println!("  index: {}", path.display());
+    outln!("  index: {}", path.display());
 }

@@ -82,7 +82,7 @@ impl AsRef<Path> for Scratch {
 impl Drop for Scratch {
     fn drop(&mut self) {
         if std::thread::panicking() {
-            eprintln!("scratch kept for the failure: {}", self.path.display());
+            errln!("scratch kept for the failure: {}", self.path.display());
         } else {
             let _ = std::fs::remove_dir_all(&self.path);
         }
