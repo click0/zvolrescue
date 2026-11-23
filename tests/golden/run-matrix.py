@@ -1142,6 +1142,29 @@ def judge_datasets(missing, extra, wrong_txg, blocks):
     return "ok", None
 
 
+def tree_in_part(returncode, doc):
+    """Whether a `list` that exited 4 is one the tool accounts for itself.
+
+    `list` exits 4 when the pool reads and part of its dataset tree does
+    not: what it could read is listed, each part that did not is named
+    (`errors`), and it says the list is not all there is. That is the
+    refusal `judge_datasets` knows from the walk, said by the tool one
+    level up. It read as "list exit 4", a failure the harness could not
+    account for, on the first pool whose damage took both copies of a
+    directory of the tree. An exit 4 that names no part is not that.
+
+    >>> tree_in_part(4, {"datasets": [], "errors": ["p/a: every copy failed its checksum"]})
+    True
+    >>> tree_in_part(4, {"datasets": [], "errors": []})
+    False
+    >>> tree_in_part(4, {"datasets": []})
+    False
+    >>> tree_in_part(0, {"datasets": [], "errors": []})
+    False
+    """
+    return returncode == 4 and bool(doc.get("errors"))
+
+
 def judge_walk(args, oracle, members, work, assume=()):
     """No zvols: the datasets must match `zdb -d` and every block must read."""
     outcomes = {}
@@ -1157,12 +1180,19 @@ def judge_walk(args, oracle, members, work, assume=()):
         # 1 with the F-62 message: the member the manifest asserted does
         # not read as any leaf the pool is missing.
         return {"pool": "refused", "refused_detail": why}, False
-    if proc.returncode != 0:
+    if proc.returncode not in (0, 4):
         return {"pool": f"list exit {proc.returncode}: {proc.stderr.strip()[:160]}"}, False
     try:
-        listed = {d["name"]: d["creation_txg"] for d in json.loads(proc.stdout)["datasets"]}
+        doc = json.loads(proc.stdout)
+        listed = {d["name"]: d["creation_txg"] for d in doc["datasets"]}
     except Exception as e:  # noqa: BLE001
         return {"pool": f"list output unparsable: {e}"}, False
+    # 4: the tree read in part, and the tool named the parts that did
+    # not. What it lists is judged as ever; what it does not is its own
+    # stated refusal.
+    in_part = tree_in_part(proc.returncode, doc)
+    if proc.returncode == 4 and not in_part:
+        return {"pool": f"list exit 4, and no part of the tree named: {proc.stderr.strip()[:160]}"}, False
     expected = {n: v["creation_txg"] for n, v in oracle.inventory.items()}
     missing = sorted(set(expected) - set(listed))
     extra = sorted(set(listed) - set(expected))
@@ -1200,10 +1230,14 @@ def judge_walk(args, oracle, members, work, assume=()):
         outcomes["blocks"] = "ok"
     # Judged last, because whether a missing dataset is a defect depends
     # on what the walk just said.
-    verdict, detail = judge_datasets(missing, extra, wrong_txg, outcomes["blocks"])
+    verdict, detail = judge_datasets(missing, extra, wrong_txg,
+                                     "refused" if in_part else outcomes["blocks"])
     outcomes["datasets"] = verdict
     if detail:
         outcomes["datasets_detail"] = detail
+    if in_part:
+        outcomes["tree"] = "refused"
+        outcomes["tree_detail"] = "; ".join(str(e)[:160] for e in doc["errors"][:3])
     m = re.search(r"^datasets (\d+) objects (\d+) blocks (\d+)", text, re.M)
     if m:
         outcomes["counts"] = f"{m.group(1)} datasets, {m.group(2)} objects, {m.group(3)} blocks"
@@ -1282,7 +1316,7 @@ def run_case(args, oracle, manifest, rng):
             good = {"ok"}
         result["outcomes"] = outcomes
         judged = {k: v for k, v in outcomes.items()
-                  if k not in ("counts", "refused_detail", "datasets_detail")}
+                  if k not in ("counts", "refused_detail", "datasets_detail", "tree_detail")}
         values = set(judged.values())
         if values <= good:
             actual = "reconstructed" if redundancy else "bit-exact"
