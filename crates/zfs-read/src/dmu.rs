@@ -106,18 +106,31 @@ impl<'r, 'a> ObjectReader<'r, 'a> {
     /// order the block was written in (the dnode's for holes), which
     /// structured blocks such as ZAPs need for their own fields.
     pub fn read_blkid_ext(&self, blkid: u64) -> Result<(Vec<u8>, Endian), ReadError> {
+        self.read_blkid_whole(blkid).map(|(d, e, _)| (d, e))
+    }
+
+    /// Like [`read_blkid`](Self::read_blkid) but also says whether
+    /// nothing checked the block: its pointer names no checksum
+    /// (`checksum=off`). `false` for a hole.
+    pub fn read_blkid_checked(&self, blkid: u64) -> Result<(Vec<u8>, bool), ReadError> {
+        self.read_blkid_whole(blkid).map(|(d, _, u)| (d, u))
+    }
+
+    fn read_blkid_whole(&self, blkid: u64) -> Result<(Vec<u8>, Endian, bool), ReadError> {
         let size = self.dnode.datablksz() as usize;
         match self.locate(blkid)? {
-            None => Ok((vec![0; size], self.endian)),
+            None => Ok((vec![0; size], self.endian, false)),
             Some(bp) => {
-                let data = self.reader.read_block(&bp, false)?.data;
+                let block = self.reader.read_block(&bp, false)?;
+                let unverified = block.unverified();
+                let data = block.data;
                 if data.len() != size {
                     return Err(ReadError::Io(format!(
                         "block {blkid} is {} bytes, and the object's blocks are {size}",
                         data.len()
                     )));
                 }
-                Ok((data, bp.endian))
+                Ok((data, bp.endian, unverified))
             }
         }
     }

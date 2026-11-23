@@ -57,6 +57,9 @@ struct DumpOut {
     blocksize: u64,
     blocks_total: u64,
     blocks_read: u64,
+    /// Those of `blocks_read` that nothing verified: their pointers
+    /// name no checksum (`checksum=off`).
+    blocks_unverified: u64,
     blocks_holes: u64,
     blocks_zeroed: u64,
     /// Blocks written with only their unreadable sectors zeroed (SPEC
@@ -692,6 +695,7 @@ fn dump_one(
         blocksize: report.blocksize,
         blocks_total: report.blocks_total,
         blocks_read: report.blocks_read,
+        blocks_unverified: report.blocks_unverified,
         blocks_holes: report.blocks_holes,
         blocks_zeroed: report.blocks_zeroed,
         blocks_salvaged: report.blocks_salvaged,
@@ -764,6 +768,12 @@ fn print_text(out: &RunOut) {
             "  blocks: {} total, {} read, {} holes, {} zeroed (unreadable), {} salvaged (unreadable sectors zeroed); {written} in {:.1}s",
             v.blocks_total, v.blocks_read, v.blocks_holes, v.blocks_zeroed, v.blocks_salvaged, v.seconds
         );
+        if v.blocks_unverified > 0 {
+            println!(
+                "  UNVERIFIED: {} of the {} block(s) read carry no checksum (checksum=off): written as the members gave them, and checked by nothing",
+                v.blocks_unverified, v.blocks_read
+            );
+        }
         println!("  sha256: {}", v.sha256);
         if let Some(h) = &v.sha1 {
             println!("  sha1:   {h}");

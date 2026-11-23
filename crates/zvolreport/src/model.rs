@@ -162,6 +162,11 @@ pub struct Extraction {
     /// with their unreadable sectors zeroed. For a tree of files, the
     /// entries not read whole or not written.
     pub errors: u64,
+    /// Blocks written that nothing verified: their pointers name no
+    /// checksum (`checksum=off`). Read whole, so not among `errors`,
+    /// and not read through a checksum like the rest.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub unverified: u64,
     /// For a tree of files (`zvolfiles extract`): how many were written,
     /// each of them among the outputs with its hash; `output` is the
     /// manifest that lists them and `sha256` its hash.

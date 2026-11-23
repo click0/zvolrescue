@@ -98,6 +98,10 @@ pub struct Extracted {
     /// Which bytes those are, and why (Z-06).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub zeroed: Vec<Zeroed>,
+    /// Blocks of the file that nothing verified: their pointers name no
+    /// checksum (`checksum=off`), and what a member gave was written.
+    #[serde(skip_serializing_if = "no_blocks")]
+    pub unverified: u64,
     /// Recorded here and not made: a fifo, a device or a socket, which
     /// this build does not make. Not a failure — the dataset is whole —
     /// and so not counted as one.
@@ -182,6 +186,8 @@ struct Written {
     sha256: Option<String>,
     /// What of it was written as zeros: the same bytes under every name.
     zeroed: Vec<Zeroed>,
+    /// Its blocks that nothing verified, the same under every name.
+    unverified: u64,
 }
 
 type WrittenObjects = std::collections::BTreeMap<u64, Written>;
@@ -203,6 +209,10 @@ struct ManifestOut {
     failed: usize,
     /// Files written as hard links to an earlier path.
     hardlinks: usize,
+    /// Blocks written that nothing verified (`checksum=off`), over
+    /// every file, each counted once whatever its names.
+    #[serde(skip_serializing_if = "no_blocks")]
+    unverified_blocks: u64,
     /// Entries written away from their paths (`written_as`), which are
     /// longer than the system takes.
     #[serde(skip_serializing_if = "is_zero")]
@@ -232,6 +242,10 @@ struct ManifestOut {
 }
 
 fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
+fn no_blocks(n: &u64) -> bool {
     *n == 0
 }
 
@@ -475,6 +489,8 @@ impl From<OutError> for CopyError {
 struct Copied {
     sha256: String,
     zeroed: Vec<Zeroed>,
+    /// Blocks read that nothing verified (`checksum=off`).
+    unverified: u64,
 }
 
 /// Record `length` bytes at `offset` as zeros, merged into the run
@@ -536,6 +552,7 @@ fn copy_file(
     let mut hasher = Sha256::new();
     let mut written = 0u64;
     let mut zeroed = Vec::new();
+    let mut unverified = 0u64;
     if unplaced {
         zero(&mut zeroed, 0, 0, size, NO_BLOCK_SIZE.to_string());
     }
@@ -564,7 +581,10 @@ fn copy_file(
         let read = if written >= blocks_end {
             Ok(None)
         } else {
-            obj.read_blkid(blkid).map(Some)
+            obj.read_blkid_checked(blkid).map(|(chunk, unchecked)| {
+                unverified += u64::from(unchecked);
+                Some(chunk)
+            })
         };
         let piece: Vec<u8> = match read {
             Ok(None) => zeros[..want].to_vec(),
@@ -626,7 +646,11 @@ fn copy_file(
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
-    Ok(Copied { sha256, zeroed })
+    Ok(Copied {
+        sha256,
+        zeroed,
+        unverified,
+    })
 }
 
 /// Whether `path` is inside the directory `dir`, both as bytes; the
@@ -876,6 +900,11 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
             );
         }
         let hardlinks = files.iter().filter(|f| f.hardlink_to.is_some()).count();
+        let unverified_blocks = files
+            .iter()
+            .filter(|f| f.hardlink_to.is_none())
+            .map(|f| f.unverified)
+            .sum();
         let written_short = files.iter().filter(|f| f.written_as.is_some()).count();
         let special = files.iter().filter(|f| f.not_made.is_some()).count();
         Ok((
@@ -889,6 +918,7 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
                 incomplete,
                 failed,
                 hardlinks,
+                unverified_blocks,
                 written_short,
                 special,
                 stopped: run.stopped,
@@ -977,6 +1007,13 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
             }
             if out.hardlinks > 0 {
                 println!("  {} hard link(s)", out.hardlinks);
+            }
+            if out.unverified_blocks > 0 {
+                println!(
+                    "  UNVERIFIED: {} block(s) of {} carry no checksum (checksum=off): written as the members gave them, and checked by nothing (the manifest's unverified)",
+                    out.unverified_blocks,
+                    entries(out.files.iter().filter(|f| f.unverified > 0).count())
+                );
             }
             if out.written_short > 0 {
                 println!(
@@ -1126,6 +1163,7 @@ fn record_of(fs: &Filesystem<'_, '_>, e: &Entry, z: &Znode) -> Extracted {
         contents_errors: e.contents_errors.clone(),
         errors: 0,
         zeroed: Vec::new(),
+        unverified: 0,
         not_made: None,
         error: None,
         refused: false,
@@ -1327,6 +1365,7 @@ fn write_entry(
                         record.sha256 = first.sha256.clone();
                         record.errors = first.zeroed.len() as u64;
                         record.zeroed = first.zeroed;
+                        record.unverified = first.unverified;
                         run.files.push(record);
                         return;
                     }
@@ -1366,6 +1405,7 @@ fn write_entry(
                     record.sha256 = Some(copied.sha256.clone());
                     record.errors = copied.zeroed.len() as u64;
                     record.zeroed = copied.zeroed.clone();
+                    record.unverified = copied.unverified;
                     // Only now, and only for an object that has more
                     // names to come: the hash is what a later link
                     // records, and reading the blocks again would prove
@@ -1378,6 +1418,7 @@ fn write_entry(
                                 out: to.clone(),
                                 sha256: Some(copied.sha256),
                                 zeroed: copied.zeroed,
+                                unverified: copied.unverified,
                             },
                         );
                     }
@@ -1456,6 +1497,7 @@ fn failed(e: &Entry, why: &str) -> Extracted {
         contents_errors: e.contents_errors.clone(),
         errors: 0,
         zeroed: Vec::new(),
+        unverified: 0,
         not_made: None,
         error: Some(why.to_string()),
         refused: false,

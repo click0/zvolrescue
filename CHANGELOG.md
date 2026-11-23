@@ -17,6 +17,22 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ### Fixed
 
+* **Blocks that carry no checksum are no longer counted with the
+  verified.** A dataset with `checksum=off` has pointers that name no
+  checksum, and its blocks are whatever a member holds there: a stale
+  side, a wrong parity, a column overwritten. They were "read" like any
+  other — in the summary, in `blocks_read` and in the evidence record —
+  so an image with 771 115 wrong bytes out of a raidz with one
+  overwritten member was "192 read, 0 zeroed", exit 0, under a manual
+  that says every block is verified by its checksum. They are still
+  written — nothing better is to be had — and are now counted apart:
+  `blocks_unverified` in the records of `zvolrescue dump` and
+  `zvolcarve dump` and an `UNVERIFIED` line in their summaries, carried
+  through `--resume`; `unverified` for each file of `zvolfiles extract`
+  and each object of `objects`, with `unverified_blocks` for the run;
+  and in `zvolreport` an `unverified` count on the extraction and a
+  warning that names it. A block held in its own pointer is not one of
+  them: the block above it was verified with it.
 * **A dataset under a part of the tree that did not read is no longer
   taken for absent.** At a transaction group where the pool reads and
   the dataset's own directory, or the list it would be in, does not,

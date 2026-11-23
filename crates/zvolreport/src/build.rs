@@ -230,6 +230,7 @@ fn tree_extraction(r: &Record) -> Option<Extraction> {
         sha1: None,
         md5: None,
         errors: count("incomplete").saturating_add(count("failed")),
+        unverified: count("unverified_blocks"),
         // A signal ended it: not every file or object was looked at.
         aborted: result.get("stopped").is_some_and(|s| !s.is_null())
             || result
@@ -266,6 +267,7 @@ fn extractions_of(result: &serde_json::Value) -> Vec<Extraction> {
                 errors: u64_at(v, "blocks_zeroed")
                     .unwrap_or(0)
                     .saturating_add(u64_at(v, "blocks_salvaged").unwrap_or(0)),
+                unverified: u64_at(v, "blocks_unverified").unwrap_or(0),
                 aborted: v
                     .get("aborted")
                     .and_then(serde_json::Value::as_bool)
@@ -513,6 +515,12 @@ pub fn assemble(records: &[(LogRef, Vec<Record>)], opts: &Options) -> Report {
             warnings.push(format!(
                 "{}: {} block(s) could not be read whole and were written as zeros, in whole or in part",
                 e.dataset, e.errors
+            ));
+        }
+        if e.unverified > 0 {
+            warnings.push(format!(
+                "{}: {} block(s) carry no checksum (checksum=off) and were written as the members gave them: read, and verified by nothing",
+                e.dataset, e.unverified
             ));
         }
         if e.sha256.is_none() {
@@ -1019,6 +1027,41 @@ mod tests {
             "{:?}",
             r.warnings
         );
+    }
+
+    /// Blocks that carry no checksum (`checksum=off`) are read whole and
+    /// verified by nothing: the image is complete, has no errors, and is
+    /// not one read through its checksums — which the report says. A
+    /// record of before the count existed says nothing, and a report
+    /// built from it has no such field.
+    #[test]
+    fn an_image_with_blocks_nothing_verified_says_so() {
+        let mut d = dump(9, 0, false);
+        d["volumes"][0]["blocks_unverified"] = serde_json::json!(192);
+        let r = assemble(&log(vec![record("zvolrescue", 11, 0, d)]), &opts());
+        let e = &r.extractions[0];
+        assert_eq!((e.errors, e.unverified), (0, 192));
+        assert!(e.complete());
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("192 block(s) carry no checksum")),
+            "{:?}",
+            r.warnings
+        );
+        let json = serde_json::to_value(e).unwrap();
+        assert_eq!(json["unverified"], 192);
+
+        let r = assemble(
+            &log(vec![record("zvolrescue", 11, 0, dump(9, 0, false))]),
+            &opts(),
+        );
+        assert_eq!(r.extractions[0].unverified, 0);
+        assert!(serde_json::to_value(&r.extractions[0])
+            .unwrap()
+            .get("unverified")
+            .is_none());
+        assert!(!r.warnings.iter().any(|w| w.contains("no checksum")));
     }
 
     /// An extraction a signal or a device stopped, or one with blocks

@@ -98,6 +98,15 @@ Descend into subdirectories.
 .Op Ar options
 .Pp
 Write the tree out as files.
+Every block is verified by its checksum; the blocks of a dataset with
+.Ql checksum=off
+have none, are written as the members gave them, and are counted for
+each file as
+.Ql unverified
+in the manifest
+.Po and in the index of
+.Cm objects
+.Pc .
 .Bl -tag -width Ds
 .It Fl o , Fl -output Ar dir
 Write the tree here.

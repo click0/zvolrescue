@@ -308,6 +308,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         "blocksize": report.blocksize,
         "blocks_total": report.blocks_total,
         "blocks_read": report.blocks_read,
+        "blocks_unverified": report.blocks_unverified,
         "blocks_holes": report.blocks_holes,
         "blocks_zeroed": report.blocks_zeroed,
         "blocks_salvaged": report.blocks_salvaged,
@@ -350,6 +351,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         "blocksize": report.blocksize,
         "blocks_total": report.blocks_total,
         "blocks_read": report.blocks_read,
+        "blocks_unverified": report.blocks_unverified,
         "blocks_holes": report.blocks_holes,
         "blocks_zeroed": report.blocks_zeroed,
         "blocks_salvaged": report.blocks_salvaged,
@@ -379,6 +381,12 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 report.blocks_zeroed,
                 report.blocks_salvaged
             );
+            if report.blocks_unverified > 0 {
+                println!(
+                    "  UNVERIFIED: {} of the {} block(s) read carry no checksum (checksum=off): written as the members gave them, and checked by nothing",
+                    report.blocks_unverified, report.blocks_read
+                );
+            }
             println!("  sha256: {}", report.sha256);
             if let Some(h) = &report.sha1 {
                 println!("  sha1:   {h}");

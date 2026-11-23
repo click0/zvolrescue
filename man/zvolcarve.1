@@ -197,6 +197,10 @@ one is extracted by.
 .Op Ar options
 .Pp
 Extract one candidate, verifying every block by its checksum.
+Blocks whose pointers name no checksum
+.Pq Ql checksum=off
+are written as the members gave them and counted apart, as
+.Ql blocks_unverified .
 The members must be those of the pool the scan read; another pool's
 are refused (exit 1).
 The result has the shape of

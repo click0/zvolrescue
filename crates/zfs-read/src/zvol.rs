@@ -45,8 +45,11 @@ pub struct Report {
     pub blocksize: u64,
     /// Blocks in `0..=maxblkid`.
     pub blocks_total: u64,
-    /// Blocks read and verified.
+    /// Blocks read whole.
     pub blocks_read: u64,
+    /// Those among them that nothing verified: their pointers name no
+    /// checksum (`checksum=off`), and what a member gave was written.
+    pub blocks_unverified: u64,
     /// Blocks that were holes.
     pub blocks_holes: u64,
     /// Blocks written as zeros because they could not be read.
@@ -233,6 +236,7 @@ pub fn extract_from(
         blocksize: bs,
         blocks_total,
         blocks_read: 0,
+        blocks_unverified: 0,
         blocks_holes: 0,
         blocks_zeroed: 0,
         blocks_salvaged: 0,
@@ -271,7 +275,8 @@ pub fn extract_from(
             // image as read, and nothing said so.
             Ok(Some(bp)) => obj.reader().read_block(bp, false).and_then(|b| {
                 if b.data.len() == bs as usize {
-                    Ok(Some(b.data))
+                    let unverified = b.unverified();
+                    Ok(Some((b.data, unverified)))
                 } else {
                     Err(ReadError::Io(format!(
                         "block {blkid} is {} bytes, and the volume's blocks are {bs}",
@@ -290,13 +295,14 @@ pub fn extract_from(
                 report.blocks_holes += 1;
                 digests.update(&zeros[..take]);
             }
-            Ok(Some(mut data)) => {
+            Ok(Some((mut data, unverified))) => {
                 data.resize(bs as usize, 0);
                 if let Err(e) = sink.write_at(offset, &data[..take]) {
                     refused(&mut report, blkid, offset, &e);
                     break;
                 }
                 report.blocks_read += 1;
+                report.blocks_unverified += u64::from(unverified);
                 report.bytes_written += take as u64;
                 digests.update(&data[..take]);
             }

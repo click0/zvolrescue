@@ -83,6 +83,11 @@ pub struct Lost {
     /// Blocks written with their unreadable sectors zeroed.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub blocks_salvaged: u64,
+    /// Blocks read that nothing verified (`checksum=off`). Not lost —
+    /// they are in the image as a member gave them — and counted here
+    /// so that a resumed image's count is that of the whole image.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub blocks_unverified: u64,
 }
 
 /// One unreadable range, as [`zfs_read::zvol::BadRange`] has it.
@@ -133,6 +138,7 @@ impl Lost {
             bad,
             blocks_zeroed: self.blocks_zeroed + report.blocks_zeroed,
             blocks_salvaged: self.blocks_salvaged + report.blocks_salvaged,
+            blocks_unverified: self.blocks_unverified + report.blocks_unverified,
         }
     }
 
@@ -153,6 +159,7 @@ impl Lost {
         report.bad = bad;
         report.blocks_zeroed += self.blocks_zeroed;
         report.blocks_salvaged += self.blocks_salvaged;
+        report.blocks_unverified += self.blocks_unverified;
     }
 }
 
@@ -961,6 +968,7 @@ mod tests {
             blocksize: 4096,
             blocks_total: 4,
             blocks_read: 0,
+            blocks_unverified: 0,
             blocks_holes: 0,
             blocks_zeroed: zeroed,
             blocks_salvaged: 0,
@@ -1042,6 +1050,7 @@ mod tests {
             blocksize: 4096,
             blocks_total: 4,
             blocks_read: 3,
+            blocks_unverified: 0,
             blocks_holes: 0,
             blocks_zeroed: 0,
             blocks_salvaged: 0,

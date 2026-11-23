@@ -285,6 +285,13 @@ inherited or a default.
 Extract a volume to a raw sparse image, verifying every block by its
 checksum, healing from another copy or from parity where one member
 fails, and hashing the image as it is written.
+A block whose pointer names no checksum \(em a volume with
+.Ql checksum=off
+\(em has none to be verified by: it is written as the members gave
+it, and such blocks are counted apart from the rest, on a line of the
+summary and as
+.Ql blocks_unverified
+in the record.
 The dataset comes first so that the variable-length list of members
 can follow it.
 Without

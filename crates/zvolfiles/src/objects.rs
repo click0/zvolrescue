@@ -17,6 +17,10 @@ use zvol_common::{exit, Format, Global, PoolSpec};
 use crate::common::{with_dataset, AtArgs, PassedOver, Zeroed, NO_BLOCK_SIZE};
 use crate::out::{OutError, OutTree};
 
+fn no_blocks(n: &u64) -> bool {
+    *n == 0
+}
+
 #[derive(Debug, Serialize)]
 struct ObjectOut {
     object: u64,
@@ -33,6 +37,10 @@ struct ObjectOut {
     /// Which, and why (Z-06).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     zeroed: Vec<Zeroed>,
+    /// Blocks that nothing verified: their pointers name no checksum
+    /// (`checksum=off`), and what a member gave was written.
+    #[serde(skip_serializing_if = "no_blocks")]
+    unverified: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
     /// The error was a refusal (exit 5).
@@ -66,6 +74,10 @@ struct ObjectsOut {
     written: usize,
     /// Objects with at least one block written as zeros.
     incomplete: usize,
+    /// Blocks written that nothing verified (`checksum=off`), over
+    /// every object.
+    #[serde(skip_serializing_if = "no_blocks")]
+    unverified_blocks: u64,
     /// What of the dataset's own metadata could not be read: the reason
     /// to be here rather than in `extract` (Z-08).
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -187,6 +199,7 @@ pub fn run(
                 sha256: None,
                 errors: 0,
                 zeroed: Vec::new(),
+                unverified: 0,
                 error: None,
                 refused: false,
             };
@@ -200,7 +213,7 @@ pub fn run(
                 continue;
             }
             match write_object(fs, &tree, obj, record.size, output, strict, &interrupt) {
-                Ok((hash, zeroed)) => {
+                Ok((hash, zeroed, unverified)) => {
                     if let Some(first) = zeroed.first() {
                         eprintln!(
                             "zvolfiles: object {obj}: {} run(s) of bytes written as zeros, the first {}–{} (block {}): {} (the index lists each)",
@@ -214,6 +227,7 @@ pub fn run(
                     record.sha256 = Some(hash);
                     record.errors = zeroed.len() as u64;
                     record.zeroed = zeroed;
+                    record.unverified = unverified;
                 }
                 Err(WriteError::Out(e)) => {
                     record.refused = matches!(e, OutError::Refused(_));
@@ -231,6 +245,7 @@ pub fn run(
         }
         let written = objects.iter().filter(|o| o.error.is_none()).count();
         let incomplete = objects.iter().filter(|o| o.errors > 0).count();
+        let unverified_blocks = objects.iter().map(|o| o.unverified).sum();
         Ok((
             ObjectsOut {
                 dataset: dataset.to_string(),
@@ -240,6 +255,7 @@ pub fn run(
                 objects,
                 written,
                 incomplete,
+                unverified_blocks,
                 damaged: fs.damaged.clone(),
                 unread,
                 interrupted: interrupt.load(std::sync::atomic::Ordering::Relaxed),
@@ -300,6 +316,12 @@ pub fn run(
                 out.written,
                 out.output.display()
             );
+            if out.unverified_blocks > 0 {
+                println!(
+                    "  UNVERIFIED: {} block(s) carry no checksum (checksum=off): written as the members gave them, and checked by nothing (the index's unverified)",
+                    out.unverified_blocks
+                );
+            }
             for o in &out.objects {
                 println!(
                     "  {:>6} {:<28} {:>10} bytes{}",
@@ -399,7 +421,7 @@ fn write_object(
     output: &Path,
     strict: bool,
     stop: &std::sync::atomic::AtomicBool,
-) -> Result<(String, Vec<Zeroed>), WriteError> {
+) -> Result<(String, Vec<Zeroed>, u64), WriteError> {
     let fail = OutError::Failed;
     let obj = fs.object(object).map_err(|e| fail(e.to_string()))?;
     let bs = obj.dnode().datablksz().max(512);
@@ -420,6 +442,7 @@ fn write_object(
     let mut file = tree.create(&path)?;
     let mut hasher = Sha256::new();
     let mut zeroed = Vec::new();
+    let mut unverified = 0u64;
     let zeros = vec![0u8; bs as usize];
     for blkid in 0..size.div_ceil(bs) {
         if stop.load(std::sync::atomic::Ordering::Relaxed) {
@@ -428,7 +451,10 @@ fn write_object(
         let read = if blkid.saturating_mul(bs) >= data_end {
             Ok(zeros.clone())
         } else {
-            obj.read_blkid(blkid)
+            obj.read_blkid_checked(blkid).map(|(chunk, unchecked)| {
+                unverified += u64::from(unchecked);
+                chunk
+            })
         };
         let chunk = match read {
             Ok(b) => b,
@@ -460,5 +486,5 @@ fn write_object(
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
-    Ok((hex, zeroed))
+    Ok((hex, zeroed, unverified))
 }

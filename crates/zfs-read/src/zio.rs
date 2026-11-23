@@ -380,8 +380,23 @@ pub struct Block {
     pub data: Vec<u8>,
     /// Verification result of the copy that was used.
     pub verify: Verify,
+    /// The pointer held the data itself (an embedded block): no
+    /// checksum of its own, and none wanted — the block the pointer
+    /// lies in was verified with it.
+    pub embedded: bool,
     /// Every copy tried, in order, including the successful one.
     pub attempts: Vec<Attempt>,
+}
+
+impl Block {
+    /// Whether nothing checked these bytes: the pointer names no
+    /// checksum (`checksum=off`), so what a member gave is what there
+    /// is — a stale side, a wrong parity, a flipped bit and all. Read,
+    /// and not verified: counted with the verified, such a volume was
+    /// reported as read through its checksums like any other.
+    pub fn unverified(&self) -> bool {
+        self.verify == Verify::NotChecked && !self.embedded
+    }
 }
 
 /// Of two reasons a copy could not be had, the one worth reporting: a
@@ -2043,6 +2058,7 @@ impl<'a> PoolReader<'a> {
             return Ok(Block {
                 data,
                 verify: Verify::NotChecked,
+                embedded: true,
                 attempts: Vec::new(),
             });
         }
@@ -2115,6 +2131,7 @@ impl<'a> PoolReader<'a> {
                 Ok(Block {
                     data,
                     verify,
+                    embedded: false,
                     attempts,
                 })
             }
@@ -2253,6 +2270,49 @@ mod tests {
         assert_eq!(block.attempts[0].result, Ok(Verify::Mismatch));
         assert_eq!(block.attempts[0].device, Some(0));
         assert_eq!(block.attempts[1].device, Some(1));
+    }
+
+    /// A block whose pointer names no checksum (`checksum=off`) is read,
+    /// and verified by nothing: whatever a member holds there is the
+    /// block. It says so, apart from one that verified — and apart from
+    /// an embedded block, whose bytes lie in a pointer the block above
+    /// it was verified with.
+    #[test]
+    fn a_block_with_no_checksum_is_read_and_says_nothing_checked_it() {
+        let pool = Pool::mirror("tank", 0x77, 12).txgs(&[(100, 1)]);
+        let (raw, checked) = compressed();
+        let unchecked = {
+            let bp = Builder::new()
+                .dva(0, 0, 0x10000, raw.len() as u64, false)
+                .sizes(payload().len() as u64, raw.len() as u64)
+                .props(15, 2, 19, 0)
+                .births(0, 100, 1)
+                .bytes(Endian::Little);
+            BlkPtr::parse(&bp, Endian::Little).unwrap()
+        };
+        let mut m0 = pool.member_image(0, SIZE);
+        let m1 = pool.member_image(1, SIZE);
+        write_at_dva(&mut m0, 0x10000, &raw);
+        let (sources, assembly) = reader_over(vec![Some(m0), Some(m1)]);
+        let reader = PoolReader::new(&assembly, as_dyn(&sources));
+
+        let block = reader.read_block(&checked, false).unwrap();
+        assert!(!block.unverified(), "fletcher4 verified it");
+        let block = reader.read_block(&unchecked, false).unwrap();
+        assert_eq!(block.data, payload());
+        assert_eq!(block.verify, Verify::NotChecked);
+        assert!(block.unverified());
+
+        let small = b"held in the pointer itself";
+        let bp = Builder::new()
+            .embedded(small, small.len() as u64, 2, 19)
+            .births(0, 100, 1)
+            .bytes(Endian::Little);
+        let block = reader
+            .read_block(&BlkPtr::parse(&bp, Endian::Little).unwrap(), false)
+            .unwrap();
+        assert_eq!(block.data, small);
+        assert!(!block.unverified(), "the block above covers it");
     }
 
     #[test]
