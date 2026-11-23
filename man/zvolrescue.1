@@ -310,6 +310,18 @@ read while those zeros are hashed, and a run interrupted there says
 so.
 A volume whose size reads as more than a file or a device can hold
 (2^63 \- 1 bytes) is not extracted: that is no volume's size.
+A block that cannot be read is written as zeros and its range listed,
+with the reason; blocks lost one after another for one reason are one
+range, as long as they go on.
+The summary names the first hundred ranges, the record
+.Pq Fl f Cm json , Fl -evidence-log
+the first ten thousand
+.Pq Li bad ,
+and what is past that is counted, in ranges and in bytes
+.Pq Li bad_unlisted :
+a volume with a vdev gone loses blocks by the million, and a record
+of each is no evidence of anything more.
+The count of blocks written as zeros is of every one.
 The dataset comes first so that the variable-length list of members
 can follow it.
 Without
@@ -391,7 +403,7 @@ device \(em ends the run there the same way, and
 continues once the output has room.
 The state also keeps the ranges the blocks before it lost, and the run
 that takes it up reports them with its own: a resumed image with
-blocks written as zeros lists every one of them and ends with exit
+blocks written as zeros lists them as one image's and ends with exit
 status 4, as a run that was never interrupted would.
 A run that could not write its state says so, and names the block a
 resume will start at instead; one that finds no state to take up says

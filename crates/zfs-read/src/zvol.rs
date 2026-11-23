@@ -23,17 +23,81 @@ pub enum OnError {
     Abort,
 }
 
-/// One unreadable range.
+/// One unreadable range: bytes that follow one another and could not
+/// be read for one reason — a block, part of one, or a run of blocks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BadRange {
     /// Byte offset in the volume.
     pub offset: u64,
     /// Length in bytes.
     pub len: u64,
-    /// Block id.
+    /// Block id: of the first block, when the range is a run of them.
     pub blkid: u64,
     /// Why.
     pub reason: String,
+}
+
+/// The most unreadable ranges an extraction lists ([`Report::bad`]):
+/// the ones past it are counted ([`Report::unlisted`]), not kept. A
+/// volume with one of two top-level vdevs gone has every other run of
+/// its blocks unreadable, and each was a record in memory, a line on
+/// the terminal and an entry of the evidence log: 64 524 of them for
+/// half a gibibyte of 4 KiB blocks, about 65 GiB of memory by the end
+/// of a terabyte. Enough for every bad sector of a disk that can be
+/// imaged at all.
+pub const MAX_BAD_LISTED: usize = 10_000;
+
+/// Unreadable ranges that are not in a list: how many, and their bytes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Unlisted {
+    /// Ranges, each a run of bytes lost for one reason.
+    pub ranges: u64,
+    /// The bytes of them all.
+    pub bytes: u64,
+}
+
+impl Unlisted {
+    /// Whether every range is listed.
+    pub fn is_none(&self) -> bool {
+        self.ranges == 0
+    }
+}
+
+/// Add `range`, which follows every range before it, to `bad`: joined
+/// to the last when it goes on where that one ends, for the same
+/// reason; listed while the list is under [`MAX_BAD_LISTED`]; counted
+/// in `unlisted` otherwise. `open` is where the range counted last
+/// ends, and why, so that a run going on past the list is one range
+/// there too.
+pub fn lose(
+    bad: &mut Vec<BadRange>,
+    unlisted: &mut Unlisted,
+    open: &mut Option<(u64, String)>,
+    range: BadRange,
+) {
+    if unlisted.is_none() {
+        if let Some(last) = bad.last_mut() {
+            if last.offset.checked_add(last.len) == Some(range.offset)
+                && last.reason == range.reason
+            {
+                last.len += range.len;
+                return;
+            }
+        }
+        if bad.len() < MAX_BAD_LISTED {
+            bad.push(range);
+            return;
+        }
+    }
+    unlisted.bytes = unlisted.bytes.saturating_add(range.len);
+    let end = range.offset.saturating_add(range.len);
+    match open {
+        Some((at, why)) if *at == range.offset && *why == range.reason => *at = end,
+        _ => {
+            unlisted.ranges += 1;
+            *open = Some((end, range.reason));
+        }
+    }
 }
 
 /// Outcome of an extraction.
@@ -61,8 +125,11 @@ pub struct Report {
     pub blocks_salvaged: u64,
     /// Bytes of real data written.
     pub bytes_written: u64,
-    /// Unreadable ranges, in order.
+    /// Unreadable ranges, in order: at most [`MAX_BAD_LISTED`] of them,
+    /// each as long as what was lost goes on for one reason.
     pub bad: Vec<BadRange>,
+    /// The ranges after those, counted and not listed.
+    pub unlisted: Unlisted,
     /// True when `OnError::Abort` stopped the extraction early, or a
     /// device's refusal did (SPEC F-33, N-10).
     pub aborted: bool,
@@ -297,6 +364,7 @@ pub fn extract_from(
         blocks_salvaged: 0,
         bytes_written: 0,
         bad: Vec::new(),
+        unlisted: Unlisted::default(),
         aborted: false,
         stopped_by_medium: None,
         interrupted_at: None,
@@ -309,6 +377,9 @@ pub fn extract_from(
     };
     let zeros = vec![0u8; bs as usize];
     let mut hashed_to = (start_block * bs).min(volsize);
+    // Where the unreadable range counted last ends, once the list is
+    // full ([`lose`]).
+    let mut open = None;
     trace!(
         "zvol",
         "extract: volsize {volsize} blocksize {bs} maxblkid {} -> {blocks_total} blocks, starting at {start_block}",
@@ -422,14 +493,19 @@ pub fn extract_from(
                                 refused(&mut report, blkid, offset, &e);
                                 break;
                             }
-                            report.bad.push(BadRange {
-                                offset,
-                                len: take as u64,
-                                blkid,
-                                reason: format!(
-                                    "sector(s) unreadable: {e}; none of the block could be read"
-                                ),
-                            });
+                            lose(
+                                &mut report.bad,
+                                &mut report.unlisted,
+                                &mut open,
+                                BadRange {
+                                    offset,
+                                    len: take as u64,
+                                    blkid,
+                                    reason: format!(
+                                        "sector(s) unreadable: {e}; none of the block could be read"
+                                    ),
+                                },
+                            );
                             report.blocks_zeroed += 1;
                             digests.update(&zeros[..take]);
                         } else {
@@ -438,14 +514,19 @@ pub fn extract_from(
                                 break;
                             }
                             for (start, len) in within {
-                                report.bad.push(BadRange {
-                                    offset: offset + start,
-                                    len,
-                                    blkid,
-                                    reason: format!(
-                                        "sector(s) unreadable: {e}; the rest of the block was read and kept unverified (the checksum covers the whole block)"
-                                    ),
-                                });
+                                lose(
+                                    &mut report.bad,
+                                    &mut report.unlisted,
+                                    &mut open,
+                                    BadRange {
+                                        offset: offset + start,
+                                        len,
+                                        blkid,
+                                        reason: format!(
+                                            "sector(s) unreadable: {e}; the rest of the block was read and kept unverified (the checksum covers the whole block)"
+                                        ),
+                                    },
+                                );
                             }
                             trace!(
                                 "zvol",
@@ -461,17 +542,22 @@ pub fn extract_from(
                             refused(&mut report, blkid, offset, &e);
                             break;
                         }
-                        report.bad.push(BadRange {
-                            offset,
-                            len: take as u64,
-                            blkid,
-                            reason: match bp {
-                                Some(bp) if matches!(e, ReadError::Io(_)) => {
-                                    format!("{e}; {}", why_not_salvaged(obj.reader(), bp))
-                                }
-                                _ => e.to_string(),
+                        lose(
+                            &mut report.bad,
+                            &mut report.unlisted,
+                            &mut open,
+                            BadRange {
+                                offset,
+                                len: take as u64,
+                                blkid,
+                                reason: match bp {
+                                    Some(bp) if matches!(e, ReadError::Io(_)) => {
+                                        format!("{e}; {}", why_not_salvaged(obj.reader(), bp))
+                                    }
+                                    _ => e.to_string(),
+                                },
                             },
-                        });
+                        );
                         report.blocks_zeroed += 1;
                         digests.update(&zeros[..take]);
                     }
@@ -744,6 +830,68 @@ mod tests {
             interrupted_said(640, 640),
             "after its last block, in the hole that ends the volume (all 640 block(s) are written)"
         );
+    }
+
+    /// What is lost block after block for one reason is one range, as
+    /// long as it goes on; the list holds the first ranges and the rest
+    /// are counted, a run past the list as one range there too. Each
+    /// unreadable block was a record of its own, without end.
+    #[test]
+    fn unreadable_ranges_are_joined_and_the_list_is_bounded() {
+        let range = |offset: u64, len: u64, why: &str| BadRange {
+            offset,
+            len,
+            blkid: offset / 4096,
+            reason: why.into(),
+        };
+        let (mut bad, mut unlisted, mut open) = (Vec::new(), Unlisted::default(), None);
+        let mut add = |r: BadRange, bad: &mut Vec<BadRange>, unlisted: &mut Unlisted| {
+            lose(bad, unlisted, &mut open, r)
+        };
+        add(range(0, 4096, "gone"), &mut bad, &mut unlisted);
+        add(range(4096, 4096, "gone"), &mut bad, &mut unlisted);
+        // The same bytes on, for another reason; then a gap.
+        add(range(8192, 4096, "checksum"), &mut bad, &mut unlisted);
+        add(range(16384, 4096, "checksum"), &mut bad, &mut unlisted);
+        // Part of a block, and the block after it.
+        add(range(24576 + 512, 3584, "sector"), &mut bad, &mut unlisted);
+        add(range(28672, 1024, "sector"), &mut bad, &mut unlisted);
+        let got: Vec<(u64, u64, u64)> = bad.iter().map(|b| (b.blkid, b.offset, b.len)).collect();
+        assert_eq!(
+            got,
+            [
+                (0, 0, 8192),
+                (2, 8192, 4096),
+                (4, 16384, 4096),
+                (6, 25088, 4608)
+            ]
+        );
+        assert!(unlisted.is_none());
+
+        // Fill the list with ranges that do not touch, then go past it.
+        let mut at = 1 << 20;
+        while bad.len() < MAX_BAD_LISTED {
+            add(range(at, 4096, "gone"), &mut bad, &mut unlisted);
+            at += 8192;
+        }
+        // The last listed range still grows while what is lost goes on.
+        add(range(at - 4096, 4096, "gone"), &mut bad, &mut unlisted);
+        assert_eq!(bad.last().unwrap().len, 8192);
+        assert!(unlisted.is_none());
+        // Past the list: three blocks in a row are one range, a fourth
+        // apart is another, and none is listed.
+        at += 8192;
+        for i in 0..3 {
+            add(range(at + i * 4096, 4096, "gone"), &mut bad, &mut unlisted);
+        }
+        add(range(at + (1 << 20), 4096, "gone"), &mut bad, &mut unlisted);
+        assert_eq!(bad.len(), MAX_BAD_LISTED);
+        assert_eq!((unlisted.ranges, unlisted.bytes), (2, 4 * 4096));
+        // Nothing joins the list once anything is past it.
+        let end = bad.last().map(|b| b.offset + b.len).unwrap();
+        add(range(end, 4096, "gone"), &mut bad, &mut unlisted);
+        assert_eq!(bad.last().unwrap().len, 8192);
+        assert_eq!(unlisted.ranges, 3);
     }
 
     #[test]

@@ -371,7 +371,16 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     if !bad.is_empty() {
         volume["bad"] = bad.clone().into();
     }
-    let out = serde_json::json!({
+    // The ranges past the list, counted: as `zvolrescue dump` has them.
+    let unlisted = (!report.unlisted.is_none()).then(|| {
+        serde_json::json!({
+            "ranges": report.unlisted.ranges, "bytes": report.unlisted.bytes,
+        })
+    });
+    if let Some(u) = &unlisted {
+        volume["bad_unlisted"] = u.clone();
+    }
+    let mut out = serde_json::json!({
         "candidate": c.id,
         "pool": pool.name,
         "pool_guid": guid,
@@ -398,6 +407,9 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         "sha1": report.sha1,
         "md5": report.md5,
     });
+    if let Some(u) = unlisted {
+        out["bad_unlisted"] = u;
+    }
     match g.format {
         Format::Json => println!(
             "{}",
@@ -429,11 +441,19 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             if let Some(b) = report.bad.first() {
                 outln!(
                     "  {} unreadable range(s), the first at byte {} (block {}): {}",
-                    report.bad.len(),
+                    report.bad.len() as u64 + report.unlisted.ranges,
                     b.offset,
                     b.blkid,
                     b.reason
                 );
+                if !report.unlisted.is_none() {
+                    outln!(
+                        "  {} of them, {} bytes, are counted and not listed: the record lists the first {}",
+                        report.unlisted.ranges,
+                        report.unlisted.bytes,
+                        report.bad.len()
+                    );
+                }
             }
             if let Some(why) = &report.output_failed {
                 outln!("  OUTPUT FAILED (exit 6): {why}; the image is incomplete: {resume_words}");

@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use zfs_read::hash::{Digests, Extra};
-use zfs_read::zvol::{BadRange, Report};
+use zfs_read::zvol::{BadRange, Report, Unlisted};
 use zvolrescue_io::SparseFile;
 
 /// Resume state written next to the output image.
@@ -74,9 +74,17 @@ impl State {
 /// own.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Lost {
-    /// The unreadable ranges, in order.
+    /// The unreadable ranges, in order: the first
+    /// [`MAX_BAD_LISTED`](zfs_read::zvol::MAX_BAD_LISTED) of the image
+    /// so far, however many runs it took.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bad: Vec<LostRange>,
+    /// The ranges after those, counted and not listed, and their bytes.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub unlisted_ranges: u64,
+    /// The bytes of the ranges not listed.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub unlisted_bytes: u64,
     /// Blocks written as zeros.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub blocks_zeroed: u64,
@@ -120,43 +128,71 @@ impl Lost {
     /// stopped it at, or the block an abort stopped at — which is not
     /// counted, and whose range is left out here, because the resume
     /// reads it again.
+    ///
+    /// The list stays the first ranges of the image: a state taken up
+    /// by run after run grew by each run's own list, and the image of a
+    /// volume with a vdev gone had a state file rewritten every five
+    /// seconds with every range so far.
     pub fn and(&self, report: &Report, blocks_done: u64) -> Lost {
-        let mut bad = self.bad.clone();
-        bad.extend(
-            report
-                .bad
-                .iter()
-                .filter(|b| b.blkid < blocks_done)
+        let (bad, unlisted) = self.with(
+            report.bad.iter().filter(|b| b.blkid < blocks_done).cloned(),
+            report.unlisted,
+        );
+        Lost {
+            bad: bad
+                .into_iter()
                 .map(|b| LostRange {
                     blkid: b.blkid,
                     offset: b.offset,
                     len: b.len,
-                    reason: b.reason.clone(),
-                }),
-        );
-        Lost {
-            bad,
+                    reason: b.reason,
+                })
+                .collect(),
+            unlisted_ranges: unlisted.ranges,
+            unlisted_bytes: unlisted.bytes,
             blocks_zeroed: self.blocks_zeroed + report.blocks_zeroed,
             blocks_salvaged: self.blocks_salvaged + report.blocks_salvaged,
             blocks_unverified: self.blocks_unverified + report.blocks_unverified,
         }
     }
 
-    /// Put these in `report`, ahead of what it lost itself: its ranges
-    /// and counts are then those of the whole image.
-    pub fn into_report(self, report: &mut Report) {
+    /// These ranges and then `later`, which follow them, as one list
+    /// under the limit, and what is past it: `after` and what of
+    /// `later` did not fit.
+    fn with(
+        &self,
+        later: impl IntoIterator<Item = BadRange>,
+        after: Unlisted,
+    ) -> (Vec<BadRange>, Unlisted) {
         let mut bad: Vec<BadRange> = self
             .bad
-            .into_iter()
+            .iter()
             .map(|b| BadRange {
                 offset: b.offset,
                 len: b.len,
                 blkid: b.blkid,
-                reason: b.reason,
+                reason: b.reason.clone(),
             })
             .collect();
-        bad.append(&mut report.bad);
+        let mut unlisted = Unlisted {
+            ranges: self.unlisted_ranges,
+            bytes: self.unlisted_bytes,
+        };
+        let mut open = None;
+        for b in later {
+            zfs_read::zvol::lose(&mut bad, &mut unlisted, &mut open, b);
+        }
+        unlisted.ranges += after.ranges;
+        unlisted.bytes = unlisted.bytes.saturating_add(after.bytes);
+        (bad, unlisted)
+    }
+
+    /// Put these in `report`, ahead of what it lost itself: its ranges
+    /// and counts are then those of the whole image.
+    pub fn into_report(self, report: &mut Report) {
+        let (bad, unlisted) = self.with(std::mem::take(&mut report.bad), report.unlisted);
         report.bad = bad;
+        report.unlisted = unlisted;
         report.blocks_zeroed += self.blocks_zeroed;
         report.blocks_salvaged += self.blocks_salvaged;
         report.blocks_unverified += self.blocks_unverified;
@@ -1123,6 +1159,7 @@ mod tests {
             blocks_salvaged: 0,
             bytes_written: 0,
             bad,
+            unlisted: Unlisted::default(),
             aborted: false,
             stopped_by_medium: None,
             interrupted_at: None,
@@ -1171,6 +1208,39 @@ mod tests {
         write(&out, &path(&out), &expected(), 2, &Lost::default(), None).unwrap();
         let text = std::fs::read_to_string(path(&out)).unwrap();
         assert!(!text.contains("lost"), "{text}");
+
+        // What a resume goes on losing where the run before it left
+        // off, for the same reason, is one range of the image, and the
+        // list of an image is under the limit however many runs made
+        // it: each run's own list was added to the state's, without
+        // end. What is past the limit is counted, and comes back.
+        let earlier = Lost::default().and(&report(vec![range(0, "gone"), range(1, "gone")], 2), 2);
+        assert_eq!(earlier.bad.len(), 1);
+        assert_eq!((earlier.bad[0].blkid, earlier.bad[0].len), (0, 8192));
+        let both = earlier.and(&report(vec![range(2, "gone"), range(3, "other")], 2), 4);
+        let lens: Vec<(u64, u64)> = both.bad.iter().map(|b| (b.blkid, b.len)).collect();
+        assert_eq!(lens, [(0, 12288), (3, 4096)]);
+
+        let max = zfs_read::zvol::MAX_BAD_LISTED as u64;
+        // Every other block lost: no two ranges touch.
+        let scattered = |from: u64, n: u64| -> Vec<BadRange> {
+            (from..from + n).map(|i| range(i * 2, "gone")).collect()
+        };
+        let full = Lost::default().and(&report(scattered(0, max), max), u64::MAX);
+        assert_eq!((full.bad.len() as u64, full.unlisted_ranges), (max, 0));
+        let over = full.and(&report(scattered(max, 5), 5), u64::MAX);
+        assert_eq!(over.bad.len() as u64, max);
+        assert_eq!((over.unlisted_ranges, over.unlisted_bytes), (5, 5 * 4096));
+        assert_eq!(over.blocks_zeroed, max + 5);
+        let mut last = report(scattered(max + 5, 2), 2);
+        over.clone().into_report(&mut last);
+        assert_eq!(last.bad.len() as u64, max);
+        assert_eq!((last.unlisted.ranges, last.unlisted.bytes), (7, 7 * 4096));
+        assert_eq!(last.blocks_zeroed, max + 7);
+        // And through the state file.
+        write(&out, &path(&out), &expected(), 2, &over, Some(&zeros)).unwrap();
+        let back: State = serde_json::from_slice(&std::fs::read(path(&out)).unwrap()).unwrap();
+        assert_eq!(back.lost, over);
     }
 
     /// An image named by the stream the summary goes to is refused: the
@@ -1206,6 +1276,7 @@ mod tests {
             blocks_salvaged: 0,
             bytes_written: 0,
             bad: Vec::new(),
+            unlisted: Unlisted::default(),
             aborted: false,
             stopped_by_medium: None,
             interrupted_at: Some(3),

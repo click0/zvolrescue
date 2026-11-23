@@ -1180,6 +1180,91 @@ fn dump_takes_the_legacy_digests_in_the_same_pass_and_only_when_asked() {
     assert!(err.contains("unknown digest \"crc32\""), "{err}");
 }
 
+/// Blocks lost one after another for one reason are one range of the
+/// image, as long as they go on: each was a record of its own, a line
+/// of the summary and an entry of the evidence log, and a volume with a
+/// vdev gone had them by the ten thousand. A block lost apart from them
+/// is a range of its own, and the count of blocks is every block.
+#[test]
+fn blocks_lost_in_a_row_are_one_range() {
+    use zfs_read::fixture::{dense_volume_members, Dense};
+
+    let dir = scratch("dump-run");
+    let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1)]);
+    let dense = Dense {
+        bytes: 1 << 20,
+        blocksize: 8192,
+        compression: zfs_ondisk::blkptr::Compression::Off,
+    };
+    let (mut members, _) = dense_volume_members(&mut pool, dense);
+    // The volume's blocks lie one after another where the allocator
+    // put them: both copies of five in a row, and of one thirty on.
+    for block in [10u64, 11, 12, 13, 14, 40] {
+        let at = (LABEL_START_SIZE + 0x20_0000 + block * 8192) as usize;
+        for m in members.iter_mut() {
+            m[at + 5] ^= 0xff;
+        }
+    }
+    let paths = write_members(&dir, &members);
+    let image = dir.join("out.img").to_string_lossy().into_owned();
+    let (code, out, err) = run(&[
+        "-q",
+        "-f",
+        "json",
+        "dump",
+        "tank/vm/disk0",
+        &paths[0],
+        &paths[1],
+        "-o",
+        &image,
+    ]);
+    assert_eq!(code, 4, "{out}\n{err}");
+    let v = &json(&out)["volumes"][0];
+    assert_eq!(v["blocks_zeroed"], 6, "{v}");
+    let bad: Vec<(u64, u64, u64)> = v["bad"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| {
+            (
+                b["blkid"].as_u64().unwrap(),
+                b["offset"].as_u64().unwrap(),
+                b["len"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    let first = bad[0].0;
+    assert_eq!(
+        bad,
+        [
+            (first, first * 8192, 5 * 8192),
+            (first + 30, (first + 30) * 8192, 8192)
+        ],
+        "{v}"
+    );
+    assert!(v.get("bad_unlisted").is_none(), "{v}");
+
+    let (code, out, _) = run(&[
+        "-q",
+        "dump",
+        "tank/vm/disk0",
+        &paths[0],
+        &paths[1],
+        "-o",
+        &image,
+    ]);
+    assert_eq!(code, 4, "{out}");
+    assert_eq!(out.matches("  unreadable: blkid ").count(), 2, "{out}");
+    assert!(
+        out.contains(&format!(
+            "  unreadable: blkid {first} offset {} len 40960: ",
+            first * 8192
+        )) && out.contains("WARNING: 2 unreadable range(s) were written as zeros (exit 4)"),
+        "{out}"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn an_image_with_zeroed_blocks_exits_4_and_a_healed_one_exits_0() {
     let dir = scratch("dump-zeroed");

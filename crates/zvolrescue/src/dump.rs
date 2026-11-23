@@ -47,6 +47,17 @@ struct BadOut {
     reason: String,
 }
 
+/// Unreadable ranges that are counted and not listed.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct UnlistedOut {
+    ranges: u64,
+    bytes: u64,
+}
+
+/// How many unreadable ranges the summary names one by one; the record
+/// has every one that is listed.
+const BAD_PRINTED: usize = 100;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DumpOut {
     dataset: String,
@@ -118,8 +129,14 @@ struct DumpOut {
     #[serde(skip)]
     image_bytes: u64,
     seconds: f64,
+    /// Unreadable ranges, in order: each a run of bytes lost for one
+    /// reason, `blkid` the first block of it. The first
+    /// `MAX_BAD_LISTED` of them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     bad: Vec<BadOut>,
+    /// The ranges after those: counted, not listed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bad_unlisted: Option<UnlistedOut>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     warnings: Vec<String>,
     /// Encryption suite the volume was decrypted with.
@@ -826,6 +843,10 @@ fn dump_one(
                 reason: b.reason.clone(),
             })
             .collect(),
+        bad_unlisted: (!report.unlisted.is_none()).then_some(UnlistedOut {
+            ranges: report.unlisted.ranges,
+            bytes: report.unlisted.bytes,
+        }),
         warnings: ds
             .warnings
             .iter()
@@ -892,13 +913,29 @@ fn print_text(out: &RunOut) {
         for w in &v.warnings {
             outln!("  warning: {w}");
         }
-        for b in &v.bad {
+        // The first of them by name: a volume with a vdev gone has
+        // them by the ten thousand, and each was a line here.
+        for b in v.bad.iter().take(BAD_PRINTED) {
             outln!(
                 "  unreadable: blkid {} offset {} len {}: {}",
                 b.blkid,
                 b.offset,
                 b.len,
                 b.reason
+            );
+        }
+        if v.bad.len() > BAD_PRINTED {
+            outln!(
+                "  unreadable: {} more range(s) are in the record (-f json, --evidence-log)",
+                v.bad.len() - BAD_PRINTED
+            );
+        }
+        if let Some(u) = &v.bad_unlisted {
+            outln!(
+                "  unreadable: {} range(s) more, {} bytes, are counted and not listed: the record lists the first {}",
+                u.ranges,
+                u.bytes,
+                v.bad.len()
             );
         }
         if let Some(why) = &v.output_failed {
@@ -922,7 +959,7 @@ fn print_text(out: &RunOut) {
         } else if !v.bad.is_empty() {
             outln!(
                 "  WARNING: {} unreadable range(s) were written as zeros (exit 4); rerun with --strict to refuse partial output",
-                v.bad.len()
+                v.bad.len() as u64 + v.bad_unlisted.map_or(0, |u| u.ranges)
             );
         }
     }

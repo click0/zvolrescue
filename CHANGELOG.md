@@ -17,6 +17,23 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ### Fixed
 
+* **`dump`: unreadable blocks are listed as ranges, and the list has an
+  end.** Every block that could not be read was a record kept in
+  memory, a line of the summary and an entry of the JSON and of the
+  evidence log, each with its reason, and nothing joined two that lay
+  side by side. Half a gibibyte of 4 KiB blocks with one of two
+  top-level vdevs gone was 64 524 lines on the terminal and one line of
+  5.9 MB in the log; a terabyte of 8 KiB blocks would have been some
+  65 GiB of memory by the end of a run of hours, against N-03's 512
+  MiB — and a vdev gone is the case the tool is for. Blocks lost one
+  after another for one reason are now one range, as long as they go
+  on (`blkid` is its first block); the summary names the first hundred
+  ranges, the record the first 10 000 (`bad`), and the rest are
+  counted, in ranges and in bytes (`bad_unlisted`). The same half
+  gibibyte is 5 471 ranges, 105 lines and half a megabyte of log. The
+  count of blocks written as zeros is of every one, as before, and the
+  resume state carries the bounded list and the count, where it grew
+  by every run's own list. `zvolcarve dump` has the same record.
 * **A size no image can have is refused, and a long hole at a volume's
   end is said.** `zvolcarve dump --size 18446744073709551615` was
   taken, and the run hashed the zeros after the volume's last block —
