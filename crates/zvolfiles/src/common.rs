@@ -162,20 +162,31 @@ pub fn resolve_path_or_why(
     txg: u64,
 ) -> Result<(u64, Vec<u8>), String> {
     fs.resolve(&os_bytes(asked)).map_err(|e| {
-        let e = match e {
-            zfs_read::zio::ReadError::Io(m) => m,
-            other => other.to_string(),
-        };
+        use zfs_read::zpl::Unresolved;
         let shown = asked.to_string_lossy();
         // The reader's message starts with the path; the flag and the
         // txg say the rest.
-        let why = e
-            .strip_prefix(&format!("{shown}: "))
-            .unwrap_or(&e)
-            .to_string();
-        format!(
-            "--path {shown}: {why} at txg {txg}; a file removed since may still be at an older --txg"
-        )
+        let said = |e: &str| {
+            e.strip_prefix(&format!("{shown}: "))
+                .unwrap_or(e)
+                .to_string()
+        };
+        match e {
+            // More than one entry answers to the name: that is so at
+            // every transaction group that holds them, and an older one
+            // is no answer to it.
+            Unresolved::Several(m) => format!("--path {shown}: {} (txg {txg})", said(&m)),
+            Unresolved::Read(e) => {
+                let e = match e {
+                    zfs_read::zio::ReadError::Io(m) => m,
+                    other => other.to_string(),
+                };
+                format!(
+                    "--path {shown}: {} at txg {txg}; a file removed since may still be at an older --txg",
+                    said(&e)
+                )
+            }
+        }
     })
 }
 

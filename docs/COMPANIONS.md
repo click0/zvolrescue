@@ -548,6 +548,13 @@ disagreement could pick the wrong file; behind one it cannot — the worst
 it can do is leave a file unfound, which is what would have happened
 anyway.
 
+A name that is on disk under no spelling of its own may answer to more
+than one entry once it is folded or normalized: `casesensitivity=mixed`
+keeps `Readme` beside `README`, and `readme` is either. Such a path is
+neither. It is refused with the names that answer to it (exit 3), and
+the one meant is asked for as the dataset spells it; the first in byte
+order used to be taken, without a word.
+
 The property is a bit set (`U8_CANON_DECOMP` 0x10, `U8_COMPAT_DECOMP`
 0x20, `U8_CANON_COMP` 0x40) and is read by its bits; a value whose bits
 name none of the four forms is treated as no normalization rather than

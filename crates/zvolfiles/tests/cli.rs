@@ -1200,3 +1200,72 @@ fn a_name_of_codes_is_printed_as_text() {
     );
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// On a dataset with `casesensitivity=mixed` a `--path` that is on disk
+/// under no spelling of its own, and that two entries answer to once
+/// case is folded, is neither of them: it was the first in byte order,
+/// without a word. It is named with both (exit 3), and each is found as
+/// it is spelled; a name only one entry answers to is still found.
+#[test]
+fn a_path_two_names_answer_to_is_neither() {
+    let dir = scratch("mixed-case");
+    let mut pool = Pool::mirror("tank", 0x5eed_0000_0000_0004, 12)
+        .txgs(&[(4816228, 1757100000), (4816229, 1757100005)]);
+    let m: Vec<String> = zpl_members_with(
+        &mut pool,
+        64 * 1024 * 1024,
+        Matching::MixedCase,
+        Spill::Attributes,
+    )
+    .iter()
+    .enumerate()
+    .map(|(i, m)| {
+        let p = dir.join(format!("member{i}.img"));
+        std::fs::write(&p, m).expect("write member");
+        p.to_string_lossy().into_owned()
+    })
+    .collect();
+
+    let (code, err) = run(&["list", "tank/fs", &m[0], &m[1], "--path", "Hello.txt"]);
+    assert_eq!(code, 3, "{err}");
+    assert!(
+        err.contains(
+            "--path Hello.txt: Hello.txt is not in the directory . as given, and 2 entries of it answer to it once letter case is folded: HELLO.TXT, hello.txt. Name the one meant as the dataset spells it (txg 4816229)"
+        ) && !err.contains("older --txg"),
+        "{err}"
+    );
+    for (path, object) in [("HELLO.TXT", 10), ("hello.txt", 6), ("SUB/Deep.TXT", 9)] {
+        let (code, v) = json_of(&[
+            "-q", "-f", "json", "list", "tank/fs", &m[0], &m[1], "--path", path,
+        ]);
+        assert_eq!(code, 0, "{path}: {v}");
+        assert_eq!(v["files"][0]["object"], object, "{path}: {v}");
+    }
+    // The others given are written, and this one named (exit 3).
+    let out = dir.join("out");
+    let (code, err) = run(&[
+        "-q",
+        "extract",
+        "tank/fs",
+        &m[0],
+        &m[1],
+        "-o",
+        out.to_str().unwrap(),
+        "--path",
+        "Hello.txt",
+        "--path",
+        "Sub",
+    ]);
+    assert_eq!(code, 3, "{err}");
+    assert!(out.join("sub/deep.txt").is_file() && !out.join("hello.txt").exists());
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(out.join("manifest.json")).unwrap()).unwrap();
+    assert!(
+        manifest["not_found"][0]
+            .as_str()
+            .unwrap()
+            .contains("2 entries of it answer to it"),
+        "{manifest}"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}

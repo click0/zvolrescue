@@ -193,6 +193,16 @@ It is taken as the dataset spells it: a name found by folding case or
 by normalizing is written under the name on disk, and
 .Ql \&./
 is dropped.
+A name that is not on disk as given, and that more than one entry of
+its directory answers to once case is folded or names normalized
+\(em
+.Ql casesensitivity=mixed
+keeps
+.Pa Readme
+beside
+.Pa README
+\(em is none of them: it is named with the entries that answer to it
+(exit 3), to be given as the dataset spells the one meant.
 The directory a path names is written with its own metadata, and a
 path inside another one given is written once.
 A path not in the dataset at that TXG is named, in the manifest too

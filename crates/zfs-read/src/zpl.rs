@@ -555,7 +555,12 @@ impl Filesystem<'_, '_> {
     /// disagreement between the two sets of tables can do is leave a
     /// file unfound, which is what would have happened anyway.
     pub fn lookup_bytes(&self, path: &[u8]) -> Result<u64, ReadError> {
-        self.resolve(path).map(|(object, _)| object)
+        self.resolve(path)
+            .map(|(object, _)| object)
+            .map_err(|e| match e {
+                Unresolved::Read(e) => e,
+                Unresolved::Several(why) => ReadError::Io(why),
+            })
     }
 
     /// Resolve a path, and say what it is called on disk.
@@ -566,7 +571,14 @@ impl Filesystem<'_, '_> {
     /// was written under the spelling typed, a name that is nowhere on
     /// disk (Z-09: a file comes out called what it was called), and
     /// `./sub` was kept as typed and refused as a path no file can have.
-    pub fn resolve(&self, path: &[u8]) -> Result<(u64, Vec<u8>), ReadError> {
+    ///
+    /// A name that is not on disk as given may answer to more than one
+    /// entry once it is folded or normalized: `casesensitivity=mixed`
+    /// keeps `Readme` beside `README`, and `readme` is either. The
+    /// first in byte order was taken without a word. It is neither
+    /// ([`Unresolved::Several`]): which one is meant is the asker's to
+    /// say, in the spelling on disk.
+    pub fn resolve(&self, path: &[u8]) -> Result<(u64, Vec<u8>), Unresolved> {
         let shown = String::from_utf8_lossy(path).into_owned();
         let mut at = self.root;
         let mut on_disk: Vec<u8> = Vec::new();
@@ -583,7 +595,8 @@ impl Filesystem<'_, '_> {
                 return Err(ReadError::Io(format!(
                     "{shown}: {} is not a directory",
                     String::from_utf8_lossy(&on_disk)
-                )));
+                ))
+                .into());
             }
             // Which directory did not read, where the message was the
             // checksum's alone.
@@ -595,18 +608,40 @@ impl Filesystem<'_, '_> {
                 )),
             })?;
             let entries = &read.entries;
-            let found = entries
-                .iter()
-                .find(|e| e.raw == part)
-                .or_else(|| self.matched_as_text(entries, part))
-                .ok_or_else(|| match read.lost.first() {
-                    // Not in what could be read: it may be in what could
-                    // not, and saying "no such file" would be a guess.
-                    Some((blkid, e)) => ReadError::Io(format!(
-                        "{shown}: not in the part of its directory that could be read (leaf block {blkid}: {e})"
-                    )),
-                    None => ReadError::Io(format!("{shown}: no such file or directory")),
-                })?;
+            let found = match entries.iter().find(|e| e.raw == part) {
+                Some(e) => e,
+                None => {
+                    let (by_text, how) = self.matched_as_text(entries, part);
+                    match by_text.as_slice() {
+                        [one] => *one,
+                        [] => {
+                            return Err(match read.lost.first() {
+                                // Not in what could be read: it may be in
+                                // what could not, and saying "no such
+                                // file" would be a guess.
+                                Some((blkid, e)) => ReadError::Io(format!(
+                                    "{shown}: not in the part of its directory that could be read (leaf block {blkid}: {e})"
+                                )),
+                                None => ReadError::Io(format!(
+                                    "{shown}: no such file or directory"
+                                )),
+                            }
+                            .into());
+                        }
+                        several => {
+                            let names: Vec<&str> =
+                                several.iter().map(|e| e.name.as_str()).collect();
+                            return Err(Unresolved::Several(format!(
+                                "{shown}: {} is not in the directory {} as given, and {} entries of it answer to it once {how}: {}. Name the one meant as the dataset spells it",
+                                String::from_utf8_lossy(part),
+                                shown_dir(&String::from_utf8_lossy(&on_disk)),
+                                several.len(),
+                                names.join(", ")
+                            )));
+                        }
+                    }
+                }
+            };
             on_disk = join_raw(&on_disk, &found.raw);
             at = found.object;
         }
@@ -619,30 +654,15 @@ impl Filesystem<'_, '_> {
     /// Returns nothing at all for a component that is not UTF-8, because
     /// neither folding nor normalizing means anything for bytes that are
     /// not text — and such a name can only be asked for exactly.
-    fn matched_as_text<'e>(&self, entries: &'e [DirEntry], part: &[u8]) -> Option<&'e DirEntry> {
-        let part = std::str::from_utf8(part).ok()?;
-        let fold = self.case_insensitive();
-        if fold {
-            let want = part.to_lowercase();
-            if let Some(e) = entries.iter().find(|e| e.name.to_lowercase() == want) {
-                return Some(e);
-            }
+    fn matched_as_text<'e>(
+        &self,
+        entries: &'e [DirEntry],
+        part: &[u8],
+    ) -> (Vec<&'e DirEntry>, &'static str) {
+        match std::str::from_utf8(part) {
+            Ok(part) => text_matches(entries, part, self.case_insensitive(), self.normalization()),
+            Err(_) => (Vec::new(), ""),
         }
-        let form = self.normalization()?;
-        // Folding and normalizing are independent properties and a
-        // dataset may have both; when it does, the last attempt applies
-        // both rather than making the operator choose which one the path
-        // was typed under.
-        let prepare = |s: &str| {
-            let s = form.apply(s);
-            if fold {
-                s.to_lowercase()
-            } else {
-                s
-            }
-        };
-        let want = prepare(part);
-        entries.iter().find(|e| prepare(&e.name) == want)
     }
 
     /// An object's contents as a reader.
@@ -791,6 +811,81 @@ impl Filesystem<'_, '_> {
         let len = z.size.min(4096) as usize;
         obj.read_range(0, len)
     }
+}
+
+/// Why a path was not resolved ([`Filesystem::resolve`]).
+#[derive(Debug)]
+pub enum Unresolved {
+    /// It could not be read, or it is not there.
+    Read(ReadError),
+    /// A name in it is not on disk as given, and more than one entry of
+    /// its directory answers to it once case is folded or the name
+    /// normalized. The message names them. Nothing is wrong with the
+    /// dataset, and no older transaction group would say otherwise.
+    Several(String),
+}
+
+impl From<ReadError> for Unresolved {
+    fn from(e: ReadError) -> Unresolved {
+        Unresolved::Read(e)
+    }
+}
+
+impl std::fmt::Display for Unresolved {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Unresolved::Read(e) => e.fmt(f),
+            Unresolved::Several(why) => f.write_str(why),
+        }
+    }
+}
+
+/// Every entry a name answers to when it is read as text, and what was
+/// done to it for them to: all of them, because more than one may, and
+/// then no one of them is the name. Case is folded first, where the
+/// dataset folds it; names are normalized, where it normalizes them,
+/// only when folding alone found nothing.
+///
+/// An entry whose own name is not text answers to nothing: the text
+/// printed for it is not its name.
+fn text_matches<'e>(
+    entries: &'e [DirEntry],
+    part: &str,
+    fold: bool,
+    form: Option<Normalization>,
+) -> (Vec<&'e DirEntry>, &'static str) {
+    let text = || entries.iter().filter(|e| e.name.as_bytes() == e.raw);
+    if fold {
+        let want = part.to_lowercase();
+        let found: Vec<_> = text().filter(|e| e.name.to_lowercase() == want).collect();
+        if !found.is_empty() {
+            return (found, "letter case is folded");
+        }
+    }
+    let Some(form) = form else {
+        return (Vec::new(), "");
+    };
+    // Folding and normalizing are independent properties and a dataset
+    // may have both; when it does, the last attempt applies both rather
+    // than making the operator choose which one the path was typed
+    // under.
+    let prepare = |s: &str| {
+        let s = form.apply(s);
+        if fold {
+            s.to_lowercase()
+        } else {
+            s
+        }
+    };
+    let want = prepare(part);
+    (
+        text().filter(|e| prepare(&e.name) == want).collect(),
+        if fold {
+            "letter case is folded and names are normalized"
+        } else {
+            "names are normalized"
+        },
+    )
 }
 
 /// A directory as far as it could be read.
@@ -1504,6 +1599,84 @@ mod tests {
             assert!(!fs.case_insensitive());
             assert!(fs.lookup("HELLO.TXT").is_err());
         });
+    }
+
+    /// `casesensitivity=mixed` keeps `HELLO.TXT` beside `hello.txt`.
+    /// Each is found as it is spelled, and a name only one entry
+    /// answers to is found by folding; one that both answer to is
+    /// neither, and says which they are — the first in byte order was
+    /// taken for it, without a word.
+    #[test]
+    fn a_name_two_entries_answer_to_is_neither() {
+        with_matching_fs(Matching::MixedCase, |fs| {
+            assert!(fs.case_insensitive());
+            let upper = fs
+                .lookup_bytes(crate::fixture::ZPL_UPPER_NAME)
+                .expect("as spelled");
+            let lower = fs.lookup("hello.txt").expect("as spelled");
+            assert_eq!((upper, lower), (10, 6));
+            // One entry answers: found, and spelled as on disk.
+            assert_eq!(
+                fs.resolve(b"SUB/Deep.txt").expect("folded"),
+                (9, b"sub/deep.txt".to_vec())
+            );
+            match fs.resolve(b"Hello.txt") {
+                Err(Unresolved::Several(why)) => {
+                    assert!(
+                        why.contains("2 entries of it answer to it once letter case is folded: HELLO.TXT, hello.txt"),
+                        "{why}"
+                    );
+                }
+                other => panic!("{other:?}"),
+            }
+            // A plain lookup says the same, as the error it has.
+            assert!(matches!(fs.lookup("Hello.TXT"), Err(ReadError::Io(_))));
+        });
+    }
+
+    /// What answers to a name read as text is every entry that does:
+    /// by folding where the dataset folds, by normalizing only when
+    /// folding found none, and never an entry whose own name is not
+    /// text.
+    #[test]
+    fn every_entry_a_name_answers_to_is_found() {
+        let entry = |raw: &[u8], object| DirEntry {
+            name: String::from_utf8_lossy(raw).into_owned(),
+            raw: raw.to_vec(),
+            object,
+            file_type: FileType::Regular,
+        };
+        let entries = [
+            entry(b"README", 1),
+            entry(b"Readme", 2),
+            entry(b"other", 3),
+            entry("r\u{e9}sum\u{e9}".as_bytes(), 4),
+            entry(b"caf\xe9", 5),
+        ];
+        let found = |part: &str, fold, form| {
+            let (hits, how) = text_matches(&entries, part, fold, form);
+            (hits.iter().map(|e| e.object).collect::<Vec<_>>(), how)
+        };
+        assert_eq!(
+            found("readme", true, None),
+            (vec![1, 2], "letter case is folded")
+        );
+        assert_eq!(
+            found("OTHER", true, None),
+            (vec![3], "letter case is folded")
+        );
+        assert_eq!(found("readme", false, None), (vec![], ""));
+        let form_d = Normalization::from_property(0x10);
+        assert_eq!(
+            found("re\u{301}sume\u{301}", false, form_d),
+            (vec![4], "names are normalized")
+        );
+        assert_eq!(
+            found("RE\u{301}SUME\u{301}", true, form_d),
+            (vec![4], "letter case is folded and names are normalized")
+        );
+        // The text printed for a name that is not text is not its name.
+        assert_eq!(found("CAF\u{fffd}", true, None).0, Vec::<u64>::new());
     }
 
     /// One directory, not the whole tree, when that is what was asked.

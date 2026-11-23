@@ -1983,7 +1983,15 @@ pub enum Matching {
     /// `normalization=formD`, `utf8only=on`, and a file whose name is on
     /// disk in composed form, to be found by its decomposed spelling.
     NormalizedFormD,
+    /// `casesensitivity=mixed`: names are kept and matched as they are,
+    /// and by folding case only when asked that way — so the root holds
+    /// [`ZPL_UPPER_NAME`] beside `hello.txt`, two files, which a
+    /// dataset that folds case could not.
+    MixedCase,
 }
+
+/// The file a [`Matching::MixedCase`] fixture holds beside `hello.txt`.
+pub const ZPL_UPPER_NAME: &[u8] = b"HELLO.TXT";
 
 /// One thing wrong with the ZPL fixture, written so that every checksum
 /// still agrees: damage a reader has to see from what the blocks say,
@@ -2110,19 +2118,25 @@ fn build_zpl_objset(
                 ("VERSION", 5),
                 ("ROOT", 3),
                 ("SA_ATTRS", 2),
-                ("casesensitivity", 0),
+                (
+                    "casesensitivity",
+                    match matching {
+                        Matching::MixedCase => 2,
+                        Matching::Exact | Matching::NormalizedFormD => 0,
+                    },
+                ),
                 // 0x10 is U8_CANON_DECOMP — `formD` (u8_textprep.h).
                 (
                     "normalization",
                     match matching {
-                        Matching::Exact => 0,
+                        Matching::Exact | Matching::MixedCase => 0,
                         Matching::NormalizedFormD => 0x10,
                     },
                 ),
                 (
                     "utf8only",
                     match matching {
-                        Matching::Exact => 0,
+                        Matching::Exact | Matching::MixedCase => 0,
                         Matching::NormalizedFormD => 1,
                     },
                 ),
@@ -2173,6 +2187,7 @@ fn build_zpl_objset(
     let odd_name: &[u8] = match matching {
         Matching::Exact => ZPL_LATIN1_NAME,
         Matching::NormalizedFormD => ZPL_COMPOSED_NAME,
+        Matching::MixedCase => ZPL_UPPER_NAME,
     };
     let hello: &[u8] = if damage == Some(ZplDamage::NameOfCodes) {
         ZPL_NAME_OF_CODES

@@ -17,6 +17,17 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ### Fixed
 
+* **`zvolfiles --path`: a name two entries answer to is neither.** A
+  path that is on disk under no spelling of its own is matched by
+  folding case where the dataset folds it, and a dataset with
+  `casesensitivity=mixed` may hold `Readme` beside `README`: `--path
+  readme` was `README`, the first in byte order, with no word that
+  `Readme` answers to it as well — and `--path dir` listed `DIR` and
+  not `Dir`. Such a path is named with every entry that answers to it
+  (exit 3) and asked for as the dataset spells the one meant; a name
+  one entry answers to is found as before. So with a name matched by
+  normalizing, and an entry whose own name is not text answers to
+  nothing by either.
 * **Every line of text is printed with its names shown as text.**
   v0.9.16 showed control and invisible characters as their codes where
   a name from the pool was printed — in `zvolreport verify`, `zvolfiles
