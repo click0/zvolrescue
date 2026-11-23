@@ -874,8 +874,12 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
     let mut read: Vec<PathBuf> = vec![opts.report.clone()];
     read.extend(opts.key.iter().cloned());
     read.extend(out.signature.iter().map(|s| s.path.clone()));
+    // Each once, in the order checked. Looked for in the list itself,
+    // a report of a tree of 65 000 files spent two minutes here after
+    // its answer was printed, and one of a million would have hours.
+    let mut seen: std::collections::HashSet<PathBuf> = read.iter().cloned().collect();
     for c in &out.checked {
-        if !read.contains(&c.path) {
+        if seen.insert(c.path.clone()) {
             read.push(c.path.clone());
         }
     }

@@ -290,28 +290,53 @@ impl Extraction {
     pub fn complete(&self) -> bool {
         self.ran_to_its_end() && self.unread.is_empty()
     }
-
-    /// Whether `later` finished what this one left: the same volume, at
-    /// the same TXG, into the same file, and whole. A dump interrupted
-    /// and then `--resume`d is two extractions, and only the first of
-    /// them is not the whole volume.
-    pub fn finished_by(&self, later: &Extraction) -> bool {
-        !self.ran_to_its_end() && later.ran_to_its_end() && self.same_image(later)
-    }
-
-    /// The same volume, at the same TXG, into the same file: what a
-    /// `--resume` goes on with.
-    pub fn same_image(&self, other: &Extraction) -> bool {
-        other.dataset == self.dataset && other.txg == self.txg && other.output == self.output
-    }
 }
 
+/// What came after an extraction that did not run to its end: runs of
+/// the same image — the same volume, at the same TXG, into the same
+/// file, which is what a `--resume` goes on with. A dump interrupted and
+/// then resumed is two extractions, and only the first of them is not
+/// the whole volume.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Later {
+    /// A later run of the same image ran to its end: it was finished.
+    pub finished: bool,
+    /// A later run was of the same image at all: it was gone on with,
+    /// whether or not to the end.
+    pub gone_on_with: bool,
+}
+
+/// [`Later`] for each of `extractions`, in one pass from the last: asked
+/// of each against all that follow, a report of a hundred thousand
+/// interrupted extractions took half a minute to build and minutes to
+/// render.
+pub fn later_of_the_same(extractions: &[Extraction]) -> Vec<Later> {
+    // Per image: whether one was met, and whether one that ran to its end.
+    let mut met: std::collections::HashMap<(&str, u64, &std::path::Path), bool> =
+        std::collections::HashMap::new();
+    let mut out = vec![Later::default(); extractions.len()];
+    for (i, e) in extractions.iter().enumerate().rev() {
+        let key = (e.dataset.as_str(), e.txg, e.output.as_path());
+        if !e.ran_to_its_end() {
+            if let Some(&whole) = met.get(&key) {
+                out[i] = Later {
+                    finished: whole,
+                    gone_on_with: true,
+                };
+            }
+        }
+        *met.entry(key).or_insert(false) |= e.ran_to_its_end();
+    }
+    out
+}
+
+#[cfg(test)]
 impl Report {
     /// Whether the extraction at `i` was finished by one after it.
     pub fn finished_later(&self, i: usize) -> bool {
-        self.extractions
+        later_of_the_same(&self.extractions)
             .get(i)
-            .is_some_and(|e| self.extractions[i + 1..].iter().any(|l| e.finished_by(l)))
+            .is_some_and(|l| l.finished)
     }
 }
 

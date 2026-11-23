@@ -193,6 +193,7 @@ pub fn render(r: &Report) -> String {
             "| Dataset | TXG | Output | Size | SHA-256 | Zeroed blocks | Complete |"
         );
         let _ = writeln!(s, "|---|---|---|---|---|---|---|");
+        let later = crate::model::later_of_the_same(&r.extractions);
         for (i, e) in r.extractions.iter().enumerate() {
             // What the file holds now comes first: an image a later run
             // wrote over is not there to be complete or not.
@@ -202,7 +203,7 @@ pub fn render(r: &Report) -> String {
                 "yes — kept, as an earlier run left it"
             } else if e.complete() {
                 "yes"
-            } else if r.finished_later(i) {
+            } else if later[i].finished {
                 "no — finished by a later run"
             } else if e.ran_to_its_end() {
                 "no — not all of it could be read"

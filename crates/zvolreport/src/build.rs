@@ -405,16 +405,21 @@ pub fn assemble(records: &[(LogRef, Vec<Record>)], opts: &Options) -> Report {
     // and that is what breaks the tie (R-02, R-03).
     flat.sort_by_key(|(ts, log, line, _)| (*ts, *log, *line));
 
+    let mut seen_tools: std::collections::BTreeSet<ToolRef> = std::collections::BTreeSet::new();
+    let mut seen_hosts: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     for (_, _, _, r) in flat {
+        // In the order first met, each once: looked for in the list
+        // itself, a log of a hundred thousand hosts or builds took a
+        // minute.
         let tool = ToolRef {
             tool: r.tool.clone(),
             version: r.version.clone(),
         };
-        if !tools.contains(&tool) {
+        if seen_tools.insert(tool.clone()) {
             tools.push(tool);
         }
         if let Some(h) = &r.host {
-            if !hosts.contains(h) {
+            if seen_hosts.insert(h.as_str()) {
                 hosts.push(h.clone());
             }
         }
@@ -486,9 +491,9 @@ pub fn assemble(records: &[(LogRef, Vec<Record>)], opts: &Options) -> Report {
                     "{}: read as a device, not as an image: this recovery was done against the evidence itself",
                     i.path.display()
                 );
-                if !warnings.contains(&note) {
-                    warnings.push(note);
-                }
+                // Once, however many records read it: the warnings
+                // are sorted and each kept once at the end.
+                warnings.push(note);
             }
         }
         // What a build wrote is a report, which the next build replaces
@@ -574,6 +579,7 @@ pub fn assemble(records: &[(LogRef, Vec<Record>)], opts: &Options) -> Report {
     // "complete" — with `verify` passing the file. Not one stopped early
     // that a later run of the same image went on with: that is the same
     // image, and is said below.
+    let later = crate::model::later_of_the_same(&extractions);
     for i in 0..extractions.len() {
         let e = &extractions[i];
         let (Some(&writer), Some(now)) = (last_writer.get(&e.output), outputs.get(&e.output))
@@ -584,9 +590,7 @@ pub fn assemble(records: &[(LogRef, Vec<Record>)], opts: &Options) -> Report {
             (Some(a), Some(b)) => a != b,
             _ => false,
         };
-        let gone_on_with =
-            !e.ran_to_its_end() && extractions[i + 1..].iter().any(|later| e.same_image(later));
-        if writer > extracted_by[i] && changed && !gone_on_with {
+        if writer > extracted_by[i] && changed && !later[i].gone_on_with {
             let by = &commands[writer];
             extractions[i].overwritten_by = Some(format!(
                 "{} at {}",
@@ -613,10 +617,7 @@ pub fn assemble(records: &[(LogRef, Vec<Record>)], opts: &Options) -> Report {
         }
         // Interrupted, then finished by `--resume`: what is in the file
         // now is the whole volume, and saying it is not was wrong.
-        if extractions[i + 1..]
-            .iter()
-            .any(|later| e.finished_by(later))
-        {
+        if later[i].finished {
             warnings.push(format!(
                 "{}: the extraction into {} stopped early; a later run wrote the whole volume there",
                 e.dataset,
@@ -714,19 +715,18 @@ pub fn assemble(records: &[(LogRef, Vec<Record>)], opts: &Options) -> Report {
             }
         }
     }
-    let versions: Vec<&ToolRef> = tools.iter().collect();
-    for t in &versions {
-        if let Some(other) = versions
-            .iter()
-            .find(|o| o.tool == t.tool && o.version != t.version)
-        {
-            let w = format!(
+    // Each build of a tool against the first other build of it met.
+    let mut builds: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for t in &tools {
+        builds.entry(&t.tool).or_default().push(&t.version);
+    }
+    for t in &tools {
+        let of_tool = &builds[t.tool.as_str()];
+        if let Some(other) = of_tool.iter().take(2).find(|v| **v != t.version) {
+            warnings.push(format!(
                 "{} appears as {} and {}: the report mixes runs of different builds",
-                t.tool, t.version, other.version
-            );
-            if !warnings.contains(&w) {
-                warnings.push(w);
-            }
+                t.tool, t.version, other
+            ));
         }
     }
     warnings.sort();
@@ -855,6 +855,10 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
                 .map(move |f| at_cwd(r, &f.path))
                 .filter(move |p| !report_files.contains(p))
         })
+        // Each once: a member every record names is one file to hold
+        // the outputs against, not one per record.
+        .collect::<std::collections::BTreeSet<PathBuf>>()
+        .into_iter()
         .collect();
     let mut all = reads.clone();
     all.extend(named.iter().cloned());
@@ -1869,6 +1873,80 @@ mod tests {
         assert!(
             json.contains("\"path_hex\":\"2f63fe2f6c\"") && json.contains("\"output_hex\""),
             "{json}"
+        );
+    }
+
+    /// What came after each extraction is found in one pass, and is
+    /// what asking each one against all that follow finds: of every
+    /// image, runs that stopped early and runs that did not, in every
+    /// order.
+    #[test]
+    fn what_came_after_an_extraction_is_found_in_one_pass() {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let extractions: Vec<Extraction> = (0..400)
+            .map(|_| {
+                let mut d = dump(next() % 2, 0, false);
+                d["volumes"][0]["dataset"] = format!("tank/v{}", next() % 5).into();
+                d["volumes"][0]["output"] = format!("/case/o{}.img", next() % 3).into();
+                if next() % 3 != 0 {
+                    d["volumes"][0]["interrupted_at"] = 7.into();
+                }
+                extractions_of(&d).remove(0)
+            })
+            .collect();
+        let same = |a: &Extraction, b: &Extraction| {
+            a.dataset == b.dataset && a.txg == b.txg && a.output == b.output
+        };
+        let found = crate::model::later_of_the_same(&extractions);
+        for (i, e) in extractions.iter().enumerate() {
+            let after = || extractions[i + 1..].iter().filter(|l| same(e, l));
+            let want = crate::model::Later {
+                finished: !e.ran_to_its_end() && after().any(Extraction::ran_to_its_end),
+                gone_on_with: !e.ran_to_its_end() && after().next().is_some(),
+            };
+            assert_eq!(found[i], want, "extraction {i}");
+        }
+        assert!(found.iter().any(|l| l.finished) && found.iter().any(|l| !l.gone_on_with));
+    }
+
+    /// Hosts and builds are listed once each, in the order first met,
+    /// and each build of a tool is held against the first other build of
+    /// it — what looking each up in the list itself gave, in a time that
+    /// grew with the square of how many there were.
+    #[test]
+    fn hosts_and_builds_are_listed_once_in_the_order_met() {
+        let mut records = Vec::new();
+        for (i, (host, version)) in [("b", "2"), ("a", "1"), ("b", "1"), ("c", "3"), ("a", "2")]
+            .iter()
+            .enumerate()
+        {
+            let mut r = record("zvolrescue", 10 + i as u64, 0, serde_json::json!({}));
+            r.host = Some(host.to_string());
+            r.version = version.to_string();
+            records.push(r);
+        }
+        let r = assemble(&log(records), &opts());
+        assert_eq!(r.hosts, ["b", "a", "c"]);
+        let versions: Vec<&str> = r.tools.iter().map(|t| t.version.as_str()).collect();
+        assert_eq!(versions, ["2", "1", "3"]);
+        let mixed: Vec<&String> = r
+            .warnings
+            .iter()
+            .filter(|w| w.contains("mixes runs of different builds"))
+            .collect();
+        assert_eq!(
+            mixed,
+            [
+                "zvolrescue appears as 1 and 2: the report mixes runs of different builds",
+                "zvolrescue appears as 2 and 1: the report mixes runs of different builds",
+                "zvolrescue appears as 3 and 2: the report mixes runs of different builds",
+            ]
         );
     }
 

@@ -17,6 +17,19 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ### Fixed
 
+* **`zvolreport verify` and `build` took time that grew with the
+  square of what they were given.** After `verify` had printed its
+  table and its totals it listed the files it had read, looking each
+  up in the list it was making: a report of a `zvolfiles` tree of
+  65 011 files spent 110 seconds there, and one of a million files
+  would have spent hours after its answer was already on the screen.
+  `build` did the same over hosts, over builds of a tool, over
+  extractions that stopped early and over the files it would not
+  write over: a log of 100 000 records took up to a minute, and its
+  Markdown more than two. Each is one pass now — 3.7 s for the 65 011
+  files, half a second for the 100 000 records — and the reports are
+  the same to the byte.
+
 * **`zvolreport`: an image a later run wrote over, a tree not all
   looked at, and its own paperwork taken for evidence.** Four things a
   report said that its logs do not bear out:
