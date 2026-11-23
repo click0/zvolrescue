@@ -1,5 +1,8 @@
 //! Objects: walking a dnode's block tree and the dnode array of an objset.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use zfs_ondisk::blkptr::{self, BlkPtr};
 use zfs_ondisk::dmu::{DnodePhys, DNODE_SIZE};
 use zfs_ondisk::Endian;
@@ -13,7 +16,24 @@ pub struct ObjectReader<'r, 'a> {
     dnode: DnodePhys,
     /// Byte order the dnode (and therefore its block pointers) was written in.
     endian: Endian,
+    /// The indirect block read last at each level, as it was decoded,
+    /// with the pointer it was read through ([`ObjectReader::indirect`]).
+    path: RefCell<Vec<Option<Kept>>>,
 }
+
+/// An indirect block as it was decoded, and the pointer it was read
+/// through.
+type Kept = (BlkPtr, Rc<Vec<u8>>);
+
+/// The levels [`ObjectReader`] keeps an indirect block of: a tree of
+/// 128 KiB indirect blocks over 512-byte data blocks names every block
+/// id there is in seven.
+const PATH_LEVELS: usize = 8;
+
+/// The largest indirect block kept: `DN_MAX_INDBLKSHIFT` is 17. With
+/// [`PATH_LEVELS`] it bounds what an object reader holds at 1 MiB,
+/// whatever a dnode claims.
+const PATH_BLOCK_MAX: usize = 128 << 10;
 
 impl<'r, 'a> ObjectReader<'r, 'a> {
     /// Wrap a dnode parsed with `endian`.
@@ -22,7 +42,40 @@ impl<'r, 'a> ObjectReader<'r, 'a> {
             reader,
             dnode,
             endian,
+            path: RefCell::new(Vec::new()),
         }
+    }
+
+    /// The indirect block `bp` points to, at `level`, decoded.
+    ///
+    /// The one read last at each level is kept, with its pointer. The
+    /// blocks of an object are read in order, and the 1024 data blocks
+    /// under one indirect block each came down through it: it was
+    /// fetched, checked against its checksum and decompressed once for
+    /// every one of them — the pool reader keeps the bytes a member
+    /// gave, not what they decode to. A volume of 4 KiB blocks read at
+    /// 21 MB/s and one of 8 KiB at 45, with a processor busy
+    /// decompressing the same 128 KiB over and over, and a hole cost as
+    /// much as a block. A pointer names what it points to by its
+    /// checksum, and an object at one transaction group does not
+    /// change, so the block kept for the same pointer is that block.
+    /// One that does not read is not kept.
+    fn indirect(&self, bp: &BlkPtr, level: u32) -> Result<Rc<Vec<u8>>, ReadError> {
+        let slot = level as usize;
+        if let Some(Some((kept, data))) = self.path.borrow().get(slot) {
+            if kept == bp {
+                return Ok(Rc::clone(data));
+            }
+        }
+        let data = Rc::new(self.reader.read_block(bp, false)?.data);
+        if slot < PATH_LEVELS && data.len() <= PATH_BLOCK_MAX {
+            let mut path = self.path.borrow_mut();
+            if path.len() <= slot {
+                path.resize(slot + 1, None);
+            }
+            path[slot] = Some((bp.clone(), Rc::clone(&data)));
+        }
+        Ok(data)
     }
 
     /// The dnode.
@@ -69,11 +122,11 @@ impl<'r, 'a> ObjectReader<'r, 'a> {
             if bp.is_hole() {
                 return Ok(None);
             }
-            let block = self.reader.read_block(&bp, false)?;
+            let block = self.indirect(&bp, level)?;
             let shift = epbs * (level - 1);
             let index = ((blkid >> shift) & ((1u64 << epbs) - 1)) as usize;
             let at = index * blkptr::SIZE;
-            let child = block.data.get(at..at + blkptr::SIZE).ok_or_else(|| {
+            let child = block.get(at..at + blkptr::SIZE).ok_or_else(|| {
                 ReadError::Io(format!("indirect block too small for index {index}"))
             })?;
             bp = BlkPtr::parse(child, bp.endian)?;
@@ -523,6 +576,43 @@ mod tests {
         let r = obj.read_range(4000, 200).unwrap();
         assert_eq!(&r[..96], &pattern(0, 4096)[4000..]);
         assert_eq!(&r[96..], &pattern(1, 4096)[..104]);
+    }
+
+    /// The indirect block a block came down through is kept, by the
+    /// pointer it was read through, and is the one the next block under
+    /// it comes down through: it was read, checked and decompressed
+    /// again for every block. Another pointer at the same level takes
+    /// its place, the level above stays, and every block read is still
+    /// its own, whatever order they are asked for in.
+    #[test]
+    fn the_indirect_block_of_the_last_path_is_kept() {
+        let present = [0u64, 1, 5, 9, 60];
+        let (sources, assembly, dnode) = build(|a, m| object(a, m, 3, &present));
+        let dyns = dyn_sources(&sources);
+        let reader = PoolReader::new(&assembly, dyns);
+        let obj = ObjectReader::new(&reader, dnode, Endian::Little);
+        let kept = |level: usize| match obj.path.borrow().get(level) {
+            Some(Some((_, data))) => Some(Rc::clone(data)),
+            _ => None,
+        };
+        assert!(kept(1).is_none() && kept(2).is_none());
+        obj.locate(0).unwrap().expect("block 0");
+        let (first, top) = (kept(1).expect("level 1"), kept(2).expect("level 2"));
+        // Block 5 is under the same level-1 block (eight pointers each).
+        obj.locate(5).unwrap().expect("block 5");
+        assert!(Rc::ptr_eq(&first, &kept(1).unwrap()));
+        // Block 9 is under the next one, and the same level-2 block.
+        obj.locate(9).unwrap().expect("block 9");
+        assert!(!Rc::ptr_eq(&first, &kept(1).unwrap()));
+        assert!(Rc::ptr_eq(&top, &kept(2).unwrap()));
+        for b in [0u64, 9, 1, 60, 5, 0, 60] {
+            assert_eq!(obj.read_blkid(b).unwrap(), pattern(b, 4096), "block {b}");
+        }
+        // A hole under a block that is kept, and one under a pointer
+        // that is itself a hole.
+        assert!(obj.locate(3).unwrap().is_none());
+        assert!(obj.locate(20).unwrap().is_none());
+        assert_eq!(obj.read_blkid(5).unwrap(), pattern(5, 4096));
     }
 
     /// A dnode that claims more blocks than any object has — `2^40`, or

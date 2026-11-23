@@ -5,7 +5,10 @@
 #
 # Builds a dense volume — every block present under a real indirect
 # tree, 128 KiB blocks — on a mirror and on a raidz2, with compression
-# off, lz4 and gzip, and extracts each with `dump`. For every run it
+# off, lz4 and gzip, and extracts each with `dump`; and on the mirror
+# two volumes of small blocks, 4 KiB and 8 KiB, which were not measured
+# and read at 21 and 45 MB/s: a thousand blocks lie under one indirect
+# block, and it was decompressed anew for each. For every run it
 # reports the extraction rate, the rate of a plain copy of the same
 # number of bytes out of a member (read warm from the page cache, as
 # the extraction reads, and written next to it, as the extraction
@@ -34,13 +37,22 @@ LIMIT_KIB=$((512 * 1024))
 
 rm -rf "$WORK"; mkdir -p "$WORK"
 fail=0
-echo "| pool | compression | volume | dump MB/s | copy MB/s | ratio | peak RSS |"
-echo "|---|---|---|---|---|---|---|"
+echo "| pool | compression | volume | blocks | dump MB/s | copy MB/s | ratio | peak RSS |"
+echo "|---|---|---|---|---|---|---|---|"
 for kind in bench bench-raidz2; do
-    for comp in off lz4 gzip; do
-        dir="$WORK/$kind-$comp"
+    # Pool kind, compression, block size in KiB. The uncompressed
+    # volume of 128 KiB blocks comes first for each kind: the plain
+    # copy the others are held against is taken from it.
+    cases="off:128 lz4:128 gzip:128"
+    if [ "$kind" = bench ]; then
+        cases="$cases off:4 lz4:8"
+    fi
+    for case in $cases; do
+        comp=${case%:*}
+        blk=${case#*:}
+        dir="$WORK/$kind-$comp-$blk"
         rm -rf "$dir"
-        want=$("$MK" "$dir" "$kind" 12 "$MIB" "$comp" | sed -n 's/^sha256 //p')
+        want=$("$MK" "$dir" "$kind" 12 "$MIB" "$comp" "$blk" | sed -n 's/^sha256 //p')
         members=$(ls "$dir"/member*.img)
         # Raw, once per pool kind, from the uncompressed member (a
         # compressed one is shorter than the volume): the volume's worth
@@ -48,7 +60,7 @@ for kind in bench bench-raidz2; do
         # them, and written next to it through the same page cache the
         # extraction writes through — the floor no reader can beat on
         # this host, a copy. Best of three, since writeback jitters.
-        if [ "$comp" = off ]; then
+        if [ "$comp" = off ] && [ "$blk" = 128 ]; then
             raw=$(python3 - "$dir" "$MIB" $members <<'PY'
 import os, subprocess, sys, time
 d, mib, first = sys.argv[1], int(sys.argv[2]), sys.argv[3]
@@ -65,17 +77,17 @@ PY
 )
         fi
         "$ZR" -q -f json dump tank/vm/disk0 $members -o "$dir/out.img" > "$dir/dump.json" 2> "$dir/dump.err" || {
-            echo "dump failed for $kind/$comp:"; cat "$dir/dump.err"; fail=1; continue; }
-        python3 - "$kind" "$comp" "$want" "$raw" "$dir/dump.json" "$MIB" "$FLOOR" "$LIMIT_KIB" <<'PY' || fail=1
+            echo "dump failed for $kind/$comp/$blk:"; cat "$dir/dump.err"; fail=1; continue; }
+        python3 - "$kind" "$comp" "$want" "$raw" "$dir/dump.json" "$MIB" "$FLOOR" "$LIMIT_KIB" "$blk" <<'PY' || fail=1
 import json, sys
-kind, comp, want, raw, path, mib, floor, limit = sys.argv[1:]
+kind, comp, want, raw, path, mib, floor, limit, blk = sys.argv[1:]
 raw, floor, limit = float(raw), float(floor), int(limit)
 d = json.load(open(path)); v = d["volumes"][0]
 mbs = v["bytes_written"] / v["seconds"] / 1e6
 rss = d.get("peak_rss_kib")
 rss_s = f"{rss / 1024:.0f} MiB" if rss else "n/a"
 label = {"bench": "mirror", "bench-raidz2": "raidz2"}[kind]
-print(f"| {label} | {comp} | {mib} MiB | {mbs:.0f} | {raw:.0f} | {mbs / raw * 100:.0f} % | {rss_s} |")
+print(f"| {label} | {comp} | {mib} MiB | {blk} KiB | {mbs:.0f} | {raw:.0f} | {mbs / raw * 100:.0f} % | {rss_s} |")
 bad = []
 if v["sha256"] != want:
     bad.append(f"sha256 {v['sha256']} != {want}")
@@ -86,7 +98,7 @@ if rss is not None and rss > limit:
 if mbs < floor:
     bad.append(f"{mbs:.1f} MB/s under the {floor} MB/s floor")
 if bad:
-    print(f"FAIL {kind}/{comp}: " + "; ".join(bad), file=sys.stderr)
+    print(f"FAIL {kind}/{comp}/{blk} KiB: " + "; ".join(bad), file=sys.stderr)
     sys.exit(1)
 PY
         rm -f "$dir/out.img" "$dir"/member*.img

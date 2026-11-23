@@ -17,6 +17,22 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ### Fixed
 
+* **A volume of small blocks was read at a tenth of the rate of one of
+  large blocks.** Every block of an object comes down through its
+  indirect blocks, and each of those was fetched, checked against its
+  checksum and decompressed again for every block under it — 1024 times
+  for one 128 KiB indirect block; the pool reader keeps the bytes a
+  member gave, not what they decode to. A volume with `volblocksize=4K`
+  read at 21 MB/s and one with 8K, for years the Proxmox default, at
+  45, with the processor busy decompressing; a 1 TiB volume was hours
+  of that. A hole cost the same 120 µs as a block, so a sparse 1 GiB
+  volume of 8K blocks took 8 s to say it was empty. The object reader
+  keeps the indirect block it read last at each level, by its pointer:
+  the same volumes now read at 220 and 290 MB/s on the same host, and
+  holes at the rate their zeros hash, about 1.3 GB/s. `zvolfiles` and
+  `zvolcarve dump` read through the same code. `tests/bench.sh`
+  measured blocks of 128 KiB only, and its floor never saw this; it
+  now has a 4 KiB and an 8 KiB volume.
 * **The port's `distinfo` named the GitHub tarball as the ports
   framework never looks it up.** `packaging/freebsd/distinfo.sh` wrote
   it as `rust/click0-zvolrescue-vX_GH0.tar.gz`, first; the framework

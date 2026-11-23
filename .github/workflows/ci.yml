@@ -1570,7 +1570,8 @@ jobs:
       - name: Memory and throughput on dense volumes (SPEC N-03, N-08)
         run: |
           # Six dense 512 MiB volumes — mirror and raidz2, compression
-          # off, lz4 and gzip — extracted and checked against the SHA-256
+          # off, lz4 and gzip — and two of small blocks on the mirror,
+          # 4 KiB and 8 KiB, extracted and checked against the SHA-256
           # the generator computed. The peak resident set of each run
           # must stay under N-03's 512 MiB, and the rate above a floor;
           # the rate against a plain copy is printed for the record (the

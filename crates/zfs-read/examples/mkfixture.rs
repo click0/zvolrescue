@@ -32,7 +32,7 @@ use zfs_read::fixture::{
     removed_vdev_members, two_top_mirror_members, zpl_members, Dense, Pool,
 };
 
-const USAGE: &str = "usage: mkfixture DIR [mirror|mirror3|raidz2|striped|bench|bench-raidz2] [ashift] [carved|zpl|removed|dedup] [feature]";
+const USAGE: &str = "usage: mkfixture DIR [mirror|mirror3|raidz2|striped|bench|bench-raidz2] [ashift] [carved|zpl|removed|dedup] [feature]\n       mkfixture DIR bench|bench-raidz2 ASHIFT MIB [off|lz4|gzip] [BLOCK_KIB]";
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -64,7 +64,10 @@ fn main() {
     let dedup = mode == "dedup";
     // `bench` and `bench-raidz2`: a dense volume for measurements (SPEC
     // N-03, N-08). The fourth argument is the size in MiB, the fifth the
-    // compression: off (the default), lz4, or gzip.
+    // compression: off (the default), lz4, or gzip; the sixth the block
+    // size in KiB, 128 when absent. A volume of small blocks has a
+    // thousand of them under each indirect block, which is where a
+    // reader that fetches the indirect block anew for each one shows.
     if kind == "bench" || kind == "bench-raidz2" {
         let mib: u64 = mode
             .parse()
@@ -81,15 +84,22 @@ fn main() {
             Pool::raidz("tank", 0x5eed_0000_0000_0002, ashift, 4, 2)
         }
         .txgs(&[(4816229, 1757100005)]);
+        let block_kib: usize = args
+            .next()
+            .map(|a| {
+                a.parse()
+                    .expect("bench: block size in KiB as the sixth argument")
+            })
+            .unwrap_or(128);
         let dense = Dense {
             bytes: mib << 20,
-            blocksize: 128 << 10,
+            blocksize: block_kib << 10,
             compression,
         };
         let (members, sha256) = dense_volume_members(&mut pool, dense);
         std::fs::create_dir_all(&dir).expect("mkdir");
         println!(
-            "tank/vm/disk0 is {mib} MiB, dense, 128 KiB blocks, compression {}",
+            "tank/vm/disk0 is {mib} MiB, dense, {block_kib} KiB blocks, compression {}",
             compression.name()
         );
         println!("sha256 {sha256}");
