@@ -1176,6 +1176,109 @@ fn hints_give_each_top_level_vdev_its_own_ashift() {
     }
 }
 
+/// The label `--emit-label` writes is the pool's own, where the pool
+/// says what it is. Made from the layout alone it named a pool
+/// "recovered", GUID 0, in the run that had just shown the pool's own
+/// name and GUID from its MOS; and given those, it was still a label
+/// OpenZFS takes none of: no `features_for_read`, and vdev GUIDs made
+/// up here. The pool's configuration is in its MOS, and a label is
+/// that configuration seen from one member: with every label wiped,
+/// emitted for every member and position and placed, the copies are
+/// the disks as they were, byte for byte.
+#[test]
+fn an_emitted_label_is_the_one_the_pool_wrote() {
+    let dir = scratch("emit-label-own");
+    let (_, originals) = configured_two_top_members("tank", 0x7070, 12, [2, 3], &[(100, 1)], SIZE);
+    let mut wiped = originals.clone();
+    wiped.iter_mut().for_each(|m| wipe_configs(m));
+    let paths = write_members(&dir, &wiped);
+    let all: Vec<&str> = paths.iter().map(String::as_str).collect();
+    // Neither the pool's name nor its GUID: the pool has both.
+    let hints = dir.join("layout.hints");
+    std::fs::write(
+        &hints,
+        serde_json::json!({"ashift": 12, "tops": [
+            {"kind": "mirror", "members": [&paths[0], &paths[1]]},
+            {"kind": "mirror", "members": [&paths[2], &paths[3], &paths[4]]}]})
+        .to_string(),
+    )
+    .unwrap();
+    let hints = hints.to_string_lossy().into_owned();
+    let label = dir.join("L.bin").to_string_lossy().into_owned();
+    let emit = |hints: &str, which: &str, index: usize| {
+        let mut args = vec!["scan"];
+        args.extend(&all);
+        let index = index.to_string();
+        args.extend(["--hints", hints, "--emit-label", &label]);
+        args.extend(["--emit-for", which, "--emit-label-index", &index]);
+        let (code, _, err) = run(&args);
+        assert_eq!(code, 0, "{which} L{index}: {err}");
+        let geometry: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(format!("{label}.json")).unwrap()).unwrap();
+        (std::fs::read(&label).unwrap(), geometry, err)
+    };
+
+    let size = SIZE as usize;
+    let l = LABEL_SIZE as usize;
+    let at = [0, l, size - 2 * l, size - l];
+    for (i, which) in ["0:0", "0:1", "1:0", "1:1", "1:2"].into_iter().enumerate() {
+        let mut copy = wiped[i].clone();
+        for (index, offset) in at.into_iter().enumerate() {
+            let (front, geometry, err) = emit(&hints, which, index);
+            assert_eq!(geometry["config"], "pool", "{geometry}");
+            assert_eq!(geometry["pool"], "tank", "{geometry}");
+            assert_eq!(geometry["pool_guid"], "0x0000000000007070", "{geometry}");
+            assert!(geometry["note"]
+                .as_str()
+                .unwrap()
+                .contains("rests on the order in the layout alone"));
+            assert!(
+                err.contains("the pool's own configuration, from its MOS"),
+                "{err}"
+            );
+            copy[offset..offset + front.len()].copy_from_slice(&front);
+        }
+        assert!(copy == originals[i], "member {i} is not the disk it was");
+    }
+
+    // The pool as the run names it, when the hints name it otherwise.
+    let renamed = dir.join("renamed.hints");
+    std::fs::write(
+        &renamed,
+        serde_json::json!({"name": "rescued", "ashift": 12, "tops": [
+            {"kind": "mirror", "members": [&paths[0], &paths[1]]},
+            {"kind": "mirror", "members": [&paths[2], &paths[3], &paths[4]]}]})
+        .to_string(),
+    )
+    .unwrap();
+    let (_, geometry, _) = emit(&renamed.to_string_lossy(), "1:0", 0);
+    assert_eq!(geometry["pool"], "rescued", "{geometry}");
+    assert_eq!(geometry["config"], "pool", "{geometry}");
+
+    // A layout that is not the shape the pool has cannot be labelled
+    // from the pool: the label is a template, said to be one and why.
+    let flat = dir.join("flat.hints");
+    std::fs::write(
+        &flat,
+        serde_json::json!({"ashift": 12, "tops": [
+            {"kind": "mirror", "members": [&paths[0], &paths[1]]},
+            {"kind": "mirror", "members": [&paths[2], &paths[3]]}]})
+        .to_string(),
+    )
+    .unwrap();
+    let (_, geometry, err) = emit(&flat.to_string_lossy(), "1:0", 0);
+    assert_eq!(geometry["config"], "template", "{geometry}");
+    assert_eq!(geometry["pool"], "tank", "{geometry}");
+    let why = "top-level vdev #1 has 3 member(s) in the pool's configuration and 2 in the layout";
+    assert!(
+        geometry["note"].as_str().unwrap().contains(why),
+        "{geometry}"
+    );
+    assert!(err.contains("a template with made-up vdev GUIDs"), "{err}");
+    assert!(err.contains(why), "{err}");
+    assert!(geometry.get("features_for_read").is_none(), "{geometry}");
+}
+
 /// A hints file is read strictly. A key nothing reads was passed over
 /// without a word — `nparty` for `nparity` read a raidz2 as the raidz1
 /// a raidz is by default — and is refused, in the layout, in a vdev

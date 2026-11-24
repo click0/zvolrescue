@@ -483,6 +483,143 @@ pub fn label_nvlist(
     ])
 }
 
+/// What only the MOS's copy of a vdev's configuration carries, and no
+/// label does: the per-vdev ZAP objects.
+const MOS_ONLY: [&str; 3] = [
+    "com.delphix:vdev_zap_leaf",
+    "com.delphix:vdev_zap_top",
+    "com.delphix:vdev_root_zap",
+];
+
+/// The label of one member as the pool itself wrote it (SPEC F-67).
+///
+/// `config` is the pool's own configuration, from its MOS
+/// ([`crate::dsl::pool_config`]). A label is that configuration with
+/// the member's top-level vdev in place of the whole tree, the two
+/// GUIDs that say whose label it is, and without what only the MOS's
+/// copy has. So the label is the pool's in everything a reader checks:
+/// the GUIDs of the pool and of every vdev, whose sum each uberblock
+/// records; `asize` and the metaslab array, without which the vdev's
+/// space cannot be opened; and `features_for_read`, without which
+/// OpenZFS takes no label at all. A template has none of them
+/// ([`label_nvlist`]).
+///
+/// The layout says where the member is — leaf `leaf`, in vdev order, of
+/// top-level vdev `top`, which has `leaves` of them — and the
+/// configuration which vdev that is. `name` is the pool's name as the
+/// run reads it, where that is not the configuration's.
+///
+/// An error says why the configuration cannot tell: it does not hold
+/// that vdev, or holds it in another shape than the layout does.
+pub fn label_from_config(
+    config: &NvList,
+    name: Option<&str>,
+    top: usize,
+    leaf: usize,
+    leaves: usize,
+) -> Result<NvList, String> {
+    fn leaf_guids(node: &NvList, out: &mut Vec<Option<u64>>) {
+        match node.list_array("children") {
+            Some(children) if !children.is_empty() => {
+                children.iter().for_each(|c| leaf_guids(c, out))
+            }
+            _ => out.push(node.u64("guid")),
+        }
+    }
+    fn as_a_label_has_it(node: &NvList) -> NvList {
+        NvList {
+            version: node.version,
+            flags: node.flags,
+            pairs: node
+                .pairs
+                .iter()
+                .filter(|(key, _)| !MOS_ONLY.contains(&key.as_str()))
+                .map(|(key, value)| {
+                    let value = match value {
+                        Value::ListArray(children) if key == "children" => {
+                            Value::ListArray(children.iter().map(as_a_label_has_it).collect())
+                        }
+                        other => other.clone(),
+                    };
+                    (key.clone(), value)
+                })
+                .collect(),
+        }
+    }
+    /// A value of a type the parser keeps no bytes of cannot be
+    /// written back.
+    fn unwritable(list: &NvList) -> Option<&str> {
+        list.pairs.iter().find_map(|(key, value)| match value {
+            Value::Unknown { .. } => Some(key.as_str()),
+            Value::List(inner) => unwritable(inner),
+            Value::ListArray(inner) => inner.iter().find_map(unwritable),
+            _ => None,
+        })
+    }
+
+    let tops = config
+        .list("vdev_tree")
+        .and_then(|root| root.list_array("children"))
+        .ok_or("the pool's configuration has no vdev tree")?;
+    let tree = tops.get(top).ok_or_else(|| {
+        format!(
+            "the pool's configuration has {} top-level vdev(s), and the layout places the member in #{top}",
+            tops.len()
+        )
+    })?;
+    let kind = tree.str("type").unwrap_or("?");
+    if matches!(kind, "hole" | "indirect" | "missing") {
+        return Err(format!(
+            "top-level vdev #{top} is {kind:?} in the pool's configuration: no member is in it"
+        ));
+    }
+    let mut guids = Vec::new();
+    leaf_guids(tree, &mut guids);
+    if guids.len() != leaves {
+        return Err(format!(
+            "top-level vdev #{top} has {} member(s) in the pool's configuration and {leaves} in the layout",
+            guids.len()
+        ));
+    }
+    let (Some(guid), Some(top_guid)) = (guids.get(leaf).copied().flatten(), tree.u64("guid"))
+    else {
+        return Err(format!(
+            "the pool's configuration gives no GUID for member {leaf} of top-level vdev #{top}"
+        ));
+    };
+
+    let mut label = NvList {
+        version: config.version,
+        flags: config.flags,
+        pairs: Vec::with_capacity(config.pairs.len() + 2),
+    };
+    let mut whose = Some([
+        ("top_guid".to_string(), Value::Uint64(top_guid)),
+        ("guid".to_string(), Value::Uint64(guid)),
+    ]);
+    for (key, value) in &config.pairs {
+        let value = match key.as_str() {
+            // The MOS's own word that it keeps per-vdev ZAPs; and a
+            // label's two GUIDs, which this one gets below.
+            "com.delphix:has_per_vdev_zaps" | "top_guid" | "guid" => continue,
+            "vdev_tree" => Value::List(as_a_label_has_it(tree)),
+            "name" => Value::String(name.or(config.str("name")).unwrap_or("?").to_string()),
+            _ => value.clone(),
+        };
+        // Where a label has them: ahead of the vdev count and the tree.
+        if matches!(key.as_str(), "vdev_children" | "vdev_tree") {
+            label.pairs.extend(whose.take().into_iter().flatten());
+        }
+        label.pairs.push((key.clone(), value));
+    }
+    if let Some(key) = unwritable(&label) {
+        return Err(format!(
+            "the pool's configuration holds {key:?} in a type this does not write"
+        ));
+    }
+    Ok(label)
+}
+
 /// One node of a `vdev_tree` as a label carries it, with everything under
 /// it. `top` holds what only the top-level vdev records (`ashift`,
 /// `asize`). Every group keeps its parity and, for dRAID, the three
@@ -800,6 +937,61 @@ mod tests {
             let tree = nv.list("vdev_tree").expect("vdev_tree");
             assert_eq!(tree.u64("ashift"), Some(ashift), "top {top}");
         }
+    }
+
+    /// The label made from the pool's own configuration is the label
+    /// the pool wrote for that member, pair for pair: the GUIDs, the
+    /// metaslab array, the features — and none of what only the MOS's
+    /// copy carries. What the configuration cannot tell is said, and
+    /// is no label.
+    #[test]
+    fn a_label_from_the_pools_configuration_is_the_one_the_pool_wrote() {
+        use crate::fixture::{configured_two_top_members, mos_config};
+
+        let (tops, _) = configured_two_top_members("tank", 0x7070, 12, [2, 3], &[(100, 1)], SIZE);
+        let config = mos_config(&tops);
+        assert!(config.flag("com.delphix:has_per_vdev_zaps"));
+        for (top, leaves) in [(0usize, 2usize), (1, 3)] {
+            for leaf in 0..leaves {
+                let label = label_from_config(&config, None, top, leaf, leaves).expect("a label");
+                assert_eq!(label, tops[top].config(leaf), "top {top} leaf {leaf}");
+            }
+        }
+        // The pool as the run names it, where that is not the name the
+        // configuration has.
+        let renamed = label_from_config(&config, Some("rescued"), 1, 0, 3).expect("a label");
+        assert_eq!(renamed.str("name"), Some("rescued"));
+        assert_eq!(renamed.u64("pool_guid"), Some(0x7070));
+
+        // A vdev the configuration does not have, or has in another
+        // shape than the layout.
+        let beyond = label_from_config(&config, None, 2, 0, 2).unwrap_err();
+        assert!(beyond.contains("2 top-level vdev(s)"), "{beyond}");
+        let shape = label_from_config(&config, None, 1, 0, 2).unwrap_err();
+        assert!(
+            shape.contains("3 member(s) in the pool's configuration and 2 in the layout"),
+            "{shape}"
+        );
+        // A vdev that was removed has no member to label.
+        let mut removed = config.clone();
+        for (key, value) in removed.pairs.iter_mut() {
+            if let ("vdev_tree", Value::List(root)) = (key.as_str(), value) {
+                for (key, value) in root.pairs.iter_mut() {
+                    if let ("children", Value::ListArray(tops)) = (key.as_str(), value) {
+                        tops[1] = encode::list(vec![
+                            ("type", Value::String("indirect".into())),
+                            ("id", Value::Uint64(1)),
+                            ("guid", Value::Uint64(0x1de)),
+                        ]);
+                    }
+                }
+            }
+        }
+        let gone = label_from_config(&removed, None, 1, 0, 3).unwrap_err();
+        assert!(gone.contains("is \"indirect\""), "{gone}");
+        // The vdev beside it is still labelled, and still one of two.
+        let kept = label_from_config(&removed, None, 0, 1, 2).expect("a label");
+        assert_eq!(kept.u64("vdev_children"), Some(2));
     }
 
     #[test]

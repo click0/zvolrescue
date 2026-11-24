@@ -1100,26 +1100,40 @@ pub struct EmitOpts {
     pub emit_label_index: Option<usize>,
 }
 
-/// Write the label a layout describes for one member (SPEC F-67).
+/// Write the label of one member of a layout (SPEC F-67).
 ///
 /// The bytes go where the operator asked and nowhere else: this never
-/// touches an input, and the file it writes is a *template* to place on a
-/// copy of the disk. It carries what the layout knows — pool name, TXG,
-/// vdev type, parity, ashift, member order — with synthetic vdev GUIDs,
-/// since the real ones went with the labels. Feature flags are not in it:
-/// nothing surviving says which the pool had, and `zpool import` will want
-/// them added by hand.
+/// touches an input, and the file it writes is to place on a *copy* of
+/// the disk.
+///
+/// The label is the pool's own where the pool says what it is: its
+/// configuration, read from the MOS through the layout, has the GUID of
+/// the pool and of every vdev, their sizes and metaslab arrays and the
+/// features a reader has to know, and a label is that configuration
+/// seen from one member. The layout says which member the file is.
+/// Written from the layout alone, the label named a pool "recovered",
+/// GUID 0, where the run that wrote it had just shown the pool's own
+/// name and GUID; and with those given it was still a label OpenZFS
+/// does not take — no `features_for_read`, and vdev GUIDs made up here,
+/// whose sum is not the one every uberblock records.
+///
+/// Where the configuration does not read, or does not hold the vdev in
+/// the shape the layout gives it, the label is the template it was:
+/// what the layout knows — pool name, TXG, vdev type, parity, ashift,
+/// member order — with synthetic vdev GUIDs, and the geometry says so
+/// and why.
 fn emit_label(
     g: &Global,
     devices: &[PathBuf],
     opts: &EmitOpts,
+    hinted: &zvol_common::members::Hinted,
     txg: Option<u64>,
     psize: u64,
 ) -> Result<Vec<PathBuf>, String> {
-    let (Some(file), Some(out)) = (&opts.hints, &opts.emit_label) else {
+    let Some(out) = &opts.emit_label else {
         return Ok(Vec::new());
     };
-    let hints = zvol_common::hints::load(file, devices)?;
+    let layout = &hinted.layout;
     let (top, leaf) = match &opts.emit_for {
         None => (0usize, 0usize),
         Some(spec) => {
@@ -1136,10 +1150,10 @@ fn emit_label(
             )
         }
     };
-    let hint_top = hints.layout.tops.get(top).ok_or_else(|| {
+    let hint_top = layout.tops.get(top).ok_or_else(|| {
         format!(
             "--emit-for: the layout has {} top-level vdev(s)",
-            hints.layout.tops.len()
+            layout.tops.len()
         )
     })?;
     // The members of a nested top are those of its groups, numbered in
@@ -1155,18 +1169,59 @@ fn emit_label(
     // Both files were checked against what the run reads before this
     // was called.
     let meta = geometry_path(out);
-    let nv = zfs_read::hints::label_nvlist(&hints.layout, top, leaf, txg.unwrap_or(0), None);
+    let own = match &hinted.config {
+        Some(config) => zfs_read::hints::label_from_config(
+            config,
+            layout.name.as_deref(),
+            top,
+            leaf,
+            leaves.len(),
+        ),
+        None => Err("the pool's configuration did not read through the layout".into()),
+    };
+    let (nv, template) = match own {
+        Ok(nv) => (nv, None),
+        Err(why) => (
+            zfs_read::hints::label_nvlist(layout, top, leaf, txg.unwrap_or(0), None),
+            Some(why),
+        ),
+    };
     let img = zfs_read::hints::label_image(&nv, index, psize)?;
     std::fs::write(out, &img).map_err(|e| format!("{}: {e}", out.display()))?;
-    let json = json!({
+    let guid = |key: &str| nv.u64(key).map(hex);
+    // Reading settles the order of a raidz or a dRAID, where a member
+    // in the wrong place fails checksums. The sides of a mirror hold
+    // the same bytes: which of them a file is, only the layout says.
+    let twin = {
+        let group = group_of(hint_top, leaf);
+        matches!(group.kind.as_str(), "mirror" | "replacing" | "spare") && group.members.len() > 1
+    };
+    let note = match &template {
+        None => format!(
+            "the pool's own configuration, read from its MOS through the layout: the GUIDs, sizes and features the pool recorded{}; place on a copy of the disk, never on the evidence",
+            if twin {
+                "; the members of a mirror hold the same bytes, so which of them this one is rests on the order in the layout alone"
+            } else {
+                ""
+            }
+        ),
+        Some(why) => format!(
+            "template only: synthetic vdev GUIDs, no feature flags ({why}); place on a copy of the disk, never on the evidence"
+        ),
+    };
+    let mut json = json!({
         "label_index": index,
         "label_bytes": img.len(),
         "sealed_for_vdev_size": psize,
         "top": top,
         "leaf": leaf,
-        "pool": hints.layout.name,
-        "ashift": hints.layout.ashift_of(top),
-        "txg": txg,
+        "pool": nv.str("name"),
+        "pool_guid": guid("pool_guid"),
+        "top_guid": guid("top_guid"),
+        "vdev_guid": guid("guid"),
+        "config": if template.is_none() { "pool" } else { "template" },
+        "ashift": layout.ashift_of(top),
+        "txg": nv.u64("txg").filter(|t| *t != 0).or(txg),
         "kind": hint_top.kind,
         "nparity": hint_top.nparity,
         "draid_ndata": hint_top.draid_ndata,
@@ -1176,8 +1231,16 @@ fn emit_label(
             .iter()
             .map(|m| m.map(|i| devices[i].display().to_string()))
             .collect::<Vec<_>>(),
-        "note": "template only: synthetic vdev GUIDs, no feature flags; place on a copy of the disk, never on the evidence",
+        "note": note,
     });
+    if let Some(features) = nv.list("features_for_read") {
+        json["features_for_read"] = features
+            .pairs
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>()
+            .into();
+    }
     std::fs::write(
         &meta,
         serde_json::to_string_pretty(&json).expect("serialisable") + "\n",
@@ -1185,15 +1248,39 @@ fn emit_label(
     .map_err(|e| format!("{}: {e}", meta.display()))?;
     if !g.quiet {
         errln!(
-            "zvolrescue: wrote L{index} of {}:{} to {} ({} bytes) and its geometry to {}",
+            "zvolrescue: wrote L{index} of {}:{} to {} ({} bytes) and its geometry to {}: {}",
             top,
             leaf,
             out.display(),
             img.len(),
-            meta.display()
+            meta.display(),
+            match &template {
+                None => "the pool's own configuration, from its MOS".to_string(),
+                Some(why) => format!("a template with made-up vdev GUIDs — {why}"),
+            }
         );
     }
     Ok(vec![out.clone(), meta])
+}
+
+/// The group of a vdev that leaf `leaf` of it, in vdev order, is
+/// directly in: the vdev itself, or a group nested in it.
+fn group_of(top: &zfs_read::hints::TopHint, leaf: usize) -> &zfs_read::hints::TopHint {
+    fn walk<'t>(
+        g: &'t zfs_read::hints::TopHint,
+        leaf: &mut usize,
+    ) -> Option<&'t zfs_read::hints::TopHint> {
+        if g.children.is_empty() {
+            if *leaf < g.members.len() {
+                return Some(g);
+            }
+            *leaf -= g.members.len();
+            return None;
+        }
+        g.children.iter().find_map(|c| walk(c, leaf))
+    }
+    let mut at = leaf;
+    walk(top, &mut at).unwrap_or(top)
 }
 
 /// Where `--emit-label FILE` puts the geometry: `FILE.json`, as the
@@ -1410,12 +1497,22 @@ pub fn run(
         // scan found it — to the end of its partition or of the device:
         // a member 1 MiB into a whole-disk image had its labels sealed for
         // the whole image, and the rear ones verified at neither end.
-        let bases = emit
+        let hints = match emit
             .hints
             .as_ref()
-            .and_then(|f| zvol_common::hints::load(f, devices).ok())
-            .map(|h| h.bases)
-            .unwrap_or_default();
+            .map(|f| zvol_common::hints::load(f, devices))
+        {
+            Some(Ok(h)) => h,
+            Some(Err(e)) => {
+                errln!("zvolrescue: {e}");
+                return exit::USAGE;
+            }
+            None => {
+                errln!("zvolrescue: --emit-label needs the layout: --hints FILE");
+                return exit::USAGE;
+            }
+        };
+        let bases = hints.bases.clone();
         let psize = out
             .devices
             .iter()
@@ -1454,7 +1551,28 @@ pub fn run(
                     .max()
             })
             .max();
-        match emit_label(g, devices, emit, txg, psize) {
+        // Which pool the layout is of, by the pool's own word: its
+        // configuration in the MOS, read through the layout, with the
+        // members where the hints place them.
+        let hinted = {
+            let opened: Vec<Option<&dyn BlockSource>> = sources
+                .iter()
+                .map(|s| s.as_ref().map(|s| s as &dyn BlockSource))
+                .collect();
+            let mut at: Vec<u64> = scans
+                .iter()
+                .map(|s| s.as_ref().map_or(0, |s| s.base))
+                .collect();
+            zvol_common::members::place_hinted(&hints.bases, &mut scans, &opened, &mut at);
+            match zvol_common::members::identify_hinted(hints.layout, &scans, &opened, &at) {
+                Ok(h) => h,
+                Err(e) => {
+                    errln!("zvolrescue: {e}");
+                    return exit::USAGE;
+                }
+            }
+        };
+        match emit_label(g, devices, emit, &hinted, txg, psize) {
             Ok(files) => written.extend(
                 files
                     .iter()

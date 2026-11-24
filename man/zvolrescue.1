@@ -237,7 +237,7 @@ A file that is no layout is refused with exit status 1 before anything
 is scanned, with or without
 .Fl -emit-label .
 .It Fl -emit-label Ar file
-Write the label the layout describes for one member to
+Write the label of one member of the layout to
 .Ar file :
 the first 128 KiB of a label \(em the blank area, the boot header and
 the configuration nvlist sealed for its label position \(em to place
@@ -246,9 +246,43 @@ on a
 of the disk.
 It stops short of the uberblock ring, so that placed at a label's
 offset it keeps the uberblocks that survive there.
+.Pp
+The label is the pool's own wherever the pool says what it is.
+Its configuration is kept in the MOS, and a label is that configuration
+seen from one member: read through the layout, it gives the name and
+GUID of the pool, the GUID of every vdev, their sizes and metaslab
+arrays, and
+.Ql features_for_read ,
+and the layout says which member the file is.
+A pool whose labels are all written this way on copies of its disks is
+one
+.Xr zdb 8
+opens.
+The label's
+.Ql txg
+is the configuration's: a vdev whose labels the pool last wrote
+earlier than the others' had the earlier number in them, and nothing
+else differs.
+The sides of a mirror hold the same bytes, so which of them a file is
+rests on the order in the layout alone; a raidz or a dRAID read through
+a wrong order fails checksums.
+.Pp
+Where the configuration does not read through the layout, or does not
+hold the vdev in the shape the layout gives it, the label is a
+template: what the layout knows, with vdev GUIDs made up for it and no
+features.
+This tool reads a pool so labelled; OpenZFS does not.
 The geometry goes to
 .Ar file Ns .json
-beside it.
+beside the label, and says in
+.Ql config
+which of the two the label is,
+.Ql pool
+or
+.Ql template ,
+and in
+.Ql note
+why it is a template.
 Nothing is ever written to the evidence: a
 .Ar file
 that is a member, the hints file, a map, a log, or on a device among
@@ -260,13 +294,13 @@ Which member of the layout the emitted label belongs to; default
 counts every member of the top-level vdev in vdev order, those of
 groups nested in it (a spare, a vdev being replaced) included, and the
 label describes the whole tree the member is in.
-A dRAID label carries
+A template for a dRAID carries
 .Ql draid_ndata ,
 .Ql draid_nspares
 and
 .Ql draid_ngroups
 from the hints, without which no reader can lay the dRAID out.
-The label has no metaslab array: what it reads through is the data,
+A template has no metaslab array: what it reads through is the data,
 not the space maps.
 .It Fl -emit-label-index Ar n
 Which of the four label positions to seal the emitted label for;

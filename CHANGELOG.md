@@ -17,6 +17,38 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ### Fixed
 
+* **The label `scan --emit-label` writes is the pool's own.** It was
+  made from the layout alone. With no `name` or `guid` in the hints —
+  the manual says both may be left out — the run showed the pool's own
+  from its MOS and sealed `recovered`, GUID 0, into the label: placed,
+  the datasets were `recovered/…`, `dump` of the volume by its name
+  was "dataset not found", and `zdb -e` stopped on an assertion. With
+  the name and GUID given, this tool read the copies and OpenZFS
+  still did not — `invalid label: 'features_for_read' missing`, and
+  behind that vdev GUIDs made up here, whose sum is not the one every
+  uberblock records. SPEC F-67 says the label is for `zpool import`.
+  The pool's configuration is in its MOS, and a label is that
+  configuration seen from one member: read through the layout it
+  gives the pool's name and GUID, the GUID of every vdev, `asize`,
+  the metaslab array and `features_for_read`, and the layout says
+  which member the file is. The geometry beside the label says in
+  `config` that it is the pool's (`pool`), with `pool_guid`,
+  `top_guid`, `vdev_guid` and `features_for_read`; where the MOS does
+  not read through the layout, or holds the vdev in another shape, it
+  is the template it was (`template`), and `note` says why. The
+  label's `txg` is the configuration's. A mirror's sides hold the same
+  bytes, so which of them a file is rests on the layout's order alone,
+  and the geometry says so. Checked against OpenZFS 2.2.2 on pools
+  made through libzpool — raidz1; mirror + raidz2 + dRAID; raidz1 at
+  ashift 9 with raidz1 at 12; a pool with a vdev removed — and on
+  seven `ztest` pools: every configuration erased on copies, a label
+  emitted for every member and position and placed, `zdb -l` prints
+  what it prints for the originals (but for the `txg` of a vdev whose
+  labels the pool last wrote one group before its configuration), and
+  `zdb -e` opens the copies and lists the same datasets; on the
+  libzpool pools `zdb -bcc` walks every block of them with no leak.
+  Not tried: `zpool import` on a kernel.
+
 * **A `--hints` file is read strictly.** Three ways a layout could be
   wrong and be taken. A key nothing reads was passed over without a
   word, and a key misspelt is the key left out: `"nparty": 2` on a
