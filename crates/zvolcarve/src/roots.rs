@@ -39,7 +39,7 @@ pub struct Options {
 }
 
 /// One object-set header, and what walking from it produced.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RootOut {
     /// Position in the ranking, as `dump` and a person both refer to it.
     pub id: usize,
@@ -68,6 +68,18 @@ pub struct RootOut {
     /// same place: one header, listed once.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub also_on: Vec<String>,
+    /// Where else the same header is: the MOS is written three times
+    /// over, and on a raidz the parity of a block of one sector is the
+    /// block again on another member. One header, listed once.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub copies: Vec<CopyOut>,
+}
+
+/// Another place a header is at.
+#[derive(Debug, Clone, Serialize)]
+pub struct CopyOut {
+    pub member: String,
+    pub offset: u64,
 }
 
 /// What a run writes to the workspace.
@@ -75,10 +87,21 @@ pub struct RootOut {
 pub struct RootsOut {
     pub version: u32,
     pub members: Vec<String>,
-    /// Headers found, best first.
+    /// Headers found, best first, and no more of them than
+    /// `--max-roots`.
     pub roots: Vec<RootOut>,
-    /// Headers were found than the cap allowed and the rest were dropped.
+    /// More headers were found than are listed: `--max-roots` cut the
+    /// list, or the scan met more than it keeps of one member.
     pub truncated: bool,
+    /// Headers found, before `--max-roots` cut the list: each counted
+    /// once, wherever its copies are.
+    pub found: usize,
+    /// The newest header a pool walked out of, wherever the ranking put
+    /// it and whether or not the list was cut before it: the state the
+    /// pool was last in, which is what is looked for first. Its `id` is
+    /// its place in the whole ranking.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub newest: Option<RootOut>,
     pub bytes_read: u64,
 }
 
@@ -219,26 +242,55 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     // read plain is also read as the start of a compressed one.
     found.sort_by_key(|r| (r.device, r.offset));
     found.dedup_by(|a, b| (a.device, a.offset) == (b.device, b.offset));
-    // And the sides of a mirror hold the same header at the same place
-    // in the vdev: one header, walked once, with where else it is.
+    // And one header is in several places. The sides of a mirror hold
+    // it at the same place in the vdev; the MOS is written three times
+    // over; on a raidz the parity of a one-sector block is the block
+    // again on another member. One header, walked once, with where else
+    // it is: listed once per place, three rows — six on a raidz — said
+    // one thing, and the 32 rows the list is cut to by default were the
+    // roots of six transaction groups.
     let groups = crate::scan::mirror_groups(pool.as_ref(), members.paths.len());
     let base = |i: usize| members.base_offsets.get(i).copied().unwrap_or(0);
-    let mut copies: Vec<Vec<String>> = Vec::new();
+    let mut also_on: Vec<Vec<String>> = Vec::new();
+    let mut copies: Vec<Vec<CopyOut>> = Vec::new();
     let mut kept: Vec<RootHit> = Vec::new();
+    // Those kept, by what tells one header from another at a glance —
+    // where its first block is, when it was born, what it hashes to —
+    // so that each is compared with the few that could be it.
+    let glance = |r: &RootHit| {
+        r.objset
+            .meta_dnode
+            .blkptr
+            .iter()
+            .find(|b| !b.is_hole())
+            .map(|b| (b.dva[0].offset, b.birth, b.cksum[0]))
+    };
+    let mut by_glance: std::collections::HashMap<_, Vec<usize>> = std::collections::HashMap::new();
     for r in found {
-        let first = groups[r.device].and_then(|g| {
-            kept.iter().position(|k| {
-                groups[k.device] == Some(g)
-                    && k.device != r.device
-                    && k.offset.saturating_sub(base(k.device))
-                        == r.offset.saturating_sub(base(r.device))
-                    && k.objset == r.objset
-            })
-        });
+        let first = by_glance
+            .get(&glance(&r))
+            .and_then(|same| same.iter().copied().find(|&k| kept[k].objset == r.objset));
         match first {
-            Some(k) => copies[k].push(members.paths[r.device].display().to_string()),
+            Some(k) => {
+                let side_of_mirror = groups[r.device].is_some()
+                    && groups[kept[k].device] == groups[r.device]
+                    && kept[k].device != r.device
+                    && kept[k].offset.saturating_sub(base(kept[k].device))
+                        == r.offset.saturating_sub(base(r.device));
+                let member = members.paths[r.device].display().to_string();
+                if side_of_mirror {
+                    also_on[k].push(member);
+                } else {
+                    copies[k].push(CopyOut {
+                        member,
+                        offset: r.offset,
+                    });
+                }
+            }
             None => {
+                by_glance.entry(glance(&r)).or_default().push(kept.len());
                 kept.push(r);
+                also_on.push(Vec::new());
                 copies.push(Vec::new());
             }
         }
@@ -248,7 +300,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     // Walking is what separates a header from a coincidence, so it is
     // done for every one of them before anything is ranked.
     let mut out: Vec<RootOut> = Vec::new();
-    for (r, also_on) in found.iter().zip(copies) {
+    for ((r, also_on), copies) in found.iter().zip(also_on).zip(copies) {
         let birth = r
             .objset
             .meta_dnode
@@ -269,6 +321,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             error: None,
             sample: Vec::new(),
             also_on,
+            copies,
         };
         match &pool {
             None => {
@@ -304,10 +357,23 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     // that yields more of the pool is better evidence than one that
     // yields less, whatever its transaction group says.
     out.sort_by(|a, b| b.datasets.cmp(&a.datasets).then(b.birth.cmp(&a.birth)));
-    out.truncate(opts.max_roots);
     for (i, r) in out.iter_mut().enumerate() {
         r.id = i;
     }
+    // The pool as it last was is the newest header a pool walks out of,
+    // and that ranking puts it last of all once a dataset has been
+    // destroyed: the roots before the destruction yield more. Cut to
+    // `--max-roots`, the list of a command meant to find the MOS did
+    // not hold the pool's last one, and said nothing was cut. It is
+    // named whatever its rank, and the cut is said.
+    let newest = out
+        .iter()
+        .filter(|r| r.datasets > 0)
+        .max_by_key(|r| (r.birth, std::cmp::Reverse(r.id)))
+        .cloned();
+    let headers = out.len();
+    truncated |= headers > opts.max_roots;
+    out.truncate(opts.max_roots);
 
     let doc = RootsOut {
         version: ROOTS_VERSION,
@@ -318,6 +384,8 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             .collect(),
         roots: out,
         truncated,
+        found: headers,
+        newest,
         bytes_read,
     };
     let path = opts.output.join(ROOTS);
@@ -367,20 +435,9 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     )
 }
 
-fn print(doc: &RootsOut, path: &std::path::Path) {
-    outln!(
-        "{} object-set header(s) in {} bytes of {}",
-        doc.roots.len(),
-        doc.bytes_read,
-        doc.members.join(", ")
-    );
-    if doc.truncated {
-        outln!("  more headers were found than the cap allowed; the rest were dropped");
-    }
-    if doc.roots.is_empty() {
-        outln!("  no MOS header was found: the pool's root is not in the range that was read");
-    }
-    for r in &doc.roots {
+/// One header, as the list shows it.
+fn print_root(r: &RootOut) {
+    {
         outln!(
             "  [{}] {} at {:#x}  {}  birth {}  {} dataset(s)",
             r.id,
@@ -404,9 +461,66 @@ fn print(doc: &RootsOut, path: &std::path::Path) {
         if !r.also_on.is_empty() {
             outln!("      also on {}", r.also_on.join(", "));
         }
+        if !r.copies.is_empty() {
+            // By place, each with the members that hold it there.
+            let mut places: Vec<(u64, Vec<&str>)> = Vec::new();
+            for c in &r.copies {
+                match places.iter_mut().find(|(at, _)| *at == c.offset) {
+                    Some((_, on)) => on.push(&c.member),
+                    None => places.push((c.offset, vec![&c.member])),
+                }
+            }
+            outln!(
+                "      the same header also at {}",
+                places
+                    .iter()
+                    .map(|(at, on)| format!("{at:#x} ({})", on.join(", ")))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
         if let Some(e) = &r.error {
             outln!("      {}", zvol_common::text::shown(e));
         }
+    }
+}
+
+fn print(doc: &RootsOut, path: &std::path::Path) {
+    outln!(
+        "{} object-set header(s) in {} bytes of {}",
+        doc.found,
+        doc.bytes_read,
+        doc.members.join(", ")
+    );
+    if doc.found > doc.roots.len() {
+        outln!(
+            "  the first {} by rank are listed and {} are not: --max-roots {} lists them all",
+            doc.roots.len(),
+            doc.found - doc.roots.len(),
+            doc.found
+        );
+    } else if doc.truncated {
+        outln!("  more headers were met than are kept of one member; the rest were dropped");
+    }
+    if doc.found == 0 {
+        outln!("  no MOS header was found: the pool's root is not in the range that was read");
+    }
+    for r in &doc.roots {
+        print_root(r);
+    }
+    // Said apart when the ranking did not put it first: it is the state
+    // the pool was last in.
+    if let Some(n) = doc.newest.as_ref().filter(|n| n.id != 0) {
+        outln!(
+            "  the newest a pool walks out of is [{}]{}:",
+            n.id,
+            if n.id >= doc.roots.len() {
+                ", past where the list was cut"
+            } else {
+                ""
+            }
+        );
+        print_root(n);
     }
     outln!("  index: {}", path.display());
 }

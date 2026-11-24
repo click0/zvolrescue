@@ -8,7 +8,9 @@ use std::process::Command;
 use zfs_ondisk::blkptr::Compression;
 use zfs_ondisk::dmu::ot;
 use zfs_ondisk::label::LABEL_SIZE;
-use zfs_read::fixture::{build_sample_mos, carved_zvol_members, Alloc, Pool};
+use zfs_read::fixture::{
+    build_sample_mos, build_sample_mos_variant, carved_zvol_members, Alloc, Pool,
+};
 use zfs_read::hash::{Digests, Extra};
 use zvol_common::scratch::Scratch;
 
@@ -1206,6 +1208,110 @@ fn roots_and_zeropoint_are_on_the_record() {
         })
         .collect();
     assert_eq!(wrote, ["roots.json", "zeropoint.json"]);
+}
+
+/// `roots` lists a header once, wherever its copies are, says when
+/// `--max-roots` cut the list, and names the newest header a pool walks
+/// out of whatever its rank. The ranking puts first what yields most of
+/// a pool, so once a dataset has been destroyed the pool's last state is
+/// last of all: cut to the cap, the list of the command that finds the
+/// MOS did not hold the pool's last one, and `truncated` said false.
+#[test]
+fn roots_names_the_newest_and_says_what_it_cut() {
+    let dir = scratch("roots-newest");
+    let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(300, 1)]);
+    let mut images: Vec<Vec<u8>> = (0..2).map(|_| vec![0u8; SIZE as usize]).collect();
+    let mut alloc = Alloc::new(0x20_0000);
+    // Four states of the pool with the volume in it, then the one after
+    // it was destroyed, which is the state the pool is in.
+    for txg in 100..104 {
+        alloc.born = Some(txg);
+        build_sample_mos_variant(&mut images, &mut alloc, true);
+    }
+    alloc.born = Some(200);
+    pool.rootbp = Some(build_sample_mos_variant(&mut images, &mut alloc, false));
+    let write = |images: &[Vec<u8>]| -> Vec<String> {
+        images
+            .iter()
+            .enumerate()
+            .map(|(i, img)| {
+                let mut img = img.clone();
+                pool.write_labels(i, &mut img);
+                let p = dir.join(format!("member{i}.img"));
+                std::fs::write(&p, img).expect("write member");
+                p.to_string_lossy().into_owned()
+            })
+            .collect()
+    };
+    let m = write(&images);
+    let roots = |name: &str, more: &[&str]| {
+        let out = dir.join(name);
+        let mut args = vec!["-q", "roots", m[0].as_str(), m[1].as_str(), "-o"];
+        let o = out.to_string_lossy().into_owned();
+        args.push(&o);
+        args.extend(more);
+        let (code, text, err) = run(&args);
+        assert_eq!(code, 0, "{err}");
+        let doc: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(out.join("roots.json")).unwrap()).unwrap();
+        (doc, text)
+    };
+    let (all, text) = roots("all", &[]);
+    let listed = all["roots"].as_array().unwrap();
+    let births: Vec<u64> = listed
+        .iter()
+        .map(|r| r["birth"].as_u64().unwrap())
+        .collect();
+    assert_eq!(births, [103, 102, 101, 100, 200], "{all}");
+    assert_eq!(all["found"], 5, "{all}");
+    assert_eq!(all["truncated"], false, "{all}");
+    assert_eq!(all["newest"]["id"], 4, "{all}");
+    assert_eq!(all["newest"]["birth"], 200, "{all}");
+    assert!(
+        listed[4]["datasets"].as_u64() < listed[0]["datasets"].as_u64(),
+        "{all}"
+    );
+    assert!(
+        text.contains("the newest a pool walks out of is [4]:"),
+        "{text}"
+    );
+
+    let (cut, text) = roots("cut", &["--max-roots", "2"]);
+    assert_eq!(cut["roots"].as_array().unwrap().len(), 2, "{cut}");
+    assert_eq!(cut["found"], 5, "{cut}");
+    assert_eq!(cut["truncated"], true, "{cut}");
+    assert_eq!(cut["newest"], all["newest"], "{cut}");
+    assert!(
+        text.starts_with("5 object-set header(s)")
+            && text.contains("the first 2 by rank are listed and 3 are not")
+            && text.contains("is [4], past where the list was cut:"),
+        "{text}"
+    );
+
+    // The same header a second time on one member — the MOS is written
+    // three times over — is that header, not another.
+    let at = listed[0]["offset"].as_u64().unwrap() as usize;
+    let (spare, mut again) = (14usize << 20, images.clone());
+    let header = again[0][at..at + 4096].to_vec();
+    assert!(again[0][spare..spare + 4096].iter().all(|b| *b == 0));
+    again[0][spare..spare + 4096].copy_from_slice(&header);
+    let m = write(&again);
+    let out = dir.join("copy");
+    let (code, text, err) = run(&["-q", "roots", &m[0], &m[1], "-o", &out.to_string_lossy()]);
+    assert_eq!(code, 0, "{err}");
+    let doc: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(out.join("roots.json")).unwrap()).unwrap();
+    assert_eq!(doc["found"], 5, "{doc}");
+    assert_eq!(
+        doc["roots"][0]["copies"],
+        serde_json::json!([{"member": m[0], "offset": spare}]),
+        "{doc}"
+    );
+    assert_eq!(doc["roots"][0]["also_on"], serde_json::json!([m[1]]));
+    assert!(
+        text.contains(&format!("the same header also at {spare:#x} ({})", m[0])),
+        "{text}"
+    );
 }
 
 /// The scan's state is kept from the logs and the image like its index,

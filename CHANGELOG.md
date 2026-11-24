@@ -17,6 +17,22 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ### Fixed
 
+* **`zvolcarve roots` says what it cut, and names the pool's last
+  root.** The list was cut to `--max-roots` (32 by default) and
+  `"truncated": false` was written: 80 headers on the members, 32
+  listed, nothing said of the other 48. And the ranking — what yields
+  most of a pool first — puts the pool's last state last once a
+  dataset has been destroyed, so the default output of the command
+  that finds the MOS when no uberblock survives did not hold the MOS
+  the pool was at: every root listed was 17 transaction groups old or
+  more. `truncated` is true of a list that was cut, `found` is how
+  many headers there were, and the newest header a pool walks out of
+  is named whatever its rank (`newest`). One header is listed once,
+  with where its copies are (`copies`): the three places the MOS is
+  written to, and on a raidz the parity of a one-sector block, were a
+  row each — six rows a transaction group on raidz1, so that 32 rows
+  were the roots of six. On that pool 107 rows are 18 headers.
+
 * **`zvolcarve list` says when it is the list of part of a scan.** On
   the workspace of a scan that stopped — a signal, `--max-hits` —
   after 4.4 of 96 MiB of each member, `list` printed its hundred

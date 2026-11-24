@@ -321,9 +321,19 @@ a device is kept in the current directory under the device's path.
 Find the pool's object set when no uberblock survives: the members are
 scanned for object set headers, which are ranked into
 .Ar dir .
-The same header on two sides of a mirror is listed once, with the
-other members it is on
-.Pq Li also_on .
+They are ranked by how much of a pool walks out of each, the newer
+first where two yield as much.
+One header is listed once: with the other members of its mirror that
+hold it at the same place
+.Pq Li also_on ,
+and with where its other copies are
+.Pq Li copies
+\(em the pool's object set is written three times over, and on a raidz
+the parity of a block of one sector is the block again.
+The newest header a pool walks out of is named whatever its rank
+.Pq Li newest :
+it is the state the pool was last in, and once a dataset has been
+destroyed the roots from before yield more and rank above it.
 .Bl -tag -width Ds
 .It Fl o , Fl -output Ar dir
 Carve workspace, where the ranked headers are written; refused as the
@@ -336,7 +346,12 @@ Only this byte range of each member.
 Compressions to try, as in
 .Cm scan .
 .It Fl -max-roots Ar n
-Keep at most this many headers after ranking; default 32.
+List at most this many headers after ranking; default 32.
+A list that was cut says how many headers were found
+.Pq Li found
+and that it was cut
+.Pq Li truncated ;
+the newest is named either way.
 .El
 .Ss zeropoint
 .Nm Cm zeropoint
