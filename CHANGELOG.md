@@ -17,6 +17,30 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ### Fixed
 
+* **`zvolcarve` looks for compressed blocks at every sector of a
+  member nothing says the ashift of.** With no label and no `--hints`
+  the compressed pass of `scan` and `roots` stepped 4 KiB, taking
+  ashift 12 for granted. On the members of a pool of ashift 9 with
+  their labels gone — the pool a carve is for — seven blocks in eight
+  were never tried: 410 candidates for 3072, 2 volume dnodes for 18,
+  exit 0 and a state that said `complete`. The step is the sector,
+  which no block is finer than; a member whose top-level vdev states
+  its ashift is stepped by it, as before.
+
+* **`zvolcarve scan` takes the start of an unlabelled vdev that
+  `zeropoint` puts first.** A member that begins at an offset of its
+  own — a partition whose table is gone — is placed by its block
+  pointers, and the start was taken only with twice the agreements of
+  the runner-up. Metadata is written two or three times, the copies
+  often one metaslab apart, so a base wrong by that distance agrees
+  with every pointer that has a second copy: 56 of 64 probes at the
+  start, 31 a metaslab on, and the right start was thrown away without
+  a word — 126 candidates and no volume for 5383 and 42. Agreements
+  that are another copy of a block the first base places are that
+  base's, and are not held against it; `zeropoint` says how many of a
+  base's are such (`copies_of_first`). A start the pointers do not
+  settle is said, with the bases they were closest to.
+
 * **`zvolcarve scan --like` finds the volume made like its
   neighbour.** It took the neighbour's `volsize` as the exact size of
   what is looked for, and the depth of its tree as the exact depth. A

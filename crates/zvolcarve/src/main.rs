@@ -31,10 +31,15 @@ use zvol_common::{exit, Global, PoolSpec};
 /// taken for every member, missed every block on a member of a top with
 /// a smaller ashift — on a ztest pool of mixed ashifts, 29 514 of 40 446
 /// dnodes. A member no top names is stepped by the smallest any top
-/// states, which no block of the pool is finer than; 12 when none does.
+/// states, which no block of the pool is finer than; and 9, the sector,
+/// which no block of any pool is finer than, when none states one or no
+/// pool assembled at all. That was 12: the members of a pool of ashift 9
+/// with their labels gone — what a carve is for — had seven blocks in
+/// eight never tried, 410 candidates for 3072, and the scan said it was
+/// complete.
 pub(crate) fn member_ashift(pool: Option<&zfs_read::pool::PoolAssembly>, member: usize) -> u32 {
     let Some(p) = pool else {
-        return 12;
+        return 9;
     };
     let own = p
         .tops
@@ -42,7 +47,7 @@ pub(crate) fn member_ashift(pool: Option<&zfs_read::pool::PoolAssembly>, member:
         .find(|t| t.members.iter().any(|m| m.present == Some(member)))
         .and_then(|t| t.ashift);
     own.or_else(|| p.tops.iter().filter_map(|t| t.ashift).min())
-        .map_or(12, |a| a.clamp(9, 17) as u32)
+        .map_or(9, |a| a.clamp(9, 17) as u32)
 }
 
 /// A reader for `pool` over the members, told what the pool's newest

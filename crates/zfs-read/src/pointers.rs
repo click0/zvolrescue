@@ -48,6 +48,12 @@ pub struct Anchor {
     /// The block is encrypted, so the stored checksum covers only part
     /// of the value and `verify_block` compares it accordingly.
     pub encrypted: bool,
+    /// Where the pointer's other copies of the block are on the same
+    /// vdev, as offsets like `offset`: metadata is written two or three
+    /// times over, and a base that is wrong by the distance between two
+    /// copies reads the other one — the same bytes, and the checksum
+    /// agrees (see [`explained`]).
+    pub copies: Vec<u64>,
 }
 
 /// Whether a pointer can be used as a probe, and why not when it cannot.
@@ -84,6 +90,11 @@ fn as_anchor(bp: &BlkPtr) -> Option<Anchor> {
         cksum: bp.cksum,
         endian: bp.endian,
         encrypted: bp.encrypted,
+        copies: bp.dva[1..]
+            .iter()
+            .filter(|d| d.asize != 0 && !d.gang && d.vdev == dva.vdev)
+            .map(|d| d.offset)
+            .collect(),
     })
 }
 
@@ -191,6 +202,90 @@ pub fn confirm(
         }
     }
     (ok, tried)
+}
+
+/// Of the probes that agree at `other`, how many do so because `best`
+/// has another copy of their block exactly there: `(agreed, explained)`,
+/// over the probes [`confirm`] reads with the same `at_most`.
+///
+/// Metadata is written two or three times, and the allocator likes to
+/// put the copies the same distance apart — one metaslab, on a young
+/// pool. A base that is wrong by that distance then reads, for every
+/// such pointer, its second copy: half the probes agree at a base that
+/// is nobody's. Those agreements are evidence for `best`, which says
+/// where the copy is, and not for `other`; what is left of `other`'s
+/// count once they are taken away is what it has of its own.
+pub fn explained(
+    dev: &dyn BlockSource,
+    best: u64,
+    other: u64,
+    anchors: &[Anchor],
+    at_most: usize,
+) -> (usize, usize) {
+    let size = dev.size();
+    let delta = other as i128 - best as i128;
+    let mut buf = Vec::new();
+    let (mut agreed, mut by_copy, mut tried) = (0usize, 0usize, 0usize);
+    for a in anchors {
+        if tried >= at_most {
+            break;
+        }
+        let Some(at) = other
+            .checked_add(LABEL_START_SIZE)
+            .and_then(|p| p.checked_add(a.offset))
+        else {
+            continue;
+        };
+        if at.saturating_add(a.psize) > size {
+            continue;
+        }
+        buf.clear();
+        buf.resize(a.psize as usize, 0);
+        if dev.read_at(at, &mut buf).is_err() {
+            continue;
+        }
+        tried += 1;
+        if verify_block(a.checksum, &buf, a.endian, &a.cksum, None, a.encrypted) == Verify::Ok {
+            agreed += 1;
+            if a.copies
+                .iter()
+                .any(|c| *c as i128 == a.offset as i128 + delta)
+            {
+                by_copy += 1;
+            }
+        }
+    }
+    (agreed, by_copy)
+}
+
+/// How many probes have to agree at a base before it is one: fewer is
+/// what chance gives — a sparse member is mostly zeros, and two blocks
+/// of the same bytes are not rare.
+pub const ENOUGH: usize = 8;
+
+/// The base the probes settle on, if they settle on one: the first of
+/// `found` (as [`search`] ranks them) when enough probes agree there —
+/// [`ENOUGH`] — and twice as many as agree at any other base for a
+/// reason of its own (see [`explained`]).
+///
+/// The margin is what tells a base from a coincidence. Held against the
+/// runner-up's whole count it threw the right base away on any pool
+/// whose metadata copies sit a metaslab apart: 56 of 64 probes at the
+/// start, 31 at the start plus 16 MiB — every one of them a second copy
+/// — and 56 is not twice 31.
+pub fn settled(dev: &dyn BlockSource, found: &[Base], anchors: &[Anchor]) -> Option<Base> {
+    let confirm = Options::default().confirm;
+    let best = found.first()?;
+    let rival = found
+        .iter()
+        .skip(1)
+        .map(|b| {
+            let (agreed, by_copy) = explained(dev, best.base, b.base, anchors, confirm);
+            agreed - by_copy
+        })
+        .max()
+        .unwrap_or(0);
+    (best.confirmed >= ENOUGH && best.confirmed >= 2 * rival).then(|| best.clone())
 }
 
 /// Bases from `start` to `end`, `step` apart, at which one of the first
@@ -426,6 +521,92 @@ mod tests {
         for other in found.iter().skip(1) {
             assert!(other.confirmed < best.confirmed, "{found:?}");
         }
+    }
+
+    /// Sixteen blocks of a vdev that starts at `base`, some written a
+    /// second time `apart` further on, and the probes that point at them:
+    /// with the second place as a copy of the pointer's when `as_copies`.
+    fn written(
+        disk: &mut [u8],
+        base: u64,
+        apart: u64,
+        twice: impl Fn(u64) -> bool,
+        as_copies: bool,
+    ) -> Vec<Anchor> {
+        (0..16u64)
+            .map(|i| {
+                let block: Vec<u8> = (0..4096u64).map(|b| (b * (i + 3) + i) as u8).collect();
+                let offset = i * 0x1_0000;
+                let mut copies = Vec::new();
+                for at in std::iter::once(offset).chain(twice(i).then_some(offset + apart)) {
+                    let on_disk = (base + LABEL_START_SIZE + at) as usize;
+                    disk[on_disk..on_disk + block.len()].copy_from_slice(&block);
+                    if at != offset && as_copies {
+                        copies.push(at);
+                    }
+                }
+                Anchor {
+                    offset,
+                    psize: 4096,
+                    checksum: Checksum::Fletcher4,
+                    cksum: zfs_ondisk::checksum::fletcher4(&block, Endian::Little),
+                    endian: Endian::Little,
+                    encrypted: false,
+                    copies,
+                }
+            })
+            .collect()
+    }
+
+    /// The base the probes settle on is the one where the vdev starts,
+    /// though a base one metaslab on has more than half as many: there
+    /// every pointer with a second copy reads it. Those agreements are
+    /// the first base's — it says where the copy is — and held against
+    /// it they threw the right start away: 56 probes of 64 at the start,
+    /// 31 a metaslab on, and 56 is not twice 31. Two starts that each
+    /// have agreements of their own are still no answer.
+    #[test]
+    fn a_base_that_reads_second_copies_is_no_rival() {
+        let (base, apart) = (63 * 512u64, 1 << 20);
+        let size = (base + LABEL_START_SIZE + (2 << 20) + apart) as usize;
+        let opts = Options::default();
+
+        let mut disk = vec![0u8; size];
+        let probes = written(&mut disk, base, apart, |i| i % 4 != 0, true);
+        let src = MemSource::new(disk);
+        let found = search(&src, &probes, &opts).expect("search");
+        let at = |b: u64| found.iter().find(|f| f.base == b).map(|f| f.confirmed);
+        assert_eq!(
+            (at(base), at(base + apart)),
+            (Some(16), Some(12)),
+            "{found:?}"
+        );
+        assert_eq!(
+            explained(&src, base, base + apart, &probes, opts.confirm),
+            (12, 12)
+        );
+        assert_eq!(settled(&src, &found, &probes).map(|b| b.base), Some(base));
+
+        // The same bytes, with nothing to say the second place is a copy:
+        // two starts, and neither is twice the other.
+        let mut disk = vec![0u8; size];
+        let probes = written(&mut disk, base, apart, |i| i % 4 != 0, false);
+        let src = MemSource::new(disk);
+        let found = search(&src, &probes, &opts).expect("search");
+        assert_eq!(
+            explained(&src, base, base + apart, &probes, opts.confirm),
+            (12, 0)
+        );
+        assert!(settled(&src, &found, &probes).is_none(), "{found:?}");
+
+        // And fewer than enough agreeing anywhere is nothing to settle on.
+        let mut disk = vec![0u8; size];
+        let probes = written(&mut disk, base, apart, |_| false, true);
+        let src = MemSource::new(disk);
+        let few = &probes[..ENOUGH - 1];
+        let found = search(&src, few, &opts).expect("search");
+        assert_eq!(found.first().map(|b| b.confirmed), Some(ENOUGH - 1));
+        assert!(settled(&src, &found, few).is_none());
     }
 
     /// And a device with no pool on it at all yields no base, rather than

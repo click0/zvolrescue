@@ -5,6 +5,8 @@
 use std::path::Path;
 use std::process::Command;
 
+use zfs_ondisk::blkptr::Compression;
+use zfs_ondisk::dmu::ot;
 use zfs_ondisk::label::LABEL_SIZE;
 use zfs_read::fixture::{build_sample_mos, carved_zvol_members, Alloc, Pool};
 use zfs_read::hash::{Digests, Extra};
@@ -1281,6 +1283,93 @@ fn a_member_no_label_places_is_placed_by_its_pointers() {
         assert_eq!(index["starts_by_pointers"][0]["base"].as_u64(), start);
     }
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// With no label and no hints nothing says what the pool's ashift was,
+/// and compressed blocks are looked for at every sector, which no block
+/// is finer than. They were looked for every 4 KiB: of a pool of ashift
+/// 9 with its labels gone — what a carve is for — seven blocks in eight
+/// were never tried, and the scan said it was complete. And two starts
+/// the block pointers do not choose between are said, not passed over.
+#[test]
+fn a_member_with_no_label_is_searched_at_every_sector() {
+    let dir = scratch("no-label-ashift9");
+    let mut pool = Pool::mirror("tank", 0x4242, 9).txgs(&[(100, 1)]);
+    let mut whole = carved_zvol_members(&mut pool, SIZE).swap_remove(0);
+    // A block of dnodes as a pool of ashift 9 writes one: compressed,
+    // and on a sector that is no 4 KiB boundary. The dnode in it is the
+    // fixture's own volume, found where the fixture wrote it plain.
+    let plain = whole
+        .chunks(512)
+        .position(|slot| slot[0] == ot::ZVOL && slot[1] == 17)
+        .expect("the volume's dnode")
+        * 512;
+    let mut block = vec![0u8; 16384];
+    for slot in [0, 3, 7] {
+        block[slot * 512..(slot + 1) * 512].copy_from_slice(&whole[plain..plain + 512]);
+    }
+    let odd = (9 << 20) + 512;
+    Alloc::new(odd).put_compressed(
+        std::slice::from_mut(&mut whole),
+        &block,
+        Compression::Lz4,
+        ot::DNODE,
+        0,
+        100,
+    );
+    let mut bare = whole.clone();
+    let (n, labels) = (bare.len(), 2 * LABEL_SIZE as usize);
+    bare[..labels].fill(0);
+    bare[n - labels..].fill(0);
+    let found = |name: &str, bytes: &[u8]| {
+        let img = dir.join(format!("{name}.img"));
+        std::fs::write(&img, bytes).unwrap();
+        let ws = dir.join(format!("ws-{name}"));
+        let (code, _, err) = run(&[
+            "scan",
+            img.to_str().unwrap(),
+            "-o",
+            ws.to_str().unwrap(),
+            "--dnode-type",
+            "any",
+        ]);
+        assert_eq!(code, 0, "{name}: {err}");
+        let index: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(ws.join("candidates.json")).unwrap()).unwrap();
+        let mut at: Vec<(u64, u64, String)> = index["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| {
+                (
+                    c["offset"].as_u64().unwrap(),
+                    c["slot"].as_u64().unwrap(),
+                    c["found"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        at.sort();
+        (at, err)
+    };
+    let (labelled, _) = found("whole", &whole);
+    let (unlabelled, err) = found("bare", &bare);
+    let off_boundary = labelled
+        .iter()
+        .filter(|(o, _, f)| f == "lz4" && o % 4096 != 0)
+        .count();
+    assert_eq!(off_boundary, 3, "{labelled:?}");
+    assert_eq!(unlabelled, labelled);
+    assert!(!err.contains("do not settle"), "{err}");
+
+    let mut twice = bare.clone();
+    twice.extend_from_slice(&bare);
+    let (both, err) = found("twice", &twice);
+    assert_eq!(both.len(), 2 * labelled.len());
+    assert!(
+        err.contains("its block pointers do not settle it (byte 0: ")
+            && err.contains("looked for at every sector"),
+        "{err}"
+    );
 }
 
 /// `--max-hits` ends a member's scan after the chunk it was reached in,

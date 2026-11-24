@@ -587,21 +587,41 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 by_pointers.push(b.clone());
                 continue;
             }
-            if let Some(b) = start_by_pointers(src, i, &codecs, range, &interrupt) {
-                errln!(
-                    "zvolcarve: {}: no label says where the vdev starts; its block pointers put it at byte {} ({} of {} probes agree, as `zvolcarve zeropoint` would say), and compressed blocks are looked for from there. Reading a candidate needs the same base in --hints",
-                    members.paths[i].display(),
-                    b.base,
-                    b.confirmed,
-                    b.tried
-                );
-                starts[i] = b.base;
-                by_pointers.push(StartByPointers {
-                    member: members.paths[i].clone(),
-                    base: b.base,
-                    confirmed: b.confirmed,
-                    tried: b.tried,
-                });
+            match start_by_pointers(src, i, &codecs, range, &interrupt) {
+                Start::At(b) if b.base != 0 => {
+                    errln!(
+                        "zvolcarve: {}: no label says where the vdev starts; its block pointers put it at byte {} ({} of {} probes agree, as `zvolcarve zeropoint` would say), and compressed blocks are looked for from there. Reading a candidate needs the same base in --hints",
+                        members.paths[i].display(),
+                        b.base,
+                        b.confirmed,
+                        b.tried
+                    );
+                    starts[i] = b.base;
+                    by_pointers.push(StartByPointers {
+                        member: members.paths[i].clone(),
+                        base: b.base,
+                        confirmed: b.confirmed,
+                        tried: b.tried,
+                    });
+                }
+                // Byte 0, which is what was assumed, or no pointer to ask.
+                Start::At(_) | Start::Unasked => {}
+                // Pointers there are, and they do not agree on a start:
+                // said, since what follows depends on it. It was thrown
+                // away without a word, and the scan ended 0 with a list
+                // of almost nothing.
+                Start::Unsettled(seen) => {
+                    let step = 1u64 << crate::member_ashift(pool.as_ref(), i);
+                    errln!(
+                        "zvolcarve: {}: no label says where the vdev starts, and its block pointers do not settle it ({seen}); `zvolcarve zeropoint` lists the candidates, and --hints takes the base. {}",
+                        members.paths[i].display(),
+                        if step == 512 {
+                            "Compressed blocks are looked for at every sector, so none is missed for it".to_string()
+                        } else {
+                            format!("Compressed blocks are looked for every {step} bytes from byte 0: those of a vdev that starts elsewhere are missed")
+                        }
+                    );
+                }
             }
         }
     }
@@ -1195,19 +1215,31 @@ fn contents_of(obj: &ObjectReader<'_, '_>) -> Vec<ContentsOut> {
         .collect()
 }
 
+/// What a member's block pointers say of where its vdev starts.
+enum Start {
+    /// They agree on this base.
+    At(zfs_read::pointers::Base),
+    /// There was none to ask, or too few agreed anywhere to say.
+    Unasked,
+    /// They agree on none: the bases they were closest to, for the
+    /// operator.
+    Unsettled(String),
+}
+
 /// Where a member's vdev starts by its own block pointers (SPEC F-63),
 /// as `zvolcarve zeropoint` finds it: every sector tried, a few
 /// thousand pointers read, and each candidate start tested by whether
 /// the blocks they name hash right there. Only a start the probes agree
-/// on — enough of them, and twice as many as on any other — and one
-/// that is not 0, which is what was assumed already.
+/// on — enough of them, and twice as many as on any other that has
+/// agreements of its own: a base one metaslab on reads the second copy
+/// of every block that has one, and those are the first base's.
 fn start_by_pointers(
     src: &dyn BlockSource,
     device: usize,
     codecs: &[Codec],
     range: Option<(u64, u64)>,
     stop: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-) -> Option<zfs_read::pointers::Base> {
+) -> Start {
     // Within the range the scan was asked for: the probes are looked for
     // where the candidates will be, and a scan of 4 MiB read the whole
     // member — 3.4 GB — to find them.
@@ -1222,12 +1254,34 @@ fn start_by_pointers(
             stop: Some(stop.clone()),
             ..ScanOptions::default()
         },
-    )
-    .ok()?;
+    );
+    let Ok(scan) = scan else {
+        return Start::Unasked;
+    };
     let probes = zfs_read::pointers::anchors(&scan);
-    let found =
-        zfs_read::pointers::search(src, &probes, &zfs_read::pointers::Options::default()).ok()?;
-    let best = found.first()?;
-    let next = found.get(1).map_or(0, |b| b.confirmed);
-    (best.base != 0 && best.confirmed >= 8 && best.confirmed >= 2 * next).then(|| best.clone())
+    let Ok(found) =
+        zfs_read::pointers::search(src, &probes, &zfs_read::pointers::Options::default())
+    else {
+        return Start::Unasked;
+    };
+    // A base one or two probes agree at is what chance gives, and the
+    // members of a raidz have nothing else: a DVA there is no offset on
+    // a member. Not a contest worth a word.
+    if found
+        .first()
+        .is_none_or(|b| b.confirmed < zfs_read::pointers::ENOUGH)
+    {
+        return Start::Unasked;
+    }
+    match zfs_read::pointers::settled(src, &found, &probes) {
+        Some(b) => Start::At(b),
+        None => Start::Unsettled(
+            found
+                .iter()
+                .take(3)
+                .map(|b| format!("byte {}: {} of {} probes", b.base, b.confirmed, b.tried))
+                .collect::<Vec<_>>()
+                .join("; "),
+        ),
+    }
 }

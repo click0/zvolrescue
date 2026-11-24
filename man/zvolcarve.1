@@ -193,13 +193,20 @@ Metadata is lz4 on any modern pool and lzjb on one made before the
 .Ql lz4_compress
 feature; each one costs a pass, and dropping the wrong one finds
 nothing.
-The offsets are counted from where the vdev starts; on a member no
-label, uberblock or
+The offsets are those the member's top-level vdev allocates at, its
+ashift apart; with no label and no
+.Fl -hints
+to say what that is, every 512-byte sector is tried, which no block
+is finer than.
+They are counted from where the vdev starts; on a member no label,
+uberblock or
 .Fl -hints
 places, that start is found from its block pointers, as
 .Cm zeropoint
 finds it, said, and recorded in the index
 .Pq Li starts_by_pointers .
+A start the pointers do not settle \(em two that each have agreements
+of their own \(em is said too, with the bases they were closest to.
 Reading a candidate from such a member needs the same start in
 .Fl -hints .
 .El
@@ -306,6 +313,11 @@ Keep at most this many headers after ranking; default 32.
 Where the vdev begins, from the pointers alone: the base at which the
 block pointers found on a member agree with the checksums of what they
 point at.
+Metadata is written two or three times, the copies often one metaslab
+apart, and a base wrong by that distance reads the second copy of
+every such block: those agreements are counted for the base, and said
+to be the first base's
+.Pq Li copies_of_first .
 .Bl -tag -width Ds
 .It Fl o , Fl -output Ar dir
 Also write

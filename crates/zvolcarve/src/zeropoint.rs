@@ -21,7 +21,7 @@ use zvol_common::{errln, outln};
 
 use serde::Serialize;
 use zfs_read::carve::{scan_member, Codec, Options as ScanOptions};
-use zfs_read::pointers::{anchors, search, shifts, Options as SearchOptions};
+use zfs_read::pointers::{anchors, explained, search, shifts, Options as SearchOptions};
 use zvol_common::evidence::FileRef;
 use zvol_common::members::open_members;
 use zvol_common::{exit, Format, Global, PoolSpec, WriteGuard};
@@ -45,6 +45,17 @@ pub struct BaseOut {
     pub confirmed: usize,
     /// Probes read. One agreement is worth about nothing; fifty is not.
     pub tried: usize,
+    /// Of those that agreed, how many did because the first base has
+    /// another copy of their block exactly there: metadata is written
+    /// two or three times, the copies often a metaslab apart, and a base
+    /// wrong by that distance reads the second copy of each. They speak
+    /// for the first base, not for this one.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub copies_of_first: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 /// What one member produced.
@@ -205,11 +216,24 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             probes: probes.len(),
             shifts: shift_list,
             bases: found
-                .into_iter()
-                .map(|b| BaseOut {
+                .iter()
+                .enumerate()
+                .map(|(n, b)| BaseOut {
                     base: b.base,
                     confirmed: b.confirmed,
                     tried: b.tried,
+                    copies_of_first: if n == 0 {
+                        0
+                    } else {
+                        explained(
+                            src,
+                            found[0].base,
+                            b.base,
+                            &probes,
+                            SearchOptions::default().confirm,
+                        )
+                        .1
+                    },
                 })
                 .collect(),
             scan_stopped_early: scan.stopped_early,
@@ -301,11 +325,19 @@ fn print(doc: &ZeroPointOut) {
         }
         for b in &m.bases {
             outln!(
-                "  base {:#x} ({} bytes): {} of {} probe(s) agreed",
+                "  base {:#x} ({} bytes): {} of {} probe(s) agreed{}",
                 b.base,
                 b.base,
                 b.confirmed,
-                b.tried
+                b.tried,
+                if b.copies_of_first > 0 {
+                    format!(
+                        ", {} of them on another copy of a block the first base places",
+                        b.copies_of_first
+                    )
+                } else {
+                    String::new()
+                }
             );
         }
     }
