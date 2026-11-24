@@ -1320,6 +1320,203 @@ fn the_scan_state_is_kept_and_a_bad_one_stops_a_resume() {
     assert_eq!(again, first);
 }
 
+/// `list` says what its index is the list of. From a scan that stopped
+/// part of the way it is the list of that part, and said nothing of it,
+/// in text or in JSON: handed on, it read as the answer about the whole
+/// disk. An index written before it recorded how far the scan got is
+/// read with the state beside it.
+#[test]
+fn a_list_of_part_of_a_scan_says_so() {
+    let dir = scratch("list-part");
+    let members = carved_members(&dir, 0x4242, "member");
+    let carve = dir.join("carve");
+    let c = carve.to_string_lossy().into_owned();
+    let scan = |more: &[&str]| {
+        let mut args = vec!["-q", "scan", members[0].as_str(), "-o", c.as_str()];
+        args.extend(["--dnode-type", "any"]);
+        args.extend(more);
+        run(&args)
+    };
+    let (code, out, err) = scan(&["--max-hits", "1"]);
+    assert_eq!(code, 6, "{err}");
+    assert!(out.contains("NOT FINISHED"), "{out}");
+    let (code, out, err) = run(&["list", &c]);
+    assert_eq!(code, 0, "{err}");
+    let reached = format!("{}: read to byte ", members[0]);
+    assert!(
+        out.contains("NOT FINISHED") && out.contains(&reached),
+        "{out}"
+    );
+    assert!(out.contains(&format!(" of {SIZE}\n")), "{out}");
+    let (code, out, err) = run(&["-f", "json", "list", &c]);
+    assert_eq!(code, 0, "{err}");
+    let progress = json(&out)["progress"].clone();
+    assert_eq!(progress["complete"], false, "{progress}");
+    assert_eq!(progress["member_bytes"], serde_json::json!([SIZE]));
+    assert!(
+        progress["reached"][0].as_u64().unwrap() < SIZE,
+        "{progress}"
+    );
+
+    // An index of before: the state beside it says.
+    let index = carve.join("candidates.json");
+    let mut old: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&index).unwrap()).unwrap();
+    old.as_object_mut().unwrap().remove("progress");
+    let kept = std::fs::read(&index).unwrap();
+    std::fs::write(&index, old.to_string()).unwrap();
+    let (code, out, err) = run(&["list", &c]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("NOT FINISHED") && out.contains(&reached),
+        "{out}"
+    );
+    std::fs::write(&index, kept).unwrap();
+
+    let (code, out, err) = scan(&["--resume"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!out.contains("NOT FINISHED"), "{out}");
+    let (code, out, err) = run(&["-f", "json", "list", &c]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        json(&out)["progress"],
+        serde_json::json!({"complete": true, "reached": [SIZE], "member_bytes": [SIZE]})
+    );
+    let (_, out, _) = run(&["list", &c]);
+    assert!(!out.contains("NOT FINISHED"), "{out}");
+}
+
+/// What `list` shows is what the index says, no rounder: a candidate
+/// with a block that failed its checksum is not "100%" verified, nor
+/// 1.00 — one failed block in 640 was both — and `-v` says what the
+/// score is made of and how the walk went (C-05). A name the pool gave
+/// is shown as text, not sent to the terminal, and the run is on the
+/// evidence record: the log was created and nothing written to it.
+#[test]
+fn a_list_shows_what_the_index_says() {
+    let dir = scratch("list-says");
+    let members = carved_members(&dir, 0x4242, "member");
+    let carve = dir.join("carve");
+    let c = carve.to_string_lossy().into_owned();
+    let (code, _, err) = run(&["-q", "scan", &members[0], &members[1], "-o", &c]);
+    assert_eq!(code, 0, "{err}");
+    let (code, plain, err) = run(&["list", &c]);
+    assert_eq!(code, 0, "{err}");
+    let (code, wordy, err) = run(&["-v", "list", &c]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        !plain.contains("score ") && !plain.contains("walk: "),
+        "{plain}"
+    );
+    assert!(
+        wordy.contains("0.55 for matching the profile, and 0.45 of the mean of its structure (")
+            && wordy.contains(" failed"),
+        "{wordy}"
+    );
+
+    let index = carve.join("candidates.json");
+    let mut doc: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&index).unwrap()).unwrap();
+    doc["pool"] = "ta\u{1b}cnk".into();
+    {
+        let first = &mut doc["candidates"][0];
+        let total = first["assessment"]["blocks_total"].as_u64().unwrap();
+        assert!(total > 0, "{first}");
+        // 4999 failed in a million, and a score just short of the top.
+        first["assessment"]["blocks_verified"] = 995_001.into();
+        first["assessment"]["blocks_holes"] = 0.into();
+        first["assessment"]["blocks_failed"] = 4999.into();
+        first["assessment"]["agreement"] = 0.995001.into();
+        first["score"] = 0.9997.into();
+    }
+    std::fs::write(&index, doc.to_string()).unwrap();
+    let log = dir.join("case.jsonl");
+    let (code, out, err) = run(&["-v", "--evidence-log", &log.to_string_lossy(), "list", &c]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!out.contains('\u{1b}'), "{out:?}");
+    assert!(
+        out.lines().next().unwrap().ends_with("of ta\\u{1b}cnk"),
+        "{out}"
+    );
+    let row = out
+        .lines()
+        .find(|l| l.starts_with("c0001 "))
+        .expect("the first candidate");
+    assert!(row.contains("  0.99 ") && row.contains(" 99% "), "{row}");
+    assert!(!row.contains("100%") && !row.contains("1.00"), "{row}");
+    assert!(
+        out.contains("walk: of 1000000 block(s) looked at")
+            && out.contains("995001 verified, 0 hole(s), 4999 failed"),
+        "{out}"
+    );
+    let records: Vec<serde_json::Value> = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(records.len(), 1, "{records:?}");
+    let r = &records[0];
+    assert_eq!(r["status"], 0, "{r}");
+    assert_eq!(
+        r["result"]["candidates"],
+        doc["candidates"].as_array().unwrap().len()
+    );
+    assert_eq!(r["result"]["complete"], true, "{r}");
+    assert!(
+        r["inputs"][0]["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("carve/candidates.json"),
+        "{r}"
+    );
+}
+
+/// The names `roots` lists are what the pool's own MOS says, and are
+/// shown as text; so is the pool's name in the line `scan` ends with.
+#[test]
+fn names_from_the_pool_are_shown_as_text() {
+    let dir = scratch("names");
+    let mut pool = Pool::mirror("ta\u{1b}cnk", 0x4242, 12).txgs(&[(100, 1)]);
+    let members: Vec<String> = carved_zvol_members(&mut pool, SIZE)
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let p = dir.join(format!("member{i}.img"));
+            std::fs::write(&p, m).expect("write member");
+            p.to_string_lossy().into_owned()
+        })
+        .collect();
+    let (code, out, err) = run(&[
+        "-q",
+        "scan",
+        &members[0],
+        &members[1],
+        "-o",
+        &dir.join("carve").to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!out.contains('\u{1b}'), "{out:?}");
+    assert!(
+        out.lines().next().unwrap().ends_with("of ta\\u{1b}cnk"),
+        "{out}"
+    );
+    let (code, out, err) = run(&[
+        "-q",
+        "roots",
+        &members[0],
+        &members[1],
+        "-o",
+        &dir.join("roots").to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!out.contains('\u{1b}'), "{out:?}");
+    assert!(out.contains("ta\\u{1b}cnk, ta\\u{1b}cnk/vm"), "{out}");
+    // In JSON a name is a string, and is the pool's own.
+    let doc: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("roots/roots.json")).unwrap()).unwrap();
+    assert_eq!(doc["roots"][0]["sample"][0], "ta\u{1b}cnk");
+}
+
 /// A workspace that holds a scan which did not finish is not written
 /// over by a scan without `--resume`: the hours of reading and the place
 /// to go on from were replaced without a word. A finished scan, or a

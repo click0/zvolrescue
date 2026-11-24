@@ -196,14 +196,14 @@ writes.
 
 | ID | Pri | Requirement |
 |---|---|---|
-| C-01 | M | Scan every member (or `--range`) at `ashift` granularity, streaming, bounded memory; progress on stderr. A block device is refused (exit 5) without `--surface-scan-on-device`: a surface scan is what a failing disk survives least (SPEC N-10). |
+| C-01 | M | Scan every member (or `--range`) at `ashift` granularity — at every 512-byte sector where no label or hint says the ashift — streaming, bounded memory; progress on stderr. A block device is refused (exit 5) without `--surface-scan-on-device`: a surface scan is what a failing disk survives least (SPEC N-10). |
 | C-02 | M | Recognise dnode blocks by structural validation: `dn_type` in the known set, `dn_indblkshift` 9–17, `dn_nlevels` 1–7, `dn_nblkptr` 1–3, known checksum/compression codes, DVAs inside the vdev; every field range from OpenZFS `dnode.h`. |
 | C-03 | M | Recognise indirect blocks: arrays of block pointers whose DVAs lie inside member vdevs and whose birth TXGs are mutually consistent. |
 | C-04 | M | From each `DMU_OT_ZVOL` dnode, walk its tree, verify checksums, and build a candidate: estimated `volsize`, birth-TXG range, share of blocks that verified, share of blocks already overwritten by newer data. |
 | C-05 | M | Score candidates (checksum agreement, contiguity, birth consistency, overwrite share) and sort by score; explain the score in `-v`. |
 | C-06 | S | Detect overwritten blocks by checking each DVA against the space map of the newest importable TXG when available. |
 | C-07 | M | `dump` is byte-for-byte the `zvolrescue dump` pipeline (sparse output, `--strict`, `--resume` from the same state file — the candidate id where the dataset name goes — a SIGINT ending the run at the next block with the state written and exit 6, evidence record); unreadable blocks become zeros and are logged. |
-| C-08 | M | `scan --resume` continues from the state file; interruption exits 6, whether the cap on candidates stopped the scan or a SIGINT did (at the next chunk; members not reached keep what an earlier run reached). |
+| C-08 | M | `scan --resume` continues from the state file; interruption exits 6, whether the cap on candidates stopped the scan or a SIGINT did (at the next chunk; members not reached keep what an earlier run reached). The index says how far the scan got (`progress`) and which compressions it tried (`compressed`): `list` says when it is the list of part of a scan, and a resume with other compressions, or from a state that is not this scan's, is refused. |
 | C-09 | S | Mirror members are scanned once (identical copies), RAIDZ/dRAID members are scanned with parity reconstruction (phase 3+). |
 | C-10 | S | Compressed metadata: try lz4/zstd/gzip/lzjb on candidate blocks whose plaintext validation fails. |
 | C-11 | S | Also record `DMU_OT_OBJSET`/dataset dnodes found, so a candidate can be named when its DSL metadata survived. |

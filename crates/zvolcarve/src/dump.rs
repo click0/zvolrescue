@@ -141,9 +141,9 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         errln!(
             "zvolcarve: {} was made from pool {} ({}); these members are pool {} ({guid}): give the members that scan read",
             opts.dir.display(),
-            index.pool,
+            zvol_common::text::shown(&index.pool),
             index.pool_guid,
-            pool.name
+            zvol_common::text::shown(&pool.name)
         );
         return zvol_common::end_early(g, "zvolcarve", spec, exit::USAGE);
     }

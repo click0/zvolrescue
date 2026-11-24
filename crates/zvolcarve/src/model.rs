@@ -172,7 +172,29 @@ pub struct Index {
     /// from there (SPEC F-63).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub starts_by_pointers: Vec<StartByPointers>,
+    /// How far the scan got: a list of candidates from a scan that
+    /// stopped a twentieth of the way in reads, handed on, as the answer
+    /// about the whole disk. Absent from an index written before it was
+    /// recorded; `list` takes it from the state beside such an index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<Progress>,
     pub candidates: Vec<Candidate>,
+}
+
+/// How far a scan got on each member.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Progress {
+    /// Every member was read to the end of the range.
+    pub complete: bool,
+    /// The `--range` the scan was given, if one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range: Option<[u64; 2]>,
+    /// The offset reached on each member, in the order of `members`.
+    pub reached: Vec<u64>,
+    /// The size of each member in bytes; 0 for one that did not open.
+    /// Empty where the index did not record it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub member_bytes: Vec<u64>,
 }
 
 /// A member's vdev start found from its block pointers.

@@ -17,6 +17,39 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ### Fixed
 
+* **`zvolcarve list` says when it is the list of part of a scan.** On
+  the workspace of a scan that stopped — a signal, `--max-hits` —
+  after 4.4 of 96 MiB of each member, `list` printed its hundred
+  candidates and exited 0 with not a word, nor a field in the JSON,
+  that the rest was unread: handed on, the list read as the answer
+  about the disk. It says `NOT FINISHED` and how far each member was
+  read, and the index carries it (`progress`: `complete`, `reached`,
+  `member_bytes`, the `range`); for an index written before, `list`
+  takes it from the state beside it.
+
+* **`zvolcarve list` does not round a failed block away, and `-v`
+  explains the score.** A candidate with one block of 640 that failed
+  its checksum — or 4999 of a million — was listed `100%` verified
+  with score `1.00`: both columns were rounded to the nearest. They
+  are rounded down, and `100%` is said only of a walk in which nothing
+  failed. `-v` printed the same list; it now follows each candidate
+  with what the score is made of (the profile, the dnode's structure,
+  the walk) and with the walk's counts — verified, holes, failed — as
+  COMPANIONS C-05 asks.
+
+* **Names from the pool are shown as text by `zvolcarve` too.** The
+  pool's name in the line `scan` and `list` begin with, and the
+  dataset names `roots` lists, were printed as the pool gave them: a
+  name with an escape sequence in it reached the terminal as one. They
+  are shown as `zvolrescue` shows them, control characters as their
+  codes; JSON was always safe.
+
+* **`zvolcarve list --evidence-log` writes its record.** The option
+  was taken, the file created, and nothing written to it. The run is
+  recorded like every other: the workspace, how many candidates were
+  shown and whether the scan was complete, with the index as the input
+  it read.
+
 * **`zvolcarve scan --resume` goes on with the compressions the scan
   began with.** A resume with another `--compressed` list was taken:
   the first ten megabytes read with all four and the rest with `none`

@@ -19,7 +19,7 @@ use zvol_common::{exit, Format, Global, PoolSpec, WriteGuard};
 use zvolrescue_io::BlockSource;
 
 use crate::model::{
-    to_hex, AssessmentOut, Bucket, Candidate, ContentsOut, Histograms, Index, ProfileOut,
+    to_hex, AssessmentOut, Bucket, Candidate, ContentsOut, Histograms, Index, ProfileOut, Progress,
     Rejection, SpaceOut, StartByPointers, State, INDEX, INDEX_VERSION, STATE,
 };
 
@@ -1003,6 +1003,16 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         }),
         histograms,
         starts_by_pointers: by_pointers,
+        progress: Some(Progress {
+            complete,
+            range: range.map(|(a, b)| [a, b]),
+            reached: reached.clone(),
+            member_bytes: members
+                .sources
+                .iter()
+                .map(|s| s.as_ref().map_or(0, |s| s.size()))
+                .collect(),
+        }),
         candidates,
     };
 
@@ -1046,7 +1056,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             "{}",
             serde_json::to_string_pretty(&json).expect("serialisable")
         ),
-        Format::Text => crate::list::print(&index),
+        Format::Text => crate::list::print(&index, g.verbose > 0),
     }
     // Exit 6: a scan that stopped early left a state file to go on
     // from (COMPANIONS §1.2). Exit 4: it went to the end, but not over

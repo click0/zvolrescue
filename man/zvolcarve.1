@@ -230,6 +230,25 @@ Reading a candidate from such a member needs the same start in
 .Pp
 Show the candidates a previous scan found, ranked, with the id each
 one is extracted by.
+The index of a scan that stopped before the end of what it was to read
+\(em interrupted, or at
+.Fl -max-hits
+\(em is the list of the part it read:
+.Cm list
+says so, with how far each member was read, and the index carries it
+.Pq Li progress .
+The score and the share verified are shown rounded down:
+.Ql 100%
+is a candidate no block of which failed its checksum, and
+.Ql 1.00
+one with nothing against it.
+With
+.Fl v
+each candidate is followed by what its score is made of \(em whether it
+matched the profile, the structure of its dnode, the walk of its tree
+\(em and by how the walk went: blocks verified, holes, and failed.
+Names the pool gave are shown as text, control characters as their
+codes.
 .Ss dump
 .Nm Cm dump
 .Ar dir candidate

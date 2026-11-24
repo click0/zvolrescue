@@ -1,11 +1,17 @@
 //! `zvolcarve list` — the candidates a scan found.
 
 use std::path::Path;
+use zvol_common::text::{shown, shown_path};
 use zvol_common::{errln, outln};
 
+use zfs_ondisk::dmu::DnodePhys;
+use zfs_ondisk::Endian;
+use zfs_read::carve::{Found, Hit};
 use zvol_common::{exit, Format, Global};
 
-use crate::model::{load_index, Index};
+use crate::model::{
+    from_hex, load_index, AssessmentOut, Candidate, Index, Progress, State, INDEX, STATE,
+};
 
 fn size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
@@ -22,15 +28,113 @@ fn size(bytes: u64) -> String {
     }
 }
 
+/// The share of a walk that agreed, as the list shows it: 100% is said
+/// of a candidate no block of which failed, and of no other. Rounded,
+/// one failed block in 640 was "100%", and so were 4999 in a million.
+fn verified(a: &AssessmentOut) -> String {
+    let percent = (a.agreement * 100.0 + 1e-9).floor() as u64;
+    let percent = if a.blocks_failed > 0 {
+        percent.min(99)
+    } else {
+        percent
+    };
+    format!("{percent}%")
+}
+
+/// Why a candidate has the score it has (C-05), for `-v`: the profile
+/// decides which half of the range it is in, and its structure and its
+/// walk where in that half ([`zfs_read::carve::rank`]).
+fn explain(c: &Candidate) {
+    // What the dnode's own shape scores is not in the index; the dnode
+    // is, and it is scored again as the scan scored it.
+    let structure = from_hex(&c.dnode_hex)
+        .ok()
+        .and_then(|b| DnodePhys::parse(&b, Endian::Little).ok())
+        .map(|dnode| {
+            zfs_read::carve::score(&Hit {
+                device: c.device,
+                offset: c.offset,
+                slot: c.slot,
+                found: Found::Plaintext,
+                dnode,
+                misses: Vec::new(),
+            })
+        });
+    let band = if c.profile_misses.is_empty() {
+        "0.55 for matching the profile, and 0.45 of"
+    } else {
+        "below every candidate that matched the profile: 0.45 of"
+    };
+    let structure = structure.map_or("?".to_string(), |s| format!("{s:.2}"));
+    match &c.assessment {
+        Some(a) => {
+            outln!(
+                "         score {:.4}: {band} the mean of its structure ({structure}) and its walk ({:.4})",
+                c.score,
+                a.agreement
+            );
+            let looked = a.blocks_verified + a.blocks_holes + a.blocks_failed;
+            outln!(
+                "         walk: of {looked} block(s) looked at{}, {} verified, {} hole(s), {} failed",
+                if a.sampled {
+                    format!(
+                        " (a sample of {}; --full-assess reads every one)",
+                        a.blocks_total
+                    )
+                } else {
+                    String::new()
+                },
+                a.blocks_verified,
+                a.blocks_holes,
+                a.blocks_failed
+            );
+        }
+        None => outln!(
+            "         score {:.4}: {band} its structure ({structure}); not walked, with no pool to read it through",
+            c.score
+        ),
+    }
+}
+
 /// Print an index the way `scan` and `list` both do.
-pub fn print(index: &Index) {
+pub fn print(index: &Index, verbose: bool) {
     outln!(
         "{} candidate(s) from {} slot(s) in {} bytes of {}",
         index.candidates.len(),
         index.slots_examined,
         index.bytes_read,
-        index.pool
+        shown(&index.pool)
     );
+    // A list from a scan that stopped part of the way is the list of
+    // that part, and has to say so: handed on, it read as the answer
+    // about the whole disk. A sample stops where it has enough, and
+    // says what it is further down.
+    if let Some(p) = index
+        .progress
+        .as_ref()
+        .filter(|p| !p.complete && index.histograms.is_none())
+    {
+        outln!(
+            "  NOT FINISHED: the scan stopped before the end of what it was to read, and this is what the part it read holds; `zvolcarve scan --resume` goes on"
+        );
+        for (i, reached) in p.reached.iter().enumerate() {
+            let member = index
+                .members
+                .get(i)
+                .map_or_else(|| format!("member {i}"), |m| shown_path(m));
+            match p.member_bytes.get(i).copied() {
+                None => outln!("    {member}: read to byte {reached}"),
+                // A member that did not open was not there to read.
+                Some(0) => {}
+                Some(size) => {
+                    let end = p.range.map_or(size, |[_, end]| end.min(size));
+                    if *reached < end {
+                        outln!("    {member}: read to byte {reached} of {end}");
+                    }
+                }
+            }
+        }
+    }
     // C-14: an empty list has to say whether the filter rejected
     // everything or there was nothing to reject.
     if index.candidates.is_empty() && index.rejected_by_profile > 0 {
@@ -123,14 +227,16 @@ pub fn print(index: &Index) {
         "VERIFIED"
     );
     for c in &index.candidates {
-        let verified = match &c.assessment {
-            None => "—".to_string(),
-            Some(a) => format!("{:.0}%", a.agreement * 100.0),
-        };
+        let verified = c
+            .assessment
+            .as_ref()
+            .map_or_else(|| "—".to_string(), verified);
         outln!(
             "{:<8} {:>6.2} {:<20} {:>9} {:>6} {:>10} {:>12} {:>9} {}:{:#x}+{} {}",
             c.id,
-            c.score,
+            // Down, not to the nearest: 1.00 is a candidate with nothing
+            // against it, and 0.9997 was shown as one.
+            (c.score * 100.0 + 1e-9).floor() / 100.0,
             c.dnode_type,
             c.volblocksize,
             c.levels,
@@ -177,6 +283,9 @@ pub fn print(index: &Index) {
         if !c.profile_misses.is_empty() {
             outln!("         did not match: {}", c.profile_misses.join(", "));
         }
+        if verbose {
+            explain(c);
+        }
     }
     outln!();
     outln!(
@@ -187,19 +296,43 @@ pub fn print(index: &Index) {
 
 /// Run `list`.
 pub fn run(g: &Global, dir: &Path) -> u8 {
-    let index = match load_index(dir) {
+    let mut index = match load_index(dir) {
         Ok(i) => i,
         Err(e) => {
             errln!("zvolcarve: {e}");
             return exit::EVIDENCE;
         }
     };
+    // An index written before it recorded how far its scan got has the
+    // scan's state beside it, which says.
+    if index.progress.is_none() {
+        index.progress = std::fs::read_to_string(dir.join(STATE))
+            .ok()
+            .and_then(|t| serde_json::from_str::<State>(&t).ok())
+            .map(|s| Progress {
+                complete: s.complete,
+                range: s.range,
+                reached: s.reached,
+                member_bytes: Vec::new(),
+            });
+    }
     match g.format {
         Format::Json => println!(
             "{}",
             serde_json::to_string_pretty(&index).expect("serialisable")
         ),
-        Format::Text => print(&index),
+        Format::Text => print(&index, g.verbose > 0),
     }
-    0
+    // On the record like every other run: `--evidence-log` was taken,
+    // the file created, and nothing written to it. What was shown is the
+    // index, which the record names as what the run read; the list
+    // itself is in that file, not copied here.
+    let shown = serde_json::json!({
+        "workspace": dir,
+        "pool": index.pool,
+        "pool_guid": index.pool_guid,
+        "candidates": index.candidates.len(),
+        "complete": index.progress.as_ref().map(|p| p.complete),
+    });
+    g.log_evidence("zvolcarve", &shown, 0, &[dir.join(INDEX)], Vec::new())
 }

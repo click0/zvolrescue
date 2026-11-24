@@ -391,13 +391,21 @@ fn print(doc: &RootsOut, path: &std::path::Path) {
             r.datasets
         );
         if !r.sample.is_empty() {
-            outln!("      {}", r.sample.join(", "));
+            // Names are what the pool says they are, and are shown as
+            // text: one with an escape sequence in it was sent to the
+            // terminal as one.
+            let names: Vec<_> = r
+                .sample
+                .iter()
+                .map(|n| zvol_common::text::shown(n))
+                .collect();
+            outln!("      {}", names.join(", "));
         }
         if !r.also_on.is_empty() {
             outln!("      also on {}", r.also_on.join(", "));
         }
         if let Some(e) = &r.error {
-            outln!("      {e}");
+            outln!("      {}", zvol_common::text::shown(e));
         }
     }
     outln!("  index: {}", path.display());
