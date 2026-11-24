@@ -1826,12 +1826,18 @@ fn a_member_no_label_places_is_placed_by_its_pointers() {
         let img = dir.join(format!("{name}.img"));
         std::fs::write(&img, bytes).unwrap();
         let ws = dir.join(format!("ws-{name}"));
+        // One compression, here and in the test after this one: what is
+        // tested is where blocks are looked for, not with what, and with
+        // all four tried at every sector an unoptimised build took over
+        // a minute for each of the two.
         let (code, _, err) = run(&[
             "-q",
             "scan",
             img.to_str().unwrap(),
             "-o",
             ws.to_str().unwrap(),
+            "--compressed",
+            "lz4",
         ]);
         assert_eq!(code, 0, "{name}: {err}");
         let index: serde_json::Value =
@@ -1852,6 +1858,8 @@ fn a_member_no_label_places_is_placed_by_its_pointers() {
             "-o",
             ws.to_str().unwrap(),
             "--resume",
+            "--compressed",
+            "lz4",
         ]);
         assert_eq!(code, 0, "{name}: {err}");
         assert!(!err.contains("its block pointers put it"), "{name}: {err}");
@@ -1909,6 +1917,8 @@ fn a_member_with_no_label_is_searched_at_every_sector() {
             ws.to_str().unwrap(),
             "--dnode-type",
             "any",
+            "--compressed",
+            "lz4",
         ]);
         assert_eq!(code, 0, "{name}: {err}");
         let index: serde_json::Value =

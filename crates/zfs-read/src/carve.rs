@@ -1149,7 +1149,14 @@ mod tests {
     fn a_range_that_ends_past_the_member_ends_with_it() {
         let members = carved();
         let src = MemSource::new(members[0].clone());
-        let whole = scan_member(&src, 0, 12, &Options::default()).expect("scan");
+        // The plaintext pass alone: where a range ends is the same
+        // question with it, and five scans with every compression tried
+        // are twenty seconds of an unoptimised build.
+        let plain = Options {
+            codecs: Vec::new(),
+            ..Options::default()
+        };
+        let whole = scan_member(&src, 0, 12, &plain).expect("scan");
         assert!(!whole.hits.is_empty());
         for end in [u64::MAX, u64::MAX - 511, u64::MAX - 512, SIZE + 1] {
             let ranged = scan_member(
@@ -1158,7 +1165,7 @@ mod tests {
                 12,
                 &Options {
                     range: Some((0, end)),
-                    ..Options::default()
+                    ..plain.clone()
                 },
             )
             .expect("scan");
