@@ -332,6 +332,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         }
         v
     };
+    let compressed: Vec<String> = codecs.iter().map(|c| c.as_str().to_string()).collect();
     let range = match &opts.range {
         // Dnodes sit on 512-byte slots, and a start between two of them
         // put every slot of the range off by the difference: `--range
@@ -425,12 +426,48 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         );
         exit::USAGE
     };
+    // Without --resume the workspace is written anew. Over a scan that
+    // did not finish that is hours of reading gone, and the place a
+    // resume would have gone on from: a directory name used twice, or
+    // --resume forgotten, threw both away without a word. Such a
+    // workspace is left as it is. A finished scan is replaced, as an
+    // image is by the next dump to the same file, and said to be.
+    if !opts.resume {
+        let unfinished = std::fs::read_to_string(&state_path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<State>(&t).ok())
+            .is_some_and(|s| !s.complete);
+        let held = crate::model::load_index(&opts.output).ok();
+        // A sample ends where it has enough, and is a look at the disk:
+        // the scan it was a look for is what comes next.
+        let sample = held.as_ref().is_some_and(|i| i.histograms.is_some());
+        if unfinished && !sample {
+            errln!(
+                "zvolcarve: -o {}: it holds a scan that did not finish, and {} says where it got to; --resume goes on with it. To start over, scan into another directory or remove that file",
+                opts.output.display(),
+                state_path.display()
+            );
+            return exit::USAGE;
+        }
+        if let Some(i) = held.filter(|_| !g.quiet) {
+            errln!(
+                "zvolcarve: -o {}: the index of an earlier {} is there ({} candidate(s)); it is replaced",
+                opts.output.display(),
+                if sample { "sample" } else { "scan" },
+                i.candidates.len()
+            );
+        }
+    }
+    let mut state_read = false;
     let previous: State = if !opts.resume {
         State::default()
     } else {
         match std::fs::read_to_string(&state_path) {
             Ok(t) => match serde_json::from_str(&t) {
-                Ok(s) => s,
+                Ok(s) => {
+                    state_read = true;
+                    s
+                }
                 Err(e) => return unreadable(&state_path, format!("not a scan state: {e}")),
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -445,10 +482,23 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             Err(e) => return unreadable(&state_path, e.to_string()),
         }
     };
+    // A state that parses is not yet one of this scan: of another
+    // version, of fewer members than are given, or with a place past the
+    // end of a member, it was taken as it stood — the member with no
+    // entry read from byte 0, the one past its end not at all — and the
+    // scan ended "complete".
+    if state_read {
+        if let Err(why) = state_fits(&previous, &members) {
+            return unreadable(&state_path, why);
+        }
+    }
 
     // A resume adds to what the earlier run found; replacing the index
     // would throw away the part of the member that was already read.
-    let earlier = if opts.resume && std::fs::symlink_metadata(&index_path).is_ok() {
+    // With no state there is nothing to add to: the scan starts over,
+    // as it says, and an index left there is replaced — added to, its
+    // slots and bytes were counted twice.
+    let earlier = if state_read && std::fs::symlink_metadata(&index_path).is_ok() {
         match crate::model::load_index(&opts.output) {
             Ok(i) => Some(i),
             Err(e) => {
@@ -457,6 +507,14 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 return unreadable(&index_path, why);
             }
         }
+    } else if state_read && previous.reached.iter().any(|r| *r > 0) {
+        // The state of a scan that had read something, and nothing of
+        // what it found: gone on with, the part read before was in no
+        // index, and the index said it was the whole.
+        return unreadable(
+            &state_path,
+            format!("{} that goes with it is not there", index_path.display()),
+        );
     } else {
         None
     };
@@ -483,6 +541,22 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             Some("other members, or the same in another order".into())
         } else if i.profile != profile_out {
             Some("another search profile".into())
+        } else if let Some(there) = i.compressed.as_ref().filter(|c| **c != compressed) {
+            // What is tried decides what is found: the second half of a
+            // member read with other compressions than the first is the
+            // index of no scan there is.
+            let list = |l: &[String]| {
+                if l.is_empty() {
+                    "none".to_string()
+                } else {
+                    l.join(",")
+                }
+            };
+            Some(format!(
+                "--compressed {} there, {} here",
+                list(there),
+                list(&compressed)
+            ))
         } else {
             None
         };
@@ -909,6 +983,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             .map_or_else(|| "-".into(), |p| format!("{:#018x}", p.guid)),
         members: members.paths.clone(),
         profile: profile_out,
+        compressed: Some(compressed),
         rejected_by_profile: by_reason
             .iter()
             .filter(|r| r.profile)
@@ -1020,6 +1095,64 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         written,
         &members.ledger.incidents(),
     )
+}
+
+/// Whether a state that parsed is the state of a scan of these members
+/// by this build, or why not.
+fn state_fits(state: &State, members: &zvol_common::members::Members) -> Result<(), String> {
+    if state.index_version != INDEX_VERSION {
+        return Err(format!(
+            "state version {}; this build reads version {INDEX_VERSION}",
+            state.index_version
+        ));
+    }
+    let n = members.paths.len();
+    for (what, len) in [
+        ("reached", Some(state.reached.len())),
+        (
+            "counted",
+            (!state.counted.is_empty()).then_some(state.counted.len()),
+        ),
+        ("cut", (!state.cut.is_empty()).then_some(state.cut.len())),
+    ] {
+        if let Some(len) = len.filter(|l| *l != n) {
+            return Err(format!(
+                "its `{what}` is of {len} member(s), and {n} are given"
+            ));
+        }
+    }
+    if let Some([a, b]) = state.range {
+        if a >= b {
+            return Err(format!("its range, {a}-{b}, is empty"));
+        }
+    }
+    for (i, src) in members.sources.iter().enumerate() {
+        let Some(size) = src.as_ref().map(|s| s.size()) else {
+            continue;
+        };
+        let places = [
+            ("reached", state.reached.get(i).copied()),
+            ("counted", state.counted.get(i).copied()),
+            (
+                "cut",
+                state
+                    .cut
+                    .get(i)
+                    .copied()
+                    .flatten()
+                    .map(|[offset, _]| offset),
+            ),
+        ];
+        for (what, at) in places {
+            if let Some(at) = at.filter(|at| *at > size) {
+                return Err(format!(
+                    "its `{what}` puts the scan of {} at byte {at}, past its end ({size} bytes)",
+                    members.paths[i].display()
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The dnode's own bytes, as the index stores them.

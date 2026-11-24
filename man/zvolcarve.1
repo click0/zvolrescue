@@ -93,6 +93,12 @@ The directory and both files in it are refused, with exit 5, if they
 are anything the run reads or share bytes with it: a member under any
 name, a map, the hints, the profile, a device a member is on, or the
 path a log goes to.
+A workspace that holds a scan which did not finish is not written over
+without
+.Fl -resume
+(exit 1): the state there says where hours of reading got to.
+The index of a finished scan, or of a sample, is replaced, and said to
+be.
 .It Fl -volblocksize Ar bytes
 Data block size of the volume being looked for: a whole number of
 512-byte sectors, up to 16 MiB.
@@ -154,9 +160,17 @@ Continue a scan that was interrupted; a SIGINT or SIGTERM ends a scan
 with its state written (exit status 6), and the candidates whose walk
 the signal cut short are walked by the resume.
 The workspace must be from a scan of the same pool and members, with
-the same profile; another is refused (exit 1), and so is a state or an
-index there that cannot be read.
-With no state at all the scan starts from the beginning, and says so.
+the same profile and the same
+.Fl -compressed
+list, which the index records
+.Pq Li compressed ;
+another is refused (exit 1).
+So is a state or an index there that cannot be read, a state that is
+not this scan's \(em of another version, of another number of members,
+or with a place past the end of a member \(em and a state whose index
+is gone.
+With no state at all the scan starts from the beginning, and says so;
+an index left there is replaced.
 It goes on with the range the scan was started with; a
 .Fl -range
 given again may end elsewhere but must start where that one did.

@@ -1058,6 +1058,35 @@ fn a_resume_is_of_the_same_scan() {
     let (code, _, err) = run(&["-q", "scan", &other[0], &other[1], "-o", &carve, "--resume"]);
     assert_eq!(code, 1, "{err}");
     assert!(err.contains("a scan of something else"), "{err}");
+    // What is tried decides what is found, as the profile does: a resume
+    // with other compressions wrote the index of no scan there is. The
+    // index says which it was made with.
+    let index: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("carve/candidates.json")).unwrap()).unwrap();
+    assert_eq!(
+        index["compressed"],
+        serde_json::json!(["lz4", "lzjb", "gzip", "zstd"])
+    );
+    for other in ["none", "lz4", "zstd,gzip,lzjb,lz4"] {
+        let (code, _, err) = run(&[
+            "-q",
+            "scan",
+            &members[0],
+            &members[1],
+            "-o",
+            &carve,
+            "--resume",
+            "--compressed",
+            other,
+        ]);
+        assert_eq!(code, 1, "{other}: {err}");
+        assert!(
+            err.contains(&format!(
+                "--compressed lz4,lzjb,gzip,zstd there, {other} here"
+            )),
+            "{other}: {err}"
+        );
+    }
     let (code, _, err) = run(&[
         "-q",
         "scan",
@@ -1228,6 +1257,121 @@ fn the_scan_state_is_kept_and_a_bad_one_stops_a_resume() {
     assert_eq!(code, 1, "{err}");
     assert!(err.contains("not a scan state"), "{err}");
     assert_eq!(std::fs::read(&state).unwrap(), bad);
+
+    // One that reads is not yet the state of this scan: of another
+    // version, of one member where two are given, or with a place past
+    // the end of a member, it was taken as it stood and the scan ended
+    // "complete".
+    let index = carve.join("candidates.json");
+    let index_before = std::fs::read(&index).unwrap();
+    for (bad, why) in [
+        (
+            serde_json::json!({"index_version": 99, "reached": [0, 0], "complete": false}),
+            "state version 99",
+        ),
+        (
+            serde_json::json!({"index_version": 1, "reached": [4096], "complete": false}),
+            "its `reached` is of 1 member(s), and 2 are given",
+        ),
+        (
+            serde_json::json!({"index_version": 1, "reached": [0, 0], "complete": false,
+                "counted": [0]}),
+            "its `counted` is of 1 member(s)",
+        ),
+        (
+            serde_json::json!({"index_version": 1, "reached": [u64::MAX, 0], "complete": false}),
+            "past its end",
+        ),
+        (
+            serde_json::json!({"index_version": 1, "reached": [0, 0], "complete": false,
+                "cut": [[SIZE + 512, 0], null]}),
+            "its `cut` puts the scan",
+        ),
+        (
+            serde_json::json!({"index_version": 1, "reached": [0, 0], "complete": false,
+                "range": [4096, 4096]}),
+            "its range, 4096-4096, is empty",
+        ),
+    ] {
+        let bad = bad.to_string().into_bytes();
+        std::fs::write(&state, &bad).unwrap();
+        let (code, _, err) = run(&["-q", "scan", &members[0], &members[1], "-o", &c, "--resume"]);
+        assert_eq!(code, 1, "{why}: {err}");
+        assert!(err.contains(why), "{why}: {err}");
+        assert_eq!(std::fs::read(&state).unwrap(), bad);
+        assert_eq!(std::fs::read(&index).unwrap(), index_before);
+    }
+    // The state of a scan that had read something, and no index of what
+    // it found: gone on with, that part was in no index.
+    std::fs::write(&state, &before).unwrap();
+    std::fs::rename(&index, dir.join("index.kept")).unwrap();
+    let (code, _, err) = run(&["-q", "scan", &members[0], &members[1], "-o", &c, "--resume"]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("that goes with it is not there"), "{err}");
+    // And an index with no state is replaced by the scan that starts
+    // over, as it says it does: added to, every slot was counted twice.
+    std::fs::rename(dir.join("index.kept"), &index).unwrap();
+    std::fs::remove_file(&state).unwrap();
+    let (code, _, err) = run(&["scan", &members[0], &members[1], "-o", &c, "--resume"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(err.contains("scanning from the start"), "{err}");
+    let again: serde_json::Value = serde_json::from_slice(&std::fs::read(&index).unwrap()).unwrap();
+    let first: serde_json::Value = serde_json::from_slice(&index_before).unwrap();
+    assert_eq!(again, first);
+}
+
+/// A workspace that holds a scan which did not finish is not written
+/// over by a scan without `--resume`: the hours of reading and the place
+/// to go on from were replaced without a word. A finished scan, or a
+/// sample, is replaced, and said to be.
+#[test]
+fn an_unfinished_scan_is_not_written_over() {
+    let dir = scratch("unfinished");
+    let members = carved_members(&dir, 0x4242, "member");
+    let carve = dir.join("carve");
+    let c = carve.to_string_lossy().into_owned();
+    let any = ["--dnode-type", "any"];
+    let scan = |more: &[&str]| {
+        let mut args = vec!["scan", members[0].as_str(), "-o", c.as_str()];
+        args.extend(any);
+        args.extend(more);
+        run(&args)
+    };
+    let (code, _, err) = scan(&["--max-hits", "1"]);
+    assert_eq!(code, 6, "{err}");
+    let kept = (
+        std::fs::read(carve.join("state.json")).unwrap(),
+        std::fs::read(carve.join("candidates.json")).unwrap(),
+    );
+    let (code, _, err) = scan(&[]);
+    assert_eq!(code, 1, "{err}");
+    assert!(
+        err.contains("it holds a scan that did not finish") && err.contains("--resume"),
+        "{err}"
+    );
+    assert_eq!(std::fs::read(carve.join("state.json")).unwrap(), kept.0);
+    assert_eq!(
+        std::fs::read(carve.join("candidates.json")).unwrap(),
+        kept.1
+    );
+    let (code, _, err) = scan(&["--resume"]);
+    assert_eq!(code, 0, "{err}");
+    let (code, _, err) = scan(&[]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        err.contains("the index of an earlier scan is there") && err.contains("it is replaced"),
+        "{err}"
+    );
+    // A sample stops where it has enough, and is not a scan left half
+    // done: the scan it was a look for goes into the same workspace.
+    let (code, _, err) = scan(&["--sample", "1"]);
+    assert_eq!(code, 0, "{err}");
+    let (code, _, err) = scan(&[]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        err.contains("the index of an earlier sample is there"),
+        "{err}"
+    );
 }
 
 /// A member no label places is searched for its start by its block

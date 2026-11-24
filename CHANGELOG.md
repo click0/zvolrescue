@@ -17,6 +17,34 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ### Fixed
 
+* **`zvolcarve scan --resume` goes on with the compressions the scan
+  began with.** A resume with another `--compressed` list was taken:
+  the first ten megabytes read with all four and the rest with `none`
+  made a "complete" index of 652 candidates where one pass finds 2932,
+  and nothing in the workspace said which compressions any of it had
+  been read with. The index records the list (`compressed`), and a
+  resume with another is refused (exit 1), as one with another profile
+  already was.
+
+* **`zvolcarve scan --resume` holds the state to the scan it is of.**
+  A `state.json` that parsed was taken as it stood: of another
+  version, with one entry where two members are given (the second was
+  read from byte 0), or with a place past the end of a member (it was
+  not read at all) — each ended "complete", exit 0. They are refused
+  (exit 1), and the state is left as it is. So is a state whose index
+  is gone: gone on with, what the scan had found before was in no
+  index. An index with no state is replaced by the scan that starts
+  over; added to, its slots and bytes were counted twice.
+
+* **`zvolcarve scan` does not write over a scan that did not
+  finish.** `scan -o DIR` without `--resume`, into a workspace an
+  interrupted scan had left, replaced its candidates and the place a
+  resume would have gone on from, without a word: a directory name
+  used twice, or `--resume` forgotten, cost the hours the scan had
+  read for. It is refused (exit 1) and names `--resume`. The index of
+  a finished scan, or of a `--sample`, is replaced as before, and the
+  run says so.
+
 * **`zvolcarve` looks for compressed blocks at every sector of a
   member nothing says the ashift of.** With no label and no `--hints`
   the compressed pass of `scan` and `roots` stepped 4 KiB, taking

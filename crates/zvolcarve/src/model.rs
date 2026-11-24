@@ -136,6 +136,13 @@ pub struct Index {
     pub pool_guid: String,
     pub members: Vec<PathBuf>,
     pub profile: ProfileOut,
+    /// The compressions the scan tried, in the order it tried them
+    /// (`--compressed`); empty for the plaintext pass alone. They decide
+    /// what is found as much as the profile does, and a resume goes on
+    /// with the same. Absent from an index written before they were
+    /// recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compressed: Option<Vec<String>>,
     /// Rejections by reason, most first.
     pub rejected: Vec<Rejection>,
     /// Rejections that came from the profile rather than from the bytes:
