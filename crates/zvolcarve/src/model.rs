@@ -102,6 +102,19 @@ pub struct Candidate {
     /// Creation transaction group of that dataset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dataset_creation_txg: Option<u64>,
+    /// What that dataset was called, where a `roots` run in the same
+    /// workspace found a MOS header that names its GUID. Joined by
+    /// `list` when it shows the index; `scan` does not write it, and
+    /// the index is what the scan found whatever `roots` has said since.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataset_name: Option<String>,
+    /// The size that dataset was made, if it is a volume — what the
+    /// dnode cannot say, and `dump --size` takes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataset_volsize: Option<u64>,
+    /// The transaction group of the newest header that names it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataset_last_txg: Option<u64>,
     /// What the volume's own contents say it is (C-12). A carved dnode
     /// says how many blocks it has, which is not how large the volume
     /// was made; a filesystem superblock inside it usually says that.

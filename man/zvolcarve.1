@@ -249,6 +249,25 @@ matched the profile, the structure of its dnode, the walk of its tree
 \(em and by how the walk went: blocks verified, holes, and failed.
 Names the pool gave are shown as text, control characters as their
 codes.
+.Pp
+A carved dnode carries no name.
+Where the scan met the dataset whose object set pointed at it, the
+candidate carries that dataset's GUID
+.Pq Li dataset_guid ;
+and where
+.Cm roots
+has been run into the same workspace,
+.Cm list
+says what a MOS header calls that GUID
+.Pq Li dataset_name ,
+the size a volume was made
+.Pq Li dataset_volsize ,
+and whether the pool's newest root still names it or which root named
+it last
+.Pq Li dataset_last_txg
+\(em a volume destroyed since is named by the roots from before.
+The index itself is not changed: the names are joined when it is
+shown.
 .Ss dump
 .Nm Cm dump
 .Ar dir candidate
@@ -263,6 +282,14 @@ are written as the members gave them and counted apart, as
 .Ql blocks_unverified .
 The members must be those of the pool the scan read; another pool's
 are refused (exit 1).
+Where the scan knew the dataset a candidate belonged to and
+.Cm roots
+has been run into the same workspace, the image is recorded as that
+dataset's
+.Pq Li dataset_guid , dataset_name , dataset_volsize
+and the run says what size the volume was made, which
+.Fl -size
+takes: the dnode says only how far it was written.
 The result has the shape of
 .Nm zvolrescue Cm dump Ns 's ,
 a
@@ -334,6 +361,21 @@ The newest header a pool walks out of is named whatever its rank
 .Pq Li newest :
 it is the state the pool was last in, and once a dataset has been
 destroyed the roots from before yield more and rank above it.
+Every dataset a header names is recorded once, over all the headers
+found
+.Pq Li datasets :
+its GUID, its name, the size a volume was made, and the transaction
+groups of the oldest and the newest header that name it.
+Those the newest does not name \(em destroyed, or renamed, since \(em
+are listed; and
+.Cm list
+and
+.Cm dump
+name a candidate of
+.Cm scan
+by this table.
+No other program takes a root yet: a filesystem, a snapshot or a
+history is not read from one.
 .Bl -tag -width Ds
 .It Fl o , Fl -output Ar dir
 Carve workspace, where the ranked headers are written; refused as the

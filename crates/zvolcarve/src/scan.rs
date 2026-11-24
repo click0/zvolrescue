@@ -935,6 +935,9 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 contents,
                 dataset_guid: named.map(|(g, _)| format!("{g:#018x}")),
                 dataset_creation_txg: named.map(|(_, t)| t),
+                dataset_name: None,
+                dataset_volsize: None,
+                dataset_last_txg: None,
                 dnode_hex: hex,
             });
         }
@@ -1056,7 +1059,11 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             "{}",
             serde_json::to_string_pretty(&json).expect("serialisable")
         ),
-        Format::Text => crate::list::print(&index, g.verbose > 0),
+        Format::Text => crate::list::print(
+            &index,
+            &crate::roots::Names::load_or_say(&opts.output),
+            g.verbose > 0,
+        ),
     }
     // Exit 6: a scan that stopped early left a state file to go on
     // from (COMPANIONS §1.2). Exit 4: it went to the end, but not over

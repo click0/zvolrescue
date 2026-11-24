@@ -1314,6 +1314,136 @@ fn roots_names_the_newest_and_says_what_it_cut() {
     );
 }
 
+/// A candidate is named by what `roots` found: the scan knows the GUID
+/// of the dataset whose object set pointed at a carved dnode, a MOS
+/// header says what that GUID was called and how large the volume was
+/// made, and `list`, the text of `scan` and `dump` put the two together
+/// when both are in the workspace. The volume here was destroyed: the
+/// pool's newest root does not name it, the roots from before do, and
+/// the list said `0x…a3` of every one of its candidates.
+#[test]
+fn a_candidate_is_named_by_what_roots_found() {
+    let dir = scratch("named");
+    let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(300, 1)]);
+    let mut images: Vec<Vec<u8>> = (0..2).map(|_| vec![0u8; SIZE as usize]).collect();
+    let mut alloc = Alloc::new(0x20_0000);
+    for txg in 100..104 {
+        alloc.born = Some(txg);
+        build_sample_mos_variant(&mut images, &mut alloc, true);
+    }
+    alloc.born = Some(200);
+    pool.rootbp = Some(build_sample_mos_variant(&mut images, &mut alloc, false));
+    let m: Vec<String> = images
+        .iter_mut()
+        .enumerate()
+        .map(|(i, img)| {
+            pool.write_labels(i, img);
+            let p = dir.join(format!("member{i}.img"));
+            std::fs::write(&p, img).expect("write member");
+            p.to_string_lossy().into_owned()
+        })
+        .collect();
+    let ws = dir.join("carve");
+    let w = ws.to_string_lossy().into_owned();
+
+    // Without `roots` a candidate has the GUID alone.
+    let (code, out, err) = run(&["-q", "scan", &m[0], &m[1], "-o", &w]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("belonged to dataset 0x"), "{out}");
+    assert!(!out.contains("tank/vm/disk0"), "{out}");
+
+    let (code, out, err) = run(&["-q", "roots", &m[0], &m[1], "-o", &w]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("dataset name(s) the headers give are not in the newest (txg 200):")
+            && out.contains("tank/vm/disk0 (0x"),
+        "{out}"
+    );
+    let roots: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(ws.join("roots.json")).unwrap()).unwrap();
+    let table = roots["datasets"].as_array().unwrap();
+    let of = |name: &str| {
+        table
+            .iter()
+            .find(|d| d["name"] == name)
+            .unwrap_or_else(|| panic!("{name} is not in {table:?}"))
+    };
+    assert_eq!(of("tank")["last_txg"], 200);
+    assert_eq!(of("tank")["first_txg"], 100);
+    assert_eq!(of("tank")["kind"], "filesystem");
+    let disk = of("tank/vm/disk0");
+    assert_eq!(
+        (&disk["first_txg"], &disk["last_txg"], &disk["kind"]),
+        (&100.into(), &103.into(), &"volume".into()),
+        "{disk}"
+    );
+    assert_eq!(disk["volsize"], 32 << 20, "{disk}");
+    assert_eq!(disk["volblocksize"], 8192, "{disk}");
+    assert_eq!(of("tank/vm/disk0@before")["snapshot"], true);
+
+    let (code, out, err) = run(&["-f", "json", "list", &w]);
+    assert_eq!(code, 0, "{err}");
+    let listed = json(&out);
+    let named: Vec<&serde_json::Value> = listed["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c.get("dataset_name").is_some())
+        .collect();
+    assert!(!named.is_empty(), "{listed}");
+    for c in &named {
+        let name = c["dataset_name"].as_str().unwrap();
+        assert!(name.starts_with("tank/vm/disk0"), "{c}");
+        assert_eq!(c["dataset_guid"], of(name)["guid"], "{c}");
+        assert_eq!(c["dataset_last_txg"], 103, "{c}");
+        assert_eq!(c["dataset_volsize"], 32 << 20, "{c}");
+    }
+    // The index is what the scan found, whatever has been said since.
+    let index: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(ws.join("candidates.json")).unwrap()).unwrap();
+    assert!(
+        index["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c.get("dataset_name").is_none()),
+        "{index}"
+    );
+    let (code, out, err) = run(&["list", &w]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("belonged to dataset tank/vm/disk0")
+            && out.contains(
+                ": a volume made 32.0MiB; last named by the root of txg 103, and not by the newest"
+            ),
+        "{out}"
+    );
+
+    // And the image is on the record as that volume.
+    let id = named[0]["id"].as_str().unwrap();
+    let img = dir.join("disk0.img").to_string_lossy().into_owned();
+    let (code, out, err) = run(&["-q", "-f", "json", "dump", &w, id, &m[0], &m[1], "-o", &img]);
+    assert_eq!(code, 0, "{err}");
+    let volume = json(&out)["volumes"][0].clone();
+    assert_eq!(volume["dataset"], id, "{volume}");
+    assert_eq!(volume["dataset_name"], named[0]["dataset_name"], "{volume}");
+    assert_eq!(volume["dataset_guid"], named[0]["dataset_guid"], "{volume}");
+    assert_eq!(volume["dataset_volsize"], 32 << 20, "{volume}");
+
+    // A `roots.json` that does not read costs the names, not the list.
+    std::fs::write(ws.join("roots.json"), b"{ not json").unwrap();
+    let (code, out, err) = run(&["list", &w]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        err.contains("roots.json") && err.contains("candidates are not named from it"),
+        "{err}"
+    );
+    assert!(
+        out.contains("belonged to dataset 0x") && !out.contains("tank/vm/disk0"),
+        "{out}"
+    );
+}
+
 /// The scan's state is kept from the logs and the image like its index,
 /// and a state that does not read stops a resume rather than letting it
 /// begin again from nothing over the record of where it had got to.

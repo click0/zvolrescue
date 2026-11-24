@@ -69,6 +69,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             return exit::EVIDENCE;
         }
     };
+    let names = crate::roots::Names::load_or_say(&opts.dir);
     let Some(c) = index.candidates.iter().find(|c| c.id == opts.candidate) else {
         errln!(
             "zvolcarve: no candidate {} in {} ({}){}",
@@ -112,6 +113,8 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     reads.extend(index.candidates.iter().map(|c| c.path.clone()));
     reads.push(opts.dir.join(crate::model::INDEX));
     reads.push(opts.dir.join(crate::model::STATE));
+    // And what `roots` wrote there, which names the candidate.
+    reads.push(opts.dir.join(crate::roots::ROOTS));
     let guard = WriteGuard::new(g, &reads);
     let [state, tmp] = resume::sidecars(&opts.output);
     for (what, path) in [
@@ -371,6 +374,22 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     if !bad.is_empty() {
         volume["bad"] = bad.clone().into();
     }
+    // Which dataset the volume was, where the scan met the dataset that
+    // pointed at it and `roots` a MOS header that names it: the image is
+    // on the record as that volume, not only as a place in a list.
+    let named = c
+        .dataset_guid
+        .as_deref()
+        .and_then(|guid| names.of(guid).map(|n| (guid, n)));
+    if let Some(guid) = &c.dataset_guid {
+        volume["dataset_guid"] = guid.clone().into();
+    }
+    if let Some((_, n)) = named {
+        volume["dataset_name"] = n.name.clone().into();
+        if let Some(v) = n.volsize {
+            volume["dataset_volsize"] = v.into();
+        }
+    }
     // The ranges past the list, counted: as `zvolrescue dump` has them.
     let unlisted = (!report.unlisted.is_none()).then(|| {
         serde_json::json!({
@@ -417,6 +436,15 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         ),
         Format::Text => {
             outln!("{}: {} bytes -> {}", c.id, size, opts.output.display());
+            if let Some((guid, n)) = named {
+                outln!(
+                    "  dataset: {} ({guid}){}",
+                    zvol_common::text::shown(&n.name),
+                    n.volsize.filter(|v| *v != size).map_or(String::new(), |v| {
+                        format!(", made {v} bytes: --size {v} gives the image that size")
+                    })
+                );
+            }
             outln!(
                 "  blocks: {} total, {} read, {} holes, {} zeroed (unreadable), {} salvaged (unreadable sectors zeroed)",
                 report.blocks_total,

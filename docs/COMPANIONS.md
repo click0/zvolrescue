@@ -294,7 +294,12 @@ no name — names live in the DSL directory chain in the MOS, which is what
 a carve cannot reach — so the scan keeps every dataset dnode it meets,
 whatever the profile asked for, and a candidate is named by the GUID and
 creation transaction group of the dataset whose objset still points at
-it. That is enough to match against a `zvoltimeline` line. `--sample N`
+it. That is enough to match against a `zvoltimeline` line, and against
+what `roots` found: every MOS header it walks says what each dataset
+GUID was called and how large a volume was made, `roots.json` keeps
+that table over all the headers, and `list` and `dump` name a
+candidate by it when both are in the workspace — a volume destroyed
+since by the roots from before it was. `--sample N`
 reports what the first N hits actually look like — object types, block
 sizes, tree depths and birth transaction groups — so a profile can be
 picked from the disk rather than from memory.

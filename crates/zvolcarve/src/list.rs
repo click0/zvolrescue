@@ -12,6 +12,7 @@ use zvol_common::{exit, Format, Global};
 use crate::model::{
     from_hex, load_index, AssessmentOut, Candidate, Index, Progress, State, INDEX, STATE,
 };
+use crate::roots::Names;
 
 fn size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
@@ -96,8 +97,9 @@ fn explain(c: &Candidate) {
     }
 }
 
-/// Print an index the way `scan` and `list` both do.
-pub fn print(index: &Index, verbose: bool) {
+/// Print an index the way `scan` and `list` both do, its candidates
+/// named by what `roots` found in the same workspace.
+pub fn print(index: &Index, names: &Names, verbose: bool) {
     outln!(
         "{} candidate(s) from {} slot(s) in {} bytes of {}",
         index.candidates.len(),
@@ -274,11 +276,36 @@ pub fn print(index: &Index, verbose: bool) {
             }
         }
         if let Some(g) = &c.dataset_guid {
-            outln!(
-                "         belonged to dataset {g}{}",
-                c.dataset_creation_txg
-                    .map_or(String::new(), |t| format!(" (created at txg {t})"))
-            );
+            let created = c
+                .dataset_creation_txg
+                .map_or(String::new(), |t| format!("created at txg {t}"));
+            match names.of(g) {
+                // The GUID is the dataset's own; the name is what a MOS
+                // header found by `roots` calls it.
+                Some(n) => outln!(
+                    "         belonged to dataset {} ({g}{}{created}){}{}",
+                    shown(&n.name),
+                    if created.is_empty() { "" } else { ", " },
+                    n.volsize
+                        .map_or(String::new(), |v| format!(": a volume made {}", size(v))),
+                    match names.newest() {
+                        Some(newest) if n.last_txg >= newest =>
+                            format!("; the pool's newest root (txg {newest}) names it"),
+                        _ => format!(
+                            "; last named by the root of txg {}, and not by the newest",
+                            n.last_txg
+                        ),
+                    }
+                ),
+                None => outln!(
+                    "         belonged to dataset {g}{}",
+                    if created.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({created})")
+                    }
+                ),
+            }
         }
         if !c.profile_misses.is_empty() {
             outln!("         did not match: {}", c.profile_misses.join(", "));
@@ -316,12 +343,22 @@ pub fn run(g: &Global, dir: &Path) -> u8 {
                 member_bytes: Vec::new(),
             });
     }
+    // The candidates' datasets, by the names `roots` found them under,
+    // when it has been run into this workspace.
+    let names = Names::load_or_say(dir);
+    for c in &mut index.candidates {
+        if let Some(n) = c.dataset_guid.as_deref().and_then(|g| names.of(g)) {
+            c.dataset_name = Some(n.name.clone());
+            c.dataset_volsize = n.volsize;
+            c.dataset_last_txg = Some(n.last_txg);
+        }
+    }
     match g.format {
         Format::Json => println!(
             "{}",
             serde_json::to_string_pretty(&index).expect("serialisable")
         ),
-        Format::Text => print(&index, g.verbose > 0),
+        Format::Text => print(&index, &names, g.verbose > 0),
     }
     // On the record like every other run: `--evidence-log` was taken,
     // the file created, and nothing written to it. What was shown is the
@@ -332,7 +369,17 @@ pub fn run(g: &Global, dir: &Path) -> u8 {
         "pool": index.pool,
         "pool_guid": index.pool_guid,
         "candidates": index.candidates.len(),
+        "named": index
+            .candidates
+            .iter()
+            .filter(|c| c.dataset_name.is_some())
+            .count(),
         "complete": index.progress.as_ref().map(|p| p.complete),
     });
-    g.log_evidence("zvolcarve", &shown, 0, &[dir.join(INDEX)], Vec::new())
+    // And `roots.json`, where the names came from it.
+    let mut read = vec![dir.join(INDEX)];
+    if index.candidates.iter().any(|c| c.dataset_name.is_some()) {
+        read.push(dir.join(crate::roots::ROOTS));
+    }
+    g.log_evidence("zvolcarve", &shown, 0, &read, Vec::new())
 }

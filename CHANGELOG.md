@@ -670,6 +670,29 @@ tagged. `v0.7.1` is the release that carries those six.
   committed file to the same. `packaging/aur/update.sh` hashed an
   error page the same way for a tag that is not there, and stops too.
 
+### Added
+
+* **`zvolcarve` names its candidates by what `roots` found.** A carved
+  dnode carries no name, and the list said `belonged to dataset
+  0x8d7a777f20c673c9` of a candidate at best: which volume that was,
+  the operator worked out from its contents. A MOS header is where the
+  names are, and `roots` walks every one it finds: `roots.json` now
+  keeps every dataset the headers name (`datasets`: GUID, name, kind,
+  the size a volume was made, and the transaction groups of the oldest
+  and the newest header that name it), over all the headers found, and
+  `roots` lists those the newest does not name — destroyed, or
+  renamed, since. With both files in one workspace `list` says of a
+  candidate `belonged to dataset e1/v1 (…): a volume made 8.0MiB; last
+  named by the root of txg 28, and not by the newest` (in JSON
+  `dataset_name`, `dataset_volsize`, `dataset_last_txg`), and `dump`
+  records the image as that dataset's and says the size `--size`
+  takes, which the dnode cannot. On a pool with every label zeroed and
+  the layout in `--hints`, a destroyed volume and a live one each came
+  out byte for byte under its name. The index is not changed: the
+  names are joined when it is shown. No other program takes a root
+  yet — a filesystem, a snapshot or a history is not read from one —
+  and SPEC's status of F-64 says so now.
+
 ## v0.9.16 — 2026-11-16
 
 **Pools OpenZFS wrote on other machines read as they are.** A pool a

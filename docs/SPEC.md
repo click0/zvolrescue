@@ -316,12 +316,16 @@ than the layout, is the label a template with made-up vdev GUIDs,
 which this tool reads and OpenZFS does not; the geometry says which. F-64 is in `zvolcarve` as `roots`: it scans for the MOS's
 own `objset_phys_t`, walks the DSL from each one it finds, and ranks
 them by how much of the pool came out — so a pool whose uberblock rings
-are all gone still has a way in. What is left of the bare-device case is
+are all gone still has a way in: its datasets are named, with their GUIDs
+and the sizes its volumes were made, and the volumes `scan` carves are
+listed and extracted under those names. What F-64 words as "continue
+through the DSL as usual" stops there: no other program takes a root
+yet, so a filesystem, a snapshot or a history is not read from one. What
+is left of the bare-device case is
 F-63, which is in `zvolcarve` as `zeropoint`: it collects the block
 pointers a scan meets, and tests a candidate base by reading where each
 pointer says its block is and checking that the bytes hash to what the
-pointer carries. Nothing of the bare-device case is left undone, though
-F-64's and F-63's answers are both evidence to weigh rather than
+pointer carries. F-64's and F-63's answers are both evidence to weigh rather than
 verdicts: each is reported with the count of pointers that agreed.
 
 Two regimes follow:

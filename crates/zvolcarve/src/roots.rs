@@ -16,7 +16,7 @@
 use std::path::PathBuf;
 use zvol_common::{errln, outln};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use zfs_ondisk::Endian;
 use zfs_read::carve::{scan_member, Codec, Options as ScanOptions, RootHit};
 use zfs_read::zio::PoolReader;
@@ -82,6 +82,105 @@ pub struct CopyOut {
     pub offset: u64,
 }
 
+/// A dataset some header names, with the GUID a carved candidate knows
+/// its dataset by.
+///
+/// A candidate of `scan` carries no name: names are in the DSL
+/// directories of the MOS, which a carve does not reach. It may carry
+/// the GUID of the dataset whose object set pointed at it, and a header
+/// found here is a MOS: walked, it says what each GUID was called. A
+/// volume destroyed since is named by the headers from before it was.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NamedOut {
+    /// `ds_guid`, written as a candidate's `dataset_guid` is.
+    pub guid: String,
+    pub name: String,
+    /// `volume` or `filesystem`; absent where its object set did not
+    /// read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub snapshot: bool,
+    pub creation_txg: u64,
+    /// The size a volume was made, which its dnode cannot say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volsize: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volblocksize: Option<u64>,
+    /// The transaction group of the oldest header that names it so.
+    pub first_txg: u64,
+    /// And of the newest: older than the newest header of all, the
+    /// dataset was destroyed, or renamed, after it.
+    pub last_txg: u64,
+}
+
+/// What a `roots` run in a workspace says the datasets were called, for
+/// `list` and `dump` to name a candidate by.
+#[derive(Debug, Default)]
+pub struct Names {
+    by_guid: std::collections::HashMap<String, NamedOut>,
+    newest: Option<u64>,
+}
+
+impl Names {
+    /// From `roots.json` in `dir`: nothing when there is none, and why
+    /// when one is there and does not read.
+    pub fn load(dir: &std::path::Path) -> Result<Names, String> {
+        #[derive(Deserialize)]
+        struct Root {
+            birth: u64,
+        }
+        #[derive(Deserialize)]
+        struct Doc {
+            #[serde(default)]
+            datasets: Vec<NamedOut>,
+            #[serde(default)]
+            newest: Option<Root>,
+        }
+        let path = dir.join(ROOTS);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Names::default()),
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        };
+        let doc: Doc = serde_json::from_str(&text)
+            .map_err(|e| format!("{}: not what `roots` writes: {e}", path.display()))?;
+        let mut by_guid = std::collections::HashMap::<String, NamedOut>::new();
+        for d in doc.datasets {
+            // Renamed, a dataset has two names for one GUID: the one it
+            // had last is what it is called.
+            match by_guid.get(&d.guid) {
+                Some(have) if have.last_txg >= d.last_txg => {}
+                _ => {
+                    by_guid.insert(d.guid.clone(), d);
+                }
+            }
+        }
+        Ok(Names {
+            by_guid,
+            newest: doc.newest.map(|r| r.birth),
+        })
+    }
+
+    /// Read for a run that goes on without it: said, not fatal.
+    pub fn load_or_say(dir: &std::path::Path) -> Names {
+        Names::load(dir).unwrap_or_else(|e| {
+            errln!("zvolcarve: {e}; candidates are not named from it");
+            Names::default()
+        })
+    }
+
+    /// The dataset of this GUID, as a candidate writes it.
+    pub fn of(&self, guid: &str) -> Option<&NamedOut> {
+        self.by_guid.get(guid)
+    }
+
+    /// The transaction group of the newest header a pool walks out of.
+    pub fn newest(&self) -> Option<u64> {
+        self.newest
+    }
+}
+
 /// What a run writes to the workspace.
 #[derive(Debug, Serialize)]
 pub struct RootsOut {
@@ -102,6 +201,11 @@ pub struct RootsOut {
     /// its place in the whole ranking.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub newest: Option<RootOut>,
+    /// Every dataset a header names, once per name and GUID, over all
+    /// the headers found — those `--max-roots` cut from the list too:
+    /// what `list` names a candidate of `scan` by.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub datasets: Vec<NamedOut>,
     pub bytes_read: u64,
 }
 
@@ -300,6 +404,8 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     // Walking is what separates a header from a coincidence, so it is
     // done for every one of them before anything is ranked.
     let mut out: Vec<RootOut> = Vec::new();
+    let mut named: std::collections::BTreeMap<(String, u64), NamedOut> =
+        std::collections::BTreeMap::new();
     for ((r, also_on), copies) in found.iter().zip(also_on).zip(copies) {
         let birth = r
             .objset
@@ -339,6 +445,38 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                     Ok(mos) => match zfs_read::dsl::walk(&mos, &p.name) {
                         Err(e) => row.error = Some(e.to_string()),
                         Ok(tree) => {
+                            for d in &tree.datasets {
+                                let e =
+                                    named.entry((d.name.clone(), d.guid)).or_insert_with(|| {
+                                        NamedOut {
+                                            guid: format!("{:#018x}", d.guid),
+                                            name: d.name.clone(),
+                                            kind: None,
+                                            snapshot: d.snapshot,
+                                            creation_txg: d.creation_txg,
+                                            volsize: None,
+                                            volblocksize: None,
+                                            first_txg: birth,
+                                            last_txg: birth,
+                                        }
+                                    });
+                                e.first_txg = e.first_txg.min(birth);
+                                // What the newest header says of it is
+                                // what it last was.
+                                let newer = birth >= e.last_txg;
+                                e.last_txg = e.last_txg.max(birth);
+                                for (have, says, newer) in [
+                                    (&mut e.volsize, d.volsize, newer),
+                                    (&mut e.volblocksize, d.volblocksize, newer),
+                                ] {
+                                    if says.is_some() && (newer || have.is_none()) {
+                                        *have = says;
+                                    }
+                                }
+                                if let Some(k) = d.kind.filter(|_| newer || e.kind.is_none()) {
+                                    e.kind = Some(k.name());
+                                }
+                            }
                             row.datasets = tree.datasets.len();
                             row.sample = tree
                                 .datasets
@@ -386,6 +524,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         truncated,
         found: headers,
         newest,
+        datasets: named.into_values().collect(),
         bytes_read,
     };
     let path = opts.output.join(ROOTS);
@@ -425,9 +564,16 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     // On the record like every other run: `--evidence-log` was taken
     // and nothing was written to it.
     let written = FileRef::hashed(&path).map(|f| vec![f]).unwrap_or_default();
+    // The table of names is in the file, which the record names with
+    // its hash; in the record itself it is how many there are.
+    let mut record = serde_json::to_value(&doc).expect("serialisable");
+    if let Some(o) = record.as_object_mut() {
+        o.remove("datasets");
+        o.insert("datasets_named".into(), doc.datasets.len().into());
+    }
     g.log_evidence_with_incidents(
         "zvolcarve",
-        &serde_json::to_value(&doc).expect("serialisable"),
+        &record,
         code,
         &members.inputs(),
         written,
@@ -521,6 +667,38 @@ fn print(doc: &RootsOut, path: &std::path::Path) {
             }
         );
         print_root(n);
+    }
+    // What a carve is usually for: the datasets the pool does not have
+    // any more, with the header that named each last.
+    if let Some(newest) = doc.newest.as_ref().map(|n| n.birth) {
+        let gone: Vec<&NamedOut> = doc
+            .datasets
+            .iter()
+            .filter(|d| d.last_txg < newest)
+            .collect();
+        if !gone.is_empty() {
+            outln!(
+                "  {} of the {} dataset name(s) the headers give are not in the newest (txg {newest}):",
+                gone.len(),
+                doc.datasets.len()
+            );
+            const SHOWN: usize = 16;
+            for d in gone.iter().take(SHOWN) {
+                outln!(
+                    "      {} ({}), last named at txg {}",
+                    zvol_common::text::shown(&d.name),
+                    d.guid,
+                    d.last_txg
+                );
+            }
+            if gone.len() > SHOWN {
+                outln!(
+                    "      and {} more, in {}",
+                    gone.len() - SHOWN,
+                    path.display()
+                );
+            }
+        }
     }
     outln!("  index: {}", path.display());
 }

@@ -233,10 +233,14 @@ fn main() -> ExitCode {
     let more: Vec<PathBuf> = match &cli.command {
         Command::Scan {
             output, profile, ..
-        } => [output.join(model::INDEX), output.join(model::STATE)]
-            .into_iter()
-            .chain(profile.profile.clone())
-            .collect(),
+        } => [
+            output.join(model::INDEX),
+            output.join(model::STATE),
+            output.join(roots::ROOTS),
+        ]
+        .into_iter()
+        .chain(profile.profile.clone())
+        .collect(),
         Command::Roots { output, .. } => vec![output.join(roots::ROOTS)],
         Command::Zeropoint { output, .. } => output
             .iter()
@@ -244,11 +248,21 @@ fn main() -> ExitCode {
             .collect(),
         // The scan's state too: written over, a later `scan --resume`
         // started again from nothing.
-        Command::List { dir } => vec![dir.join(model::INDEX), dir.join(model::STATE)],
-        Command::Dump { dir, output, .. } => [dir.join(model::INDEX), dir.join(model::STATE)]
-            .into_iter()
-            .chain(zvol_common::resume::sidecars(output))
-            .collect(),
+        // And what `roots` wrote there: `list` and `dump` name a
+        // candidate by it.
+        Command::List { dir } => vec![
+            dir.join(model::INDEX),
+            dir.join(model::STATE),
+            dir.join(roots::ROOTS),
+        ],
+        Command::Dump { dir, output, .. } => [
+            dir.join(model::INDEX),
+            dir.join(model::STATE),
+            dir.join(roots::ROOTS),
+        ]
+        .into_iter()
+        .chain(zvol_common::resume::sidecars(output))
+        .collect(),
     };
     if let Err(code) = cli.global.enable_tracing_over("zvolcarve", &more) {
         return ExitCode::from(code);
