@@ -158,6 +158,7 @@ fn layout_record(
             ("draid_ndata", t.draid_ndata),
             ("draid_nspares", t.draid_nspares),
             ("draid_ngroups", t.draid_ngroups),
+            ("ashift", t.ashift),
         ] {
             if let Some(n) = value {
                 v[key] = n.into();

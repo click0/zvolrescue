@@ -1665,6 +1665,47 @@ pub fn two_top_mirror_members(
     (tops, members)
 }
 
+/// A pool of two raidz1 vdevs of three leaves whose `ashift` differ,
+/// `raidz1-0` of `ashifts[0]` holding the MOS and `raidz1-1` of
+/// `ashifts[1]` the volume's data: a pool of 512-byte disks grown with
+/// 4Kn ones. Where a column of a block lies depends on the `ashift` of
+/// the vdev it is on, so no one value reads both. Returns the member
+/// images, `raidz1-0`'s first.
+pub fn two_top_raidz_members(
+    name: &str,
+    guid: u64,
+    ashifts: [u32; 2],
+    txgs: &[(u64, u64)],
+    size: u64,
+) -> Vec<Vec<u8>> {
+    const WIDTH: usize = 3;
+    let raidz = |ashift| Layout::Raidz { ashift, nparity: 1 };
+    let mut members: Vec<Vec<u8>> = (0..2 * WIDTH).map(|_| vec![0u8; size as usize]).collect();
+    let mut a = Alloc::with_layout(0x20_0000, raidz(ashifts[0]));
+    a.members = Some(0..WIDTH);
+    let mut data = Alloc::with_layout(TWO_TOP_DATA_OFFSET, raidz(ashifts[1]));
+    data.vdev = 1;
+    data.members = Some(WIDTH..2 * WIDTH);
+    a.data = Some(Box::new(data));
+    let rootbp = build_sample_mos_variant(&mut members, &mut a, true);
+    for top in 0..2usize {
+        let mut p = Pool::raidz(name, guid, ashifts[top], WIDTH, 1).txgs(txgs);
+        p.top_id = top as u64;
+        p.vdev_children = 2;
+        p.members = (top * WIDTH..(top + 1) * WIDTH)
+            .map(|i| Member {
+                guid: Member::guid_for(guid, i),
+                path: format!("/dev/gpt/{name}-d{i}"),
+            })
+            .collect();
+        p.rootbp = Some(rootbp);
+        for k in 0..WIDTH {
+            p.write_labels(k, &mut members[top * WIDTH + k]);
+        }
+    }
+    members
+}
+
 /// A mirror whose newest TXG no longer has `tank/vm/disk0` while the
 /// older ones still do — the SPEC UC-1 scenario. Returns the member
 /// images and the TXGs `(destroyed_at, last_with_disk0)`.

@@ -112,6 +112,22 @@ Describe the layout by hand when the labels cannot: a JSON file with
 the ashift, the top-level vdevs and their members in vdev order.
 It is used exactly as a label would be; every block read through it
 is still verified by its checksum.
+A top-level vdev whose ashift is not the pool's \(em one of 4Kn disks
+added to a pool of 512-byte ones \(em gives its own,
+.Ql ashift
+beside its
+.Ql kind ,
+and the pool's may be left out when every vdev does.
+An
+.Ql ashift
+further down, in a group nested in a vdev, is refused with exit
+status 1: what is under a top-level vdev shares its.
+The
+.Ql tree
+of each vdev in the JSON of
+.Cm scan
+is in this shape, its ashift included, so the scan of a healthy pool
+can be kept to describe it later.
 The pool's
 .Ql name ,
 the first part of every dataset's, may be left out: a member's label

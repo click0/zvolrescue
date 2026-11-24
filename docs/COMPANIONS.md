@@ -74,8 +74,9 @@ One JSON object per line, appended, never rewritten:
 * `layout` is the layout a run read the pool through when `--hints` gave
   it — the hints file, whether `--search-order` was asked, the `ashift`
   and each top-level vdev with its members by name in the order read, the
-  order the search settled on included, which no argument says. Absent
-  when the labels gave the layout.
+  order the search settled on included, which no argument says; a vdev
+  whose `ashift` is its own and not the pool's carries it. Absent when
+  the labels gave the layout.
 * `zvolreport` consumes these records; nothing else reads them.
 
 ### 1.4 Read-only invariants

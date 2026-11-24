@@ -17,6 +17,26 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ### Fixed
 
+* **A pool whose vdevs differ in ashift can be described in
+  `--hints`.** The layout had one `ashift` for the whole pool. A pool
+  of 512-byte disks grown with a vdev of 4Kn ones has two, and where a
+  raidz column lies depends on the one of the vdev it is on: with the
+  labels gone, a pool of `raidz1` at ashift 9 and `raidz1` at ashift 12
+  read with 522 of 1536 blocks zeroed under one value and 754 under
+  the other, exit 4, and `zvolcarve` found 1671 candidates where the
+  labels gave 1762. An `"ashift"` written inside a vdev was ignored
+  without a word. A top-level vdev now gives its own beside its
+  `kind`, the pool's standing for those that do not, and it may be
+  left out when every vdev gives one; an `ashift` in a group nested in
+  a vdev, which nothing reads, is refused with exit 1. The `tree` of
+  each vdev in `scan -f json` carries the vdev's ashift, so the
+  template kept from a healthy pool describes it; `--emit-label`
+  writes each vdev's own, and the `layout` of the evidence record
+  holds it. Checked on pools made through libzpool: the volume reads
+  the same bytes through hints, also with one member of each raidz
+  missing, through the labels emitted from them, and carved by
+  `zvolcarve`.
+
 * **The labels `scan --emit-label` makes for a pool of several vdevs
   say which vdev each is of.** Every emitted `vdev_tree` carried
   `id: 0`, whichever top-level vdev of the layout the member was in.

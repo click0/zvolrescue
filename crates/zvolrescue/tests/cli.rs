@@ -11,7 +11,7 @@ use zfs_ondisk::label::{label_offsets, LABEL_SIZE, UBERBLOCK_RING_OFFSET, UBERBL
 use zfs_read::fixture::{
     build_sample_mos, checkpointed_members, destroyed_zvol_members, lose_children_list,
     objset_reused_members, removed_since_members, removed_vdev_members, two_top_mirror_members,
-    zpl_members, zvol_pattern, Alloc, Pool, SAMPLE_ZVOL_BLOCK0_OFFSET,
+    two_top_raidz_members, zpl_members, zvol_pattern, Alloc, Pool, SAMPLE_ZVOL_BLOCK0_OFFSET,
 };
 use zfs_read::hash::{Digests, Extra};
 use zvol_common::scratch::Scratch;
@@ -1060,6 +1060,137 @@ fn emitted_labels_of_a_pool_of_two_vdevs_read_as_that_pool() {
     let (code, out, err) = run(&args);
     assert_eq!(code, 0, "{out}{err}");
     assert_eq!(json(&out)["volumes"][0]["sha256"], want);
+}
+
+/// A pool whose top-level vdevs differ in `ashift` — raidz of 512-byte
+/// disks, grown with one of 4Kn — is described with each vdev's own.
+/// The hints had one `ashift` for the pool: with the labels gone no
+/// value read it, the blocks of one vdev or the other failing their
+/// checksums, and an `ashift` written inside a vdev was ignored without
+/// a word. The scan's own template carries it, so the scan of a healthy
+/// pool, kept, describes that pool.
+#[test]
+fn hints_give_each_top_level_vdev_its_own_ashift() {
+    let dir = scratch("hints-ashift");
+    let want = reference_sha(&dir);
+    let mut members = two_top_raidz_members("tank", 0x7171, [9, 12], &[(100, 1)], SIZE);
+    let labelled = write_members(&dir, &members);
+
+    // With its labels the pool reads, and the scan says each vdev's.
+    let mut args = vec!["-q", "-f", "json", "scan"];
+    args.extend(labelled.iter().map(String::as_str));
+    let (code, out, _) = run(&args);
+    assert_eq!(code, 0, "{out}");
+    let tops = json(&out)["pools"][0]["tops"].clone();
+    assert_eq!(tops[0]["tree"]["ashift"], 9, "{tops}");
+    assert_eq!(tops[1]["tree"]["ashift"], 12, "{tops}");
+
+    members.iter_mut().for_each(|m| wipe_configs(m));
+    let bare = scratch("hints-ashift-bare");
+    let paths = write_members(&bare, &members);
+    let all: Vec<&str> = paths.iter().map(String::as_str).collect();
+    let dump = |hints: serde_json::Value, name: &str| {
+        let file = bare.join(format!("{name}.hints"));
+        std::fs::write(&file, hints.to_string()).unwrap();
+        let image = bare
+            .join(format!("{name}.img"))
+            .to_string_lossy()
+            .into_owned();
+        let file = file.to_string_lossy().into_owned();
+        let mut args = vec!["-q", "-f", "json", "dump", "tank/vm/disk0"];
+        args.extend(&all);
+        args.extend(["--hints", &file, "-o", &image]);
+        run(&args)
+    };
+    let tops = |first: serde_json::Value, second: serde_json::Value| {
+        let mut tops = vec![
+            serde_json::json!({"kind": "raidz", "nparity": 1, "members": &paths[..3]}),
+            serde_json::json!({"kind": "raidz", "nparity": 1, "members": &paths[3..]}),
+        ];
+        for (t, own) in tops.iter_mut().zip([first, second]) {
+            if !own.is_null() {
+                t["ashift"] = own;
+            }
+        }
+        tops
+    };
+    let none = serde_json::Value::Null;
+
+    // One value for the pool reads the vdev that has it, and the blocks
+    // of the other fail their checksums.
+    for ashift in [9, 12] {
+        let (code, out, err) = dump(
+            serde_json::json!({"name": "tank", "ashift": ashift, "tops": tops(none.clone(), none.clone())}),
+            &format!("one-{ashift}"),
+        );
+        assert_ne!(code, 0, "ashift {ashift} for both: {out}{err}");
+    }
+    // The pool's and one vdev's own; each vdev's own and none for the
+    // pool; the scan's template as it was printed.
+    let scanned: Vec<serde_json::Value> = tops_from_scan(&out, &labelled, &paths);
+    for (name, hints) in [
+        (
+            "own-one",
+            serde_json::json!({"name": "tank", "ashift": 9, "tops": tops(none.clone(), 12.into())}),
+        ),
+        (
+            "own-each",
+            serde_json::json!({"name": "tank", "tops": tops(9.into(), 12.into())}),
+        ),
+        (
+            "scanned",
+            serde_json::json!({"name": "tank", "ashift": 9, "tops": scanned}),
+        ),
+    ] {
+        let (code, out, err) = dump(hints, name);
+        assert_eq!(code, 0, "{name}: {out}{err}");
+        assert_eq!(json(&out)["volumes"][0]["sha256"], want, "{name}");
+    }
+
+    // No ashift for a vdev and none for the pool is refused, and so is
+    // one written where nothing reads it, or one no vdev has.
+    let mut nested = tops(none.clone(), none.clone());
+    nested[1] = serde_json::json!({"kind": "mirror", "children": [
+        {"kind": "raidz", "nparity": 1, "ashift": 12, "members": &paths[3..]}]});
+    for (name, hints, said) in [
+        (
+            "absent",
+            serde_json::json!({"name": "tank", "tops": tops(none.clone(), 12.into())}),
+            "ashift is required",
+        ),
+        (
+            "nested",
+            serde_json::json!({"name": "tank", "ashift": 9, "tops": nested}),
+            "tops[1].children[0].ashift",
+        ),
+        (
+            "wild",
+            serde_json::json!({"name": "tank", "ashift": 9, "tops": tops(none.clone(), 40.into())}),
+            "tops[1].ashift 40",
+        ),
+    ] {
+        let (code, _, err) = dump(hints, name);
+        assert_eq!(code, 1, "{name}: {err}");
+        assert!(err.contains(said), "{name}: {err}");
+    }
+}
+
+/// The `tree` of every top-level vdev a scan printed, as hints: the
+/// members it names replaced by the same members of another set.
+fn tops_from_scan(scan: &str, from: &[String], to: &[String]) -> Vec<serde_json::Value> {
+    json(scan)["pools"][0]["tops"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| {
+            let mut tree = t["tree"].clone();
+            for m in tree["members"].as_array_mut().unwrap() {
+                let at = from.iter().position(|p| Some(p.as_str()) == m.as_str());
+                *m = to[at.expect("a member the scan was given")].clone().into();
+            }
+            tree
+        })
+        .collect()
 }
 
 #[test]

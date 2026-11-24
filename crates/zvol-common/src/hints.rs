@@ -21,6 +21,9 @@
 //! vdev that nests — one being replaced, one backed by a spare, or the
 //! mirror-of-raidz shapes ztest builds — carries `children` instead of
 //! `members`, each child a vdev of the same form.
+//! A top-level vdev whose `ashift` is not the pool's says its own
+//! beside its `kind` — a pool grown with 4Kn disks has vdevs of 9 and
+//! vdevs of 12 — and the pool's may be left out when every one does.
 //! Order is the vdev's own order — it is what a DVA addresses — so it
 //! matters, and getting it wrong shows up as failed checksums, never as
 //! wrong data.
@@ -55,10 +58,23 @@ fn as_u64(v: &Json, what: &str) -> Result<u64, String> {
     }
 }
 
-/// One vdev of the template, with its members or its nested groups.
+/// An `ashift` a vdev can have, `what` naming where it was written.
+fn ashift_at(v: &Json, what: &str) -> Result<u64, String> {
+    let ashift = as_u64(v, what)?;
+    if !(9..=16).contains(&ashift) {
+        return Err(format!(
+            "hints: {what} {ashift}: a vdev's sectors are 2^9 to 2^16 bytes (ashift 9 to 16)"
+        ));
+    }
+    Ok(ashift)
+}
+
+/// One vdev of the template, with its members or its nested groups;
+/// `nested` for one inside another.
 fn top_hint(
     t: &serde_json::Map<String, Json>,
     what: &str,
+    nested: bool,
     paths: &[PathBuf],
     bases: &mut [u64],
 ) -> Result<TopHint, String> {
@@ -140,6 +156,7 @@ fn top_hint(
                 children.push(top_hint(
                     child,
                     &format!("{what}.children[{c}]"),
+                    true,
                     paths,
                     bases,
                 )?);
@@ -174,6 +191,18 @@ fn top_hint(
         ));
     }
     let nparity = t.get("nparity").map(|v| as_u64(v, "nparity")).transpose()?;
+    // A vdev's own ashift, where it is not the pool's. It is the
+    // top-level vdev's: what is under one shares its, and one written
+    // further down was read by nothing, without a word.
+    let ashift = match t.get("ashift") {
+        None => None,
+        Some(v) if !nested => Some(ashift_at(v, &format!("{what}.ashift"))?),
+        Some(_) => {
+            return Err(format!(
+                "hints: {what}.ashift: an ashift is a top-level vdev's, and what is under one shares its; give it in the entry of tops itself"
+            ))
+        }
+    };
     if matches!(kind.as_str(), "disk" | "file") && (members.len() != 1 || !children.is_empty()) {
         return Err(format!(
             "hints: {what}: a {kind} vdev is one member; {} given",
@@ -229,6 +258,7 @@ fn top_hint(
         draid_ndata,
         draid_nspares,
         draid_ngroups,
+        ashift,
         members,
         children,
     })
@@ -243,19 +273,10 @@ pub fn load(file: &Path, paths: &[PathBuf]) -> Result<Hints, String> {
         .as_object()
         .ok_or("hints: the file must hold one JSON object")?;
 
-    let ashift = match obj.get("ashift") {
-        Some(v) => as_u64(v, "ashift")?,
-        None => {
-            return Err(
-                "hints: ashift is required — it is what a DVA's offset is measured in".into(),
-            )
-        }
-    };
-    if !(9..=16).contains(&ashift) {
-        return Err(format!(
-            "hints: ashift {ashift}: a vdev's sectors are 2^9 to 2^16 bytes (ashift 9 to 16)"
-        ));
-    }
+    let pool_ashift = obj
+        .get("ashift")
+        .map(|v| ashift_at(v, "ashift"))
+        .transpose()?;
     let mut bases = vec![0u64; paths.len()];
     let mut tops = Vec::new();
     let list = obj
@@ -266,11 +287,30 @@ pub fn load(file: &Path, paths: &[PathBuf]) -> Result<Hints, String> {
         let t = t
             .as_object()
             .ok_or_else(|| format!("hints: tops[{i}] must be an object"))?;
-        tops.push(top_hint(t, &format!("tops[{i}]"), paths, &mut bases)?);
+        tops.push(top_hint(
+            t,
+            &format!("tops[{i}]"),
+            false,
+            paths,
+            &mut bases,
+        )?);
     }
     if tops.is_empty() {
         return Err("hints: no top-level vdev described".into());
     }
+    // One ashift for the pool, or each top-level vdev's own: a pool
+    // whose vdevs differ — raidz of 512-byte disks, then one of 4Kn —
+    // could be described with neither value, and read with a third of
+    // its blocks failing their checksums under either.
+    let ashift = match (pool_ashift, tops.iter().find(|t| t.ashift.is_none())) {
+        (Some(a), _) => a,
+        (None, None) => tops[0].ashift.unwrap_or(9),
+        (None, Some(_)) => {
+            return Err(
+                "hints: ashift is required — it is what a raidz or a dRAID lays its columns out by; give the pool's, or its own in every top-level vdev".into(),
+            )
+        }
+    };
     Ok(Hints {
         layout: LayoutHints {
             name: obj.get("name").and_then(Json::as_str).map(str::to_string),

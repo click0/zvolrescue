@@ -37,6 +37,10 @@ pub struct TopHint {
     pub draid_nspares: Option<u64>,
     /// Groups per dRAID slice.
     pub draid_ngroups: Option<u64>,
+    /// `ashift` of this vdev, where it is not the pool's: a pool grown
+    /// with 4Kn disks has vdevs of 9 beside vdevs of 12. Read on a
+    /// top-level vdev only — what is under one shares its.
+    pub ashift: Option<u64>,
     /// Indices into the scanned device list, in vdev order. `None` marks a
     /// member that is known to exist but was not supplied.
     pub members: Vec<Option<usize>>,
@@ -63,7 +67,8 @@ pub struct LayoutHints {
     pub name: Option<String>,
     /// Pool GUID, if known.
     pub guid: Option<u64>,
-    /// `ashift` of every top-level vdev.
+    /// `ashift` of every top-level vdev that does not give its own
+    /// ([`TopHint::ashift`]).
     pub ashift: u64,
     /// Top-level vdevs in order; their index is their vdev id, which is
     /// what a DVA names.
@@ -71,6 +76,14 @@ pub struct LayoutHints {
 }
 
 impl LayoutHints {
+    /// `ashift` of top-level vdev `top`: its own, or the pool's.
+    pub fn ashift_of(&self, top: usize) -> u64 {
+        self.tops
+            .get(top)
+            .and_then(|t| t.ashift)
+            .unwrap_or(self.ashift)
+    }
+
     /// Turn the template into the assembly the reader takes.
     ///
     /// GUIDs are invented (a label would carry real ones, and nothing in
@@ -86,7 +99,8 @@ impl LayoutHints {
             // is what places a member's top among the pool's. Written 0
             // for every top, the labels made from a layout of several
             // put them all in the place of the first.
-            let tree = self.node(hint, id, id as u64, &mut count, &mut members);
+            let ashift = self.ashift_of(id);
+            let tree = self.node(hint, (id, ashift), id as u64, &mut count, &mut members);
             for m in &members {
                 if let Some(d) = m.present {
                     if !devices.contains(&d) {
@@ -100,7 +114,7 @@ impl LayoutHints {
                 name: format!("{}-{id}", display_kind(hint)),
                 kind: hint.kind.clone(),
                 nparity: hint.nparity,
-                ashift: Some(self.ashift),
+                ashift: Some(ashift),
                 members,
                 tree,
             });
@@ -126,11 +140,12 @@ impl LayoutHints {
         }
     }
 
-    /// One node of the tree, numbering leaves in vdev order.
+    /// One node of the tree of top-level vdev `top`, whose `ashift`
+    /// comes with it, numbering leaves in vdev order.
     fn node(
         &self,
         hint: &TopHint,
-        top: usize,
+        (top, ashift): (usize, u64),
         id: u64,
         count: &mut Count,
         members: &mut Vec<Member>,
@@ -156,7 +171,7 @@ impl LayoutHints {
                 id,
                 guid,
                 path: None,
-                ashift: Some(self.ashift),
+                ashift: Some(ashift),
                 asize: None,
                 metaslab_array: None,
                 metaslab_shift: None,
@@ -182,7 +197,7 @@ impl LayoutHints {
                     id: children.len() as u64,
                     guid,
                     path: None,
-                    ashift: Some(self.ashift),
+                    ashift: Some(ashift),
                     asize: None,
                     metaslab_array: None,
                     metaslab_shift: None,
@@ -203,14 +218,14 @@ impl LayoutHints {
         let guid = synthetic_guid(top, usize::MAX - *group);
         *group += 1;
         for (i, c) in hint.children.iter().enumerate() {
-            children.push(self.node(c, top, i as u64, count, members));
+            children.push(self.node(c, (top, ashift), i as u64, count, members));
         }
         VdevNode {
             kind: hint.kind.clone(),
             id,
             guid,
             path: None,
-            ashift: Some(self.ashift),
+            ashift: Some(ashift),
             asize: None,
             metaslab_array: None,
             metaslab_shift: None,
@@ -451,7 +466,7 @@ pub fn label_nvlist(
 ) -> NvList {
     let assembly = layout.assemble();
     let t = &assembly.tops[top];
-    let tree = tree_nvlist(&t.tree, Some((layout.ashift, asize)));
+    let tree = tree_nvlist(&t.tree, Some((layout.ashift_of(top), asize)));
     encode::list(vec![
         ("version", Value::Uint64(5000)),
         (
@@ -586,6 +601,7 @@ mod tests {
                 draid_ndata: None,
                 draid_nspares: None,
                 draid_ngroups: None,
+                ashift: None,
                 members: order.iter().map(|&i| Some(i)).collect(),
                 children: Vec::new(),
             }],
@@ -660,6 +676,7 @@ mod tests {
             draid_ndata: None,
             draid_nspares: None,
             draid_ngroups: None,
+            ashift: None,
             members: vec![Some(i)],
             children: Vec::new(),
         };
@@ -676,6 +693,7 @@ mod tests {
                 draid_ndata: Some(4),
                 draid_nspares: Some(1),
                 draid_ngroups: Some(1),
+                ashift: None,
                 members: Vec::new(),
                 children: vec![leaf(0), leaf(1), leaf(2), leaf(3), leaf(4), spare],
             }],
@@ -710,6 +728,7 @@ mod tests {
             draid_ndata: None,
             draid_nspares: None,
             draid_ngroups: None,
+            ashift: None,
             members: members.iter().map(|&i| Some(i)).collect(),
             children: Vec::new(),
         };
@@ -761,6 +780,28 @@ mod tests {
         }
     }
 
+    /// A top-level vdev that gives its own `ashift` is assembled, and
+    /// labelled, with it; the others have the pool's.
+    #[test]
+    fn a_top_level_vdev_has_its_own_ashift_or_the_pools() {
+        let mut l = layout(&[0, 1, 2, 3]);
+        let mut second = l.tops[0].clone();
+        second.members = vec![Some(4), Some(5), Some(6), Some(7)];
+        second.ashift = Some(9);
+        l.tops.push(second);
+        assert_eq!((l.ashift_of(0), l.ashift_of(1)), (12, 9));
+        let assembly = l.assemble();
+        assert_eq!(
+            assembly.tops.iter().map(|t| t.ashift).collect::<Vec<_>>(),
+            vec![Some(12), Some(9)]
+        );
+        for (top, ashift) in [(0, 12), (1, 9)] {
+            let nv = label_nvlist(&l, top, 0, 100, None);
+            let tree = nv.list("vdev_tree").expect("vdev_tree");
+            assert_eq!(tree.u64("ashift"), Some(ashift), "top {top}");
+        }
+    }
+
     #[test]
     fn the_right_member_order_is_the_one_with_no_mismatches() {
         let sources = label_less_raidz2();
@@ -807,6 +848,7 @@ mod tests {
             draid_ndata: None,
             draid_nspares: None,
             draid_ngroups: None,
+            ashift: None,
             members: Vec::new(),
             children: vec![group],
         });

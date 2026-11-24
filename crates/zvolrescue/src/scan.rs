@@ -305,13 +305,21 @@ struct TreeOut {
     draid_nspares: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     draid_ngroups: Option<u64>,
+    /// On the top-level vdev only, as the hints take it: its own
+    /// `ashift`, which need not be the next vdev's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ashift: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     members: Option<Vec<Option<String>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     children: Option<Vec<TreeOut>>,
 }
 
-fn tree_out(node: &zfs_ondisk::label::VdevNode, members: &[MemberOut]) -> TreeOut {
+fn tree_out(
+    node: &zfs_ondisk::label::VdevNode,
+    members: &[MemberOut],
+    ashift: Option<u64>,
+) -> TreeOut {
     let leaf_path = |guid: u64| {
         members
             .iter()
@@ -326,9 +334,15 @@ fn tree_out(node: &zfs_ondisk::label::VdevNode, members: &[MemberOut]) -> TreeOu
         draid_ndata: node.draid_ndata,
         draid_nspares: node.draid_nspares,
         draid_ngroups: node.draid_ngroups,
+        ashift,
         members: (!nested && !node.children.is_empty())
             .then(|| node.children.iter().map(|c| leaf_path(c.guid)).collect()),
-        children: nested.then(|| node.children.iter().map(|c| tree_out(c, members)).collect()),
+        children: nested.then(|| {
+            node.children
+                .iter()
+                .map(|c| tree_out(c, members, None))
+                .collect()
+        }),
     }
 }
 
@@ -688,6 +702,7 @@ fn pool_out(p: &PoolAssembly, paths: &[PathBuf], names: &[Vec<String>]) -> PoolO
                 tree: tree_out(
                     &t.tree,
                     &t.members.iter().map(member_out).collect::<Vec<_>>(),
+                    t.ashift,
                 ),
             })
             .collect(),
@@ -1150,7 +1165,7 @@ fn emit_label(
         "top": top,
         "leaf": leaf,
         "pool": hints.layout.name,
-        "ashift": hints.layout.ashift,
+        "ashift": hints.layout.ashift_of(top),
         "txg": txg,
         "kind": hint_top.kind,
         "nparity": hint_top.nparity,
