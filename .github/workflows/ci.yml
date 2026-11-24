@@ -691,10 +691,13 @@ jobs:
           # C-14: an empty result must be a rejection, not an absence.
           rm -rf /tmp/carve-none
           ./target/release/zvolcarve -f json scan /tmp/cv/member0.img -o /tmp/carve-none --volblocksize 1048576 --strict-profile | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["candidates"] == []; assert d["rejected_by_profile"] > 0, d; names=[r["reason"] for r in d["rejected"] if r["profile"]]; assert "profile_volblocksize" in names, names'
-          # C-17: the profile taken off a sibling the pool still has.
+          # C-17: the profile taken off a sibling the pool still has: its
+          # block size, and its size as the most a candidate's can be. The
+          # volume named is 32 MiB with four blocks written, and is found
+          # by its own numbers even as a hard filter.
           rm -rf /tmp/carve-like
-          ./target/release/zvolcarve -q scan /tmp/fx/member0.img -o /tmp/carve-like --like tank/vm/disk0
-          python3 -c 'import json; p=json.load(open("/tmp/carve-like/candidates.json"))["profile"]; assert p["volblocksize"] == 8192 and p["levels"] == 1 and p["size"] == [33554432, 33554432], p'
+          ./target/release/zvolcarve -q scan /tmp/fx/member0.img -o /tmp/carve-like --like tank/vm/disk0 --strict-profile
+          python3 -c 'import json; d=json.load(open("/tmp/carve-like/candidates.json")); p=d["profile"]; assert p["volblocksize"] == 8192 and "levels" not in p and p["size"] == [0, 33554432], p; assert d["candidates"] and all(c["volblocksize"] == 8192 for c in d["candidates"]), d["candidates"]'
           # C-08: interrupted, then resumed, is the same as one pass.
           rm -rf /tmp/carve-r /tmp/carve-1
           if ./target/release/zvolcarve -q scan /tmp/cv/member0.img -o /tmp/carve-r --max-hits 3 --dnode-type any; then echo "must exit 6"; exit 1; else test $? = 6; fi
