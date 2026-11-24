@@ -17,6 +17,17 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ### Fixed
 
+* **`zvolcarve scan --range` and `roots --range` that end past the
+  member end with it.** A range has no open form, and the end that
+  says "to the end, wherever that is" is the largest number there is:
+  `--range 0-18446744073709551615`. The end was rounded up to a
+  512-byte slot before it was held to the member, wrapped to 0, and
+  the scan read nothing: "0 candidate(s) from 0 slot(s) in 0 bytes",
+  exit 3, and a state that said `complete` — so that `--resume` did
+  not repair it either; `roots` said no MOS header was in the range
+  that was read. A debug build stopped on the overflow. The end is
+  held to the member first.
+
 * **The template `scan` prints for a vdev that is one disk is a
   layout.** The `tree` of every top-level vdev in `scan -f json` is in
   the shape `--hints` takes, so that the scan of a healthy pool can be

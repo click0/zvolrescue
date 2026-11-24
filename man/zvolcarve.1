@@ -128,7 +128,10 @@ dnode that starts before
 is read whole.
 A scan done in parts, each resumed to the end of a longer range, is
 the scan done in one, wherever the parts end.
-A range that starts past the end of every member is a usage error.
+A range that starts past the end of every member is a usage error;
+one that ends past a member ends with it, so the largest number there
+is says
+.Dq to the end .
 .It Fl -resume
 Continue a scan that was interrupted; a SIGINT or SIGTERM ends a scan
 with its state written (exit status 6), and the candidates whose walk

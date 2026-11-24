@@ -861,6 +861,15 @@ fn the_scan_does_what_the_manual_says() {
     let (code, _, err) = run(&["-q", "scan", &members[0], "--range", &range, "-o", &off]);
     assert_eq!(code, 0, "{err}");
     assert_eq!(index(&off)["candidates"], o["candidates"]);
+    // "To the end, wherever that is": the largest end there is was
+    // rounded up past it, to 0, and the scan read nothing, found nothing
+    // (exit 3) and wrote that it was complete.
+    let far = ws("far");
+    let range = format!("0-{}", u64::MAX);
+    let (code, _, err) = run(&["-q", "scan", &members[0], "--range", &range, "-o", &far]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(index(&far)["candidates"], o["candidates"]);
+    assert_eq!(index(&far)["bytes_read"], o["bytes_read"]);
 
     let none = ws("none");
     let (code, _, err) = run(&[

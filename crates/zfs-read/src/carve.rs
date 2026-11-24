@@ -575,7 +575,13 @@ pub fn scan_member(
     // slot after it off by the difference — the dnodes there were never
     // seen, and the scan said it was complete.
     let start = start / 512 * 512;
-    let end = end.next_multiple_of(512).min(size);
+    // Held to the member first: an end within 511 of the largest number
+    // there is — "to the end, wherever that is" — rounded up to 0, and
+    // the scan read nothing and said it was complete.
+    let end = end
+        .min(size)
+        .checked_next_multiple_of(512)
+        .map_or(size, |e| e.min(size));
     let step = 1u64 << ashift.clamp(9, 17);
     let mut scan = Scan {
         resume_at: start,
@@ -1133,6 +1139,33 @@ mod tests {
         }
         assert_eq!(hits, key(&whole));
         assert_eq!((slots, bytes), (whole.slots_examined, whole.bytes_read));
+    }
+
+    /// A range that ends past the member ends with the member, however
+    /// far past: the largest end there is — "to the end" — was rounded
+    /// up to a slot boundary before it was held to the member, wrapped to
+    /// 0, and the scan read nothing and was complete.
+    #[test]
+    fn a_range_that_ends_past_the_member_ends_with_it() {
+        let members = carved();
+        let src = MemSource::new(members[0].clone());
+        let whole = scan_member(&src, 0, 12, &Options::default()).expect("scan");
+        assert!(!whole.hits.is_empty());
+        for end in [u64::MAX, u64::MAX - 511, u64::MAX - 512, SIZE + 1] {
+            let ranged = scan_member(
+                &src,
+                0,
+                12,
+                &Options {
+                    range: Some((0, end)),
+                    ..Options::default()
+                },
+            )
+            .expect("scan");
+            assert_eq!(ranged.hits.len(), whole.hits.len(), "end {end}");
+            assert_eq!(ranged.bytes_read, whole.bytes_read, "end {end}");
+            assert_eq!(ranged.resume_at, SIZE, "end {end}");
+        }
     }
 
     /// The hit limit ends the scan after the chunk it was reached in, with
