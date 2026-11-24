@@ -134,6 +134,11 @@ the first part of every dataset's, may be left out: a member's label
 gives it, or else the pool's own configuration in its MOS; so does the
 pool's
 .Ql guid .
+A
+.Ql guid
+that is given is the pool's or is refused with exit status 1: the
+configuration read through the layout says whose it is, and the refusal
+names it.
 A dRAID needs
 .Ql draid_ndata ,
 .Ql nparity ,
@@ -142,6 +147,14 @@ and
 .Ql draid_ngroups
 as the pool was made; numbers no dRAID has are refused with exit
 status 1.
+So is a key the layout does not have, named with the keys it does: a
+key misspelt is a key left out, and what stands for one left out is a
+default.
+.Ql comment ,
+with any value, may hold a note in the layout, in a vdev or in a member
+written as an object.
+A member is named as on the command line or by any other path to the
+same file.
 .It Fl -search-order
 Try every member order the layout leaves open and keep the one the
 checksums accept.
@@ -220,6 +233,9 @@ The front pair needs no hypothesis.
 Describe the layout by hand: the JSON template that
 .Fl -emit-label
 turns into a label.
+A file that is no layout is refused with exit status 1 before anything
+is scanned, with or without
+.Fl -emit-label .
 .It Fl -emit-label Ar file
 Write the label the layout describes for one member to
 .Ar file :

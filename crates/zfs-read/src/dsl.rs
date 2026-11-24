@@ -820,29 +820,27 @@ pub fn removed_tops_of(
     }
 }
 
-/// The pool's name and GUID as its own configuration in the MOS keeps
-/// them, at the newest TXG that reads: for a pool no label names — a
-/// hand-written layout without them — whose datasets were named from
-/// the MOS while the pool stayed "?", GUID 0, in every header, JSON
-/// document and evidence record.
-pub fn pool_identity(
+/// The pool's own configuration: the nvlist its MOS keeps under
+/// `config`, at the newest TXG that reads through `pool`. It is what
+/// the labels were written from — the pool's name and GUID, every vdev
+/// with its GUID and the numbers its space is laid out by, the features
+/// a reader has to know — and it is there when every label is gone: a
+/// pool read through a hand-written layout says by it what it is
+/// (SPEC F-65, F-67).
+pub fn pool_config(
     scans: &[Option<DeviceScan>],
     devices: Vec<Option<&dyn BlockSource>>,
     bases: &[u64],
     pool: &PoolAssembly,
-) -> (Option<String>, Option<u64>) {
+) -> Option<NvList> {
     let candidates = uberblock_candidates(scans, pool);
     let reader = PoolReader::new(pool, devices).with_base_offsets(bases);
-    candidates
-        .iter()
-        .find_map(|c| {
-            let mos = open_mos(&reader, &c.ub).ok()?;
-            let dir = object_directory(&mos).ok()?;
-            let config = dir.iter().find(|(n, _)| n == CONFIG).map(|(_, v)| *v)?;
-            let nv = read_packed_nvlist(&mos, config).ok()?;
-            Some((nv.str("name").map(str::to_string), nv.u64("pool_guid")))
-        })
-        .unwrap_or((None, None))
+    candidates.iter().find_map(|c| {
+        let mos = open_mos(&reader, &c.ub).ok()?;
+        let dir = object_directory(&mos).ok()?;
+        let config = dir.iter().find(|(n, _)| n == CONFIG).map(|(_, v)| *v)?;
+        read_packed_nvlist(&mos, config).ok()
+    })
 }
 
 /// Read a `DMU_OT_PACKED_NVLIST` object.

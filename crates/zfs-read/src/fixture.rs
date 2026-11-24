@@ -358,6 +358,10 @@ pub struct Alloc {
     /// transaction group from before a removal has it. The pointers
     /// still name `removed_vdev`, which was a device then.
     pub plain_config: bool,
+    /// The pool's configuration object, written as given
+    /// ([`mos_config`]): the whole account of the pool a real MOS keeps,
+    /// in place of the root with no live child the sample has.
+    pub config: Option<NvList>,
     /// What it takes to translate those addresses back, in source order.
     pub mapping: Vec<indirect::Entry>,
     /// Next address to hand out in the removed vdev's own space.
@@ -533,6 +537,7 @@ impl Alloc {
             removed_vdev: None,
             checkpoint: None,
             plain_config: false,
+            config: None,
             mapping: Vec::new(),
             removed_next: REMOVED_BASE,
             vdev: 0,
@@ -1371,7 +1376,7 @@ pub fn build_sample_mos_variant(
     // away, so no label describes it — but the live vdevs are described
     // by the labels already, and writing a second, unchecked account of
     // them here would be inventing evidence rather than providing it.
-    if a.removed_vdev.is_some() || a.plain_config {
+    if a.removed_vdev.is_some() || a.plain_config || a.config.is_some() {
         let mut children = Vec::new();
         if let Some(vdev) = a.removed_vdev.filter(|_| !a.plain_config) {
             let mut entries = a.mapping_entries();
@@ -1398,17 +1403,19 @@ pub fn build_sample_mos_variant(
                 ("com.delphix:indirect_object", Value::Uint64(MAPPING_OBJECT)),
             ]));
         }
-        let config = pack(&list(vec![
-            ("name", Value::String("tank".into())),
-            (
-                "vdev_tree",
-                Value::List(list(vec![
-                    ("type", Value::String("root".into())),
-                    ("id", Value::Uint64(0)),
-                    ("children", Value::ListArray(children)),
-                ])),
-            ),
-        ]));
+        let config = pack(&a.config.clone().unwrap_or_else(|| {
+            list(vec![
+                ("name", Value::String("tank".into())),
+                (
+                    "vdev_tree",
+                    Value::List(list(vec![
+                        ("type", Value::String("root".into())),
+                        ("id", Value::Uint64(0)),
+                        ("children", Value::ListArray(children)),
+                    ])),
+                ),
+            ])
+        }));
         assert!(
             config.len() <= 4096,
             "fixture config object outgrew a block"
@@ -1634,7 +1641,51 @@ pub fn two_top_mirror_members(
     txgs: &[(u64, u64)],
     size: u64,
 ) -> (Vec<Pool>, Vec<Vec<u8>>) {
+    two_top_mirrors(name, guid, ashift, widths, txgs, size, false)
+}
+
+/// [`two_top_mirror_members`] of a pool whose MOS keeps its whole
+/// configuration ([`mos_config`]), as a real pool's does: with every
+/// label gone, the pool still says what it is.
+pub fn configured_two_top_members(
+    name: &str,
+    guid: u64,
+    ashift: u32,
+    widths: [usize; 2],
+    txgs: &[(u64, u64)],
+    size: u64,
+) -> (Vec<Pool>, Vec<Vec<u8>>) {
+    two_top_mirrors(name, guid, ashift, widths, txgs, size, true)
+}
+
+fn two_top_mirrors(
+    name: &str,
+    guid: u64,
+    ashift: u32,
+    widths: [usize; 2],
+    txgs: &[(u64, u64)],
+    size: u64,
+    configured: bool,
+) -> (Vec<Pool>, Vec<Vec<u8>>) {
     let total = widths[0] + widths[1];
+    let ranges = [0..widths[0], widths[0]..total];
+    let mut tops: Vec<Pool> = ranges
+        .iter()
+        .enumerate()
+        .map(|(top_id, range)| {
+            let mut p = Pool::mirror_of(name, guid, ashift, range.len()).txgs(txgs);
+            p.top_id = top_id as u64;
+            p.vdev_children = 2;
+            p.members = range
+                .clone()
+                .map(|i| Member {
+                    guid: Member::guid_for(guid, i),
+                    path: format!("/dev/gpt/{name}-d{i}"),
+                })
+                .collect();
+            p
+        })
+        .collect();
     let mut members: Vec<Vec<u8>> = (0..total).map(|_| vec![0u8; size as usize]).collect();
     let mut a = Alloc::new(0x20_0000);
     a.members = Some(0..widths[0]);
@@ -1643,26 +1694,74 @@ pub fn two_top_mirror_members(
         1,
         widths[0]..total,
     )));
+    a.config = configured.then(|| mos_config(&tops));
     let rootbp = build_sample_mos_variant(&mut members, &mut a, true);
-    let mut tops = Vec::new();
-    for (top_id, range) in [(0u64, 0..widths[0]), (1, widths[0]..total)] {
-        let mut p = Pool::mirror_of(name, guid, ashift, range.len()).txgs(txgs);
-        p.top_id = top_id;
-        p.vdev_children = 2;
-        p.members = range
-            .clone()
-            .map(|i| Member {
-                guid: Member::guid_for(guid, i),
-                path: format!("/dev/gpt/{name}-d{i}"),
-            })
-            .collect();
+    for (p, range) in tops.iter_mut().zip(ranges) {
         p.rootbp = Some(rootbp);
         for (k, i) in range.enumerate() {
             p.write_labels(k, &mut members[i]);
         }
-        tops.push(p);
     }
     (tops, members)
+}
+
+/// The configuration of a pool as its MOS keeps it, of these top-level
+/// vdevs in order: what every label is written from. It is a label's
+/// own account with the whole tree under a root in place of one vdev,
+/// without the two GUIDs that say whose label it is, and with what only
+/// the MOS's copy has — the per-vdev ZAP objects, and the word that
+/// they exist.
+pub fn mos_config(tops: &[Pool]) -> NvList {
+    let first = &tops[0];
+    let label = first.config(0);
+    let mut zap = 64u64;
+    let mut next_zap = || {
+        zap += 1;
+        Value::Uint64(zap)
+    };
+    let children: Vec<NvList> = tops
+        .iter()
+        .map(|t| {
+            let mut tree = t.tree();
+            for (key, value) in tree.pairs.iter_mut() {
+                if let ("children", Value::ListArray(leaves)) = (key.as_str(), value) {
+                    for leaf in leaves {
+                        leaf.pairs
+                            .push(("com.delphix:vdev_zap_leaf".into(), next_zap()));
+                    }
+                }
+            }
+            tree.pairs
+                .push(("com.delphix:vdev_zap_top".into(), next_zap()));
+            tree
+        })
+        .collect();
+    let root = list(vec![
+        ("type", Value::String("root".into())),
+        ("id", Value::Uint64(0)),
+        ("guid", Value::Uint64(first.guid)),
+        ("create_txg", Value::Uint64(4)),
+        ("children", Value::ListArray(children)),
+    ]);
+    let mut config = NvList {
+        version: label.version,
+        flags: label.flags,
+        pairs: Vec::new(),
+    };
+    for (key, value) in label.pairs {
+        match key.as_str() {
+            "top_guid" | "guid" => {}
+            "vdev_children" => {
+                config
+                    .pairs
+                    .push(("com.delphix:has_per_vdev_zaps".into(), Value::Boolean));
+                config.pairs.push((key, value));
+            }
+            "vdev_tree" => config.pairs.push((key, Value::List(root.clone()))),
+            _ => config.pairs.push((key, value)),
+        }
+    }
+    config
 }
 
 /// A pool of two raidz1 vdevs of three leaves whose `ashift` differ,

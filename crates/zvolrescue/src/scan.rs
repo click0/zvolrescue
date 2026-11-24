@@ -1228,6 +1228,17 @@ pub fn run(
         }
     }
     let devices = &once[..];
+    // A layout that does not parse is the run's to refuse before it
+    // scans anything: without `--emit-label` nothing read the file, and
+    // `scan --hints` passed one no other command would take.
+    if let Some(Err(e)) = emit
+        .hints
+        .as_ref()
+        .map(|f| zvol_common::hints::load(f, devices))
+    {
+        errln!("zvolrescue: {e}");
+        return exit::USAGE;
+    }
     let open = &match open.for_inputs(devices, "devices") {
         Ok(o) => o,
         Err(e) => {

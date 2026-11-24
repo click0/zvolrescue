@@ -177,6 +177,90 @@ fn layout_record(
     })
 }
 
+/// Give each member the hints place its vdev's start: its labels and
+/// uberblocks are there, which the hints say. Read where the search of
+/// the member had placed it — or had not, a vdev 100 MiB into its image
+/// — a member the hints placed offered no uberblock, and the pool had
+/// no transaction group to be read at (exit 3).
+pub fn place_hinted(
+    hinted: &[u64],
+    scans: &mut [Option<DeviceScan>],
+    devices: &[Option<&dyn BlockSource>],
+    bases: &mut [u64],
+) {
+    for (i, b) in hinted.iter().enumerate() {
+        if *b == 0 {
+            continue;
+        }
+        bases[i] = *b;
+        let elsewhere = scans[i].as_ref().is_none_or(|s| s.base != *b);
+        if let (true, Some(src)) = (elsewhere, devices[i]) {
+            if let Ok(mut s) = zfs_read::vdev::scan_device_at(src, *b) {
+                s.base_source = Some("hints");
+                scans[i] = Some(s);
+            }
+        }
+    }
+}
+
+/// A hand-written layout with what it left out filled in, ready to read
+/// through.
+pub struct Hinted {
+    /// The layout, named.
+    pub layout: LayoutHints,
+    /// The assembly it makes.
+    pub pool: PoolAssembly,
+    /// The pool's own configuration, where its MOS read through the
+    /// layout ([`zfs_read::dsl::pool_config`]).
+    pub config: Option<zfs_ondisk::nvlist::NvList>,
+}
+
+/// Say which pool a hand-written layout is of.
+///
+/// The pool's name is the first part of every dataset's: one the hints
+/// do not give is the labels', where any member's verifies, and else
+/// the pool's own configuration in its MOS, as is its GUID. Left as
+/// "?", `dump tank/vm/disk0` found no dataset of that name — they were
+/// all `?/…` — and the pool was "?", GUID 0, in the header, the JSON
+/// and the record, while its datasets were named from the MOS.
+///
+/// A GUID the hints do give is the pool's or is refused: the
+/// configuration read through this very layout is the pool's own word
+/// on it. One of another pool was taken — the hints of the last case,
+/// a digit dropped — and went into every record of the run as the pool
+/// that was read, and into the label `--emit-label` wrote.
+pub fn identify_hinted(
+    mut layout: LayoutHints,
+    scans: &[Option<DeviceScan>],
+    devices: &[Option<&dyn BlockSource>],
+    bases: &[u64],
+) -> Result<Hinted, String> {
+    let config = zfs_read::dsl::pool_config(scans, devices.to_vec(), bases, &layout.assemble());
+    let own = config.as_ref().and_then(|c| c.u64("pool_guid"));
+    if let (Some(given), Some(own)) = (layout.guid, own) {
+        if given != own {
+            return Err(format!(
+                "hints: guid 0x{given:016x} is not this pool's: its own configuration, read through this layout, says 0x{own:016x}"
+            ));
+        }
+    }
+    layout.name = layout
+        .name
+        .take()
+        .or_else(|| scans.iter().flatten().find_map(|s| s.config()?.name))
+        .or_else(|| Some(config.as_ref()?.str("name")?.to_string()));
+    layout.guid = layout
+        .guid
+        .or_else(|| scans.iter().flatten().find_map(|s| s.config()?.pool_guid))
+        .or(own);
+    let pool = layout.assemble();
+    Ok(Hinted {
+        layout,
+        pool,
+        config,
+    })
+}
+
 /// Apply every `--assume-member`: put a member whose labels are gone into
 /// a leaf slot the configuration leaves vacant (SPEC F-62).
 fn bind_assumed(
@@ -536,62 +620,20 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
                 say!("{e}");
                 exit::USAGE
             })?;
-            for (i, b) in hints.bases.iter().enumerate() {
-                if *b != 0 {
-                    bases[i] = *b;
-                    // Its labels and uberblocks are where the vdev starts,
-                    // which the hints say: read where the search of the
-                    // member had placed it — or had not, a vdev 100 MiB
-                    // into its image — a member the hints placed offered
-                    // no uberblock, and the pool had no transaction group
-                    // to be read at (exit 3).
-                    let elsewhere = scans[i].as_ref().is_none_or(|s| s.base != *b);
-                    if let (true, Some(src)) = (elsewhere, sources[i].as_ref()) {
-                        if let Ok(mut s) = zfs_read::vdev::scan_device_at(src, *b) {
-                            s.base_source = Some("hints");
-                            scans[i] = Some(s);
-                        }
-                    }
-                }
-            }
+            let devices: Vec<Option<&dyn BlockSource>> = sources
+                .iter()
+                .map(|s| s.as_ref().map(|s| s as &dyn BlockSource))
+                .collect();
+            place_hinted(&hints.bases, &mut scans, &devices, &mut bases);
             let mut layout = hints.layout;
-            // The pool's name is the first part of every dataset's: one
-            // the hints do not give is the labels', where any member's
-            // verifies, and else the pool's own configuration in its MOS
-            // (`walk` reads it). Left as "?", `dump tank/vm/disk0` found
-            // no dataset of that name — they were all `?/…`.
-            if layout.name.is_none() {
-                layout.name = scans.iter().flatten().find_map(|s| s.config()?.name);
-            }
-            if layout.guid.is_none() {
-                layout.guid = scans.iter().flatten().find_map(|s| s.config()?.pool_guid);
-            }
             if spec.search_order {
-                let devices: Vec<Option<&dyn BlockSource>> = sources
-                    .iter()
-                    .map(|s| s.as_ref().map(|s| s as &dyn BlockSource))
-                    .collect();
                 layout = search_layout(&layout, &scans, &devices, &bases)?;
             }
-            let mut pool = layout.assemble();
-            // What the labels could not give, the MOS can: a pool read
-            // through hints without a name was "?", GUID 0, in the
-            // header, the JSON and the record, while its datasets were
-            // named from the MOS.
-            if layout.name.is_none() || layout.guid.is_none() {
-                let devices: Vec<Option<&dyn BlockSource>> = sources
-                    .iter()
-                    .map(|s| s.as_ref().map(|s| s as &dyn BlockSource))
-                    .collect();
-                let (name, guid) = zfs_read::dsl::pool_identity(&scans, devices, &bases, &pool);
-                if layout.name.is_none() && name.is_some()
-                    || layout.guid.is_none() && guid.is_some()
-                {
-                    layout.name = layout.name.take().or(name);
-                    layout.guid = layout.guid.or(guid);
-                    pool = layout.assemble();
-                }
-            }
+            let Hinted { layout, pool, .. } = identify_hinted(layout, &scans, &devices, &bases)
+                .map_err(|e| {
+                    say!("{e}");
+                    exit::USAGE
+                })?;
             crate::evidence::note_layout(layout_record(&layout, &paths, file, spec.search_order));
             say!(
                 "reading through the layout in {}: {}",

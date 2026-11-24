@@ -9,9 +9,10 @@ use zfs_ondisk::blkptr::LABEL_START_SIZE;
 use zfs_ondisk::checksum::seal_label;
 use zfs_ondisk::label::{label_offsets, LABEL_SIZE, UBERBLOCK_RING_OFFSET, UBERBLOCK_RING_SIZE};
 use zfs_read::fixture::{
-    build_sample_mos, checkpointed_members, destroyed_zvol_members, lose_children_list,
-    objset_reused_members, removed_since_members, removed_vdev_members, two_top_mirror_members,
-    two_top_raidz_members, zpl_members, zvol_pattern, Alloc, Pool, SAMPLE_ZVOL_BLOCK0_OFFSET,
+    build_sample_mos, checkpointed_members, configured_two_top_members, destroyed_zvol_members,
+    lose_children_list, objset_reused_members, removed_since_members, removed_vdev_members,
+    two_top_mirror_members, two_top_raidz_members, zpl_members, zvol_pattern, Alloc, Pool,
+    SAMPLE_ZVOL_BLOCK0_OFFSET,
 };
 use zfs_read::hash::{Digests, Extra};
 use zvol_common::scratch::Scratch;
@@ -1173,6 +1174,115 @@ fn hints_give_each_top_level_vdev_its_own_ashift() {
         assert_eq!(code, 1, "{name}: {err}");
         assert!(err.contains(said), "{name}: {err}");
     }
+}
+
+/// A hints file is read strictly. A key nothing reads was passed over
+/// without a word — `nparty` for `nparity` read a raidz2 as the raidz1
+/// a raidz is by default — and is refused, in the layout, in a vdev
+/// and in a member, `comment` standing for a note in any of them. A
+/// GUID that is not the pool's was taken and recorded as the pool
+/// read: the pool's own configuration, read through the layout, says
+/// whose it is. And a member is the file, not its spelling: named one
+/// way on the command line and another in the hints, it was "not among
+/// the members given".
+#[test]
+fn hints_are_read_strictly() {
+    let dir = scratch("hints-strict");
+    let (_, mut members) =
+        configured_two_top_members("tank", 0x7070, 12, [2, 3], &[(100, 1)], SIZE);
+    members.iter_mut().for_each(|m| wipe_configs(m));
+    let paths = write_members(&dir, &members);
+    let all: Vec<&str> = paths.iter().map(String::as_str).collect();
+    let layout = || {
+        serde_json::json!({"ashift": 12, "tops": [
+            {"kind": "mirror", "members": [&paths[0], &paths[1]]},
+            {"kind": "mirror", "members": [&paths[2], &paths[3], &paths[4]]}]})
+    };
+    let with = |command: &str, members: &[&str], hints: &serde_json::Value| {
+        let file = dir.join("layout.hints");
+        std::fs::write(&file, hints.to_string()).unwrap();
+        let file = file.to_string_lossy().into_owned();
+        let mut args = vec!["-q", "-f", "json", command];
+        args.extend(members);
+        args.extend(["--hints", &file]);
+        run(&args)
+    };
+
+    // As written it reads, and the pool is named by its own word: its
+    // configuration in the MOS, no label being left to say.
+    let (code, out, err) = with("list", &all, &layout());
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(json(&out)["pool"], "tank", "{out}");
+    assert_eq!(json(&out)["pool_guid"], "0x0000000000007070", "{out}");
+
+    // A key nothing reads, wherever it is written.
+    let mut misspelt = layout();
+    misspelt["ashfit"] = 9.into();
+    let mut parity = layout();
+    parity["tops"][0]["nparty"] = 1.into();
+    let mut member = layout();
+    member["tops"][1]["members"][0] = serde_json::json!({"path": &paths[2], "offset": 0});
+    for (hints, said) in [
+        (&misspelt, "\"ashfit\" is not a key of the layout"),
+        (&parity, "tops[0]: \"nparty\" is not a key of a vdev"),
+        (
+            &member,
+            "tops[1].members[0]: \"offset\" is not a key of a member",
+        ),
+    ] {
+        for command in ["list", "scan"] {
+            let (code, _, err) = with(command, &all, hints);
+            assert_eq!(code, 1, "{command}: {err}");
+            assert!(err.contains(said), "{command}: {err}");
+        }
+    }
+    // A note is no key to refuse.
+    let mut noted = layout();
+    noted["comment"] = "from the case file".into();
+    noted["tops"][0]["comment"] = serde_json::json!(["zpool status of 2026-11-01"]);
+    noted["tops"][1]["members"][0] =
+        serde_json::json!({"path": &paths[2], "comment": "the disk that was replaced"});
+    let (code, _, err) = with("list", &all, &noted);
+    assert_eq!(code, 0, "{err}");
+
+    // The pool's GUID, in either notation, or not this pool's.
+    for own in [serde_json::json!("0x7070"), serde_json::json!(0x7070)] {
+        let mut hints = layout();
+        hints["guid"] = own;
+        let (code, out, err) = with("list", &all, &hints);
+        assert_eq!(code, 0, "{err}");
+        assert_eq!(json(&out)["pool_guid"], "0x0000000000007070", "{out}");
+    }
+    let mut foreign = layout();
+    foreign["guid"] = "0x10".into();
+    let (code, _, err) = with("list", &all, &foreign);
+    assert_eq!(code, 1, "{err}");
+    assert!(
+        err.contains("guid 0x0000000000000010 is not this pool's")
+            && err.contains("says 0x0000000000007070"),
+        "{err}"
+    );
+
+    // The same files under another spelling on the command line.
+    let respelt: Vec<String> = (0..paths.len())
+        .map(|i| {
+            dir.join(".")
+                .join(format!("member{i}.img"))
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert_ne!(respelt[0], paths[0]);
+    let respelt: Vec<&str> = respelt.iter().map(String::as_str).collect();
+    let (code, out, err) = with("list", &respelt, &layout());
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(json(&out)["pool"], "tank", "{out}");
+    // A file that is none of them is still none of them.
+    let mut absent = layout();
+    absent["tops"][0]["members"][0] = dir.join("nowhere.img").to_string_lossy().into();
+    let (code, _, err) = with("list", &all, &absent);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("is not among the members given"), "{err}");
 }
 
 /// The `tree` of every top-level vdev a scan printed, as hints: the

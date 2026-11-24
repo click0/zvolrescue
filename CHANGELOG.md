@@ -17,6 +17,26 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ### Fixed
 
+* **A `--hints` file is read strictly.** Three ways a layout could be
+  wrong and be taken. A key nothing reads was passed over without a
+  word, and a key misspelt is the key left out: `"nparty": 2` on a
+  raidz2 read it as the raidz1 a raidz is by default — nothing of the
+  pool, and no hint that the parity given had never been looked at.
+  Such a key is refused with exit 1 and named with the keys the
+  layout, a vdev or a member does have; `comment` may hold a note in
+  any of them, JSON having no other place for one. A `guid` that was
+  not the pool's was taken, shown as the pool read, written into the
+  evidence record and sealed into the label `--emit-label` made; the
+  pool's own configuration, read from its MOS through the layout,
+  says whose it is, and a GUID that differs is refused with exit 1,
+  the pool's named. And a member was matched to the command line by
+  the spelling of its path — `nl/d0` there and its absolute path in
+  the hints was "not among the members given" — where everywhere else
+  one file under two names is one disk; it is matched as a file now.
+  `scan --hints` without `--emit-label` read the file not at all and
+  passed one no other command would take; it refuses it before
+  scanning.
+
 * **A pool whose vdevs differ in ashift can be described in
   `--hints`.** The layout had one `ashift` for the whole pool. A pool
   of 512-byte disks grown with a vdev of 4Kn ones has two, and where a

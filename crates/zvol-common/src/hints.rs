@@ -27,6 +27,12 @@
 //! Order is the vdev's own order — it is what a DVA addresses — so it
 //! matters, and getting it wrong shows up as failed checksums, never as
 //! wrong data.
+//!
+//! A key that is none of these is refused: one misspelt is one left
+//! out, and what stands for a key left out is a default. `comment`,
+//! with any value, may stand in the layout, in a vdev or in a member
+//! written as an object — JSON has no other place for a note of where
+//! the layout came from.
 
 use std::path::{Path, PathBuf};
 
@@ -58,6 +64,43 @@ fn as_u64(v: &Json, what: &str) -> Result<u64, String> {
     }
 }
 
+/// The keys of the layout itself, of a vdev and of a member written as
+/// an object.
+const LAYOUT_KEYS: [&str; 4] = ["name", "guid", "ashift", "tops"];
+const VDEV_KEYS: [&str; 8] = [
+    "kind",
+    "nparity",
+    "draid_ndata",
+    "draid_nspares",
+    "draid_ngroups",
+    "ashift",
+    "members",
+    "children",
+];
+const MEMBER_KEYS: [&str; 2] = ["path", "base"];
+
+/// Refuse a key nothing reads. One was passed over without a word, and
+/// a key misspelt is the key left out: `"nparty": 2` on a raidz2 read
+/// it as the raidz1 a raidz is by default — nothing of the pool, and
+/// no hint that the parity given had never been looked at.
+fn known(
+    obj: &serde_json::Map<String, Json>,
+    at: &str,
+    of: &str,
+    keys: &[&str],
+) -> Result<(), String> {
+    match obj
+        .keys()
+        .find(|k| *k != "comment" && !keys.contains(&k.as_str()))
+    {
+        None => Ok(()),
+        Some(k) => Err(format!(
+            "hints: {at}{k:?} is not a key of {of}; those are {}, and comment for a note",
+            keys.join(", ")
+        )),
+    }
+}
+
 /// An `ashift` a vdev can have, `what` naming where it was written.
 fn ashift_at(v: &Json, what: &str) -> Result<u64, String> {
     let ashift = as_u64(v, what)?;
@@ -78,6 +121,7 @@ fn top_hint(
     paths: &[PathBuf],
     bases: &mut [u64],
 ) -> Result<TopHint, String> {
+    known(t, &format!("{what}: "), "a vdev", &VDEV_KEYS)?;
     let kind = t
         .get("kind")
         .and_then(Json::as_str)
@@ -104,6 +148,12 @@ fn top_hint(
                     }
                     Json::String(s) => (s.clone(), 0),
                     Json::Object(o) => {
+                        known(
+                            o,
+                            &format!("{what}.members[{m}]: "),
+                            "a member",
+                            &MEMBER_KEYS,
+                        )?;
                         let p = o
                             .get("path")
                             .and_then(Json::as_str)
@@ -120,9 +170,19 @@ fn top_hint(
                         ))
                     }
                 };
+                // The member as it was spelt on the command line, or
+                // the same file under another name — `nl/d0` there and
+                // its absolute path here: everywhere else one file
+                // under two names is one disk, and here it was "not
+                // among the members given".
                 let device = paths
                     .iter()
                     .position(|p| p.as_os_str() == path.as_str())
+                    .or_else(|| {
+                        paths
+                            .iter()
+                            .position(|p| crate::same_file(p, Path::new(&path)))
+                    })
                     .ok_or_else(|| {
                         format!("hints: {path} is not among the members given on the command line")
                     })?;
@@ -273,6 +333,7 @@ pub fn load(file: &Path, paths: &[PathBuf]) -> Result<Hints, String> {
         .as_object()
         .ok_or("hints: the file must hold one JSON object")?;
 
+    known(obj, "", "the layout", &LAYOUT_KEYS)?;
     let pool_ashift = obj
         .get("ashift")
         .map(|v| ashift_at(v, "ashift"))
