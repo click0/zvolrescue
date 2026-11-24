@@ -17,6 +17,20 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ### Fixed
 
+* **The template `scan` prints for a vdev that is one disk is a
+  layout.** The `tree` of every top-level vdev in `scan -f json` is in
+  the shape `--hints` takes, so that the scan of a healthy pool can be
+  kept for the day its labels are gone. A disk that is a vdev by
+  itself — the top of a stripe, a leaf beside a spare inside a dRAID —
+  was written `{"kind": "disk"}` with no member, and the hints take no
+  vdev without one ("needs members or children"): of a stripe, or of
+  a dRAID with a spare in use, the template described nothing. Such a
+  vdev carries its one member. The cross-check against `ztest` pools
+  hands the layout on as well now: with every configuration erased on
+  copies, a label is emitted for every member and position and
+  placed, and `zdb -e` has to list from the copies the datasets it
+  listed from the pool.
+
 * **The label `scan --emit-label` writes is the pool's own.** It was
   made from the layout alone. With no `name` or `guid` in the hints —
   the manual says both may be left out — the run showed the pool's own

@@ -335,8 +335,15 @@ fn tree_out(
         draid_nspares: node.draid_nspares,
         draid_ngroups: node.draid_ngroups,
         ashift,
-        members: (!nested && !node.children.is_empty())
-            .then(|| node.children.iter().map(|c| leaf_path(c.guid)).collect()),
+        // A disk that is a vdev by itself — a stripe's top, or a leaf
+        // beside a spare inside a dRAID — is its own one member. It was
+        // written with none, and the hints take no vdev without them:
+        // the template of such a pool was no layout.
+        members: if node.children.is_empty() {
+            Some(vec![leaf_path(node.guid)])
+        } else {
+            (!nested).then(|| node.children.iter().map(|c| leaf_path(c.guid)).collect())
+        },
         children: nested.then(|| {
             node.children
                 .iter()

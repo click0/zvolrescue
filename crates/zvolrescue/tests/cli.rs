@@ -1388,6 +1388,60 @@ fn hints_are_read_strictly() {
     assert!(err.contains("is not among the members given"), "{err}");
 }
 
+/// The template `scan` prints for a vdev is a layout the hints take
+/// when the vdev is one disk, too. A disk that is a vdev by itself —
+/// the top of a stripe, a leaf beside a spare in a dRAID — was written
+/// `{"kind": "disk"}`, with no member, which the hints refuse: the
+/// template of such a pool, kept for the day its labels are gone,
+/// described nothing.
+#[test]
+fn the_scanned_template_of_a_one_disk_vdev_is_a_layout() {
+    let dir = scratch("hints-one-disk");
+    let want = reference_sha(&dir);
+    let mut pool = Pool::mirror_of("tank", 0x4242, 12, 1).txgs(&[(100, 1)]);
+    pool.kind = "disk".into();
+    // A disk that is a top-level vdev is one vdev: the GUID its label
+    // gives the member is the vdev's own.
+    pool.members[0].guid = pool.top_guid();
+    let mut members = vec![vec![0u8; SIZE as usize]];
+    let mut a = Alloc::new(0x20_0000);
+    build_sample_mos(&mut pool, &mut members, &mut a);
+    pool.write_labels(0, &mut members[0]);
+    let labelled = write_members(&dir, &members);
+
+    let (code, out, _) = run(&["-q", "-f", "json", "scan", &labelled[0]]);
+    assert_eq!(code, 0, "{out}");
+    let tree = &json(&out)["pools"][0]["tops"][0]["tree"];
+    assert_eq!(tree["kind"], "disk", "{tree}");
+    assert_eq!(tree["members"], serde_json::json!([&labelled[0]]), "{tree}");
+
+    members.iter_mut().for_each(|m| wipe_configs(m));
+    let bare = scratch("hints-one-disk-bare");
+    let paths = write_members(&bare, &members);
+    let hints = bare.join("layout.hints");
+    std::fs::write(
+        &hints,
+        serde_json::json!({"name": "tank", "ashift": 12, "tops": tops_from_scan(&out, &labelled, &paths)})
+            .to_string(),
+    )
+    .unwrap();
+    let image = bare.join("out.img").to_string_lossy().into_owned();
+    let (code, out, err) = run(&[
+        "-q",
+        "-f",
+        "json",
+        "dump",
+        "tank/vm/disk0",
+        &paths[0],
+        "--hints",
+        &hints.to_string_lossy(),
+        "-o",
+        &image,
+    ]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert_eq!(json(&out)["volumes"][0]["sha256"], want);
+}
+
 /// The `tree` of every top-level vdev a scan printed, as hints: the
 /// members it names replaced by the same members of another set.
 fn tops_from_scan(scan: &str, from: &[String], to: &[String]) -> Vec<serde_json::Value> {

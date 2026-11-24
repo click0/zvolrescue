@@ -45,6 +45,17 @@ with open(out, "r+b") as f:
 EOF
 }
 
+# zdb_datasets DIR: every dataset of the pool whose members are in DIR,
+# name and creation txg, as zdb finds them.
+zdb_datasets() {
+    zdb -e -p "$1" -d ztest 2>/dev/null | python3 -c '
+import re,sys
+for l in sys.stdin:
+    m = re.match(r"Dataset (\S+) \[(\w+)\], ID \d+, cr_txg (\d+)", l)
+    if m and m.group(1) != "mos":
+        print(m.group(1), m.group(3))' | sort
+}
+
 # run_pool NAME REDUNDANCY ZTEST-ARGS...: REDUNDANCY is how many members
 # the walk in step 8 leaves out (parity level, or 1 for a mirror).
 # ASHIFT (default 12) is the pool's ashift: it sets the stride of every
@@ -70,12 +81,7 @@ run_pool() {
     members=$(ls "$dir"/ztest.*a)
 
     # 1. datasets: name + creation txg, from zdb and from zvolrescue.
-    zdb -e -p "$dir" -d ztest 2>/dev/null | python3 -c '
-import re,sys
-for l in sys.stdin:
-    m = re.match(r"Dataset (\S+) \[(\w+)\], ID \d+, cr_txg (\d+)", l)
-    if m and m.group(1) != "mos":
-        print(m.group(1), m.group(3))' | sort > "$dir/zdb.txt"
+    zdb_datasets "$dir" > "$dir/zdb.txt"
     # Every object zdb can see, taken now: later steps leave doctored
     # copies of the members in this directory, and `zdb -e -p DIR` reads
     # the directory, not the pool. Step 13 compares against this.
@@ -387,6 +393,56 @@ if listed != oracle:
     sys.exit(1)
 ' "$dir/list-hints.json" "$dir/zdb.txt"; then
                 echo "   layout: with every configuration erased, the hand-written layout lists the same $(wc -l < "$dir/zdb.txt") dataset(s) as zdb"
+                # The layout handed on (SPEC F-67): a label emitted for
+                # every member and position, and placed on these copies,
+                # is the pool's own configuration read from its MOS — so
+                # OpenZFS opens the copies, and finds the pool zdb found
+                # before anything was erased.
+                mkdir -p "$dir/relabel"
+                if python3 - "$ZR" "$dir/hints.json" "$dir/relabel" > "$dir/relabel.txt" 2>&1 <<'EOF'
+import json, os, subprocess, sys
+zr, hints_file, out = sys.argv[1:4]
+LABEL = 256 * 1024
+hints = json.load(open(hints_file))
+def leaves(n):
+    if n.get("children") is not None:
+        return [m for c in n["children"] for m in leaves(c)]
+    return n["members"]
+tops = [leaves(t) for t in hints["tops"]]
+members = [m for top in tops for m in top]
+label = os.path.join(out, "label.bin")
+for ti, top in enumerate(tops):
+    for li, member in enumerate(top):
+        aligned = os.path.getsize(member) & ~(LABEL - 1)
+        for index, at in enumerate((0, LABEL, aligned - 2 * LABEL, aligned - LABEL)):
+            subprocess.run([zr, "-q", "scan", *members, "--hints", hints_file,
+                            "--emit-label", label, "--emit-for", f"{ti}:{li}",
+                            "--emit-label-index", str(index)],
+                           check=True, stdout=subprocess.DEVNULL)
+            geometry = json.load(open(label + ".json"))
+            if geometry["config"] != "pool":
+                sys.exit(f"{ti}:{li} L{index}: {geometry['note']}")
+            with open(member, "r+b") as f:
+                f.seek(at)
+                f.write(open(label, "rb").read())
+os.remove(label)
+os.remove(label + ".json")
+# Under the names ztest gave them, in a directory of their own:
+# `zdb -e -p DIR` reads the directory.
+for member in members:
+    os.rename(member, os.path.join(out, os.path.basename(member)[len("blank-"):]))
+EOF
+                then
+                    zdb_datasets "$dir/relabel" > "$dir/zdb-relabel.txt"
+                    if diff -u "$dir/zdb.txt" "$dir/zdb-relabel.txt"; then
+                        echo "   labels: emitted for every member and placed, they are the pool's own — zdb opens the copies and lists the same $(wc -l < "$dir/zdb.txt") dataset(s)"
+                    else
+                        echo "   labels: FAILED: zdb does not find the pool in the relabelled copies"; fail=1
+                    fi
+                else
+                    echo "   labels: FAILED"; tail -5 "$dir/relabel.txt"; fail=1
+                fi
+                rm -rf "$dir/relabel"
             else
                 echo "   layout: FAILED"; tail -3 "$dir/hints.err"; fail=1
             fi
