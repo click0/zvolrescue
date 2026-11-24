@@ -17,6 +17,30 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ### Fixed
 
+* **`zvolcarve scan --like` finds the volume made like its
+  neighbour.** It took the neighbour's `volsize` as the exact size of
+  what is looked for, and the depth of its tree as the exact depth. A
+  candidate is measured by its dnode — one block past the highest ever
+  written, and the depth that block needed — so the lost volume matched
+  only if it had been written to its last block: with a tail never
+  written, as a VM's disk has, the very volume the option was given
+  for failed the profile, fell from 1.00 to 0.45 behind forty objects
+  of other kinds, and with `--strict-profile` the scan ended "nothing
+  found", exit 3. The size is taken as the most a candidate's can be
+  (`"size": [0, volsize]` in the profile the index records) and the
+  depth is not taken; `--levels` and `--size` still say more. A dataset
+  that is not a volume was "I/O error: … data object is free"; it is
+  said to be a filesystem, exit 1.
+
+* **A search profile no dnode can match is refused.** `--levels 0`,
+  `--volblocksize 0` or one that is not a whole number of sectors,
+  `--dnode-type 0` (a free slot) or a type the scan does not recognise,
+  a `--size` below one sector — on the command line or in `--profile` —
+  searched, matched nothing and ended as a scan that found nothing
+  (exit 3), or with a soft profile listed every candidate as a miss.
+  They are usage errors (exit 1) that name the field, as a range whose
+  start is past its end already was.
+
 * **`zvolcarve scan --range` and `roots --range` that end past the
   member end with it.** A range has no open form, and the end that
   says "to the end, wherever that is" is the largest number there is:

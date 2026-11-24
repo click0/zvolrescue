@@ -352,6 +352,52 @@ impl Profile {
         }
         out
     }
+
+    /// Why no dnode [`plausible_dnode`] passes can match this profile, if
+    /// none can: a field outside what the structural test lets through.
+    ///
+    /// A search for such a profile ends as one that found nothing — an
+    /// answer about the evidence to a question that was a slip of the
+    /// hand. The bounds are the ones the structural test holds a dnode
+    /// to, kept beside it so the two cannot drift apart.
+    pub fn matches_nothing(&self) -> Option<String> {
+        match self.dnode_type {
+            Some(0) => {
+                return Some(
+                    "dnode type 0 is a free slot, which is no candidate (`any` follows every type)"
+                        .into(),
+                )
+            }
+            Some(t) if !known_type(t) => {
+                return Some(format!(
+                    "dnode type {t} is not one the scan recognises: 1 to 60, or 128 and above"
+                ))
+            }
+            _ => {}
+        }
+        if let Some(bs) = self.volblocksize {
+            if bs == 0 || bs % 512 != 0 || bs > MAX_BLOCKSIZE {
+                return Some(format!(
+                    "volblocksize {bs}: a block is a whole number of 512-byte sectors, from 512 to {MAX_BLOCKSIZE} bytes"
+                ));
+            }
+        }
+        if let Some(l) = self.levels {
+            if !(1..=7).contains(&l) {
+                return Some(format!(
+                    "levels {l}: the tree of an object has 1 to 7 levels"
+                ));
+            }
+        }
+        if let Some((_, max)) = self.size {
+            if max < 512 {
+                return Some(format!(
+                    "size up to {max}: no object is smaller than one 512-byte sector"
+                ));
+            }
+        }
+        None
+    }
 }
 
 #[cfg(test)]
@@ -604,6 +650,70 @@ mod tests {
         let before = names.len();
         names.dedup();
         assert_eq!(names.len(), before);
+    }
+
+    /// A profile that asks for what the structural test never lets
+    /// through says so, field by field; one that asks for what a dnode
+    /// can be does not. The bounds are the structural test's own: a
+    /// dnode built at each edge passes it and matches.
+    #[test]
+    fn a_profile_no_dnode_can_match_says_which_field() {
+        let of = |f: fn(&mut Profile)| {
+            let mut p = Profile::default();
+            f(&mut p);
+            p.matches_nothing()
+        };
+        for (what, p) in [
+            ("dnode type 0", of(|p| p.dnode_type = Some(0))),
+            ("dnode type 61", of(|p| p.dnode_type = Some(61))),
+            ("dnode type 127", of(|p| p.dnode_type = Some(127))),
+            ("volblocksize 0", of(|p| p.volblocksize = Some(0))),
+            ("volblocksize 1000", of(|p| p.volblocksize = Some(1000))),
+            (
+                "volblocksize 16777728",
+                of(|p| p.volblocksize = Some(MAX_BLOCKSIZE + 512)),
+            ),
+            ("levels 0", of(|p| p.levels = Some(0))),
+            ("levels 8", of(|p| p.levels = Some(8))),
+            ("size up to 511", of(|p| p.size = Some((0, 511)))),
+        ] {
+            let why = p.unwrap_or_else(|| panic!("{what} was taken"));
+            assert!(why.starts_with(what), "{what}: {why}");
+        }
+        for p in [
+            Profile::default(),
+            Profile {
+                dnode_type: Some(ot::ZVOL),
+                volblocksize: Some(512),
+                levels: Some(1),
+                size: Some((0, 512)),
+                txg: Some((0, 0)),
+            },
+            Profile {
+                dnode_type: Some(60),
+                volblocksize: Some(MAX_BLOCKSIZE),
+                levels: Some(7),
+                size: Some((u64::MAX, u64::MAX)),
+                txg: None,
+            },
+            Profile {
+                dnode_type: Some(196),
+                volblocksize: Some(1536),
+                ..Profile::default()
+            },
+        ] {
+            assert_eq!(p.matches_nothing(), None, "{p:?}");
+        }
+        let d = DnodePhys::parse(&zvol().build(), Endian::Little).expect("parses");
+        assert!(plausible_dnode(&d).is_ok());
+        let own = Profile {
+            dnode_type: Some(d.object_type),
+            volblocksize: Some(d.datablksz()),
+            levels: Some(d.nlevels),
+            ..Profile::default()
+        };
+        assert_eq!(own.matches_nothing(), None);
+        assert!(own.misses(&d).is_empty());
     }
 
     #[test]

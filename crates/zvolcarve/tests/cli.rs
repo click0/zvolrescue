@@ -6,7 +6,7 @@ use std::path::Path;
 use std::process::Command;
 
 use zfs_ondisk::label::LABEL_SIZE;
-use zfs_read::fixture::{carved_zvol_members, Pool};
+use zfs_read::fixture::{build_sample_mos, carved_zvol_members, Alloc, Pool};
 use zfs_read::hash::{Digests, Extra};
 use zvol_common::scratch::Scratch;
 
@@ -1463,4 +1463,118 @@ fn a_profile_says_only_what_it_can() {
         assert_eq!(code, 1, "{profile}: {err}");
         assert!(err.contains(want), "{want}: {err}");
     }
+    // And to what a dnode can be: a value none has searched, found
+    // nothing and exited 3, as though nothing were there.
+    let out = dir.join("none").to_string_lossy().into_owned();
+    for (args, want) in [
+        (vec!["--levels", "0"], "levels 0"),
+        (vec!["--levels", "8"], "levels 8"),
+        (vec!["--volblocksize", "0"], "volblocksize 0"),
+        (vec!["--volblocksize", "1000"], "volblocksize 1000"),
+        (vec!["--dnode-type", "0"], "dnode type 0"),
+        (vec!["--dnode-type", "100"], "dnode type 100"),
+        (vec!["--size", "..100"], "size up to 100"),
+    ] {
+        let mut argv = vec!["-q", "scan", m[0].as_str(), m[1].as_str(), "-o", &out];
+        argv.extend(args.iter());
+        let (code, _, err) = run(&argv);
+        assert_eq!(code, 1, "{args:?}: {err}");
+        assert!(
+            err.contains("the profile can match nothing") && err.contains(want),
+            "{args:?}: {err}"
+        );
+    }
+    let file = dir.join("profile.json");
+    std::fs::write(&file, r#"{"levels": 0}"#).unwrap();
+    let (code, _, err) = run(&[
+        "-q",
+        "scan",
+        &m[0],
+        &m[1],
+        "-o",
+        &out,
+        "--profile",
+        &file.to_string_lossy(),
+    ]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("levels 0"), "{err}");
+    assert!(
+        !dir.join("none").exists(),
+        "a refused scan made a workspace"
+    );
+}
+
+/// `--like` is a volume made like the lost one, and what it knows is
+/// how that one was made: its block size, and the size it was given —
+/// which is the most a dnode can imply, not what it does. A dnode is
+/// measured by the highest block written, so the sibling's exact size
+/// turned away the very volume made like it, tail unwritten as a VM's
+/// disk is; here the volume named is itself the candidate, 32 MiB with
+/// four blocks written, and was not found by its own numbers. A
+/// filesystem has none of them, and is said to be one.
+#[test]
+fn like_takes_what_a_sibling_knows_of_the_lost_volume() {
+    let dir = scratch("like");
+    let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1)]);
+    let mut images: Vec<Vec<u8>> = (0..2).map(|_| vec![0u8; SIZE as usize]).collect();
+    let mut alloc = Alloc::new(0x20_0000);
+    build_sample_mos(&mut pool, &mut images, &mut alloc);
+    let m: Vec<String> = images
+        .iter_mut()
+        .enumerate()
+        .map(|(i, img)| {
+            pool.write_labels(i, img);
+            let p = dir.join(format!("member{i}.img"));
+            std::fs::write(&p, img).expect("write member");
+            p.to_string_lossy().into_owned()
+        })
+        .collect();
+    let ws = dir.join("carve").to_string_lossy().into_owned();
+    let (code, out, err) = run(&[
+        "-q",
+        "-f",
+        "json",
+        "scan",
+        &m[0],
+        &m[1],
+        "-o",
+        &ws,
+        "--like",
+        "tank/vm/disk0",
+        "--strict-profile",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let index = json(&out);
+    assert_eq!(
+        index["profile"],
+        serde_json::json!({
+            "dnode_type": "zvol object",
+            "volblocksize": 8192,
+            "size": [0, 32 << 20],
+            "strict": true,
+        })
+    );
+    let found = index["candidates"].as_array().unwrap();
+    assert!(!found.is_empty(), "{index}");
+    for c in found {
+        assert_eq!(c["volblocksize"], 8192, "{c}");
+        assert!(c["implied_size"].as_u64().unwrap() < 32 << 20, "{c}");
+        assert!(c.get("profile_misses").is_none(), "{c}");
+    }
+    let (code, _, err) = run(&[
+        "-q",
+        "scan",
+        &m[0],
+        &m[1],
+        "-o",
+        &dir.join("fs").to_string_lossy(),
+        "--like",
+        "tank/vm",
+    ]);
+    assert_eq!(code, 1, "{err}");
+    assert!(
+        err.contains("--like tank/vm: it is a filesystem, not a volume"),
+        "{err}"
+    );
+    assert!(!err.contains("I/O error"), "{err}");
 }

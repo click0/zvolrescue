@@ -46,9 +46,10 @@ pub struct ProfileArgs {
     /// Read the profile from a JSON file; command-line fields win.
     #[arg(long, value_name = "FILE")]
     pub profile: Option<PathBuf>,
-    /// Take `volblocksize`, `levels` and `size` from a dataset that
-    /// still exists in the pool: in most incidents the lost volume was
-    /// made like its neighbours (C-17).
+    /// Take `volblocksize`, and `size` as the most it can be, from a
+    /// volume the pool still has, or had in a transaction group that
+    /// still reads: in most incidents the lost volume was made like its
+    /// neighbours (C-17).
     #[arg(long, value_name = "DATASET")]
     pub like: Option<String>,
     /// Treat profile fields as hard filters, not as hints (C-18).
@@ -164,7 +165,7 @@ pub(crate) fn mirror_groups(
 /// that order of precedence.
 fn build_profile(
     args: &ProfileArgs,
-    like: Option<(u64, u8, u64)>,
+    like: Option<(u64, u64)>,
 ) -> Result<(Profile, ProfileOut), String> {
     let mut p = Profile::default();
     let mut profile_named_a_type = false;
@@ -195,10 +196,18 @@ fn build_profile(
         }
     }
     // A sibling that still exists knows these better than memory does.
-    if let Some((bs, levels, size)) = like {
+    // What it knows is how the lost volume was made, not how much of it
+    // was written, and a dnode is measured by the second: its size here
+    // is one block past the highest ever written, and the depth of its
+    // tree is what that block needed. Taken as the sibling's exact size
+    // and depth, the volume made like it — with a tail never written, as
+    // a VM's disk has — failed the profile it was the reason for: 0.45
+    // behind forty objects of other kinds, and gone with
+    // `--strict-profile`. The size is the most it can be; the depth is
+    // the lost volume's own, and is not taken.
+    if let Some((bs, size)) = like {
         p.volblocksize = Some(bs);
-        p.levels = Some(levels);
-        p.size = Some((size, size));
+        p.size = Some((0, size));
     }
     if let Some(bs) = args.volblocksize {
         p.volblocksize = Some(bs);
@@ -220,6 +229,12 @@ fn build_profile(
         Some(t) => p.dnode_type = dnode_type_code(t)?,
         None if !profile_named_a_type => p.dnode_type = dnode_type_code("zvol")?,
         None => {}
+    }
+    // A value no dnode the scan keeps can have — `--levels 0`, a block
+    // size of 0, type 0 — is the same slip as a range that is empty: it
+    // searched, found nothing, and exited 3.
+    if let Some(why) = p.matches_nothing() {
+        return Err(format!("the profile can match nothing: {why}"));
     }
     let out = ProfileOut {
         dnode_type: p.dnode_type.map(object_type_name),
@@ -1004,8 +1019,8 @@ fn dnode_bytes(d: &DnodePhys) -> Vec<u8> {
     .build()
 }
 
-/// `volblocksize`, `nlevels` and `volsize` of a dataset the pool still
-/// has, for `--like` (C-17).
+/// `volblocksize` and `volsize` of a volume the pool still has, for
+/// `--like` (C-17).
 ///
 /// Newest transaction group first, and the first one that has the
 /// dataset wins. A sibling that was itself destroyed a moment ago is
@@ -1017,7 +1032,7 @@ fn like_dataset(
     scans: &[Option<zfs_read::vdev::DeviceScan>],
     pool: &zfs_read::pool::PoolAssembly,
     name: &str,
-) -> Result<(u64, u8, u64), String> {
+) -> Result<(u64, u64), String> {
     // With the pool checkpoint: a sibling destroyed since is whole there.
     let candidates = zfs_read::dsl::txg_candidates(reader, scans, pool);
     if candidates.is_empty() {
@@ -1035,9 +1050,20 @@ fn like_dataset(
         let Some(ds) = tree.datasets.iter().find(|d| d.name == name) else {
             continue;
         };
-        let (volsize, _) = zfs_read::zvol::volume_facts(reader, ds).map_err(|e| e.to_string())?;
-        let (obj, _) = zfs_read::zvol::open_volume(reader, ds).map_err(|e| e.to_string())?;
-        return Ok((obj.dnode().datablksz(), obj.dnode().nlevels, volsize));
+        // A filesystem has neither number: it was "I/O error: … data
+        // object is free", as though the pool had failed to read.
+        if let Some(kind) = ds.kind.filter(|k| *k != zfs_ondisk::dmu::ObjsetType::Zvol) {
+            return Err(format!(
+                "it is {}, not a volume: a volume's block size and size are what are taken",
+                kind.described()
+            ));
+        }
+        let said = |e: zfs_read::zio::ReadError| match e {
+            zfs_read::zio::ReadError::Io(m) => m,
+            e => e.to_string(),
+        };
+        let (volsize, volblocksize) = zfs_read::zvol::volume_facts(reader, ds).map_err(said)?;
+        return Ok((volblocksize, volsize));
     }
     Err(format!(
         "no such dataset in any of the {looked} readable transaction group(s)"

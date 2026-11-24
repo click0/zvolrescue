@@ -94,9 +94,10 @@ are anything the run reads or share bytes with it: a member under any
 name, a map, the hints, the profile, a device a member is on, or the
 path a log goes to.
 .It Fl -volblocksize Ar bytes
-Data block size of the volume being looked for.
+Data block size of the volume being looked for: a whole number of
+512-byte sectors, up to 16 MiB.
 .It Fl -levels Ar n
-Tree depth of the volume being looked for.
+Tree depth of the volume being looked for, 1 to 7.
 .It Fl -txg Ar from Ns .. Ns Ar to
 Birth transaction group window.
 .It Fl -size Ar min Ns .. Ns Ar max
@@ -109,14 +110,30 @@ Object type to look for:
 a numeric dnode type, or
 .Ql any .
 Given here, it wins over the profile's.
+.Pp
+A value no dnode the scan keeps can have \(em a block size of 0, a
+depth of 0, type 0 (a free slot), a size below one sector \(em is a
+usage error, here and in a profile file: it is not a search that found
+nothing.
 .It Fl -profile Ar file
 Read the profile from a JSON file; command-line fields win.
 A key it does not know, or a range whose start is past its end, is
 refused (exit 1).
 .It Fl -like Ar dataset
-Take the block size, levels and size from a dataset that still exists
-in the pool: in most incidents the lost volume was made like its
+Take the block size, and the size as the most a candidate's can be,
+from a volume the pool still has, or had in a transaction group that
+still reads: in most incidents the lost volume was made like its
 neighbours.
+What a neighbour cannot say is how much of the lost volume was
+written, which is what a dnode is measured by \(em its size is one
+block past the highest ever written, and the depth of its tree what
+that block needed \(em so the size is an upper bound, and the depth
+is not taken; give
+.Fl -levels
+or
+.Fl -size
+to say more.
+A dataset that is not a volume is a usage error.
 .It Fl -strict-profile
 Treat profile fields as hard filters, not as hints.
 .It Fl -range Ar start Ns - Ns Ar end
