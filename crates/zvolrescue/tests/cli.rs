@@ -978,6 +978,90 @@ fn an_emitted_label_is_sealed_for_the_vdev_the_hints_place() {
     assert_eq!(geometry["sealed_for_vdev_size"], SIZE, "{geometry}");
 }
 
+/// The labels `--emit-label` makes for a pool of two vdevs are of two
+/// vdevs. Each said it was of vdev #0: placed on copies, the pool the
+/// layout had read whole was "top-level vdev #1: no scanned member
+/// describes it — MISSING", the members of the second mirror were set
+/// aside as superseded, and the volume did not read.
+#[test]
+fn emitted_labels_of_a_pool_of_two_vdevs_read_as_that_pool() {
+    let dir = scratch("emit-label-tops");
+    let want = reference_sha(&dir);
+    let (_, mut members) = two_top_mirror_members("tank", 0x7070, 12, [2, 3], &[(100, 1)], SIZE);
+    members.iter_mut().for_each(|m| wipe_configs(m));
+    let paths = write_members(&dir, &members);
+    let all: Vec<&str> = paths.iter().map(String::as_str).collect();
+    let hints = dir.join("layout.hints");
+    std::fs::write(
+        &hints,
+        serde_json::json!({"name": "tank", "ashift": 12, "tops": [
+            {"kind": "mirror", "members": [&paths[0], &paths[1]]},
+            {"kind": "mirror", "members": [&paths[2], &paths[3], &paths[4]]}]})
+        .to_string(),
+    )
+    .unwrap();
+    let hints = hints.to_string_lossy().into_owned();
+
+    let mut copies = Vec::new();
+    for (i, (top, leaf)) in [(0, 0), (0, 1), (1, 0), (1, 1), (1, 2)]
+        .into_iter()
+        .enumerate()
+    {
+        let label = dir
+            .join(format!("L-{i}.bin"))
+            .to_string_lossy()
+            .into_owned();
+        let mut args = vec!["-q", "scan"];
+        args.extend(&all);
+        let which = format!("{top}:{leaf}");
+        args.extend([
+            "--hints",
+            &hints,
+            "--emit-label",
+            &label,
+            "--emit-for",
+            &which,
+        ]);
+        let (code, _, err) = run(&args);
+        assert_eq!(code, 0, "{which}: {err}");
+        let mut img = members[i].clone();
+        let front = std::fs::read(&label).unwrap();
+        img[..front.len()].copy_from_slice(&front);
+        let copy = dir.join(format!("relabel{i}.img"));
+        std::fs::write(&copy, img).unwrap();
+        copies.push(copy.to_string_lossy().into_owned());
+    }
+    let copies: Vec<&str> = copies.iter().map(String::as_str).collect();
+
+    let mut args = vec!["-q", "-f", "json", "scan"];
+    args.extend(&copies);
+    let (code, out, _) = run(&args);
+    assert_eq!(code, 0, "{out}");
+    let pool = &json(&out)["pools"][0];
+    assert_eq!(pool["readable"], true, "{pool}");
+    assert_eq!(pool["missing_tops"], serde_json::json!([]), "{pool}");
+    let tops = pool["tops"].as_array().unwrap();
+    assert_eq!(
+        tops.iter()
+            .map(|t| (
+                t["id"].as_u64().unwrap(),
+                t["members"].as_array().unwrap().len()
+            ))
+            .collect::<Vec<_>>(),
+        vec![(0, 2), (1, 3)],
+        "{pool}"
+    );
+    assert_eq!(pool["stale"], serde_json::json!([]), "{pool}");
+
+    let image = dir.join("from-labels.img").to_string_lossy().into_owned();
+    let mut args = vec!["-q", "-f", "json", "dump", "tank/vm/disk0"];
+    args.extend(&copies);
+    args.extend(["-o", &image]);
+    let (code, out, err) = run(&args);
+    assert_eq!(code, 0, "{out}{err}");
+    assert_eq!(json(&out)["volumes"][0]["sha256"], want);
+}
+
 #[test]
 fn scan_tells_a_removed_vdev_from_a_missing_one() {
     let dir = scratch("scan-removed");

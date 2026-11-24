@@ -81,8 +81,12 @@ impl LayoutHints {
         let mut devices = Vec::new();
         for (id, hint) in self.tops.iter().enumerate() {
             let mut members = Vec::new();
-            let mut leaf = 0usize;
-            let tree = self.node(hint, id, 0, &mut leaf, &mut members);
+            let mut count = Count::default();
+            // The tree carries the vdev's own id, as a label's does: it
+            // is what places a member's top among the pool's. Written 0
+            // for every top, the labels made from a layout of several
+            // put them all in the place of the first.
+            let tree = self.node(hint, id, id as u64, &mut count, &mut members);
             for m in &members {
                 if let Some(d) = m.present {
                     if !devices.contains(&d) {
@@ -128,9 +132,10 @@ impl LayoutHints {
         hint: &TopHint,
         top: usize,
         id: u64,
-        leaf: &mut usize,
+        count: &mut Count,
         members: &mut Vec<Member>,
     ) -> VdevNode {
+        let Count { leaf, group } = count;
         let mut children = Vec::new();
         // A top-level vdev of one disk is that disk: the leaf itself, as
         // a label describes a plain stripe. Wrapped in a "disk" node of
@@ -191,17 +196,19 @@ impl LayoutHints {
                 });
                 *leaf += 1;
             }
-        } else {
-            for (i, c) in hint.children.iter().enumerate() {
-                children.push(self.node(c, top, i as u64, leaf, members));
-            }
+        }
+        // Group GUIDs are numbered from the top down, well clear of the
+        // leaves' own numbering, and each its own: numbered by position
+        // among its siblings, the first group in a top had the top's.
+        let guid = synthetic_guid(top, usize::MAX - *group);
+        *group += 1;
+        for (i, c) in hint.children.iter().enumerate() {
+            children.push(self.node(c, top, i as u64, count, members));
         }
         VdevNode {
             kind: hint.kind.clone(),
             id,
-            // Group GUIDs are numbered from the top down, well clear of
-            // the leaves' own numbering.
-            guid: synthetic_guid(top, usize::MAX - id as usize),
+            guid,
             path: None,
             ashift: Some(self.ashift),
             asize: None,
@@ -224,6 +231,14 @@ impl LayoutHints {
             .flat_map(|t| t.leaves().into_iter().flatten())
             .collect()
     }
+}
+
+/// Where the numbering of one top-level vdev's tree stands: the leaves
+/// in vdev order, and the groups from the top down.
+#[derive(Default)]
+struct Count {
+    leaf: usize,
+    group: usize,
 }
 
 fn display_kind(hint: &TopHint) -> String {
@@ -680,6 +695,70 @@ mod tests {
         assert_eq!(nv.u64("guid"), Some(spare.children[0].guid));
         assert_eq!(node.children[0].kind, "disk");
         assert!(node.children[0].children.is_empty());
+    }
+
+    /// Each top-level vdev's label says which of the pool's vdevs it is.
+    /// Every tree was written with id 0: placed, the labels of a pool
+    /// of three vdevs described three vdevs #0, the reader kept one and
+    /// set the members of the others aside as superseded, and the pool
+    /// the layout had read whole was "top-level vdev #1: MISSING".
+    #[test]
+    fn an_emitted_label_says_which_top_level_vdev_it_is_of() {
+        let group = |kind: &str, nparity, members: &[usize]| TopHint {
+            kind: kind.into(),
+            nparity,
+            draid_ndata: None,
+            draid_nspares: None,
+            draid_ngroups: None,
+            members: members.iter().map(|&i| Some(i)).collect(),
+            children: Vec::new(),
+        };
+        let mut nested = group("mirror", None, &[]);
+        nested.children = vec![
+            group("raidz", Some(1), &[6, 7, 8]),
+            group("raidz", Some(1), &[9, 10, 11]),
+        ];
+        let l = LayoutHints {
+            name: Some("tank".into()),
+            guid: Some(0x7070),
+            ashift: 12,
+            tops: vec![
+                group("mirror", None, &[0, 1]),
+                group("raidz", Some(2), &[2, 3, 4, 5]),
+                nested,
+            ],
+        };
+        let mut tops = Vec::new();
+        for top in 0..3 {
+            let nv = label_nvlist(&l, top, 0, 100, None);
+            assert_eq!(nv.u64("vdev_children"), Some(3));
+            let tree = nv.list("vdev_tree").expect("vdev_tree");
+            assert_eq!(tree.u64("id"), Some(top as u64), "top {top}");
+            assert_eq!(tree.u64("guid"), nv.u64("top_guid"));
+            tops.push(VdevNode::from_nvlist(tree));
+        }
+        // What is inside a top is numbered within it, as before.
+        assert_eq!(
+            tops[1].children.iter().map(|c| c.id).collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
+        // No two vdevs of the pool share a GUID: the first group inside
+        // a top had the top's own.
+        fn guids(n: &VdevNode, out: &mut Vec<u64>) {
+            out.push(n.guid);
+            n.children.iter().for_each(|c| guids(c, out));
+        }
+        let mut all = Vec::new();
+        tops.iter().for_each(|t| guids(t, &mut all));
+        let n = all.len();
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(all.len(), n, "a GUID is given twice");
+        // And the assembly numbers them the same way.
+        let assembly = l.assemble();
+        for (i, t) in assembly.tops.iter().enumerate() {
+            assert_eq!((t.id, t.tree.id), (i as u64, i as u64));
+        }
     }
 
     #[test]

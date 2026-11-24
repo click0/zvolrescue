@@ -17,6 +17,22 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ### Fixed
 
+* **The labels `scan --emit-label` makes for a pool of several vdevs
+  say which vdev each is of.** Every emitted `vdev_tree` carried
+  `id: 0`, whichever top-level vdev of the layout the member was in.
+  One vdev is all the round trip in CI has, and there 0 is right.
+  Placed on copies of a pool of a mirror, a raidz2 and a dRAID, every
+  label verified, and the pool the layout had just read whole was
+  "top-level vdev #1: no scanned member describes it — MISSING", with
+  the nine members of the other two vdevs set aside as "superseded by
+  a newer label" and the volume refused: `DVA names unknown top-level
+  vdev 2`, exit 3. The tree is written with the vdev's own id. The
+  synthetic GUID of a group nested in a vdev was the vdev's own for
+  the first such group; each group has its own now. Checked on a pool
+  made through libzpool, `mirror` + `raidz2` + `draid1:2d:1s:4g`: with
+  the emitted labels on copies and no layout given, the volume reads
+  the same bytes.
+
 * **The pool checkpoint is a transaction group to read at.** From
   `zpool checkpoint` until the checkpoint is discarded nothing the pool
   held is freed, and the uberblock of that moment is kept in the MOS
