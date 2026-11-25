@@ -86,16 +86,26 @@ tagged. `v0.7.1` is the release that carries those six.
   record's inputs, `zvolreport` warns of such a run, and the command
   the timeline prints for what was destroyed names the file. `roots`
   prints the command that lists the pool so, and `scan --like` reads a
-  sibling at a header. A pool with no label either takes its name and
+  sibling at a header. A header `roots` found with no layout to walk it
+  by — no label, no `--hints` — is taken too, and walked through the
+  layout the run is given; one walked to nothing is passed over, as
+  before. `--search-order` reads every member order of a raidz from
+  the headers as from uberblocks, so a raidz with no label and no
+  uberblock left no longer needs its members given in order: where
+  none is left, every order had nothing to be read from, and the search
+  ended "no order … reads this pool at all". A pool with no label either takes its name and
   GUID from the MOS such a header leads to. On a pool made through
   libzpool with every label zeroed whole and the layout in `--hints`:
   `list` lists it, `dump` writes a live volume and two destroyed ones
   by their names, byte for byte, and `zvoltimeline` tells their
   creation and destruction with the commands that get them back; on
   the same pool with its labels, a header gave a transaction group the
-  ring had lost. Not done: `--search-order` does not try an order by a
-  header, so a raidz with no label and no uberblock needs its members
-  given in order.
+  ring had lost. On a raidz2 of five made through libzpool, every label
+  zeroed whole and four of the five members out of place in the
+  hints, `--search-order` settles on the order written, with no
+  checksum mismatch, and the live volume and the destroyed one are
+  dumped through it byte for byte; through the order the hints gave,
+  every block of the destroyed volume failed its checksum.
 
 ## v0.9.17 — 2026-11-25
 

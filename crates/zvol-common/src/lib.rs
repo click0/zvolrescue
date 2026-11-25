@@ -1029,7 +1029,8 @@ pub struct PoolSpec {
     pub hints: Option<PathBuf>,
     /// Try every member order the layout leaves open and keep the one the
     /// checksums accept (SPEC F-66). Only for raidz/draid, where order is
-    /// what a DVA addresses.
+    /// what a DVA addresses. Each order is read from the uberblocks and
+    /// from the headers of `--roots`.
     #[arg(long, requires = "hints")]
     pub search_order: bool,
     /// Select a pool by GUID when several are found.
@@ -1039,9 +1040,10 @@ pub struct PoolSpec {
     /// found (SPEC F-64): the `roots.json` it wrote, or the directory
     /// that holds it. Each header a pool walked out of is a transaction
     /// group to read at, beside whatever uberblocks are left — and for
-    /// a pool none is left of, the only ones. No checksum vouches for
-    /// such a header and it says no time; every block under it is
-    /// verified by its checksum as any other is.
+    /// a pool none is left of, the only ones — and so is each found
+    /// with no layout to walk it by, walked through the one given here.
+    /// No checksum vouches for such a header and it says no time; every
+    /// block under it is verified by its checksum as any other is.
     #[arg(long, value_name = "FILE|DIR")]
     pub roots: Option<PathBuf>,
     /// Treat a member whose labels are gone as a leaf the configuration

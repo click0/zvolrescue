@@ -431,11 +431,11 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         };
         match &pool {
             None => {
-                row.error = Some(
-                    "no layout: the header was found, but a DVA cannot be placed without \
-                     labels or --hints (SPEC F-65)"
-                        .into(),
-                )
+                row.error = Some(format!(
+                    "{} the header was found, but a DVA cannot be placed without labels or \
+                     --hints (SPEC F-65)",
+                    zvol_common::members::NO_LAYOUT
+                ))
             }
             Some(p) => {
                 let reader =
@@ -546,11 +546,22 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             print(&doc, &path);
             // What a header is found for: the other programs read the
             // pool at it, given the file this run wrote.
+            let ws = zvol_common::shell_quote(&opts.output.display().to_string());
             if doc.roots.iter().chain(&doc.newest).any(|r| r.datasets > 0) {
                 outln!(
-                    "  to read the pool at them: zvolrescue list {} --roots {}",
-                    spec.as_arguments().join(" "),
-                    zvol_common::shell_quote(&opts.output.display().to_string())
+                    "  to read the pool at them: zvolrescue list {} --roots {ws}",
+                    spec.as_arguments().join(" ")
+                );
+            } else if doc.roots.iter().any(|r| {
+                r.error
+                    .as_deref()
+                    .is_some_and(|e| e.starts_with(zvol_common::members::NO_LAYOUT))
+            }) {
+                // Walked by a run that has the layout, where a raidz's
+                // member order is searched from them too.
+                outln!(
+                    "  to read the pool at them, with its layout: zvolrescue list {} --hints LAYOUT --roots {ws} (and --search-order where a raidz's member order is not known)",
+                    spec.as_arguments().join(" ")
                 );
             }
         }

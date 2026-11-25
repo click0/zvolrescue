@@ -275,8 +275,8 @@ fn synthetic_guid(top: usize, leaf: usize) -> u64 {
 // Searching what the template leaves open (F-66)
 // ---------------------------------------------------------------------------
 
-use crate::dsl::{open_mos, walk};
-use crate::pool::uberblock_candidates;
+use crate::dsl::{open_mos_at, walk};
+use crate::pool::{root_candidates, CarvedRoot};
 use crate::vdev::DeviceScan;
 use crate::zio::PoolReader;
 use zvolrescue_io::{trace, BlockSource};
@@ -302,11 +302,18 @@ impl Trial {
 }
 
 /// Read the pool through `layout` and report how well it fitted.
+///
+/// The pool is entered where any run enters it: at its verified
+/// uberblocks and at the headers found in raw space that the run was
+/// given (`roots`, SPEC F-64). A header is on one member, and is read
+/// from it, in whatever order the members are; what is under it is
+/// where an order is right or wrong.
 pub fn try_layout(
     layout: &LayoutHints,
     scans: &[Option<DeviceScan>],
     devices: &[Option<&dyn BlockSource>],
     bases: &[u64],
+    roots: &[CarvedRoot],
 ) -> Trial {
     let pool = layout.assemble();
     let mut trial = Trial {
@@ -314,13 +321,13 @@ pub fn try_layout(
         datasets: None,
         mismatches: 0,
     };
-    let candidates = uberblock_candidates(scans, &pool);
+    let candidates = root_candidates(scans, &pool, roots);
     let reader = PoolReader::new(&pool, devices.to_vec()).with_base_offsets(bases);
     // The newest TXG that reads: one with nothing behind it (a sync
     // whose MOS never reached the disk, a forged txg) is no evidence
     // about the layout either way.
     for c in &candidates {
-        if let Ok(mos) = open_mos(&reader, &c.ub) {
+        if let Ok(mos) = open_mos_at(&reader, c) {
             if let Ok(tree) = walk(&mos, &pool.name) {
                 trial.datasets = Some(tree.datasets.len());
                 break;
@@ -409,6 +416,10 @@ pub const MAX_SEARCHED_MEMBERS: usize = 7;
 /// at all, and every wrong order produces one per block that touches the
 /// swapped members.
 ///
+/// Each order is read from where [`try_layout`] enters the pool, the
+/// headers in `roots` among them: with no uberblock left, they are all
+/// an order can be read from.
+///
 /// Returns the trials that read, best first. Ties are left for the caller
 /// to judge: on a mirror every order is equally right.
 pub fn search_order(
@@ -417,6 +428,7 @@ pub fn search_order(
     scans: &[Option<DeviceScan>],
     devices: &[Option<&dyn BlockSource>],
     bases: &[u64],
+    roots: &[CarvedRoot],
 ) -> Result<Vec<Trial>, String> {
     let n = group_at(layout, group).map_or(0, |t| t.members.len());
     if n > MAX_SEARCHED_MEMBERS {
@@ -428,7 +440,7 @@ pub fn search_order(
     let mut trials: Vec<Trial> = permutations(layout, group)
         .iter()
         .map(|l| {
-            let t = try_layout(l, scans, devices, bases);
+            let t = try_layout(l, scans, devices, bases, roots);
             trace!(
                 "pool",
                 "order {:?}: {} datasets, {} mismatch(es)",
@@ -710,6 +722,13 @@ mod tests {
     const SIZE: u64 = 64 * 262_144;
 
     fn label_less_raidz2() -> Vec<MemSource> {
+        label_less_raidz2_members()
+            .into_iter()
+            .map(MemSource::new)
+            .collect()
+    }
+
+    fn label_less_raidz2_members() -> Vec<Vec<u8>> {
         let mut pool = Pool::raidz("tank", 0x1000, 12, 4, 2).txgs(&[(100, 1), (200, 2)]);
         let (mut members, _, _) = destroyed_zvol_members(&mut pool, SIZE);
         for img in &mut members {
@@ -724,7 +743,7 @@ mod tests {
                 img[at..at + VDEV_PHYS_SIZE as usize].fill(0);
             }
         }
-        members.into_iter().map(MemSource::new).collect()
+        members
     }
 
     fn layout(order: &[usize]) -> LayoutHints {
@@ -1009,17 +1028,17 @@ mod tests {
             .collect();
         let bases = vec![0u64; sources.len()];
 
-        let right = try_layout(&layout(&[0, 1, 2, 3]), &scans, &devices, &bases);
+        let right = try_layout(&layout(&[0, 1, 2, 3]), &scans, &devices, &bases, &[]);
         assert!(right.read());
         assert_eq!(right.mismatches, 0);
 
         // Two columns swapped: parity carries it, so it still reads — and
         // every block that touches them fails its checksum first.
-        let swapped = try_layout(&layout(&[0, 2, 1, 3]), &scans, &devices, &bases);
+        let swapped = try_layout(&layout(&[0, 2, 1, 3]), &scans, &devices, &bases, &[]);
         assert!(swapped.read(), "raidz2 reconstructs around two bad columns");
         assert!(swapped.mismatches > 0);
 
-        let trials = search_order(&layout(&[0, 2, 1, 3]), &[0], &scans, &devices, &bases)
+        let trials = search_order(&layout(&[0, 2, 1, 3]), &[0], &scans, &devices, &bases, &[])
             .expect("4 members is a small search");
         let best = trials.first().expect("some order reads");
         assert_eq!(best.mismatches, 0);
@@ -1045,12 +1064,84 @@ mod tests {
             children: vec![group],
         });
         assert_eq!(ordered_groups(&nested), vec![vec![0, 0]]);
-        let trials = search_order(&nested, &[0, 0], &scans, &devices, &bases).expect("search");
+        let trials = search_order(&nested, &[0, 0], &scans, &devices, &bases, &[]).expect("search");
         let best = trials.first().expect("some order reads");
         assert_eq!(best.mismatches, 0);
         assert_eq!(
             group_at(&best.layout, &[0, 0]).map(|g| g.members.clone()),
             Some(vec![Some(0), Some(1), Some(2), Some(3)])
         );
+    }
+
+    /// With no label and no uberblock left, a raidz's member order is
+    /// searched from the headers found in raw space: no order reads
+    /// without them, and with them the right one is the one with no
+    /// mismatch, as from an uberblock.
+    #[test]
+    fn the_member_order_is_searched_from_headers_where_no_uberblock_is_left() {
+        use crate::carve::{scan_member, Options};
+        use crate::fixture::zero_uberblock_rings;
+
+        let sources: Vec<MemSource> = label_less_raidz2_members()
+            .into_iter()
+            .map(|mut bytes| {
+                zero_uberblock_rings(&mut bytes);
+                MemSource::new(bytes)
+            })
+            .collect();
+        let scans: Vec<Option<DeviceScan>> = sources.iter().map(|s| scan_device(s).ok()).collect();
+        let devices: Vec<Option<&dyn BlockSource>> = sources
+            .iter()
+            .map(|s| Some(s as &dyn BlockSource))
+            .collect();
+        let bases = vec![0u64; sources.len()];
+        let swapped = layout(&[0, 2, 1, 3]);
+
+        let none = search_order(&swapped, &[0], &scans, &devices, &bases, &[]).expect("search");
+        assert!(
+            none.is_empty(),
+            "no uberblock, no header: nothing to read from"
+        );
+
+        // The headers on the members, as `zvolcarve roots` finds them,
+        // newest first.
+        let opts = Options {
+            codecs: Vec::new(),
+            collect_hits: false,
+            ..Options::default()
+        };
+        let mut roots: Vec<CarvedRoot> = Vec::new();
+        for (device, src) in sources.iter().enumerate() {
+            for r in scan_member(src, device, 12, &opts)
+                .expect("the member reads")
+                .roots
+            {
+                roots.push(CarvedRoot {
+                    device,
+                    offset: r.offset,
+                    found: r.found,
+                    txg: CarvedRoot::txg_of(&r.objset),
+                    objset: r.objset,
+                });
+            }
+        }
+        roots.sort_by_key(|r| std::cmp::Reverse(r.txg));
+        assert!(!roots.is_empty(), "the members hold the MOS headers");
+
+        let trials =
+            search_order(&swapped, &[0], &scans, &devices, &bases, &roots).expect("search");
+        let best = trials.first().expect("some order reads from a header");
+        assert_eq!(best.mismatches, 0);
+        assert_eq!(
+            best.layout.tops[0].members,
+            vec![Some(0), Some(1), Some(2), Some(3)]
+        );
+        assert_eq!(trials.iter().filter(|t| t.mismatches == 0).count(), 1);
+        // The order as given reads too, around the columns it swapped.
+        let given = trials
+            .iter()
+            .find(|t| t.layout == swapped)
+            .expect("the given order reads");
+        assert!(given.mismatches > 0);
     }
 }

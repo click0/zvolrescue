@@ -406,6 +406,15 @@ with
 and read at each header a pool walked out of as at a transaction group
 \(em a volume by its name, a filesystem's files, the history.
 The command that lists the pool so is printed after the list.
+A header found where there is no layout to walk it by \(em no label, and no
+.Fl -hints
+\(em is listed with that reason and taken by those programs all the
+same, to be walked through the layout they are given; the command
+printed then gives one, with
+.Fl -hints ,
+and
+.Fl -search-order
+finds a raidz's member order from the headers where it is not known.
 .Bl -tag -width Ds
 .It Fl o , Fl -output Ar dir
 Carve workspace, where the ranked headers are written; refused as the

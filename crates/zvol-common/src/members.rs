@@ -131,6 +131,11 @@ pub fn time_said(c: &Candidate) -> String {
 /// The name of the file `zvolcarve roots` writes into its workspace.
 pub const ROOTS_FILE: &str = "roots.json";
 
+/// How `zvolcarve roots` begins the error of a header it found and could
+/// not walk, for want of a layout to place a DVA by: no pool was tried
+/// from it, which is not a pool tried and found wanting.
+pub const NO_LAYOUT: &str = "no layout:";
+
 /// What of a `roots.json` a run reads the pool by.
 #[derive(serde::Deserialize)]
 struct RootsFile {
@@ -149,20 +154,37 @@ struct RootEntry {
     birth: u64,
     #[serde(default)]
     datasets: usize,
+    #[serde(default)]
+    error: Option<String>,
 }
 
-/// The headers a `roots.json` lists that a pool walked out of, each
-/// read again from the member it is on (SPEC F-64).
+impl RootEntry {
+    /// Found with no layout to walk it by: whether a pool comes out of
+    /// it is for the run that has one to say.
+    fn unwalked(&self) -> bool {
+        self.error
+            .as_deref()
+            .is_some_and(|e| e.starts_with(NO_LAYOUT))
+    }
+}
+
+/// The headers a `roots.json` lists that a pool walked out of, or that
+/// were found with no layout to walk them by, each read again from the
+/// member it is on (SPEC F-64); and how many are of the second kind.
 ///
 /// The file says where a header is and what it led to when it was
 /// found; the header itself is taken from the member, where it is now.
 /// One that is no longer there — another image, the same one written
-/// since — is refused, with the file: it is not of these members.
+/// since — is refused, with the file: it is not of these members. One
+/// walked to nothing is passed over. One `roots` had no layout for —
+/// a pool with no label, whose layout is in `--hints` here and was not
+/// there — is taken: its pool is found or not by this run, as at an
+/// uberblock, and a raidz's member order is searched from it.
 fn load_roots(
     file: &std::path::Path,
     paths: &[PathBuf],
     sources: &[Option<FileSource>],
-) -> Result<Vec<CarvedRoot>, String> {
+) -> Result<(Vec<CarvedRoot>, usize), String> {
     let text =
         std::fs::read_to_string(file).map_err(|e| format!("--roots {}: {e}", file.display()))?;
     let parsed: RootsFile = serde_json::from_str(&text).map_err(|e| {
@@ -179,10 +201,11 @@ fn load_roots(
         ));
     }
     let mut roots: Vec<CarvedRoot> = Vec::new();
+    let mut unwalked = 0;
     // The newest first, wherever the ranking put it: of two headers of
     // one transaction group the first given is the one read.
     for e in parsed.newest.iter().chain(&parsed.roots) {
-        if e.datasets == 0 {
+        if e.datasets == 0 && !e.unwalked() {
             continue;
         }
         let named = std::path::Path::new(&e.member);
@@ -239,6 +262,9 @@ fn load_roots(
         if txg != e.birth {
             return Err(not_there());
         }
+        if e.datasets == 0 {
+            unwalked += 1;
+        }
         roots.push(CarvedRoot {
             device,
             offset: e.offset,
@@ -247,7 +273,7 @@ fn load_roots(
             objset,
         });
     }
-    Ok(roots)
+    Ok((roots, unwalked))
 }
 
 /// Try the orders a layout leaves open and keep the one the checksums
@@ -257,6 +283,7 @@ fn search_layout(
     scans: &[Option<DeviceScan>],
     devices: &[Option<&dyn BlockSource>],
     bases: &[u64],
+    roots: &[CarvedRoot],
 ) -> Result<LayoutHints, u8> {
     let mut out = layout.clone();
     // Every group whose order is open, a raidz inside a mirror too: only
@@ -282,7 +309,7 @@ fn search_layout(
         } else {
             String::new()
         };
-        let trials = search_order(&out, &group, scans, devices, bases).map_err(|e| {
+        let trials = search_order(&out, &group, scans, devices, bases, roots).map_err(|e| {
             say!("--search-order{which}: {e}");
             exit::USAGE
         })?;
@@ -794,7 +821,7 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
     let roots_file = spec.roots_file();
     let roots = match &roots_file {
         Some(file) => {
-            let roots = load_roots(file, &paths, &sources).map_err(|e| {
+            let (roots, unwalked) = load_roots(file, &paths, &sources).map_err(|e| {
                 say!("{e}");
                 exit::USAGE
             })?;
@@ -806,13 +833,22 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
             txgs.dedup();
             match (txgs.first(), txgs.last()) {
                 (Some(a), Some(b)) => say!(
-                    "{}: {} object-set header(s) a pool walked out of, of txg {a}{}: transaction groups to read at beside those of the uberblocks",
+                    "{}: {} object-set header(s) {}, of txg {a}{}: transaction groups to read at beside those of the uberblocks",
                     file.display(),
                     roots.len(),
+                    match unwalked {
+                        0 => "a pool walked out of".to_string(),
+                        n if n == roots.len() => {
+                            "found with no layout to walk them by, which this run walks".to_string()
+                        }
+                        n => format!(
+                            "a pool walked out of, or found with no layout to walk them by ({n}), which this run walks"
+                        ),
+                    },
                     if a == b { String::new() } else { format!(" to {b}") }
                 ),
                 _ => say!(
-                    "{}: no object-set header in it that a pool walked out of: nothing to read at is added",
+                    "{}: no object-set header in it that a pool walked out of, nor one found with no layout to walk it by: nothing to read at is added",
                     file.display()
                 ),
             }
@@ -841,7 +877,7 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
             place_hinted(&hints.bases, &mut scans, &devices, &mut bases);
             let mut layout = hints.layout;
             if spec.search_order {
-                layout = search_layout(&layout, &scans, &devices, &bases)?;
+                layout = search_layout(&layout, &scans, &devices, &bases, &roots)?;
             }
             let Hinted { layout, pool, .. } =
                 identify_hinted(layout, &scans, &devices, &bases, &roots).map_err(|e| {

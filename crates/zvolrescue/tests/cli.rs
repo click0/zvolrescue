@@ -544,6 +544,107 @@ fn the_order_a_search_settled_on_is_on_the_record() {
     assert_ne!(code, 0, "the order as given reads the pool");
 }
 
+/// A raidz with no label and no uberblock left has its member order
+/// searched from the headers `zvolcarve roots` found, with no layout to
+/// walk them by: without them no order reads, and with them the search
+/// settles on the order the pool was written in, and the volume
+/// destroyed since is dumped through it, byte for byte. Every order was
+/// read from the uberblocks alone, of which there are none, and the
+/// search ended with no order reading; and a header `roots` had not
+/// walked was passed over as one that led nowhere.
+#[test]
+fn a_member_order_is_searched_from_the_headers_found() {
+    let dir = scratch("search-order-roots");
+    let mut pool = Pool::raidz("tank", 0x1000, 12, 4, 2).txgs(&[(100, 1), (200, 2)]);
+    let (mut members, newest, previous) = destroyed_zvol_members(&mut pool, SIZE);
+    let paths = write_members(&dir, &members);
+    // The volume, read while the pool is whole.
+    let whole = dir.join("whole.img").to_string_lossy().into_owned();
+    let mut args = vec!["-q", "dump", "tank/vm/disk0", "--txg", "100", "-o", &whole];
+    args.extend(paths.iter().map(String::as_str));
+    let (code, _, err) = run(&args);
+    assert_eq!(code, 0, "{err}");
+
+    // Every label zeroed whole: no configuration, no uberblock.
+    for m in &mut members {
+        for off in label_offsets(m.len() as u64).expect("four labels") {
+            m[off as usize..(off + LABEL_SIZE) as usize].fill(0);
+        }
+    }
+    write_members(&dir, &members);
+    // As `roots` writes it with no layout to walk a header by: each
+    // found, none walked.
+    let mut found: serde_json::Value = serde_json::from_str(&roots_json(&members, &paths)).unwrap();
+    for r in found["roots"].as_array_mut().unwrap() {
+        r["datasets"] = 0.into();
+        r["error"] = format!(
+            "{} the header was found, but a DVA cannot be placed without labels or --hints (SPEC F-65)",
+            zvol_common::members::NO_LAYOUT
+        )
+        .into();
+    }
+    let roots = dir.join("roots.json").to_string_lossy().into_owned();
+    std::fs::write(&roots, found.to_string()).unwrap();
+    let given = serde_json::json!([&paths[3], &paths[1], &paths[0], &paths[2]]);
+    let hints = dir.join("layout.hints");
+    std::fs::write(
+        &hints,
+        serde_json::json!({"name": "tank", "ashift": 12,
+            "tops": [{"kind": "raidz", "nparity": 2, "members": &given}]})
+        .to_string(),
+    )
+    .unwrap();
+    let hints = hints.to_string_lossy().into_owned();
+    let log = dir.join("case.jsonl").to_string_lossy().into_owned();
+    let with = |cmd: &[&str], extra: &[&str]| {
+        let mut args = vec!["-f", "json", "--evidence-log", &log];
+        args.extend_from_slice(cmd);
+        args.extend(paths.iter().map(String::as_str));
+        args.extend(["--hints", &hints, "--search-order"]);
+        args.extend_from_slice(extra);
+        run(&args)
+    };
+
+    let (code, _, err) = with(&["list"], &[]);
+    assert_eq!(code, 3, "{err}");
+    assert!(
+        err.contains("no order of 4 members reads this pool at all"),
+        "{err}"
+    );
+
+    let (code, out, err) = with(&["list"], &["--roots", &roots]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        err.contains("found with no layout to walk them by, which this run walks")
+            && err.contains("--search-order: ")
+            && err.contains("best has 0 checksum mismatch(es)"),
+        "{err}"
+    );
+    let doc = json(&out);
+    assert_eq!(doc["txg"], newest, "{out}");
+    assert_eq!(doc["carved_txgs"], serde_json::json!([newest, previous]));
+    let text = std::fs::read_to_string(&log).unwrap();
+    let rec: serde_json::Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+    assert_eq!(rec["layout"]["search_order"], true, "{rec}");
+    assert_eq!(
+        rec["layout"]["tops"][0]["members"],
+        serde_json::json!(&paths),
+        "the order the pool was written in"
+    );
+
+    // The destroyed volume, by its name, through the order found.
+    let image = dir.join("disk0.img").to_string_lossy().into_owned();
+    let (code, _, err) = with(
+        &["-q", "dump", "tank/vm/disk0", "-o", &image],
+        &["--roots", &roots],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        std::fs::read(&image).unwrap(),
+        std::fs::read(&whole).unwrap()
+    );
+}
+
 /// A member that begins 100 MiB into its image, past where a search for
 /// its start looks, is read from where the hints say it begins: its
 /// labels and uberblocks too, not only its blocks. The labels were read

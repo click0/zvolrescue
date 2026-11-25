@@ -310,6 +310,29 @@ jobs:
           cmp /tmp/disk0.img /tmp/hz/searched.img
           grep -q "best has 0 checksum mismatch" /tmp/hz/search.err
           grep -q "just as good" /tmp/hz/search.err && { echo "the right order must be unique here"; exit 1; } || true
+          # With the uberblock rings gone too, nothing is left to read an
+          # order from but the object-set headers `zvolcarve roots` finds,
+          # with no layout to walk them by: the order is searched from
+          # them, and the volume read through it (SPEC F-64, F-66).
+          python3 - <<'EOF'
+          LABEL, UB_OFF, UB_SIZE = 256 << 10, 128 << 10, 128 << 10
+          for i in range(4):
+              b = bytearray(open(f"/tmp/hz/nolabel{i}.img", "rb").read())
+              aligned = len(b) & ~(LABEL - 1)
+              for off in (0, LABEL, aligned - 2 * LABEL, aligned - LABEL):
+                  b[off + UB_OFF:off + UB_OFF + UB_SIZE] = b"\0" * UB_SIZE
+              open(f"/tmp/hz/noring{i}.img", "wb").write(bytes(b))
+          EOF
+          r="/tmp/hz/noring0.img /tmp/hz/noring1.img /tmp/hz/noring2.img /tmp/hz/noring3.img"
+          sed 's/nolabel/noring/g' /tmp/hz/swapped.json > /tmp/hz/swapped-noring.json
+          if ./target/release/zvolrescue -q list $r --hints /tmp/hz/swapped-noring.json --search-order; then echo "an uberblock survived; the case is void"; exit 1; else test $? = 3; fi
+          ./target/release/zvolcarve roots $r -o /tmp/hz/roots | tee /tmp/hz/roots.txt
+          grep -q -- "--hints LAYOUT --roots /tmp/hz/roots (and --search-order" /tmp/hz/roots.txt
+          ./target/release/zvolrescue dump tank/vm/disk0 $r --hints /tmp/hz/swapped-noring.json --search-order --roots /tmp/hz/roots -o /tmp/hz/from-roots.img 2>/tmp/hz/roots.err || { cat /tmp/hz/roots.err; exit 1; }
+          cat /tmp/hz/roots.err
+          grep -q "found with no layout to walk them by" /tmp/hz/roots.err
+          grep -q "best has 0 checksum mismatch" /tmp/hz/roots.err
+          cmp /tmp/disk0.img /tmp/hz/from-roots.img
           # The layout can be handed on as a label (SPEC F-67): placed on
           # a *copy* of each member, it makes the pool readable with no
           # hints at all. The image stops before the uberblock ring, so

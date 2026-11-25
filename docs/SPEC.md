@@ -324,7 +324,11 @@ for an uberblock: `zvolrescue list` and `dump`, `zvolfiles` and
 `zvoltimeline` take the file `roots` wrote (`--roots`) and read at each
 header a pool walked out of as at a transaction group — a volume by its
 name, a filesystem's files, the history — beside those of whatever
-uberblocks are left. No checksum vouches for a header that was found,
+uberblocks are left. A header `roots` found with no layout to walk it
+by — no label, no `--hints` — is taken too, and walked through the
+layout the run is given; `--search-order` reads every member order of
+a raidz from such headers as from uberblocks, so a raidz with no label
+and no uberblock left is read with its order not known. No checksum vouches for a header that was found,
 as an uberblock's root pointer vouches for the one it leads to, and it
 says no time; every block under it is verified by the pointer that
 names it, and a run that read at one says so in its output and its

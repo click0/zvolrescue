@@ -161,6 +161,10 @@ checksums accept.
 Only for raidz and draid, where order is what a DVA addresses: each such
 group is searched, at the top or inside a mirror, and the order kept is
 in the evidence record.
+Each order is read from the uberblocks and from the headers of
+.Fl -roots ;
+where no uberblock is left, the headers are what an order is read
+from.
 .It Fl -pool-guid Ar guid
 Select a pool by GUID when several are found on the members.
 .It Fl -roots Ar file | dir
@@ -176,6 +180,13 @@ raw space, is the way in that is left.
 Each header in the file that a pool walked out of is a TXG to read at,
 beside those of whatever uberblocks are left; where the uberblock of a
 TXG is left, the uberblock is what that TXG is read by.
+So is each that
+.Cm roots
+found with no layout to walk it by \(em a pool with no label left,
+whose layout is given here with
+.Fl -hints :
+this run walks it, and one no pool comes out of is passed over as a
+TXG with nothing behind it is.
 .Fl -txg
 names one of them as it names any other, and without it the newest
 that reads is taken.

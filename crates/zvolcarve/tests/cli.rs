@@ -2356,6 +2356,69 @@ fn what_roots_finds_is_what_a_pool_with_no_uberblock_is_read_by() {
     assert_eq!(code, 5, "{err}");
 }
 
+/// With no label left either, `roots` has no layout to walk a header by,
+/// and says so of each; the command it prints reads the pool at them
+/// with the layout a person gives, the member order searched where it
+/// is not known.
+#[test]
+fn roots_found_with_no_layout_say_how_they_are_read() {
+    use zfs_ondisk::label::label_offsets;
+    let dir = scratch("roots-no-layout");
+    let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1)]);
+    let mut images: Vec<Vec<u8>> = (0..2).map(|_| vec![0u8; SIZE as usize]).collect();
+    let mut alloc = Alloc::new(0x20_0000);
+    build_sample_mos(&mut pool, &mut images, &mut alloc);
+    let m: Vec<String> = images
+        .iter_mut()
+        .enumerate()
+        .map(|(i, img)| {
+            pool.write_labels(i, img);
+            for off in label_offsets(img.len() as u64).expect("four labels") {
+                img[off as usize..(off + LABEL_SIZE) as usize].fill(0);
+            }
+            let p = dir.join(format!("member{i}.img"));
+            std::fs::write(&p, img).expect("write member");
+            p.to_string_lossy().into_owned()
+        })
+        .collect();
+    let found = dir.join("found").to_string_lossy().into_owned();
+    let (code, text, err) = run(&[
+        "-q",
+        "roots",
+        &m[0],
+        &m[1],
+        "-o",
+        &found,
+        "--compressed",
+        "none",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let index: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(Path::new(&found).join("roots.json")).unwrap(),
+    )
+    .unwrap();
+    let rows = index["roots"].as_array().unwrap();
+    assert!(!rows.is_empty(), "{index}");
+    for r in rows {
+        assert_eq!(r["datasets"], 0, "{r}");
+        assert!(
+            r["error"]
+                .as_str()
+                .unwrap()
+                .starts_with(zvol_common::members::NO_LAYOUT),
+            "{r}"
+        );
+    }
+    assert!(
+        text.contains(&format!(
+            "to read the pool at them, with its layout: zvolrescue list {} {} --hints LAYOUT --roots {found} (and --search-order where a raidz's member order is not known)",
+            m[0], m[1]
+        )),
+        "{text}"
+    );
+    assert!(!text.contains("to read the pool at them: "), "{text}");
+}
+
 /// `--like` is a volume made like the lost one, and what it knows is
 /// how that one was made: its block size, and the size it was given —
 /// which is the most a dnode can imply, not what it does. A dnode is
