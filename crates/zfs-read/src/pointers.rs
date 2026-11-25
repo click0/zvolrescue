@@ -481,19 +481,37 @@ mod tests {
     /// Screening reads each probe once for a run of bases, and answers
     /// for every base what asking it alone does: the same bases, at the
     /// boundary of a run and at the end of the device too.
+    ///
+    /// Asking base by base is what it is held to, and in an unoptimised
+    /// build a base costs what it costs: 64 MiB at every sector, and a
+    /// scan with every compression for pointers a plaintext pass finds
+    /// as well, took a minute and a half. The sector step is asked over
+    /// the first MiB, and a run boundary at the step of 4096, on bases
+    /// that line up with the vdev's.
     #[test]
     fn screening_in_runs_is_screening_base_by_base() {
-        let (disk, _) = bare(63 * 512);
+        let (disk, at) = bare(63 * 512);
         let src = MemSource::new(disk);
-        let scan = scan_member(&src, 0, 9, &ScanOptions::default()).expect("scan");
+        let plain = ScanOptions {
+            codecs: Vec::new(),
+            ..ScanOptions::default()
+        };
+        let scan = scan_member(&src, 0, 9, &plain).expect("scan");
         let probes = anchors(&scan);
         assert!(!probes.is_empty());
         let size = src.size();
-        for (start, end, step) in [(0, 64 << 20, 512), (size - (3 << 20), size, 4096)] {
+        let aligned = at % 4096;
+        for (start, end, step, finds) in [
+            (0, 1 << 20, 512, true),
+            // Past one run of the screen: 16 MiB of bases.
+            (aligned, aligned + (17 << 20), 4096, true),
+            (size - (3 << 20), size, 4096, false),
+        ] {
             let one_by_one: Vec<u64> = (start..end)
                 .step_by(step as usize)
                 .filter(|&b| confirm(&src, b, &probes, 4).0 > 0)
                 .collect();
+            assert_eq!(one_by_one.contains(&at), finds, "{one_by_one:?}");
             assert_eq!(screen(&src, start, end, step, &probes, 4), one_by_one);
         }
     }
