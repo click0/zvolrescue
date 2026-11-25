@@ -1,4 +1,4 @@
-TIMESTAMP = 1795597044
+TIMESTAMP = 1795626382
 SHA256 (rust/crates/adler2-2.0.1.crate) = 320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa
 SIZE (rust/crates/adler2-2.0.1.crate) = 13366
 SHA256 (rust/crates/aead-0.5.2.crate) = d122413f284cf2d62fb1b7db97e02edb8cda96d769b16e443a4f6195e35662b0
@@ -187,5 +187,5 @@ SHA256 (rust/crates/zeroize-1.9.0.crate) = e13c156562582aa81c60cb29407084cdb54c4
 SIZE (rust/crates/zeroize-1.9.0.crate) = 24480
 SHA256 (rust/crates/zmij-1.0.23.crate) = 29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b
 SIZE (rust/crates/zmij-1.0.23.crate) = 28612
-SHA256 (click0-zvolrescue-v0.9.17_GH0.tar.gz) = 925add6fa1332fafa36e7c7d3f7092adfbbbfb001b1c68bbbe34bf39d468e6cb
-SIZE (click0-zvolrescue-v0.9.17_GH0.tar.gz) = 1284369
+SHA256 (click0-zvolrescue-v0.9.18_GH0.tar.gz) = 3e636eb6e59ff9945f15b6e2fb225529e53003e8b7e5f283c8b6efabb72808f1
+SIZE (click0-zvolrescue-v0.9.18_GH0.tar.gz) = 1317033
