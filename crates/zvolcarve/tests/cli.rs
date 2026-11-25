@@ -20,6 +20,9 @@ const SIZE: u64 = 64 * LABEL_SIZE;
 /// cross-check holds `zvolrescue dump` and `zvolcarve dump` to.
 const FIXTURE_SHA256: &str = "febfe0108392728dbde89ee63f9f25419a0192ac04420db3ad88b0032a088585";
 
+/// Where a dnode was found: `(offset, slot)` each.
+type Places = Vec<(u64, u64)>;
+
 /// A directory for one test, removed when the test ends.
 fn scratch(name: &str) -> Scratch {
     Scratch::new("zvolcarve-cli", name)
@@ -1876,6 +1879,71 @@ fn a_member_no_label_places_is_placed_by_its_pointers() {
 /// 9 with its labels gone — what a carve is for — seven blocks in eight
 /// were never tried, and the scan said it was complete. And two starts
 /// the block pointers do not choose between are said, not passed over.
+/// One dnode found at two places is one candidate: a block of dnodes is
+/// metadata, and the pool writes it two or three times over. Each copy
+/// was a candidate of its own — the same volume twice in the list,
+/// walked twice, and a choice between the two that is no choice. It is
+/// listed once, with where else it is, and the index counts the copies
+/// it folded (`ditto_copies`).
+#[test]
+fn a_dnode_found_twice_is_one_candidate() {
+    let dir = scratch("ditto");
+    let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1)]);
+    let mut whole = carved_zvol_members(&mut pool, SIZE).swap_remove(0);
+    let plain = whole
+        .chunks(512)
+        .position(|slot| slot[0] == ot::ZVOL && slot[1] == 17)
+        .expect("the volume's dnode")
+        * 512;
+    // Another copy of it, in space nothing else uses.
+    let copy = 12 << 20;
+    assert!(whole[copy..copy + 512].iter().all(|b| *b == 0));
+    let dnode = whole[plain..plain + 512].to_vec();
+    whole[copy..copy + 512].copy_from_slice(&dnode);
+    let img = dir.join("member.img").to_string_lossy().into_owned();
+    std::fs::write(&img, &whole).unwrap();
+    let ws = dir.join("ws").to_string_lossy().into_owned();
+    let (code, _, err) = run(&[
+        "-q",
+        "scan",
+        &img,
+        "-o",
+        &ws,
+        "--dnode-type",
+        "any",
+        "--compressed",
+        "none",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let index: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("ws/candidates.json")).unwrap()).unwrap();
+    let hex: String = dnode.iter().map(|b| format!("{b:02x}")).collect();
+    let of_it: Vec<&serde_json::Value> = index["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["dnode_hex"] == hex.as_str())
+        .collect();
+    assert_eq!(of_it.len(), 1, "{index}");
+    let c = of_it[0];
+    assert_eq!(
+        c["offset"], plain as u64,
+        "the first one met is the candidate"
+    );
+    assert_eq!(
+        c["copies"],
+        serde_json::json!([{"device": 0, "path": img, "offset": copy, "slot": 0, "found": "plaintext"}]),
+        "{c}"
+    );
+    assert!(index["ditto_copies"].as_u64().unwrap() >= 1, "{index}");
+    let (code, text, err) = run(&["list", &ws]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        text.contains(&format!("the same dnode also at 0:{copy:#x}+0 plaintext")),
+        "{text}"
+    );
+}
+
 #[test]
 fn a_member_with_no_label_is_searched_at_every_sector() {
     let dir = scratch("no-label-ashift9");
@@ -1923,10 +1991,14 @@ fn a_member_with_no_label_is_searched_at_every_sector() {
         assert_eq!(code, 0, "{name}: {err}");
         let index: serde_json::Value =
             serde_json::from_slice(&std::fs::read(ws.join("candidates.json")).unwrap()).unwrap();
+        // Every place a dnode was found at: a candidate's, and those of
+        // the copies of it the scan folded into it — the three planted
+        // here are one dnode, which is also where the fixture wrote it.
         let mut at: Vec<(u64, u64, String)> = index["candidates"]
             .as_array()
             .unwrap()
             .iter()
+            .flat_map(|c| std::iter::once(c).chain(c["copies"].as_array().into_iter().flatten()))
             .map(|c| {
                 (
                     c["offset"].as_u64().unwrap(),
@@ -1986,21 +2058,39 @@ fn a_limited_scan_resumes_to_the_scan_in_one_pass() {
         let index: serde_json::Value =
             serde_json::from_slice(&std::fs::read(Path::new(ws).join("candidates.json")).unwrap())
                 .unwrap();
-        let mut k: Vec<(u64, u64)> = index["candidates"]
+        // Each candidate with the copies folded into it: a scan in
+        // parts folds them as one in one pass does.
+        let mut k: Vec<(u64, u64, Places)> = index["candidates"]
             .as_array()
             .unwrap()
             .iter()
-            .map(|c| (c["offset"].as_u64().unwrap(), c["slot"].as_u64().unwrap()))
+            .map(|c| {
+                let place = |c: &serde_json::Value| {
+                    (c["offset"].as_u64().unwrap(), c["slot"].as_u64().unwrap())
+                };
+                let (offset, slot) = place(c);
+                let mut copies: Vec<(u64, u64)> = c["copies"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(place)
+                    .collect();
+                copies.sort();
+                (offset, slot, copies)
+            })
             .collect();
         k.sort();
         (
             k,
             index["slots_examined"].clone(),
             index["rejected"].clone(),
+            index["ditto_copies"].clone(),
         )
     };
     let want = keys(&one);
     assert!(want.0.len() > 2, "{:?}", want.0);
+    // A run takes one hit, a copy as well as a candidate.
+    let hits = want.0.iter().map(|(_, _, c)| 1 + c.len()).sum::<usize>();
 
     let parts = dir.join("parts").to_string_lossy().into_owned();
     let mut runs = 0;
@@ -2026,7 +2116,7 @@ fn a_limited_scan_resumes_to_the_scan_in_one_pass() {
         }
         assert_eq!(code, 6, "{err}");
         assert!(err.contains("the --max-hits limit"), "{err}");
-        assert!(runs <= want.0.len() + 1, "no progress after {runs} runs");
+        assert!(runs <= hits + 1, "no progress after {runs} runs");
     }
     assert_eq!(keys(&parts), want);
     assert!(runs > 2, "the limit was reached: {runs} run(s)");

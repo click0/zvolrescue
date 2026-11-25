@@ -124,6 +124,24 @@ pub struct Candidate {
     /// again. What they say is still only a claim: the extraction reads
     /// through the pool and checks every block against its checksum.
     pub dnode_hex: String,
+    /// The other places the same dnode was found at, byte for byte: a
+    /// block of dnodes is metadata, and the pool writes it twice or
+    /// three times (ditto copies), apart from the copies a mirror's
+    /// sides hold at one place. One dnode, one candidate: walked and
+    /// extracted once, with where else it is.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub copies: Vec<CopyOut>,
+}
+
+/// Another place a candidate's dnode is at.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopyOut {
+    pub device: usize,
+    pub path: PathBuf,
+    pub offset: u64,
+    pub slot: u64,
+    /// `plaintext`, or the compression of the block it is in.
+    pub found: String,
 }
 
 /// One thing recognised inside a candidate.
@@ -170,6 +188,11 @@ pub struct Index {
     /// listed again.
     #[serde(default)]
     pub mirror_duplicates: u64,
+    /// Hits that were the same dnode, byte for byte, as a candidate met
+    /// elsewhere: another copy of the block of dnodes it is in. Listed
+    /// with that candidate (`copies`), not as one of their own.
+    #[serde(default)]
+    pub ditto_copies: u64,
     pub slots_examined: u64,
     /// Dataset dnodes the scan met, which is what can name a candidate.
     #[serde(default)]

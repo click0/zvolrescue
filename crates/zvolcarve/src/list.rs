@@ -250,6 +250,18 @@ pub fn print(index: &Index, names: &Names, verbose: bool) {
             c.slot,
             c.found
         );
+        // The other copies of its block of dnodes: one dnode, listed
+        // once.
+        if !c.copies.is_empty() {
+            outln!(
+                "         the same dnode also at {}",
+                c.copies
+                    .iter()
+                    .map(|k| format!("{}:{:#x}+{} {}", k.device, k.offset, k.slot, k.found))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
         for f in &c.contents {
             outln!(
                 "         holds {}{}{}",

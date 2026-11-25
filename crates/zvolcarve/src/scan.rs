@@ -631,6 +631,18 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         }
     }
     let mut mirror_duplicates = earlier.as_ref().map_or(0, |i| i.mirror_duplicates);
+    // And a dnode met again somewhere else, byte for byte: the pool
+    // writes a block of dnodes two or three times over, and each copy
+    // was a candidate of its own — the same volume twice in the list,
+    // walked twice, 42 candidates for 21 states of three volumes. Keyed
+    // by the dnode's bytes, holding the candidate it is: those an
+    // interrupted run listed included, with the copies it had found.
+    let mut ditto_copies = earlier.as_ref().map_or(0, |i| i.ditto_copies);
+    let mut by_bytes: std::collections::HashMap<String, usize> = candidates
+        .iter()
+        .enumerate()
+        .map(|(n, c)| (c.dnode_hex.clone(), n))
+        .collect();
     // A member no label, uberblock or hint places is read from byte 0,
     // and a compressed block is looked for every 2^ashift bytes from
     // there: a vdev on a partition at sector 63 had none of its blocks
@@ -869,6 +881,37 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                     }
                 }
             }
+            let named = name_from_datasets(&owners, hit);
+            if let Some(&first) = by_bytes.get(&hex) {
+                let c = &mut candidates[first];
+                let here = (hit.device, hit.offset, hit.slot);
+                let known = (c.device, c.offset, c.slot) == here
+                    || c.copies
+                        .iter()
+                        .any(|k| (k.device, k.offset, k.slot) == here);
+                // Read again by a resume: listed already, as the
+                // candidate or as one of its copies.
+                if known {
+                    continue;
+                }
+                c.copies.push(crate::model::CopyOut {
+                    device: hit.device,
+                    path: members.paths[hit.device].clone(),
+                    offset: hit.offset,
+                    slot: hit.slot,
+                    found: hit.found.as_str().to_string(),
+                });
+                // The dataset that points at this copy, where none was
+                // met for the first.
+                if c.dataset_guid.is_none() {
+                    if let Some((g, t)) = named {
+                        c.dataset_guid = Some(format!("{g:#018x}"));
+                        c.dataset_creation_txg = Some(t);
+                    }
+                }
+                ditto_copies += 1;
+                continue;
+            }
             let assessed = reader.as_ref().map(|r| {
                 let obj = ObjectReader::new(r, hit.dnode.clone(), Endian::Little);
                 assess_against(
@@ -891,7 +934,6 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 }
                 break;
             }
-            let named = name_from_datasets(&owners, hit);
             // C-12: what is inside usually says how large the volume was
             // made, which the dnode cannot. Once a signal has come the
             // rest of the candidates are recorded as they are, at once.
@@ -904,6 +946,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 })
                 .unwrap_or_default();
             let id = format!("c{:04}", candidates.len() + 1);
+            by_bytes.insert(hex.clone(), candidates.len());
             candidates.push(Candidate {
                 id,
                 device: hit.device,
@@ -939,6 +982,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 dataset_volsize: None,
                 dataset_last_txg: None,
                 dnode_hex: hex,
+                copies: Vec::new(),
             });
         }
         if let Some([at, slot]) = cut_at.or(limited_at) {
@@ -996,6 +1040,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         bytes_read,
         unreadable_bytes: unreadable,
         mirror_duplicates,
+        ditto_copies,
         slots_examined: slots,
         datasets_met,
         space: space.as_ref().map(|s| SpaceOut {

@@ -15,6 +15,21 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ## Unreleased
 
+### Fixed
+
+* **A dnode found at two places is one candidate.** A block of dnodes
+  is metadata, and the pool writes it two or three times over; the
+  scan listed each copy as a candidate of its own, walked each, and
+  left the operator to choose between two that are one. On a pool with
+  every label zeroed, the 42 volume candidates of three volumes were
+  21 dnodes twice; without a profile, 5383 were 438. A dnode found
+  again byte for byte is listed once, where it was first met, with
+  where else it is (`copies`, and `the same dnode also at` in `list`),
+  and the index counts the copies it folded (`ditto_copies`); the walk
+  is not done again, nor is a dataset that points at the copy lost —
+  it names the candidate where none pointed at the first. A scan in
+  parts folds them as one pass does.
+
 ### Added
 
 * **A report says which run each extraction is of, and what a carved

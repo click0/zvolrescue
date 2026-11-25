@@ -86,6 +86,19 @@ same place on two of them is one candidate, and
 .Pa candidates.json
 counts the copies it left out
 .Pq Li mirror_duplicates .
+So is a dnode found anywhere else byte for byte as it was found
+before: a block of dnodes is metadata, which the pool writes two or
+three times over.
+It is listed once, where it was first found, with where else it is
+.Pq Li copies ,
+which
+.Cm list
+prints as
+.Dq the same dnode also at ,
+and
+.Pa candidates.json
+counts those
+.Pq Li ditto_copies .
 A scan that finds no candidate exits 3.
 .Bl -tag -width Ds
 .It Fl o , Fl -output Ar dir
