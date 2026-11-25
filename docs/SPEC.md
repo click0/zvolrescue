@@ -1,6 +1,6 @@
 # zvolrescue — Technical Specification (ТЗ)
 
-**Status:** living document, revised 2026-11-16 (tool at v0.9.16) · **Owner:** Vladyslav V. Prodan
+**Status:** living document, revised 2026-11-25 (tool at v0.9.17) · **Owner:** Vladyslav V. Prodan
 
 **Ukrainian version:** [SPEC.uk.md](SPEC.uk.md) · **Companion tools:** [COMPANIONS.md](COMPANIONS.md)
 
@@ -701,6 +701,14 @@ in for a failed disk (F-25) — looks where the pool kept twice what a
 ddrescue map refused (F-72), writes a dRAID's label from its hints
 (F-67), keeps on a bulk resume the images already finished (F-31,
 F-32), and tells a `zfs promote` in the history (T-03).
+`v0.9.17` reads a transaction group from before a device removal
+(F-69) and the pool checkpoint (F-10), counts apart the blocks that
+carry no checksum and says what an intent log holds unapplied (F-20),
+writes with `scan --emit-label` the pool's own label (F-67) from hints
+that give each top-level vdev its ashift (F-65), tells the line a
+rewind left behind by what its groups hold and not by their dates, and
+names carved candidates by the datasets the object-set headers of
+`zvolcarve roots` give (F-64).
 `1.0.0` is the full release, and waits for what no CI can supply: three real-world incidents with
 documented outcomes ([REALWORLD-TESTS.md](REALWORLD-TESTS.md)). The
 packaging it also waited for — a FreeBSD port, a `.deb`, an AUR

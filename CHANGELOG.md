@@ -13,7 +13,30 @@ development milestone that names what changed when — the sections below
 are their record — and ships inside the next version that does get
 tagged. `v0.7.1` is the release that carries those six.
 
-## Unreleased
+## v0.9.17 — 2026-11-25
+
+**What a pool still holds is read, and what was not checked is counted.**
+A transaction group from before a device removal reads through the
+mapping the pool wrote since, and the pool checkpoint is a transaction
+group every tool reads at; under raidz and dRAID a failed disk that
+still answers no longer stands for its column while the spare that has
+it goes untried; and a dataset under a part of the tree that did not
+read is no longer taken for absent. Blocks that carry no
+checksum are counted apart from the verified, and what a dataset's
+intent log holds that was not applied is counted and said. A volume of
+4K or 8K blocks reads six to ten times faster. The history holds where
+the clock does not: a line a rewind left behind is told by what its
+groups hold, not by their dates, and a multihost heartbeat dates
+nothing. The label `scan --emit-label` writes is the pool's own, which
+`zdb -e` opens, and `--hints` describes vdevs of different ashift. The
+record holds where it did not: a report tells an image a later run
+wrote over, `--resume` no longer takes a state that vouches for
+nothing, and the record of an image kept by `dump -r --resume` is the
+run's own. And `zvolcarve` works where nothing names the pool: a
+member with no label is searched at every sector and placed by its
+pointers, a scan that did not finish is neither written over nor
+listed as whole, `roots` says what it cut, and a candidate is named by
+the dataset the pool's roots give it.
 
 ### Fixed
 

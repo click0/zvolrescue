@@ -1,6 +1,6 @@
 PORTNAME=	zvolrescue
 DISTVERSIONPREFIX=	v
-DISTVERSION=	0.9.16
+DISTVERSION=	0.9.17
 CATEGORIES=	sysutils
 
 MAINTAINER=	akapulko@gmail.com
