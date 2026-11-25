@@ -935,6 +935,63 @@ jobs:
           sha256sum /tmp/f64/member0.img /tmp/f64/member1.img > /tmp/f64.sums
           sha256sum -c /tmp/f64.sums
           if ./target/release/zvolcarve -q roots /tmp/f64/member0.img -o /tmp/f64/member0.img; then echo "must refuse"; exit 1; else test $? = 5; fi
+      - name: A pool no uberblock leads to, read at the headers found (SPEC F-64)
+        run: |
+          # What `roots` wrote in the step before is what the other
+          # programs read the pool by: each header a pool walked out of
+          # is a transaction group to read at. The fixture has two: the
+          # newest no longer has the volume, and it comes out by its
+          # name at the older, the bytes an intact copy gives.
+          m="/tmp/f64/member0.img /tmp/f64/member1.img"
+          ./target/release/zvolrescue list -r --roots /tmp/f64out $m
+          ./target/release/zvolrescue -q -f json list -r --roots /tmp/f64out $m > /tmp/f64.list.json
+          python3 - <<'EOF'
+          import json
+          d = json.load(open("/tmp/f64.list.json"))
+          # Read from a header and no uberblock, and said so: where the
+          # header is, and no time made up for it.
+          assert d["carved_root"]["member"] == "/tmp/f64/member0.img", d
+          assert d["time"] == "unknown" and d["carved_txgs"] == d["available_txgs"], d
+          assert len(d["available_txgs"]) == 2 and d["txg"] == d["available_txgs"][0], d
+          assert "tank/vm/disk0" not in [x["name"] for x in d["datasets"]], d
+          EOF
+          ./target/release/zvolrescue -q dump tank/vm/disk0 --roots /tmp/f64out -o /tmp/f64.disk0.img $m
+          cargo run -q -p zfs-read --example mkfixture -- /tmp/f64w mirror 12 sample
+          ./target/release/zvolrescue -q dump tank/vm/disk0 -o /tmp/f64w.disk0.img /tmp/f64w/member0.img /tmp/f64w/member1.img
+          cmp /tmp/f64.disk0.img /tmp/f64w.disk0.img
+          ./target/release/zvoltimeline -q --roots /tmp/f64out $m | tee /tmp/f64.timeline
+          grep -q ' destroyed  *tank/vm/disk0 ' /tmp/f64.timeline
+          grep -q -- '-> zvolrescue dump tank/vm/disk0 .* --roots /tmp/f64out ' /tmp/f64.timeline
+          grep -q 'from object-set headers found in raw space' /tmp/f64.timeline
+          # A filesystem's files too: the same listing as before the
+          # rings were zeroed, but for where it was read from.
+          cargo run -q -p zfs-read --example mkfixture -- /tmp/f64z mirror 12 zpl
+          z="/tmp/f64z/member0.img /tmp/f64z/member1.img"
+          ./target/release/zvolfiles -q -f json list tank/fs -R $z > /tmp/f64z.before.json
+          python3 - <<'EOF'
+          import os
+          LABEL, UB_OFF, UB_SIZE = 256 << 10, 128 << 10, 128 << 10
+          for name in ("member0.img", "member1.img"):
+              p = f"/tmp/f64z/{name}"
+              tail = (os.path.getsize(p) // LABEL) * LABEL
+              with open(p, "r+b") as f:
+                  for base in (0, LABEL, tail - 2 * LABEL, tail - LABEL):
+                      f.seek(base + UB_OFF)
+                      f.write(b"\0" * UB_SIZE)
+          EOF
+          if ./target/release/zvolfiles -q list tank/fs $z; then echo "an uberblock survived; the case is void"; exit 1; else test $? = 3; fi
+          ./target/release/zvolcarve -q roots $z -o /tmp/f64zout
+          ./target/release/zvolfiles -q -f json list tank/fs -R --roots /tmp/f64zout $z > /tmp/f64z.after.json
+          python3 - <<'EOF'
+          import json
+          before = json.load(open("/tmp/f64z.before.json"))
+          after = json.load(open("/tmp/f64z.after.json"))
+          assert after["files"] == before["files"] and len(after["files"]) == 8, after
+          assert "carved_root" in after and "carved_root" not in before, after
+          EOF
+          # The file of headers is read, and not something to write to.
+          if ./target/release/zvolrescue -q dump tank/vm/disk0 --roots /tmp/f64out -o /tmp/f64out/roots.json $m; then echo "must refuse"; exit 1; else test $? = 5; fi
+          sha256sum -c /tmp/f64.sums
       - name: Files out of a filesystem dataset (COMPANIONS §5.4)
         run: |
           ./target/release/zvolfiles --version

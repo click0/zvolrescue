@@ -1035,6 +1035,15 @@ pub struct PoolSpec {
     /// Select a pool by GUID when several are found.
     #[arg(long, value_name = "GUID")]
     pub pool_guid: Option<String>,
+    /// Read the pool from the object-set headers `zvolcarve roots`
+    /// found (SPEC F-64): the `roots.json` it wrote, or the directory
+    /// that holds it. Each header a pool walked out of is a transaction
+    /// group to read at, beside whatever uberblocks are left — and for
+    /// a pool none is left of, the only ones. No checksum vouches for
+    /// such a header and it says no time; every block under it is
+    /// verified by its checksum as any other is.
+    #[arg(long, value_name = "FILE|DIR")]
+    pub roots: Option<PathBuf>,
     /// Treat a member whose labels are gone as a leaf the configuration
     /// says is missing: `PATH` when only one leaf is missing, or
     /// `PATH=GUID` to name it. Repeatable. Nothing is taken on trust —
@@ -1247,6 +1256,7 @@ impl PoolSpec {
     pub fn reads(&self) -> Vec<PathBuf> {
         let mut v: Vec<PathBuf> = self.devices.iter().chain(&self.image).cloned().collect();
         v.extend(self.hints.iter().cloned());
+        v.extend(self.roots_file());
         for m in &self.map {
             if let Some((member, file)) = m.split_once('=') {
                 v.push(member.into());
@@ -1257,6 +1267,17 @@ impl PoolSpec {
             v.push(a.split_once('=').map_or(a.as_str(), |(p, _)| p).into());
         }
         v
+    }
+
+    /// The file `--roots` names: itself, or the `roots.json` in the
+    /// directory it is.
+    pub fn roots_file(&self) -> Option<PathBuf> {
+        let given = self.roots.as_ref()?;
+        Some(if given.is_dir() {
+            given.join(members::ROOTS_FILE)
+        } else {
+            given.clone()
+        })
     }
 
     /// All members in command-line order, or a usage error when none were given.
@@ -1290,6 +1311,10 @@ impl PoolSpec {
         }
         if self.search_order {
             args.push("--search-order".into());
+        }
+        if let Some(r) = &self.roots {
+            args.push("--roots".into());
+            args.push(shell_quote(&r.display().to_string()));
         }
         if let Some(g) = &self.pool_guid {
             args.push("--pool-guid".into());

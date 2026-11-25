@@ -2180,6 +2180,92 @@ fn a_profile_says_only_what_it_can() {
     );
 }
 
+/// What `roots` finds is what the other programs read the pool by
+/// (SPEC F-64): it says how, the file it wrote is one they take, and
+/// `scan --like` reads a sibling's numbers at a header where no
+/// uberblock is left to lead to it.
+#[test]
+fn what_roots_finds_is_what_a_pool_with_no_uberblock_is_read_by() {
+    use zfs_read::fixture::zero_uberblock_rings;
+    let dir = scratch("roots-read");
+    let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1)]);
+    let mut images: Vec<Vec<u8>> = (0..2).map(|_| vec![0u8; SIZE as usize]).collect();
+    let mut alloc = Alloc::new(0x20_0000);
+    build_sample_mos(&mut pool, &mut images, &mut alloc);
+    let m: Vec<String> = images
+        .iter_mut()
+        .enumerate()
+        .map(|(i, img)| {
+            pool.write_labels(i, img);
+            zero_uberblock_rings(img);
+            let p = dir.join(format!("member{i}.img"));
+            std::fs::write(&p, img).expect("write member");
+            p.to_string_lossy().into_owned()
+        })
+        .collect();
+    let like = |ws: &str, more: &[&str]| {
+        let mut args = vec![
+            "-q",
+            "-f",
+            "json",
+            "scan",
+            m[0].as_str(),
+            m[1].as_str(),
+            "-o",
+            ws,
+            "--like",
+            "tank/vm/disk0",
+            "--compressed",
+            "none",
+        ];
+        args.extend(more);
+        run(&args)
+    };
+    let (code, _, err) = like(&dir.join("none").to_string_lossy(), &[]);
+    assert_eq!(code, 1, "{err}");
+    assert!(
+        err.contains("--like tank/vm/disk0: no verified uberblock"),
+        "{err}"
+    );
+
+    let found = dir.join("found").to_string_lossy().into_owned();
+    let (code, text, err) = run(&[
+        "-q",
+        "roots",
+        &m[0],
+        &m[1],
+        "-o",
+        &found,
+        "--compressed",
+        "none",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        text.contains(&format!(
+            "to read the pool at them: zvolrescue list {} {} --roots {found}",
+            m[0], m[1]
+        )),
+        "{text}"
+    );
+    let (code, out, err) = like(&dir.join("with").to_string_lossy(), &["--roots", &found]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(json(&out)["profile"]["volblocksize"], 8192, "{out}");
+    // It is read, and never written over by the run that reads it.
+    let (code, _, err) = run(&[
+        "-q",
+        "roots",
+        &m[0],
+        &m[1],
+        "-o",
+        &found,
+        "--roots",
+        &found,
+        "--compressed",
+        "none",
+    ]);
+    assert_eq!(code, 5, "{err}");
+}
+
 /// `--like` is a volume made like the lost one, and what it knows is
 /// how that one was made: its block size, and the size it was given —
 /// which is the most a dnode can imply, not what it does. A dnode is

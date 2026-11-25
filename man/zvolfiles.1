@@ -53,6 +53,7 @@ and
 .Fl -hints ,
 .Fl -search-order ,
 .Fl -pool-guid ,
+.Fl -roots ,
 .Fl -assume-member ,
 .Fl -ignore-unknown-features ,
 .Fl -map ,
@@ -288,6 +289,16 @@ group, as for
 reads it, a dataset in no newer one is looked for there, and a run
 that reads at it says so and records
 .Ql checkpoint_txg .
+With
+.Fl -roots
+the object-set headers that
+.Xr zvolcarve 1
+.Cm roots
+found are transaction groups too, and where no uberblock is left the
+only ones: the dataset is read at the newest that has it, the run says
+that it read from a header and no uberblock, and the manifest, the
+index and the record give where the header is
+.Pq Ql carved_root .
 A transaction group from before a top-level vdev was removed from the
 pool is read as
 .Xr zvolrescue 1

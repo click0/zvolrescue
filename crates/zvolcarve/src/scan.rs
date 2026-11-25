@@ -286,7 +286,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     let like = match (&opts.profile.like, &pool) {
         (Some(name), Some(p)) => {
             let reader = PoolReader::new(p, members.devices()).with_base_offsets(&members.bases());
-            match like_dataset(&reader, &members.scans, p, name) {
+            match like_dataset(&reader, &members.scans, p, &members.roots, name) {
                 Ok(v) => Some(v),
                 Err(e) => {
                     errln!("zvolcarve: --like {name}: {e}");
@@ -1201,16 +1201,19 @@ fn like_dataset(
     reader: &PoolReader<'_>,
     scans: &[Option<zfs_read::vdev::DeviceScan>],
     pool: &zfs_read::pool::PoolAssembly,
+    roots: &[zfs_read::pool::CarvedRoot],
     name: &str,
 ) -> Result<(u64, u64), String> {
-    // With the pool checkpoint: a sibling destroyed since is whole there.
-    let candidates = zfs_read::dsl::txg_candidates(reader, scans, pool);
+    // With the pool checkpoint: a sibling destroyed since is whole
+    // there. And with the headers `--roots` gave, which name the
+    // sibling where no uberblock is left to (SPEC F-64).
+    let candidates = zfs_read::dsl::txg_candidates(reader, scans, pool, roots);
     if candidates.is_empty() {
         return Err("no verified uberblock".into());
     }
     let mut looked = 0;
     for c in &candidates {
-        let Ok(mos) = zfs_read::dsl::open_mos(reader, &c.ub) else {
+        let Ok(mos) = zfs_read::dsl::open_mos_at(reader, c) else {
             continue;
         };
         let Ok(tree) = zfs_read::dsl::walk(&mos, &pool.name) else {

@@ -23,7 +23,8 @@ use zfs_ondisk::dsl::DslDatasetPhys;
 use zfs_ondisk::uberblock::Uberblock;
 use zfs_ondisk::Endian;
 
-use crate::dsl::open_mos;
+use crate::dsl::open_mos_at;
+use crate::pool::Candidate;
 use crate::zio::{PoolReader, ReadError};
 
 /// Blocks read for one comparison before it is given up as saying
@@ -383,29 +384,52 @@ pub fn compare(
     earlier: &Uberblock,
     later: &Uberblock,
 ) -> Result<Compared, ReadError> {
-    let root = |ub: &Uberblock| BlkPtr::parse(&ub.rootbp, ub.endian);
+    let at = |ub: &Uberblock| Candidate {
+        ub: ub.clone(),
+        device: 0,
+        label: 0,
+        checkpoint: false,
+        carved: None,
+    };
+    compare_at(reader, &at(earlier), &at(later))
+}
+
+/// [`compare`], of two places a pool is entered at: either may be a
+/// header found in raw space and no uberblock (SPEC F-64). Such a one
+/// has no root pointer to be compared by, and its tree is compared as
+/// any tree is.
+pub fn compare_at(
+    reader: &PoolReader<'_>,
+    earlier: &Candidate,
+    later: &Candidate,
+) -> Result<Compared, ReadError> {
+    let root = |c: &Candidate| match c.carved {
+        Some(_) => Ok(None),
+        None => BlkPtr::parse(&c.ub.rootbp, c.ub.endian).map(Some),
+    };
     let (was, now) = (root(earlier)?, root(later)?);
     // The later one opened last: what it knows of vdevs removed since
     // serves the earlier one's blocks too.
-    let before = open_mos(reader, earlier)?.meta_object().dnode().clone();
-    let after = open_mos(reader, later)?.meta_object().dnode().clone();
+    let before = open_mos_at(reader, earlier)?.meta_object().dnode().clone();
+    let after = open_mos_at(reader, later)?.meta_object().dnode().clone();
     let mut cmp = Compare {
         reader,
-        txg: earlier.txg,
+        txg: earlier.ub.txg,
         blocks: 0,
         unread: [0; 2],
         found: None,
     };
-    if now.birth <= earlier.txg {
-        if !same_block(&was, &now) {
-            cmp.found = Some(Parted {
-                what: "the root of the MOS".to_string(),
-                born: now.birth,
-                earlier_born: (!was.is_hole()).then_some(was.birth),
-            });
+    match (&was, &now) {
+        (Some(was), Some(now)) if now.birth <= earlier.ub.txg => {
+            if !same_block(was, now) {
+                cmp.found = Some(Parted {
+                    what: "the root of the MOS".to_string(),
+                    born: now.birth,
+                    earlier_born: (!was.is_hole()).then_some(was.birth),
+                });
+            }
         }
-    } else {
-        cmp.object(&after, Some(&before), Tree::Array);
+        _ => cmp.object(&after, Some(&before), Tree::Array),
     }
     Ok(Compared {
         parted: cmp.found,

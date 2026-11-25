@@ -11,8 +11,8 @@ use zfs_ondisk::label::{label_offsets, LABEL_SIZE, UBERBLOCK_RING_OFFSET, UBERBL
 use zfs_read::fixture::{
     build_sample_mos, checkpointed_members, configured_two_top_members, destroyed_zvol_members,
     lose_children_list, objset_reused_members, removed_since_members, removed_vdev_members,
-    two_top_mirror_members, two_top_raidz_members, zpl_members, zvol_pattern, Alloc, Pool,
-    SAMPLE_ZVOL_BLOCK0_OFFSET,
+    roots_json, two_top_mirror_members, two_top_raidz_members, zero_uberblock_rings, zpl_members,
+    zvol_pattern, Alloc, Pool, SAMPLE_ZVOL_BLOCK0_OFFSET,
 };
 use zfs_read::hash::{Digests, Extra};
 use zvol_common::scratch::Scratch;
@@ -2367,6 +2367,201 @@ fn list_diff_names_what_the_newest_txg_no_longer_has() {
     assert_eq!(code, 3);
     assert!(
         err.contains("--diff txg 150 has no verified uberblock"),
+        "{err}"
+    );
+}
+
+/// A pool no uberblock leads to is read at the object-set headers
+/// `zvolcarve roots` found, given with `--roots` (SPEC F-64). With its
+/// rings zeroed `list` had no transaction group to read at and a volume
+/// destroyed since was out of every program's reach but the carver's,
+/// which gives it no name. Each header is a transaction group: the
+/// newest lists the pool as it is, the older one has the volume, and
+/// `dump` finds it there by its name, the bytes it had. What such a run
+/// read from is on its output and its record, and its time is not made
+/// up. A file that is not of these members is refused.
+#[test]
+fn a_pool_no_uberblock_leads_to_is_read_at_the_headers_found() {
+    let dir = scratch("roots");
+    let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1), (200, 2)]);
+    let (mut members, newest, previous) = destroyed_zvol_members(&mut pool, SIZE);
+    assert_eq!((newest, previous), (200, 100));
+    let m = write_members(&dir, &members);
+    // The volume, read while the uberblocks are there.
+    let whole = dir.join("whole.img").to_string_lossy().into_owned();
+    let (code, _, err) = run(&[
+        "-q",
+        "dump",
+        "tank/vm/disk0",
+        "--txg",
+        "100",
+        "-o",
+        &whole,
+        &m[0],
+        &m[1],
+    ]);
+    assert_eq!(code, 0, "{err}");
+
+    for member in &mut members {
+        zero_uberblock_rings(member);
+    }
+    write_members(&dir, &members);
+    let (code, _, err) = run(&["-q", "list", &m[0], &m[1]]);
+    assert_eq!(code, 3, "{err}");
+    assert!(err.contains("no verified uberblock"), "{err}");
+
+    // The file `zvolcarve roots` writes, and the directory it is in.
+    let roots = dir.join("roots.json").to_string_lossy().into_owned();
+    std::fs::write(&roots, roots_json(&members, &m)).unwrap();
+    let ws = dir.to_string_lossy().into_owned();
+    for given in [&roots, &ws] {
+        let (code, out, err) = run(&["-f", "json", "list", "--roots", given, &m[0], &m[1]]);
+        assert_eq!(code, 0, "{err}");
+        let doc = json(&out);
+        assert_eq!(doc["txg"], 200, "{out}");
+        assert_eq!(doc["time"], "unknown", "{out}");
+        assert_eq!(doc["available_txgs"], serde_json::json!([200, 100]));
+        assert_eq!(doc["carved_txgs"], serde_json::json!([200, 100]));
+        assert_eq!(doc["carved_root"]["member"], m[0].as_str(), "{out}");
+        assert_eq!(doc["carved_root"]["found"], "plaintext", "{out}");
+        assert!(doc["carved_root"]["offset"].as_u64().unwrap() > 0, "{out}");
+        assert!(
+            err.contains("txg 200 is read from the object-set header found at byte")
+                && err.contains("not from an uberblock")
+                && err.contains("no checksum vouches for the header itself"),
+            "{err}"
+        );
+    }
+    let (code, text, _) = run(&[
+        "-q", "list", "--roots", &roots, &m[0], &m[1], "--txg", "100",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    assert!(
+        text.contains("txg 100 (time unknown), 0 verified txg(s) available, and 2 of object-set headers found in raw space (--roots)")
+            && text.contains("read from the object-set header at byte")
+            && text.contains("tank/vm/disk0"),
+        "{text}"
+    );
+    // A header says no time, and none is chosen by one.
+    let (code, _, err) = run(&[
+        "-q",
+        "list",
+        "--roots",
+        &roots,
+        &m[0],
+        &m[1],
+        "--before",
+        "2030-01-01",
+    ]);
+    assert_eq!(code, 3, "{err}");
+    assert!(
+        err.contains("a header of --roots says none; --txg N reads one of 200 100"),
+        "{err}"
+    );
+
+    // The destroyed volume, by its name, at the header that has it.
+    let image = dir.join("disk0.img").to_string_lossy().into_owned();
+    let log = dir.join("evidence.jsonl").to_string_lossy().into_owned();
+    let (code, out, err) = run(&[
+        "-f",
+        "json",
+        "--evidence-log",
+        &log,
+        "dump",
+        "tank/vm/disk0",
+        "--roots",
+        &roots,
+        "-o",
+        &image,
+        &m[0],
+        &m[1],
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let doc = json(&out);
+    assert_eq!(doc["txgs_searched"], serde_json::json!([200, 100]), "{out}");
+    assert_eq!(doc["volumes"][0]["txg"], 100, "{out}");
+    assert_eq!(doc["volumes"][0]["time"], "unknown", "{out}");
+    assert_eq!(doc["carved_root"]["member"], m[0].as_str(), "{out}");
+    assert!(
+        err.contains("txg 100 is read from the object-set header"),
+        "{err}"
+    );
+    assert_eq!(
+        std::fs::read(&image).unwrap(),
+        std::fs::read(&whole).unwrap(),
+        "the volume as the uberblock of txg 100 gave it"
+    );
+    // The file of headers is among what the run read.
+    let record: serde_json::Value = serde_json::from_str(
+        std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .last()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        record["inputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["path"] == roots.as_str()),
+        "{record}"
+    );
+    assert_eq!(record["result"]["carved_root"], doc["carved_root"]);
+    // And never what it writes.
+    let (code, _, err) = run(&[
+        "-q",
+        "dump",
+        "tank/vm/disk0",
+        "--roots",
+        &roots,
+        "-o",
+        &roots,
+        &m[0],
+        &m[1],
+    ]);
+    assert_eq!(code, 5, "{err}");
+
+    // A file that is not of these members: a header where there is
+    // none, a member that was not given, a shape this build does not
+    // read.
+    let entry = |member: &str, offset: u64, datasets: u64| {
+        serde_json::json!({
+            "version": 1,
+            "roots": [{"member": member, "offset": offset, "found": "plaintext",
+                       "birth": 200, "datasets": datasets}],
+        })
+        .to_string()
+    };
+    let other = dir.join("other.json").to_string_lossy().into_owned();
+    for (text, said) in [
+        (
+            entry(&m[0], 4096, 1),
+            "no object-set header of txg 200 at byte 4096 of",
+        ),
+        (
+            entry("/nowhere/member9.img", 4096, 1),
+            "which is not among the members given",
+        ),
+        (
+            r#"{"version":7,"roots":[]}"#.to_string(),
+            "version 7 of the file, and this build reads version 1",
+        ),
+        ("not json".to_string(), "not what `zvolcarve roots` writes"),
+    ] {
+        std::fs::write(&other, &text).unwrap();
+        let (code, _, err) = run(&["-q", "list", "--roots", &other, &m[0], &m[1]]);
+        assert_eq!(code, 1, "{text}: {err}");
+        assert!(err.contains(said), "{text}: {err}");
+    }
+    // One no pool walked out of is not read at: nothing is added.
+    std::fs::write(&other, entry(&m[0], 4096, 0)).unwrap();
+    let (code, _, err) = run(&["-q", "list", "--roots", &other, &m[0], &m[1]]);
+    assert_eq!(code, 3, "{err}");
+    assert!(
+        err.contains("no object-set header in it that a pool walked out of")
+            && err.contains("and --roots gave no object-set header to read at in their place"),
         "{err}"
     );
 }

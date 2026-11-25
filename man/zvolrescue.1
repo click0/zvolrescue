@@ -163,6 +163,44 @@ group is searched, at the top or inside a mirror, and the order kept is
 in the evidence record.
 .It Fl -pool-guid Ar guid
 Select a pool by GUID when several are found on the members.
+.It Fl -roots Ar file | dir
+Read the pool at the object-set headers that
+.Xr zvolcarve 1
+.Cm roots
+found: the
+.Pa roots.json
+it wrote, or the directory that holds it.
+Every other way into a pool starts at an uberblock, and a pool whose
+uberblock rings are all gone has none: the header of its MOS, found in
+raw space, is the way in that is left.
+Each header in the file that a pool walked out of is a TXG to read at,
+beside those of whatever uberblocks are left; where the uberblock of a
+TXG is left, the uberblock is what that TXG is read by.
+.Fl -txg
+names one of them as it names any other, and without it the newest
+that reads is taken.
+A header is read again from the member it is on.
+A file that is not of these members as they are \(em no header where
+it says one is, a member that was not given \(em is refused with exit
+status 1.
+No checksum vouches for such a header, as the root pointer of an
+uberblock vouches for the one it leads to; every block under it is
+verified by the pointer that names it, as any other is.
+It says no time: the time of such a TXG is
+.Ql unknown ,
+and
+.Fl -before
+chooses none of them.
+A run that read at one says so, and gives the member and the byte
+offset of the header in its output and its record
+.Pq Ql carved_root ;
+.Cm list
+has those of the TXGs that are headers' in
+.Ql carved_txgs .
+Taken by
+.Cm list
+and
+.Cm dump .
 .It Fl -assume-member Ar path Ns Op = Ns Ar guid
 Treat a member whose labels are gone as a leaf the configuration says
 is missing:
@@ -354,6 +392,10 @@ without
 looks for the dataset there last, and says when that is where it found
 it.
 A checkpoint that was discarded is not looked for.
+With
+.Fl -roots
+the TXGs of the object-set headers found in raw space are read at as
+well, and are all there is to read at where no uberblock is left.
 .Pp
 A TXG from before a top-level vdev was removed from the pool
 .Pq Ql zpool remove

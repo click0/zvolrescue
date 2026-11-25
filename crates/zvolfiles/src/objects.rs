@@ -83,6 +83,11 @@ struct ObjectsOut {
     /// as it was then.
     #[serde(skip_serializing_if = "Option::is_none")]
     checkpoint_txg: Option<u64>,
+    /// Where the header is that the transaction group was read from,
+    /// when no uberblock led to it: one `zvolcarve roots` found, given
+    /// with `--roots` (SPEC F-64). No checksum vouches for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    carved_root: Option<zvol_common::members::CarvedOut>,
     output: std::path::PathBuf,
     objects: Vec<ObjectOut>,
     /// Objects whose contents were written.
@@ -270,6 +275,7 @@ pub fn run(
                 intent_log: opened.intent_log.clone(),
                 removed_since: opened.removed_since.clone(),
                 checkpoint_txg: opened.checkpoint_txg,
+                carved_root: opened.carved_root.clone(),
                 objects,
                 written,
                 incomplete,

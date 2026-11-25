@@ -7,7 +7,7 @@ use serde::Serialize;
 use zfs_ondisk::dmu::ObjsetType;
 use zfs_read::dmu::DnodeArray;
 use zfs_read::dsl::{
-    open_mos, read_properties, txg_candidates, walk, Dataset, DatasetTree, Property, PropertyValue,
+    open_mos_at, read_properties, walk, Dataset, DatasetTree, Property, PropertyValue,
 };
 use zfs_read::pool::{select_uberblock, Candidate, TxgSelect};
 use zfs_read::zio::{PoolReader, ReadError};
@@ -105,8 +105,18 @@ struct ListOut {
     txg: u64,
     time: String,
     /// Verified TXGs available on the scanned members, newest first:
-    /// those of the uberblock rings and the pool checkpoint.
+    /// those of the uberblock rings and the pool checkpoint — and, with
+    /// `--roots`, those of the headers found in raw space.
     available_txgs: Vec<u64>,
+    /// Those of `available_txgs` that are no uberblock's: each is a
+    /// header `zvolcarve roots` found (SPEC F-64). No checksum vouches
+    /// for such a header and it says no time.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    carved_txgs: Vec<u64>,
+    /// Where the header is that `txg` was read from, when it is one of
+    /// them; `time` is then `unknown`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    carved_root: Option<zvol_common::members::CarvedOut>,
     /// The TXG of the pool checkpoint (`zpool checkpoint`), when the
     /// pool has one: the pool as it was then is kept whole, and `--txg`
     /// reads it. It is among `available_txgs`.
@@ -203,13 +213,28 @@ fn human(bytes: u64) -> String {
 
 fn print_text(out: &ListOut) {
     outln!(
-        "pool {:?} guid {}: txg {} ({}), {} verified txg(s) available",
+        "pool {:?} guid {}: txg {} ({}), {} verified txg(s) available{}",
         out.pool,
         out.pool_guid,
         out.txg,
-        out.time,
-        out.available_txgs.len()
+        match &out.carved_root {
+            Some(_) => "time unknown",
+            None => out.time.as_str(),
+        },
+        out.available_txgs.len() - out.carved_txgs.len(),
+        match out.carved_txgs.len() {
+            0 => String::new(),
+            n => format!(", and {n} of object-set headers found in raw space (--roots)"),
+        }
     );
+    if let Some(root) = &out.carved_root {
+        outln!(
+            "  read from the object-set header at byte {} of {} ({}), not from an uberblock",
+            root.offset,
+            root.member.display(),
+            root.found
+        );
+    }
     match (out.checkpoint_txg, &out.checkpoint_time) {
         (Some(txg), _) if txg == out.txg => {
             outln!("  this is the pool checkpoint: the pool as it was then, kept whole")
@@ -332,10 +357,10 @@ impl std::fmt::Display for NoList {
 
 fn walk_at<'r, 'a>(
     reader: &'r PoolReader<'a>,
-    ub: &zfs_ondisk::uberblock::Uberblock,
+    c: &Candidate,
     name: &str,
 ) -> Result<(DnodeArray<'r, 'a>, DatasetTree), NoList> {
-    let mos = open_mos(reader, ub).map_err(NoList::Read)?;
+    let mos = open_mos_at(reader, c).map_err(NoList::Read)?;
     let tree = walk(&mos, name).map_err(NoList::Read)?;
     // A tree whose root did not read lists nothing, and is not a pool
     // with no datasets: taken for the newest that reads it was an
@@ -360,6 +385,16 @@ fn properties_of(mos: &DnodeArray<'_, '_>, d: &Dataset) -> Vec<Property> {
             value: PropertyValue::Text(e.to_string()),
             meaning: None,
         }],
+    }
+}
+
+/// What is added to "no verified uberblock" when the run was given
+/// headers to read at and none of them served.
+pub fn no_root_said(spec: &PoolSpec) -> &'static str {
+    if spec.roots.is_some() {
+        ", and --roots gave no object-set header to read at in their place"
+    } else {
+        ""
     }
 }
 
@@ -390,7 +425,14 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     // The uberblock rings' and the pool checkpoint, which no ring holds
     // once the pool has gone on for a while: a volume destroyed after a
     // checkpoint was whole there, and no run knew of the place.
-    let candidates = txg_candidates(&reader, &members.scans, &pool);
+    // And the headers `--roots` gave, where no uberblock leads to their
+    // transaction groups (SPEC F-64).
+    let candidates = members.candidates(&reader, &pool);
+    let carved_txgs: Vec<u64> = candidates
+        .iter()
+        .filter(|c| c.carved.is_some())
+        .map(|c| c.ub.txg)
+        .collect();
     let checkpoint = candidates.iter().find(|c| c.checkpoint).map(|c| &c.ub);
     let checkpoint_txg = checkpoint.map(|u| u.txg);
     let checkpoint_time = checkpoint.map(|u| iso8601(u.timestamp));
@@ -404,27 +446,45 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     let pick: Vec<&Candidate> = match sel {
         TxgSelect::Exact(_) => select_uberblock(&candidates, sel).into_iter().collect(),
         TxgSelect::Newest => candidates.iter().collect(),
-        TxgSelect::Before(ts) => candidates.iter().filter(|c| c.ub.timestamp <= ts).collect(),
+        // A header found in raw space says no time: it is at or
+        // before none.
+        TxgSelect::Before(ts) => candidates
+            .iter()
+            .filter(|c| c.time().is_some_and(|t| t <= ts))
+            .collect(),
     };
     if pick.is_empty() {
         if candidates.is_empty() {
             // Nothing was asked for that could not be had: there is no
             // verified uberblock at all, and "matches the requested TXG;
             // available: " with an empty list said neither.
-            errln!("zvolrescue: no verified uberblock on these members");
+            errln!(
+                "zvolrescue: no verified uberblock on these members{}",
+                no_root_said(spec)
+            );
         } else if let TxgSelect::Before(ts) = sel {
             // A time was asked for, and the answer is in times: it
             // named the TXGs there are, which said nothing of when.
-            let oldest = candidates
+            match candidates
                 .iter()
-                .min_by_key(|c| (c.ub.timestamp, c.ub.txg))
-                .expect("not empty");
-            errln!(
-                "zvolrescue: no verified uberblock at or before {}; the oldest is txg {} at {}",
-                iso8601(ts),
-                oldest.ub.txg,
-                iso8601(oldest.ub.timestamp)
-            );
+                .filter_map(|c| Some((c.time()?, c.ub.txg)))
+                .min()
+            {
+                Some((time, txg)) => errln!(
+                    "zvolrescue: no verified uberblock at or before {}; the oldest is txg {txg} at {}",
+                    iso8601(ts),
+                    iso8601(time)
+                ),
+                // Every one of them is a header found in raw space.
+                None => errln!(
+                    "zvolrescue: --before chooses by the time an uberblock says, and no uberblock is left: a header of --roots says none; --txg N reads one of {}",
+                    carved_txgs
+                        .iter()
+                        .map(|t| t.to_string())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ),
+            }
         } else {
             errln!(
                 "zvolrescue: no verified uberblock matches the requested TXG; available: {}",
@@ -440,7 +500,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     let mut unreadable = Vec::new();
     let mut found = None;
     for (i, c) in pick.iter().enumerate() {
-        match walk_at(&reader, &c.ub, &pool.name) {
+        match walk_at(&reader, c, &pool.name) {
             Ok(t) => {
                 found = Some((*c, t));
                 break;
@@ -494,8 +554,10 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             pool_guid: format!("{:#018x}", pool.guid),
             members: members.paths.clone(),
             txg: newest.ub.txg,
-            time: iso8601(newest.ub.timestamp),
+            time: zvol_common::members::time_said(newest),
             available_txgs: candidates.iter().map(|c| c.ub.txg).collect(),
+            carved_txgs,
+            carved_root: members.carved_record(newest),
             checkpoint_txg,
             checkpoint_time,
             unreadable_at: unreadable,
@@ -519,13 +581,18 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     // the run did not know.
     let removed_since =
         zvol_common::members::say_before_removal(g.quiet, &mos, &pool, chosen.ub.txg);
+    if let (false, Some(said)) = (g.quiet, members.carved_said(chosen)) {
+        errln!("zvolrescue: {said}");
+    }
     let mut out = ListOut {
         pool: pool.name.clone(),
         pool_guid: format!("{:#018x}", pool.guid),
         members: members.paths.clone(),
         txg: chosen.ub.txg,
-        time: iso8601(chosen.ub.timestamp),
+        time: zvol_common::members::time_said(chosen),
         available_txgs: candidates.iter().map(|c| c.ub.txg).collect(),
+        carved_txgs,
+        carved_root: members.carved_record(chosen),
         checkpoint_txg,
         checkpoint_time,
         unreadable_at: unreadable,
@@ -546,7 +613,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 errln!("zvolrescue: --diff txg {other_txg} has no verified uberblock");
                 code = exit::UNRECOVERABLE;
             }
-            Some(other) => match walk_at(&reader, &other.ub, &pool.name).map(|(_, t)| t) {
+            Some(other) => match walk_at(&reader, other, &pool.name).map(|(_, t)| t) {
                 Err(e) => {
                     errln!("zvolrescue: cannot read the pool at txg {other_txg}: {e}");
                     code = exit::UNRECOVERABLE;
@@ -557,7 +624,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                         other_tree.datasets.iter().filter(|d| keep(d)).collect();
                     out.diff = Some(DiffOut {
                         txg: other_txg,
-                        time: iso8601(other.ub.timestamp),
+                        time: zvol_common::members::time_said(other),
                         created_since: here
                             .iter()
                             .filter(|d| !there.iter().any(|o| o.guid == d.guid))
@@ -626,6 +693,7 @@ fn finish(
 mod properties_tests {
     use super::*;
     use zfs_ondisk::label::LABEL_SIZE;
+    use zfs_read::dsl::open_mos;
     use zfs_read::fixture::{build_sample_mos, Alloc, Pool};
     use zfs_read::pool::assemble;
     use zfs_read::vdev::scan_device;

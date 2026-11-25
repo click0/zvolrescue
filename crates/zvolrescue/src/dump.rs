@@ -8,14 +8,13 @@ use zvol_common::{errln, outln};
 
 use serde::{Deserialize, Serialize};
 use zfs_read::crypt::{unwrap_keys, wrapping_key, DatasetKeys, KeyMaterial};
-use zfs_read::dsl::{open_mos, walk, Dataset, DatasetTree, Encryption};
+use zfs_read::dsl::{open_mos_at, walk, Dataset, DatasetTree, Encryption};
 use zfs_read::hash::{Digests, Extra};
 use zfs_read::pool::{select_uberblock, Candidate, TxgSelect};
 use zfs_read::zio::{PoolReader, ReadError};
 use zfs_read::zvol::{extract_from, open_volume, volume_facts, OnError, Report};
 
 use zvol_common::members::{choose_pool, open_members};
-use zvol_common::timefmt::iso8601;
 use zvol_common::{evidence, exit, resume, Format, Global, PoolSpec, WriteGuard};
 
 /// Options of the `dump` command.
@@ -400,6 +399,12 @@ struct RunOut {
     /// pool has one; a volume read at it is the volume as it was then.
     #[serde(skip_serializing_if = "Option::is_none")]
     checkpoint_txg: Option<u64>,
+    /// Where the header is that the transaction group was read from,
+    /// when no uberblock led to it: one `zvolcarve roots` found, given
+    /// with `--roots` (SPEC F-64). No checksum vouches for the header
+    /// and it says no time: a volume's `time` is then `unknown`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    carved_root: Option<zvol_common::members::CarvedOut>,
     /// Top-level vdevs removed from the pool (`zpool remove`) since the
     /// transaction group read: what it has on them is read through the
     /// mapping the removal left, and from the removed device where it is
@@ -488,7 +493,7 @@ fn find_dataset<'c>(
     let mut last_err = None;
     for c in pick {
         searched.txgs.push(c.ub.txg);
-        match open_mos(reader, &c.ub).and_then(|mos| walk(&mos, pool_name)) {
+        match open_mos_at(reader, c).and_then(|mos| walk(&mos, pool_name)) {
             Ok(tree) => {
                 let Some(ds) = tree.get(name) else {
                     if let Some(why) = tree.unread_why(name) {
@@ -876,7 +881,12 @@ fn print_text(out: &RunOut) {
             v.volsize,
             out.pool,
             v.txg,
-            v.time,
+            // Of a header found in raw space, which says none.
+            if v.time == "unknown" {
+                "time unknown"
+            } else {
+                v.time.as_str()
+            },
             v.output.display(),
             if v.kept {
                 " (kept: whole as the run being resumed left it, sha256 as its manifest records)"
@@ -1099,9 +1109,13 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     let reader = PoolReader::new(&pool, members.devices()).with_base_offsets(&members.bases());
     // With the pool checkpoint, when there is one: the last place a
     // volume destroyed since is looked for, and where it is whole.
-    let candidates = zfs_read::dsl::txg_candidates(&reader, &members.scans, &pool);
+    // And the headers `--roots` gave (SPEC F-64).
+    let candidates = members.candidates(&reader, &pool);
     if candidates.is_empty() {
-        errln!("zvolrescue: no verified uberblocks on the scanned members");
+        errln!(
+            "zvolrescue: no verified uberblocks on the scanned members{}",
+            crate::list::no_root_said(spec)
+        );
         return zvol_common::end_early(g, "zvolrescue", spec, exit::UNRECOVERABLE);
     }
     let checkpoint_txg = candidates.iter().find(|c| c.checkpoint).map(|c| c.ub.txg);
@@ -1128,6 +1142,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
                 txgs_searched: searched.txgs,
                 unreadable_at: searched.unreadable,
                 checkpoint_txg,
+                carved_root: None,
                 removed_since: Vec::new(),
                 recursive: opts.recursive,
                 volumes: Vec::new(),
@@ -1149,15 +1164,19 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     // Whether this is the pool's present: only there is a dataset's
     // intent log what an import would replay.
     let newest = candidates.first().is_some_and(|c| c.ub.txg == txg);
-    let time = iso8601(chosen.ub.timestamp);
+    let time = zvol_common::members::time_said(chosen);
     if chosen.checkpoint && !g.quiet {
         errln!(
             "zvolrescue: {}",
             zvol_common::members::checkpoint_said(txg, chosen.ub.timestamp)
         );
     }
+    if let (false, Some(said)) = (g.quiet, members.carved_said(chosen)) {
+        errln!("zvolrescue: {said}");
+    }
+    let carved_root = members.carved_record(chosen);
     // The MOS was read to find the dataset, and is read from memory.
-    let removed_since = open_mos(&reader, &chosen.ub)
+    let removed_since = open_mos_at(&reader, chosen)
         .map(|mos| zvol_common::members::say_before_removal(g.quiet, &mos, &pool, txg))
         .unwrap_or_default();
 
@@ -1301,6 +1320,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         txgs_searched: searched.txgs,
         unreadable_at: searched.unreadable,
         checkpoint_txg,
+        carved_root,
         removed_since,
         recursive: opts.recursive,
         volumes: Vec::new(),

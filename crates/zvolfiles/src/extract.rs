@@ -230,6 +230,11 @@ struct ManifestOut {
     /// as it was then.
     #[serde(skip_serializing_if = "Option::is_none")]
     checkpoint_txg: Option<u64>,
+    /// Where the header is that the transaction group was read from,
+    /// when no uberblock led to it: one `zvolcarve roots` found, given
+    /// with `--roots` (SPEC F-64). No checksum vouches for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    carved_root: Option<zvol_common::members::CarvedOut>,
     output: PathBuf,
     files: Vec<Extracted>,
     directories: usize,
@@ -981,6 +986,7 @@ pub fn run(g: &Global, spec: &PoolSpec, dataset: &str, at: &AtArgs, opts: &Optio
                 intent_log: opened.intent_log.clone(),
                 removed_since: opened.removed_since.clone(),
                 checkpoint_txg: opened.checkpoint_txg,
+                carved_root: opened.carved_root.clone(),
                 files,
                 directories: run.directories,
                 incomplete,

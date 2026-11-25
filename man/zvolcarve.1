@@ -65,6 +65,7 @@ and
 .Fl -hints ,
 .Fl -search-order ,
 .Fl -pool-guid ,
+.Fl -roots ,
 .Fl -assume-member ,
 .Fl -ignore-unknown-features ,
 .Fl -map ,
@@ -140,6 +141,11 @@ or
 .Fl -size
 to say more.
 A dataset that is not a volume is a usage error.
+With
+.Fl -roots
+the neighbour is read at the object-set headers
+.Cm roots
+found as well, which is where it is named when no uberblock is left.
 .It Fl -strict-profile
 Treat profile fields as hard filters, not as hints.
 .It Fl -range Ar start Ns - Ns Ar end
@@ -374,8 +380,19 @@ and
 name a candidate of
 .Cm scan
 by this table.
-No other program takes a root yet: a filesystem, a snapshot or a
-history is not read from one.
+The headers are what the other programs read a pool by when no
+uberblock is left:
+.Xr zvolrescue 1 ,
+.Xr zvolfiles 1
+and
+.Xr zvoltimeline 1
+take the file, or
+.Ar dir ,
+with
+.Fl -roots ,
+and read at each header a pool walked out of as at a transaction group
+\(em a volume by its name, a filesystem's files, the history.
+The command that lists the pool so is printed after the list.
 .Bl -tag -width Ds
 .It Fl o , Fl -output Ar dir
 Carve workspace, where the ranked headers are written; refused as the

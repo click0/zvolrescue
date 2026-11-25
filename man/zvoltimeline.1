@@ -66,6 +66,19 @@ event: the uberblock of that moment is kept in the MOS when its TXG
 has long left the rings, and the pool reads there as it was, so that
 what was destroyed since is last seen at it and the command printed
 reads it there.
+With
+.Fl -roots
+the object-set headers found in raw space are TXGs of the history as
+well: they reach back past the rings, and are the whole of it where no
+uberblock is left.
+Such a TXG says no time, and its events carry none; no checksum
+vouches for the header, and what is under it is verified as any block
+is.
+The header says how many of the TXGs read are theirs, the JSON names
+them in
+.Ql carved_txgs ,
+and the command printed for what was destroyed names the file of
+headers, without which it would find the TXG nowhere.
 One read in part \(em part of its dataset tree did not read \(em is
 counted as read in part, and what lies there is taken as it was at the
 TXG before; it is not destroyed there, and a dataset destroyed later is
@@ -156,6 +169,11 @@ As in
 (try every member order the layout leaves open),
 .Fl -pool-guid Ar guid
 (which pool when several are found),
+.Fl -roots Ar file | dir
+(the object-set headers
+.Xr zvolcarve 1
+.Cm roots
+found, as TXGs to read at),
 .Fl -assume-member Ar path Ns Op = Ns Ar guid
 (a member whose labels are gone),
 .Fl -ignore-unknown-features ,

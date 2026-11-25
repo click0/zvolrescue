@@ -13,6 +13,45 @@ development milestone that names what changed when — the sections below
 are their record — and ships inside the next version that does get
 tagged. `v0.7.1` is the release that carries those six.
 
+## Unreleased
+
+### Added
+
+* **A pool no uberblock leads to is read at the headers `zvolcarve
+  roots` found.** With every uberblock ring gone `list`, `zvolfiles`
+  and `zvoltimeline` ended "no verified uberblock" (exit 3): the carver
+  found the MOS and the volumes, and named them, and nothing else of
+  the pool could be read — a filesystem, a snapshot, the history, a
+  volume by its name as `dump` extracts one. `--roots FILE|DIR`, taken
+  by `zvolrescue list` and `dump`, `zvolfiles`, `zvoltimeline` and
+  `zvolcarve`, gives the `roots.json` that `roots` wrote. Each header
+  in it that a pool walked out of is a transaction group to read at,
+  beside those of whatever uberblocks are left — where the uberblock
+  of a group is left, the uberblock is what the group is read by — so
+  the newest that reads is listed, a dataset is looked for from the
+  newest back, and `--txg` names one. The header is read again from the
+  member it is on, and a file that is not of these members as they are
+  is refused (exit 1). Nothing vouches for a header that was found, as
+  an uberblock's root pointer vouches for the one it leads to; every
+  block under it is verified by its pointer, as any is. It says no
+  time: such a group's `time` is `unknown`, the timeline's events of it
+  carry none, and `--before` chooses none of them. A run that read at
+  one says so, with the member and the byte offset (`carved_root`;
+  `carved_txgs` in `list` and the timeline); the file is among the
+  record's inputs, `zvolreport` warns of such a run, and the command
+  the timeline prints for what was destroyed names the file. `roots`
+  prints the command that lists the pool so, and `scan --like` reads a
+  sibling at a header. A pool with no label either takes its name and
+  GUID from the MOS such a header leads to. On a pool made through
+  libzpool with every label zeroed whole and the layout in `--hints`:
+  `list` lists it, `dump` writes a live volume and two destroyed ones
+  by their names, byte for byte, and `zvoltimeline` tells their
+  creation and destruction with the commands that get them back; on
+  the same pool with its labels, a header gave a transaction group the
+  ring had lost. Not done: `--search-order` does not try an order by a
+  header, so a raidz with no label and no uberblock needs its members
+  given in order.
+
 ## v0.9.17 — 2026-11-25
 
 **What a pool still holds is read, and what was not checked is counted.**

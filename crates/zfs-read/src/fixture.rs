@@ -14,7 +14,8 @@ use zfs_ondisk::dsl::encode::{dsl_dataset, dsl_dir};
 use zfs_ondisk::dsl::{DslDatasetPhys, DslDirPhys};
 use zfs_ondisk::indirect;
 use zfs_ondisk::label::{
-    label_offsets, LABEL_SIZE, UBERBLOCK_RING_OFFSET, VDEV_PHYS_OFFSET, VDEV_PHYS_SIZE,
+    label_offsets, LABEL_SIZE, UBERBLOCK_RING_OFFSET, UBERBLOCK_RING_SIZE, VDEV_PHYS_OFFSET,
+    VDEV_PHYS_SIZE,
 };
 use zfs_ondisk::nvlist::encode::{list, pack};
 use zfs_ondisk::nvlist::{NvList, Value};
@@ -1803,6 +1804,49 @@ pub fn two_top_raidz_members(
         }
     }
     members
+}
+
+/// Zero the four uberblock rings of a member image. What is left is a
+/// pool no uberblock leads to (SPEC F-64); its labels still say the
+/// layout.
+pub fn zero_uberblock_rings(member: &mut [u8]) {
+    for label in label_offsets(member.len() as u64).expect("four labels") {
+        let ring = (label + UBERBLOCK_RING_OFFSET) as usize;
+        member[ring..ring + UBERBLOCK_RING_SIZE as usize].fill(0);
+    }
+}
+
+/// The `roots.json` that `zvolcarve roots` writes for these members, as
+/// far as a run that reads the pool by it goes (SPEC F-64): every
+/// object-set header lying plain on them, once each, said to have led
+/// to a pool. For the tests of the programs that take `--roots`, which
+/// have no `zvolcarve` to run.
+pub fn roots_json(members: &[Vec<u8>], paths: &[String]) -> String {
+    use crate::carve::{scan_member, Options};
+    let mut seen: Vec<zfs_ondisk::dmu::ObjsetPhys> = Vec::new();
+    let mut rows = Vec::new();
+    for (i, m) in members.iter().enumerate() {
+        let src = zvolrescue_io::MemSource::new(m.clone());
+        let opts = Options {
+            codecs: Vec::new(),
+            collect_hits: false,
+            ..Options::default()
+        };
+        let scan = scan_member(&src, i, 12, &opts).expect("the member reads");
+        for r in scan.roots {
+            if seen.contains(&r.objset) {
+                continue;
+            }
+            rows.push(format!(
+                r#"{{"member":"{}","offset":{},"found":"plaintext","birth":{},"datasets":1}}"#,
+                paths[i].replace('\\', "\\\\").replace('"', "\\\""),
+                r.offset,
+                crate::pool::CarvedRoot::txg_of(&r.objset)
+            ));
+            seen.push(r.objset);
+        }
+    }
+    format!(r#"{{"version":1,"roots":[{}]}}"#, rows.join(","))
 }
 
 /// A mirror whose newest TXG no longer has `tank/vm/disk0` while the

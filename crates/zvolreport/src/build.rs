@@ -563,6 +563,19 @@ pub fn assemble(records: &[(LogRef, Vec<Record>)], opts: &Options) -> Report {
             }
             extractions.extend(of_run);
         }
+        // Read from a header found in raw space and no uberblock (SPEC
+        // F-64): what was extracted is verified block by block as any
+        // other, and the report says what the header is not vouched
+        // for by.
+        if let Some(root) = r.result.get("carved_root").filter(|c| c.is_object()) {
+            warnings.push(format!(
+                "{}: the pool was read from the object-set header at byte {} of {} (--roots), not from an uberblock: no checksum vouches for that header, and when its transaction group was written is not known : {}",
+                r.tool,
+                u64_at(root, "offset").unwrap_or(0),
+                str_at(root, "member").unwrap_or_else(|| "a member".into()),
+                r.argv.join(" ")
+            ));
+        }
         extracted_by.resize(extractions.len(), commands.len() - 1);
         if r.status != 0 {
             warnings.push(format!(
@@ -1728,6 +1741,31 @@ mod tests {
                 &"tank/vm/disk0: txg 12 names it and does not read it (object set: every copy failed its checksum); extracted at the older txg 9"
                     .to_string()
             ),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    /// A run that read the pool from a header found in raw space and no
+    /// uberblock (`--roots`) is said in the report: what it extracted
+    /// is verified like any other, and the header it started from is
+    /// vouched for by nothing.
+    #[test]
+    fn a_run_that_read_from_a_header_found_in_raw_space_says_so() {
+        let mut d = dump(9, 0, false);
+        assert!(
+            assemble(&log(vec![record("zvolrescue", 11, 0, d.clone())]), &opts())
+                .warnings
+                .iter()
+                .all(|w| !w.contains("--roots"))
+        );
+        d["carved_root"] =
+            serde_json::json!({"member": "/case/a.img", "offset": 6365184, "found": "plaintext"});
+        let r = assemble(&log(vec![record("zvolrescue", 11, 0, d)]), &opts());
+        assert!(
+            r.warnings.iter().any(|w| w.starts_with(
+                "zvolrescue: the pool was read from the object-set header at byte 6365184 of /case/a.img (--roots), not from an uberblock: no checksum vouches for that header"
+            )),
             "{:?}",
             r.warnings
         );

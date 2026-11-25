@@ -1458,7 +1458,7 @@ pub fn run(
             .map(|s| s.as_ref().map_or(0, |s| s.base))
             .collect();
         for pool in &mut assembled {
-            let removed = removed_tops_of(&scans, opened.clone(), &bases, pool);
+            let removed = removed_tops_of(&scans, opened.clone(), &bases, pool, &[]);
             pool.note_removed_tops(removed);
         }
     }
@@ -1571,7 +1571,7 @@ pub fn run(
                 .map(|s| s.as_ref().map_or(0, |s| s.base))
                 .collect();
             zvol_common::members::place_hinted(&hints.bases, &mut scans, &opened, &mut at);
-            match zvol_common::members::identify_hinted(hints.layout, &scans, &opened, &at) {
+            match zvol_common::members::identify_hinted(hints.layout, &scans, &opened, &at, &[]) {
                 Ok(h) => h,
                 Err(e) => {
                     errln!("zvolrescue: {e}");

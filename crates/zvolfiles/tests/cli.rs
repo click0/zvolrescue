@@ -40,6 +40,89 @@ fn run(args: &[&str]) -> (i32, String) {
     )
 }
 
+/// A filesystem of a pool no uberblock leads to is read at an
+/// object-set header `zvolcarve roots` found (`--roots`, SPEC F-64):
+/// the same files, and the run says what it read from. Without the
+/// file there was no transaction group to read at.
+#[test]
+fn a_filesystem_is_read_at_a_header_found_where_no_uberblock_is_left() {
+    use zfs_read::fixture::{roots_json, zero_uberblock_rings};
+    let dir = scratch("roots");
+    let mut pool = Pool::mirror("tank", 0x5eed_0000_0000_0004, 12)
+        .txgs(&[(4816228, 1757100000), (4816229, 1757100005)]);
+    let mut images = zpl_members(&mut pool, 64 * 1024 * 1024);
+    let m: Vec<String> = (0..2)
+        .map(|i| {
+            dir.join(format!("member{i}.img"))
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    let write = |images: &[Vec<u8>]| {
+        for (p, img) in m.iter().zip(images) {
+            std::fs::write(p, img).expect("write member");
+        }
+    };
+    write(&images);
+    let listed = |more: &[&str]| -> (i32, serde_json::Value, String) {
+        let mut args = vec![
+            "-f",
+            "json",
+            "list",
+            "tank/fs",
+            "-R",
+            m[0].as_str(),
+            m[1].as_str(),
+        ];
+        args.extend(more);
+        let out = Command::new(env!("CARGO_BIN_EXE_zvolfiles"))
+            .args(&args)
+            .output()
+            .expect("run zvolfiles");
+        (
+            out.status.code().expect("exit code"),
+            serde_json::from_slice(&out.stdout).unwrap_or(serde_json::Value::Null),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+    let (code, before, err) = listed(&[]);
+    assert_eq!(code, 0, "{err}");
+
+    for img in &mut images {
+        zero_uberblock_rings(img);
+    }
+    write(&images);
+    let (code, _, err) = listed(&[]);
+    assert_eq!(code, 3, "{err}");
+    assert!(
+        err.contains("no verified uberblock on these members"),
+        "{err}"
+    );
+
+    let roots = dir.join("roots.json").to_string_lossy().into_owned();
+    std::fs::write(&roots, roots_json(&images, &m)).unwrap();
+    let (code, after, err) = listed(&["--roots", &roots]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(after["files"], before["files"], "{after}");
+    assert_eq!(after["carved_root"]["member"], m[0].as_str(), "{after}");
+    assert!(before.get("carved_root").is_none(), "{before}");
+    assert!(
+        err.contains("is read from the object-set header found at byte")
+            && err.contains("not from an uberblock"),
+        "{err}"
+    );
+
+    let out = dir.join("out").to_string_lossy().into_owned();
+    let (code, err) = run(&[
+        "-q", "extract", "tank/fs", "--roots", &roots, "-o", &out, &m[0], &m[1],
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(dir.join("out/hello.txt").is_file());
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("out/manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["carved_root"], after["carved_root"], "{manifest}");
+}
+
 /// What is already in the output directory is never written through: a
 /// symbolic link to a member, or to a directory outside the tree, is
 /// replaced and what it pointed at is untouched. A member lying there

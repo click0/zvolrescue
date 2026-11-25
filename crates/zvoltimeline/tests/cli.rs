@@ -42,6 +42,83 @@ fn run(args: &[&str]) -> (i32, String) {
     )
 }
 
+/// The history of a pool no uberblock leads to is read from the
+/// object-set headers `zvolcarve roots` found (`--roots`, SPEC F-64):
+/// each is a transaction group, the destruction is between two of
+/// them, and the command that gets the volume back names the file of
+/// headers, without which it would find no transaction group at all.
+/// Such a group says no time, and none is printed for it.
+#[test]
+fn the_history_is_read_from_headers_found_where_no_uberblock_is_left() {
+    use zfs_read::fixture::{destroyed_zvol_members, roots_json, zero_uberblock_rings};
+    let dir = scratch("roots");
+    let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1), (200, 2)]);
+    let (mut images, _, last_with) = destroyed_zvol_members(&mut pool, SIZE);
+    for img in &mut images {
+        zero_uberblock_rings(img);
+    }
+    let m: Vec<String> = images
+        .iter()
+        .enumerate()
+        .map(|(i, img)| {
+            let p = dir.join(format!("member{i}.img"));
+            std::fs::write(&p, img).expect("write member");
+            p.to_string_lossy().into_owned()
+        })
+        .collect();
+    let (code, err) = run(&["-q", &m[0], &m[1]]);
+    assert_eq!(code, 3, "{err}");
+    assert!(err.contains("no verified uberblock"), "{err}");
+
+    let roots = dir.join("roots.json").to_string_lossy().into_owned();
+    std::fs::write(&roots, roots_json(&images, &m)).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_zvoltimeline"))
+        .args(["--roots", &roots, &m[0], &m[1]])
+        .output()
+        .expect("run");
+    assert_eq!(out.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("2 transaction group(s) still readable")
+            && text.contains("2 of them from object-set headers found in raw space (--roots)"),
+        "{text}"
+    );
+    let line = text
+        .lines()
+        .find(|l| l.contains(" destroyed ") && l.contains("tank/vm/disk0 "))
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(
+        line.contains(&format!("last seen at txg {last_with}")) && line.contains(" — "),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "-> zvolrescue dump tank/vm/disk0 {} {} --roots {roots} --txg {last_with} -o",
+            m[0], m[1]
+        )),
+        "{text}"
+    );
+
+    let out = Command::new(env!("CARGO_BIN_EXE_zvoltimeline"))
+        .args(["-q", "-f", "json", "--roots", &roots, &m[0], &m[1]])
+        .output()
+        .expect("run");
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON");
+    assert_eq!(doc["txgs"], serde_json::json!([100, 200]), "{doc}");
+    assert_eq!(doc["carved_txgs"], serde_json::json!([100, 200]), "{doc}");
+    let gone = doc["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["event"] == "destroyed" && e["object"] == "tank/vm/disk0")
+        .unwrap_or_else(|| panic!("{doc}"));
+    assert!(gone.get("time").is_none_or(|t| t.is_null()), "{gone}");
+    assert!(
+        gone["recover_with"].as_str().unwrap().contains("--roots"),
+        "{gone}"
+    );
+}
+
 /// `-o` is never a file the run reads: naming a member replaced the
 /// member with the report and exited 0. A report beside the members is
 /// still written.

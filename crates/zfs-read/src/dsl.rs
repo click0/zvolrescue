@@ -19,7 +19,9 @@ use zfs_ondisk::zap::Value;
 use zfs_ondisk::Endian;
 
 use crate::dmu::{DnodeArray, ObjectReader};
-use crate::pool::{select_uberblock, uberblock_candidates, Candidate, PoolAssembly, TxgSelect};
+use crate::pool::{
+    root_candidates, select_uberblock, Candidate, CarvedRoot, PoolAssembly, TxgSelect,
+};
 use crate::vdev::DeviceScan;
 use crate::zap::read_zap;
 use crate::zio::{PoolReader, ReadError};
@@ -467,6 +469,28 @@ pub fn open_mos<'r, 'a>(
     open_mos_objset(reader, os, rootbp.endian)
 }
 
+/// Open the MOS a candidate leads to: behind its uberblock, or under the
+/// header found in raw space that it is (SPEC F-64).
+pub fn open_mos_at<'r, 'a>(
+    reader: &'r PoolReader<'a>,
+    c: &Candidate,
+) -> Result<DnodeArray<'r, 'a>, ReadError> {
+    match &c.carved {
+        Some(root) => {
+            trace!(
+                "dsl",
+                "open MOS at txg {}: the header found at byte {} of device {} ({})",
+                root.txg,
+                root.offset,
+                root.device,
+                root.found.as_str()
+            );
+            open_mos_objset(reader, root.objset.clone(), Endian::Little)
+        }
+        None => open_mos(reader, &c.ub),
+    }
+}
+
 /// The same, from an objset already in hand rather than one reached
 /// through an uberblock's root pointer (SPEC F-64).
 ///
@@ -631,8 +655,9 @@ pub fn checkpoint_of(mos: &DnodeArray<'_, '_>) -> Result<Option<Uberblock>, Read
 }
 
 /// Every transaction group the pool can be read at, newest first: those
-/// of the uberblock rings ([`uberblock_candidates`]) and, when the pool
-/// has one, its checkpoint.
+/// of the uberblock rings ([`uberblock_candidates`]), those of the
+/// headers found in raw space that the run was given (`roots`, SPEC
+/// F-64) and, when the pool has one, its checkpoint.
 ///
 /// The checkpoint is asked of the newest transaction group whose MOS
 /// opens and whose object directory reads — the pool as an import would
@@ -648,11 +673,12 @@ pub fn txg_candidates(
     reader: &PoolReader<'_>,
     scans: &[Option<DeviceScan>],
     pool: &PoolAssembly,
+    roots: &[CarvedRoot],
 ) -> Vec<Candidate> {
-    let mut candidates = uberblock_candidates(scans, pool);
+    let mut candidates = root_candidates(scans, pool, roots);
     let mut found = None;
     for c in &candidates {
-        let kept = open_mos(reader, &c.ub).and_then(|mos| checkpoint_of(&mos));
+        let kept = open_mos_at(reader, c).and_then(|mos| checkpoint_of(&mos));
         match kept {
             Ok(Some(ub)) if ub.txg >= c.ub.txg => trace!(
                 "txg",
@@ -701,6 +727,7 @@ pub fn txg_candidates(
                     device,
                     label,
                     checkpoint: true,
+                    carved: None,
                 },
             );
         }
@@ -774,6 +801,7 @@ pub fn removed_tops_of(
     devices: Vec<Option<&dyn BlockSource>>,
     bases: &[u64],
     pool: &PoolAssembly,
+    roots: &[CarvedRoot],
 ) -> Vec<(u64, Rc<Mapping>)> {
     let removal_active = pool
         .features_for_read
@@ -782,7 +810,7 @@ pub fn removed_tops_of(
     if pool.missing_tops().is_empty() || !removal_active {
         return Vec::new();
     }
-    let candidates = uberblock_candidates(scans, pool);
+    let candidates = root_candidates(scans, pool, roots);
     let Some(chosen) = select_uberblock(&candidates, TxgSelect::Newest) else {
         trace!(
             "indirect",
@@ -792,7 +820,7 @@ pub fn removed_tops_of(
         return Vec::new();
     };
     let reader = PoolReader::new(pool, devices).with_base_offsets(bases);
-    match open_mos(&reader, &chosen.ub) {
+    match open_mos_at(&reader, chosen) {
         Ok(_) => {
             let removed: Vec<(u64, Rc<Mapping>)> = reader
                 .removed_mappings()
@@ -826,17 +854,19 @@ pub fn removed_tops_of(
 /// with its GUID and the numbers its space is laid out by, the features
 /// a reader has to know — and it is there when every label is gone: a
 /// pool read through a hand-written layout says by it what it is
-/// (SPEC F-65, F-67).
+/// (SPEC F-65, F-67). Where no uberblock is left either, a header found
+/// in raw space leads to it as well (`roots`, F-64).
 pub fn pool_config(
     scans: &[Option<DeviceScan>],
     devices: Vec<Option<&dyn BlockSource>>,
     bases: &[u64],
     pool: &PoolAssembly,
+    roots: &[CarvedRoot],
 ) -> Option<NvList> {
-    let candidates = uberblock_candidates(scans, pool);
+    let candidates = root_candidates(scans, pool, roots);
     let reader = PoolReader::new(pool, devices).with_base_offsets(bases);
     candidates.iter().find_map(|c| {
-        let mos = open_mos(&reader, &c.ub).ok()?;
+        let mos = open_mos_at(&reader, c).ok()?;
         let dir = object_directory(&mos).ok()?;
         let config = dir.iter().find(|(n, _)| n == CONFIG).map(|(_, v)| *v)?;
         read_packed_nvlist(&mos, config).ok()
@@ -1849,6 +1879,146 @@ mod pending_tests {
     }
 }
 
+/// A pool read from the headers of its MOS found in raw space, where no
+/// uberblock leads to them (SPEC F-64).
+#[cfg(test)]
+mod carved_root_tests {
+    use super::*;
+    use crate::carve::{root_at, scan_member, Found, Options};
+    use crate::fixture::{destroyed_zvol_members, zero_uberblock_rings, Pool};
+    use crate::pool::assemble;
+    use crate::vdev::scan_device;
+    use zfs_ondisk::label::LABEL_SIZE;
+    use zvolrescue_io::MemSource;
+
+    const SIZE: u64 = 64 * LABEL_SIZE;
+
+    /// The headers lying plain on a member, as `zvolcarve roots` finds
+    /// them, newest first.
+    fn roots_on(src: &MemSource, device: usize) -> Vec<CarvedRoot> {
+        let opts = Options {
+            codecs: Vec::new(),
+            collect_hits: false,
+            ..Options::default()
+        };
+        let mut roots: Vec<CarvedRoot> = scan_member(src, device, 12, &opts)
+            .expect("the member reads")
+            .roots
+            .into_iter()
+            .map(|r| CarvedRoot {
+                device,
+                offset: r.offset,
+                found: r.found,
+                txg: CarvedRoot::txg_of(&r.objset),
+                objset: r.objset,
+            })
+            .collect();
+        roots.sort_by_key(|r| std::cmp::Reverse(r.txg));
+        roots
+    }
+
+    fn names_at(reader: &PoolReader<'_>, c: &Candidate) -> Vec<String> {
+        let mos = open_mos_at(reader, c).expect("the MOS opens");
+        let tree = walk(&mos, "tank").expect("the dataset tree");
+        tree.datasets.into_iter().map(|d| d.name).collect()
+    }
+
+    /// With every uberblock ring zeroed the pool has no transaction
+    /// group to be read at, and with the headers found on its members
+    /// it has theirs: each opens, and names what the pool held then —
+    /// the volume destroyed since, at the older of them. Such a
+    /// candidate says no time, and is at or before none.
+    #[test]
+    fn a_pool_is_read_at_the_headers_found_where_no_uberblock_is_left() {
+        let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1), (200, 2)]);
+        let (mut members, newest, previous) = destroyed_zvol_members(&mut pool, SIZE);
+        for m in &mut members {
+            zero_uberblock_rings(m);
+        }
+        let sources: Vec<MemSource> = members.into_iter().map(MemSource::new).collect();
+        let scans: Vec<_> = sources.iter().map(|s| scan_device(s).ok()).collect();
+        let pool = assemble(&scans).into_iter().next().expect("one pool");
+        let devices: Vec<Option<&dyn BlockSource>> = sources
+            .iter()
+            .map(|s| Some(s as &dyn BlockSource))
+            .collect();
+        let reader = PoolReader::new(&pool, devices);
+        assert!(txg_candidates(&reader, &scans, &pool, &[]).is_empty());
+
+        let roots = roots_on(&sources[0], 0);
+        let candidates = txg_candidates(&reader, &scans, &pool, &roots);
+        assert_eq!(
+            candidates.iter().map(|c| c.ub.txg).collect::<Vec<_>>(),
+            [newest, previous]
+        );
+        assert!(candidates.iter().all(|c| c.carved.is_some()));
+        assert!(candidates.iter().all(|c| c.time().is_none()));
+        assert!(select_uberblock(&candidates, TxgSelect::Before(u64::MAX)).is_none());
+        assert_eq!(
+            select_uberblock(&candidates, TxgSelect::Exact(previous)).map(|c| c.ub.txg),
+            Some(previous)
+        );
+        let now = names_at(&reader, &candidates[0]);
+        let then = names_at(&reader, &candidates[1]);
+        assert!(!now.iter().any(|n| n == "tank/vm/disk0"), "{now:?}");
+        assert!(then.iter().any(|n| n == "tank/vm/disk0"), "{then:?}");
+
+        // Read again where it was found, it is the header it was; and
+        // where there is none, none.
+        let r = &roots[0];
+        assert_eq!(
+            root_at(&sources[0], r.offset, Found::Plaintext).expect("reads"),
+            Some(r.objset.clone())
+        );
+        assert_eq!(
+            root_at(&sources[0], r.offset + 512, Found::Plaintext).expect("reads"),
+            None
+        );
+    }
+
+    /// Where the uberblock of a transaction group is left, it is what
+    /// that group is read by: it leads to the same MOS and vouches for
+    /// it. A header is taken for the groups no uberblock is of.
+    #[test]
+    fn a_header_does_not_stand_in_for_an_uberblock_that_is_there() {
+        let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1), (200, 2)]);
+        let (members, newest, previous) = destroyed_zvol_members(&mut pool, SIZE);
+        let sources: Vec<MemSource> = members.into_iter().map(MemSource::new).collect();
+        let scans: Vec<_> = sources.iter().map(|s| scan_device(s).ok()).collect();
+        let pool = assemble(&scans).into_iter().next().expect("one pool");
+        let devices: Vec<Option<&dyn BlockSource>> = sources
+            .iter()
+            .map(|s| Some(s as &dyn BlockSource))
+            .collect();
+        let reader = PoolReader::new(&pool, devices);
+        let roots = roots_on(&sources[0], 0);
+        assert_eq!(roots.len(), 2);
+        let candidates = txg_candidates(&reader, &scans, &pool, &roots);
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|c| (c.ub.txg, c.carved.is_some()))
+                .collect::<Vec<_>>(),
+            [(newest, false), (previous, false)]
+        );
+        // One of a group between the two is one more, in its place.
+        let mut between = roots[1].clone();
+        between.txg = 150;
+        let candidates = txg_candidates(&reader, &scans, &pool, &[between]);
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|c| (c.ub.txg, c.time()))
+                .collect::<Vec<_>>(),
+            [(newest, Some(2)), (150, None), (previous, Some(1))]
+        );
+        // And the line of history is told through it as through any.
+        let cmp =
+            crate::lineage::compare_at(&reader, &candidates[1], &candidates[0]).expect("both open");
+        assert!(cmp.parted.is_none(), "{:?}", cmp.parted);
+    }
+}
+
 /// Telling a removed top-level vdev from a missing one (SPEC F-69).
 /// The pool checkpoint as one more transaction group to read at.
 #[cfg(test)]
@@ -1871,7 +2041,7 @@ mod checkpoint_tests {
             .map(|s| Some(s as &dyn BlockSource))
             .collect();
         let reader = PoolReader::new(&pool, devices);
-        let candidates = txg_candidates(&reader, &scans, &pool);
+        let candidates = txg_candidates(&reader, &scans, &pool, &[]);
         // What the checkpoint has that the newest group has not.
         let names = candidates
             .iter()
@@ -1998,7 +2168,7 @@ mod removed_tops_tests {
             .map(|s| Some(s as &dyn BlockSource))
             .collect();
         let bases = vec![0u64; sources.len()];
-        removed_tops_of(scans, devices, &bases, pool)
+        removed_tops_of(scans, devices, &bases, pool, &[])
     }
 
     fn ids(removed: &[(u64, Rc<Mapping>)]) -> Vec<u64> {

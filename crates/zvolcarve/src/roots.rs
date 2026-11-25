@@ -542,7 +542,18 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
 
     match g.format {
         Format::Json => print!("{json}"),
-        Format::Text => print(&doc, &path),
+        Format::Text => {
+            print(&doc, &path);
+            // What a header is found for: the other programs read the
+            // pool at it, given the file this run wrote.
+            if doc.roots.iter().chain(&doc.newest).any(|r| r.datasets > 0) {
+                outln!(
+                    "  to read the pool at them: zvolrescue list {} --roots {}",
+                    spec.as_arguments().join(" "),
+                    zvol_common::shell_quote(&opts.output.display().to_string())
+                );
+            }
+        }
     }
     // A run that found nothing is not a failure of the run; it is an
     // answer, and the exit code says which answer it was.

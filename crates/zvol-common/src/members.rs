@@ -13,9 +13,10 @@ use std::path::PathBuf;
 use zfs_read::bind::{bind_by_reading, Verdict};
 use zfs_read::dsl::removed_tops_of;
 use zfs_read::hints::{group_at, ordered_groups, search_order, LayoutHints};
-use zfs_read::pool::{assemble, PoolAssembly};
+use zfs_read::pool::{assemble, Candidate, CarvedRoot, PoolAssembly};
 use zfs_read::vdev::DeviceScan;
 use zfs_read::zeropoint::scan_with_recovered_base_opts;
+use zfs_read::zio::PoolReader;
 use zvolrescue_io::medium::Ledger;
 use zvolrescue_io::{BlockSource, FileSource};
 
@@ -34,8 +35,13 @@ pub struct Members {
     /// Where each member's vdev begins, indexed like the scans.
     pub base_offsets: Vec<u64>,
     /// Files read besides the members: the imagers' maps (SPEC F-72),
-    /// and the layout `--hints` gave (F-65).
+    /// the layout `--hints` gave (F-65) and the headers `--roots` gave
+    /// (F-64).
     pub map_files: Vec<PathBuf>,
+    /// The object-set headers of `--roots`, read again from the members
+    /// they are on (SPEC F-64): transaction groups the pool is read at
+    /// beside those of its uberblocks. Empty without `--roots`.
+    pub roots: Vec<CarvedRoot>,
     /// The run's ledger of refused device reads (SPEC F-33, N-10):
     /// what to report, and whether the run was stopped.
     pub ledger: std::sync::Arc<Ledger>,
@@ -69,6 +75,179 @@ impl Members {
     pub fn any_failed(&self) -> bool {
         self.scans.iter().any(|s| s.is_none())
     }
+
+    /// Every transaction group `pool` can be read at, newest first: of
+    /// its uberblocks, of the headers `--roots` gave, and its
+    /// checkpoint ([`zfs_read::dsl::txg_candidates`]).
+    pub fn candidates(&self, reader: &PoolReader<'_>, pool: &PoolAssembly) -> Vec<Candidate> {
+        zfs_read::dsl::txg_candidates(reader, &self.scans, pool, &self.roots)
+    }
+
+    /// What a run says, once, of the place it reads the pool at when
+    /// that is a header found in raw space and no uberblock.
+    pub fn carved_said(&self, c: &Candidate) -> Option<String> {
+        let root = c.carved.as_ref()?;
+        Some(format!(
+            "txg {} is read from the object-set header found at byte {} of {} (--roots), not from an uberblock: \
+             no checksum vouches for the header itself, every block under it is verified by its own; \
+             when the group was written is not known",
+            root.txg,
+            root.offset,
+            self.paths[root.device].display()
+        ))
+    }
+
+    /// The same place, for a run's record.
+    pub fn carved_record(&self, c: &Candidate) -> Option<CarvedOut> {
+        let root = c.carved.as_ref()?;
+        Some(CarvedOut {
+            member: self.paths[root.device].clone(),
+            offset: root.offset,
+            found: root.found.as_str().to_string(),
+        })
+    }
+}
+
+/// Where the header a run read the pool from is (SPEC F-64): in a run's
+/// output and record as `carved_root`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct CarvedOut {
+    /// The member it is on.
+    pub member: PathBuf,
+    /// Byte offset in that member.
+    pub offset: u64,
+    /// `plaintext`, or the compression of the block it is in.
+    pub found: String,
+}
+
+/// The time of a transaction group as a run writes it: of its
+/// uberblock, or `unknown` for a header found in raw space, which says
+/// none.
+pub fn time_said(c: &Candidate) -> String {
+    c.time()
+        .map_or_else(|| "unknown".to_string(), crate::timefmt::iso8601)
+}
+
+/// The name of the file `zvolcarve roots` writes into its workspace.
+pub const ROOTS_FILE: &str = "roots.json";
+
+/// What of a `roots.json` a run reads the pool by.
+#[derive(serde::Deserialize)]
+struct RootsFile {
+    version: u32,
+    #[serde(default)]
+    roots: Vec<RootEntry>,
+    #[serde(default)]
+    newest: Option<RootEntry>,
+}
+
+#[derive(serde::Deserialize)]
+struct RootEntry {
+    member: String,
+    offset: u64,
+    found: String,
+    birth: u64,
+    #[serde(default)]
+    datasets: usize,
+}
+
+/// The headers a `roots.json` lists that a pool walked out of, each
+/// read again from the member it is on (SPEC F-64).
+///
+/// The file says where a header is and what it led to when it was
+/// found; the header itself is taken from the member, where it is now.
+/// One that is no longer there — another image, the same one written
+/// since — is refused, with the file: it is not of these members.
+fn load_roots(
+    file: &std::path::Path,
+    paths: &[PathBuf],
+    sources: &[Option<FileSource>],
+) -> Result<Vec<CarvedRoot>, String> {
+    let text =
+        std::fs::read_to_string(file).map_err(|e| format!("--roots {}: {e}", file.display()))?;
+    let parsed: RootsFile = serde_json::from_str(&text).map_err(|e| {
+        format!(
+            "--roots {}: not what `zvolcarve roots` writes ({e})",
+            file.display()
+        )
+    })?;
+    if parsed.version != 1 {
+        return Err(format!(
+            "--roots {}: version {} of the file, and this build reads version 1",
+            file.display(),
+            parsed.version
+        ));
+    }
+    let mut roots: Vec<CarvedRoot> = Vec::new();
+    // The newest first, wherever the ranking put it: of two headers of
+    // one transaction group the first given is the one read.
+    for e in parsed.newest.iter().chain(&parsed.roots) {
+        if e.datasets == 0 {
+            continue;
+        }
+        let named = std::path::Path::new(&e.member);
+        let Some(device) = paths
+            .iter()
+            .position(|p| p == named || crate::same_file(p, named))
+        else {
+            return Err(format!(
+                "--roots {}: its header of txg {} is on {}, which is not among the members given",
+                file.display(),
+                e.birth,
+                crate::text::shown(&e.member)
+            ));
+        };
+        if roots
+            .iter()
+            .any(|r| r.device == device && r.offset == e.offset)
+        {
+            continue;
+        }
+        let Some(found) = zfs_read::carve::Found::named(&e.found) else {
+            return Err(format!(
+                "--roots {}: a header found as {:?}, which is no way this build finds one",
+                file.display(),
+                e.found
+            ));
+        };
+        let Some(src) = sources[device].as_ref() else {
+            // The member did not open, and that has been said.
+            continue;
+        };
+        let not_there = || {
+            format!(
+                "--roots {}: no object-set header of txg {} at byte {} of {}: the file is not of these members as they are now",
+                file.display(),
+                e.birth,
+                e.offset,
+                paths[device].display()
+            )
+        };
+        let objset = match zfs_read::carve::root_at(src, e.offset, found) {
+            Ok(Some(o)) => o,
+            Ok(None) => return Err(not_there()),
+            Err(err) => {
+                return Err(format!(
+                    "--roots {}: byte {} of {}: {err}",
+                    file.display(),
+                    e.offset,
+                    paths[device].display()
+                ))
+            }
+        };
+        let txg = CarvedRoot::txg_of(&objset);
+        if txg != e.birth {
+            return Err(not_there());
+        }
+        roots.push(CarvedRoot {
+            device,
+            offset: e.offset,
+            found,
+            txg,
+            objset,
+        });
+    }
+    Ok(roots)
 }
 
 /// Try the orders a layout leaves open and keep the one the checksums
@@ -234,8 +413,10 @@ pub fn identify_hinted(
     scans: &[Option<DeviceScan>],
     devices: &[Option<&dyn BlockSource>],
     bases: &[u64],
+    roots: &[CarvedRoot],
 ) -> Result<Hinted, String> {
-    let config = zfs_read::dsl::pool_config(scans, devices.to_vec(), bases, &layout.assemble());
+    let config =
+        zfs_read::dsl::pool_config(scans, devices.to_vec(), bases, &layout.assemble(), roots);
     let own = config.as_ref().and_then(|c| c.u64("pool_guid"));
     if let (Some(given), Some(own)) = (layout.guid, own) {
         if given != own {
@@ -606,6 +787,39 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
         return Err(exit::EVIDENCE);
     }
     refuse_unaccounted_features(&scans, spec.ignore_unknown_features)?;
+    // The headers `zvolcarve roots` found, where the run was given them
+    // (SPEC F-64): read before the layout is named, because a pool with
+    // no label and no uberblock says its own name and GUID nowhere but
+    // in the MOS such a header leads to.
+    let roots_file = spec.roots_file();
+    let roots = match &roots_file {
+        Some(file) => {
+            let roots = load_roots(file, &paths, &sources).map_err(|e| {
+                say!("{e}");
+                exit::USAGE
+            })?;
+            if open.ledger.stopped().is_some() {
+                return Err(exit::MEDIUM);
+            }
+            let mut txgs: Vec<u64> = roots.iter().map(|r| r.txg).collect();
+            txgs.sort_unstable();
+            txgs.dedup();
+            match (txgs.first(), txgs.last()) {
+                (Some(a), Some(b)) => say!(
+                    "{}: {} object-set header(s) a pool walked out of, of txg {a}{}: transaction groups to read at beside those of the uberblocks",
+                    file.display(),
+                    roots.len(),
+                    if a == b { String::new() } else { format!(" to {b}") }
+                ),
+                _ => say!(
+                    "{}: no object-set header in it that a pool walked out of: nothing to read at is added",
+                    file.display()
+                ),
+            }
+            roots
+        }
+        None => Vec::new(),
+    };
     let mut bases: Vec<u64> = scans
         .iter()
         .map(|s| s.as_ref().map_or(0, |s| s.base))
@@ -629,8 +843,8 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
             if spec.search_order {
                 layout = search_layout(&layout, &scans, &devices, &bases)?;
             }
-            let Hinted { layout, pool, .. } = identify_hinted(layout, &scans, &devices, &bases)
-                .map_err(|e| {
+            let Hinted { layout, pool, .. } =
+                identify_hinted(layout, &scans, &devices, &bases, &roots).map_err(|e| {
                     say!("{e}");
                     exit::USAGE
                 })?;
@@ -661,7 +875,7 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
     // judges what is missing, so that `--assume-member` does not refuse
     // a leaf on account of a vdev that is gone on purpose.
     for pool in &mut pools {
-        let removed = removed_tops_of(&scans, devices.clone(), &bases, pool);
+        let removed = removed_tops_of(&scans, devices.clone(), &bases, pool, &roots);
         pool.note_removed_tops(removed);
     }
     bind_assumed(spec, &paths, &mut pools, &scans, &devices, &mut bases)?;
@@ -684,7 +898,9 @@ pub fn open_members(spec: &PoolSpec) -> Result<Members, u8> {
             .map_files()
             .into_iter()
             .chain(spec.hints.clone())
+            .chain(roots_file)
             .collect(),
+        roots,
         ledger: open.ledger.clone(),
     })
 }

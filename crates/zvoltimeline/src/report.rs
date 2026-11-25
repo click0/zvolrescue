@@ -7,7 +7,7 @@ use zvol_common::errln;
 
 use serde::Serialize;
 use zfs_ondisk::dmu::ObjsetType;
-use zfs_read::dsl::{open_mos, walk, Dataset, Pending};
+use zfs_read::dsl::{open_mos_at, walk, Dataset, Pending};
 use zfs_read::pool::Candidate;
 use zfs_read::zio::PoolReader;
 use zvol_common::members::{choose_pool, open_members};
@@ -59,8 +59,14 @@ struct TimelineOut {
     pool_guid: String,
     members: Vec<PathBuf>,
     /// Every TXG whose uberblock verified, oldest first: those of the
-    /// uberblock rings and the pool checkpoint.
+    /// uberblock rings and the pool checkpoint — and, with `--roots`,
+    /// those of the headers found in raw space.
     txgs: Vec<u64>,
+    /// Those of `txgs` read from a header `zvolcarve roots` found and
+    /// no uberblock (SPEC F-64): no checksum vouches for such a header,
+    /// and its events carry no time.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    carved_txgs: Vec<u64>,
     /// The TXG of the pool checkpoint (`zpool checkpoint`), when the
     /// pool has one and it is in the range read.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -157,6 +163,13 @@ fn print_text(out: &TimelineOut, w: &mut dyn Write) -> std::io::Result<()> {
                 (u, p) => format!(", {u} unreadable, {p} read in part"),
             }
         )?;
+        if !out.carved_txgs.is_empty() {
+            writeln!(
+                w,
+                "  {} of them from object-set headers found in raw space (--roots), not from uberblocks: no checksum vouches for such a header, and when its group was written is not known",
+                out.carved_txgs.len()
+            )?;
+        }
     }
     if let Some(d) = out
         .dataset
@@ -265,7 +278,7 @@ fn datasets_at(
     pool_name: &str,
     want_pending: bool,
 ) -> Result<(zfs_read::dsl::DatasetTree, Option<Pending>), String> {
-    let mos = open_mos(reader, &c.ub).map_err(|e| format!("the MOS: {e}"))?;
+    let mos = open_mos_at(reader, c).map_err(|e| format!("the MOS: {e}"))?;
     let tree = walk(&mos, pool_name).map_err(|e| format!("the dataset tree: {e}"))?;
     let p = want_pending.then(|| zfs_read::dsl::pending(&mos, &tree.datasets));
     Ok((tree, p))
@@ -291,19 +304,23 @@ struct History {
 
 impl History {
     /// Take in what was read at `txg`, or why nothing was.
+    ///
+    /// `time` is when the group was written, where an uberblock says
+    /// it: a header found in raw space says none (SPEC F-64).
     fn step(
         &mut self,
         txg: u64,
-        timestamp: u64,
+        time: impl Into<Option<u64>>,
         read: Result<(zfs_read::dsl::DatasetTree, Option<Pending>), String>,
     ) {
+        let time: Option<u64> = time.into();
         let (mut tree, pending) = match read {
             Ok(x) => x,
             Err(why) => {
                 self.unreadable.push(txg);
                 self.events.push(Event {
                     txg,
-                    time: Some(timestamp),
+                    time,
                     kind: Kind::Unreadable,
                     object: None,
                     guid: 0,
@@ -337,7 +354,7 @@ impl History {
             let more = tree.errors.len().saturating_sub(3);
             self.events.push(Event {
                 txg,
-                time: Some(timestamp),
+                time,
                 kind: Kind::Unreadable,
                 object: None,
                 guid: 0,
@@ -358,7 +375,7 @@ impl History {
         if let Some(p) = pending {
             self.events.push(Event {
                 txg,
-                time: Some(timestamp),
+                time,
                 kind: Kind::Pending,
                 object: None,
                 guid: 0,
@@ -452,7 +469,7 @@ impl History {
                     if crate::events::promoted_since(d, &now) {
                         self.events.push(Event {
                             txg,
-                            time: Some(timestamp),
+                            time,
                             kind: Kind::Promoted,
                             object: Some(d.name.clone()),
                             guid: d.guid,
@@ -466,7 +483,7 @@ impl History {
                 }
             }
             Some((prev_txg, before)) => {
-                let mut diffed = crate::events::diff(before, &now, txg, Some(timestamp));
+                let mut diffed = crate::events::diff(before, &now, txg, time);
                 for e in &mut diffed {
                     if matches!(e.kind, Kind::Destroyed | Kind::SnapshotDestroyed) {
                         e.last_seen_txg =
@@ -523,7 +540,7 @@ impl History {
 /// A transaction group the pool did not go on from.
 struct OffLine {
     txg: u64,
-    time: u64,
+    time: Option<u64>,
     /// The later one, on the pool's line, that was not made from it.
     later: u64,
     /// Where that line leads: the newest transaction group that opens.
@@ -563,19 +580,19 @@ fn off_the_line(
             break;
         }
         let Some(later) = anchor else {
-            if open_mos(reader, &c.ub).is_ok() {
+            if open_mos_at(reader, c).is_ok() {
                 anchor = Some(c);
                 head = c.ub.txg;
             }
             continue;
         };
-        match zfs_read::lineage::compare(reader, &c.ub, &later.ub) {
+        match zfs_read::lineage::compare_at(reader, c, later) {
             Ok(zfs_read::lineage::Compared {
                 parted: Some(proof),
                 ..
             }) => off.push(OffLine {
                 txg: c.ub.txg,
-                time: c.ub.timestamp,
+                time: c.time(),
                 later: later.ub.txg,
                 head,
                 proof,
@@ -619,8 +636,11 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     // The uberblock rings' transaction groups and the pool checkpoint,
     // when the pool has one (T-01): the oldest the history can start
     // from once the rings have gone round, and where what was destroyed
-    // since is whole. They come newest first; history reads forward.
-    let mut candidates = zfs_read::dsl::txg_candidates(&reader, &members.scans, &pool);
+    // since is whole. And those of the headers `--roots` gave, which
+    // reach back past the rings, and are all there is where no
+    // uberblock is left (SPEC F-64). They come newest first; history
+    // reads forward.
+    let mut candidates = members.candidates(&reader, &pool);
     candidates.reverse();
     // The pool's line of history is found in the whole ring, and the
     // range asked for is taken from it afterwards: a range that began
@@ -632,7 +652,14 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     candidates.retain(|c| in_range(c.ub.txg) && !abandoned.iter().any(|a| a.txg == c.ub.txg));
     abandoned.retain(|a| in_range(a.txg));
     if candidates.is_empty() && abandoned.is_empty() {
-        errln!("zvoltimeline: no verified uberblock in that range");
+        errln!(
+            "zvoltimeline: no verified uberblock in that range{}",
+            if spec.roots.is_some() {
+                ", and no object-set header of --roots"
+            } else {
+                ""
+            }
+        );
         return zvol_common::end_early(g, "zvoltimeline", spec, exit::UNRECOVERABLE);
     }
     let checkpoint = candidates
@@ -645,21 +672,25 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     // Only two dataset lists are ever held at once (T-11).
     for (i, c) in candidates.iter().enumerate() {
         let read = datasets_at(&reader, c, &pool.name, opts.pending);
-        history.step(c.ub.txg, c.ub.timestamp, read);
+        history.step(c.ub.txg, c.time(), read);
         // Dated before the one it follows: the dates of the two are not
-        // to be read as the order of things.
-        if let Some(before) = i.checked_sub(1).map(|p| &candidates[p].ub) {
-            if c.ub.timestamp < before.timestamp {
+        // to be read as the order of things. The one before it that
+        // says a time: a header found in raw space says none.
+        let before = candidates[..i]
+            .iter()
+            .rev()
+            .find_map(|b| Some((b.ub.txg, b.time()?)));
+        if let (Some(time), Some((before_txg, before_time))) = (c.time(), before) {
+            if time < before_time {
                 clock.push(Event {
                     txg: c.ub.txg,
-                    time: Some(c.ub.timestamp),
+                    time: Some(time),
                     kind: Kind::Clock,
                     object: None,
                     guid: 0,
                     details: format!(
-                        "dated before txg {} ({}), which it is numbered after and, for all that was read, made from: the clock was set back between them",
-                        before.txg,
-                        iso8601(before.timestamp)
+                        "dated before txg {before_txg} ({}), which it is numbered after and, for all that was read, made from: the clock was set back between them",
+                        iso8601(before_time)
                     ),
                     last_seen_txg: None,
                 });
@@ -691,7 +722,7 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     for a in &abandoned {
         events.push(Event {
             txg: a.txg,
-            time: Some(a.time),
+            time: a.time,
             kind: Kind::Abandoned,
             object: None,
             guid: 0,
@@ -754,6 +785,11 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         pool_guid: format!("{:#018x}", pool.guid),
         members: members.paths.clone(),
         txgs: candidates.iter().map(|c| c.ub.txg).collect(),
+        carved_txgs: candidates
+            .iter()
+            .filter(|c| c.carved.is_some())
+            .map(|c| c.ub.txg)
+            .collect(),
         checkpoint_txg: checkpoint.map(|(txg, _)| txg),
         unreadable_txgs: unreadable,
         partial_txgs: partial,

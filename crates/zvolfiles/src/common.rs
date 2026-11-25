@@ -3,7 +3,7 @@
 
 use clap::Args;
 use zfs_read::crypt::{unwrap_keys, wrapping_key, DatasetKeys, KeyMaterial};
-use zfs_read::dsl::{open_mos, walk};
+use zfs_read::dsl::{open_mos_at, walk};
 use zfs_read::zio::PoolReader;
 use zfs_read::zpl::{open_filesystem, open_objects, Filesystem};
 use zvol_common::errln;
@@ -218,6 +218,10 @@ pub struct Opened<'a> {
     /// The transaction group of the pool checkpoint, when the pool has
     /// one; read at it, the dataset is as it was then.
     pub checkpoint_txg: Option<u64>,
+    /// Where the header is that `txg` was read from, when no uberblock
+    /// led to it: one `zvolcarve roots` found, given with `--roots`
+    /// (SPEC F-64).
+    pub carved_root: Option<zvol_common::members::CarvedOut>,
 }
 
 /// A transaction group newer than the one read, and why it was not.
@@ -267,7 +271,9 @@ pub fn with_dataset<T>(
     let reader = PoolReader::new(&pool, members.devices()).with_base_offsets(&members.bases());
 
     // Newest first; --txg picks one exactly.
-    let candidates = zfs_read::dsl::txg_candidates(&reader, &members.scans, &pool);
+    // Those of the uberblocks, of the headers `--roots` gave (SPEC
+    // F-64), and the pool checkpoint.
+    let candidates = members.candidates(&reader, &pool);
     let newest = candidates.first().map(|c| c.ub.txg);
     let checkpoint_txg = candidates.iter().find(|c| c.checkpoint).map(|c| c.ub.txg);
     let wanted: Vec<_> = match at.txg {
@@ -277,7 +283,14 @@ pub fn with_dataset<T>(
     if wanted.is_empty() {
         match at.txg {
             Some(n) => errln!("zvolfiles: no verified uberblock at txg {n}"),
-            None => errln!("zvolfiles: no verified uberblock on these members"),
+            None => errln!(
+                "zvolfiles: no verified uberblock on these members{}",
+                if spec.roots.is_some() {
+                    ", and --roots gave no object-set header to read at in their place"
+                } else {
+                    ""
+                }
+            ),
         }
         return Err(exit::UNRECOVERABLE);
     }
@@ -300,7 +313,7 @@ pub fn with_dataset<T>(
     };
     for c in &wanted {
         let opened =
-            open_mos(&reader, &c.ub).and_then(|mos| walk(&mos, &pool.name).map(|tree| (mos, tree)));
+            open_mos_at(&reader, c).and_then(|mos| walk(&mos, &pool.name).map(|tree| (mos, tree)));
         let (mos, tree) = match opened {
             Ok(t) => t,
             Err(e) => {
@@ -389,7 +402,11 @@ pub fn with_dataset<T>(
                 zvol_common::members::checkpoint_said(c.ub.txg, c.ub.timestamp)
             );
         }
+        if let Some(said) = members.carved_said(c) {
+            errln!("zvolfiles: {said}");
+        }
         let opened = Opened {
+            carved_root: members.carved_record(c),
             txg: c.ub.txg,
             members: &members,
             passed_over: passed.clone(),

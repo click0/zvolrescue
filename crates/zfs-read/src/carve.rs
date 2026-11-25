@@ -48,6 +48,14 @@ impl Found {
             Found::Compressed(c) => c.as_str(),
         }
     }
+
+    /// From that name, as a file a scan wrote has it.
+    pub fn named(name: &str) -> Option<Found> {
+        match name {
+            "plaintext" => Some(Found::Plaintext),
+            other => Codec::named(other).map(Found::Compressed),
+        }
+    }
 }
 
 /// A compression a metadata block may have been written with.
@@ -680,6 +688,39 @@ pub fn scan_member(
         }
     }
     Ok(scan)
+}
+
+/// The object-set header a scan found at `offset` of a member, read
+/// again (SPEC F-64): what a run that reads a pool from such a header
+/// starts with.
+///
+/// Read by the scan itself, over the one slot the header is in, so that
+/// what is a header here is what was one there. `None` when nothing at
+/// that offset is one any more — another member, or the same one
+/// written since.
+pub fn root_at(
+    src: &dyn BlockSource,
+    offset: u64,
+    found: Found,
+) -> std::io::Result<Option<ObjsetPhys>> {
+    let opts = Options {
+        range: Some((offset, offset.saturating_add(1))),
+        codecs: match found {
+            Found::Plaintext => Vec::new(),
+            Found::Compressed(c) => vec![c],
+        },
+        collect_hits: false,
+        // A compressed block is looked for at allocation boundaries
+        // counted from here: the offset is one.
+        vdev_start: offset,
+        ..Options::default()
+    };
+    let scan = scan_member(src, 0, 9, &opts)?;
+    Ok(scan
+        .roots
+        .into_iter()
+        .find(|r| r.offset == offset && r.found == found)
+        .map(|r| r.objset))
 }
 
 /// A candidate's final rank, once its tree has been walked (C-05).

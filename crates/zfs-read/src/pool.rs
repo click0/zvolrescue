@@ -795,6 +795,116 @@ pub struct Candidate {
     /// [`uberblock_candidates`] reads labels and cannot know;
     /// [`txg_candidates`](crate::dsl::txg_candidates) says.
     pub checkpoint: bool,
+    /// It is no uberblock at all: the object-set header of the MOS,
+    /// found in raw space (SPEC F-64). `ub` then stands in for one — it
+    /// carries the transaction group and nothing else that is true: no
+    /// root pointer, no time. Opened with
+    /// [`open_mos_at`](crate::dsl::open_mos_at), asked the time with
+    /// [`time`](Self::time).
+    pub carved: Option<CarvedRoot>,
+}
+
+/// The object-set header of a MOS found in raw space, which a pool is
+/// read from when no uberblock leads to it (SPEC F-64).
+///
+/// An uberblock vouches for the header it points at: its root pointer
+/// carries the header's checksum, and the uberblock its own. Nothing
+/// vouches for a header that was found — it is one because it parses as
+/// one and a pool walks out of it. Every block under it is verified by
+/// the pointer that names it, as under any other.
+#[derive(Debug, Clone)]
+pub struct CarvedRoot {
+    /// Scanned device index of the member it is on.
+    pub device: usize,
+    /// Byte offset in that member.
+    pub offset: u64,
+    /// How it lies there: plain, or in a compressed block.
+    pub found: crate::carve::Found,
+    /// The transaction group it is of: the newest birth among the
+    /// pointers of its meta-dnode. A MOS is written in every group that
+    /// is synced, and the block it changed carries that group.
+    pub txg: u64,
+    /// The header.
+    pub objset: zfs_ondisk::dmu::ObjsetPhys,
+}
+
+impl CarvedRoot {
+    /// The transaction group a header is of.
+    pub fn txg_of(objset: &zfs_ondisk::dmu::ObjsetPhys) -> u64 {
+        objset
+            .meta_dnode
+            .blkptr
+            .iter()
+            .filter(|b| !b.is_hole())
+            .map(|b| b.birth)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// The candidate it makes.
+    fn candidate(&self) -> Candidate {
+        Candidate {
+            ub: Uberblock {
+                endian: zfs_ondisk::Endian::Little,
+                version: 0,
+                txg: self.txg,
+                guid_sum: 0,
+                timestamp: 0,
+                rootbp: [0; zfs_ondisk::blkptr::SIZE],
+                software_version: 0,
+                mmp_magic: 0,
+                mmp_delay: 0,
+                mmp_config: 0,
+                checkpoint_txg: 0,
+            },
+            device: self.device,
+            label: 0,
+            checkpoint: false,
+            carved: Some(self.clone()),
+        }
+    }
+}
+
+impl Candidate {
+    /// When the transaction group was synced, as its uberblock says. A
+    /// header found in raw space has no uberblock and says no time: the
+    /// MOS does not keep one.
+    pub fn time(&self) -> Option<u64> {
+        self.carved.is_none().then_some(self.ub.timestamp)
+    }
+}
+
+/// Every place `pool` can be entered at, one per TXG, newest first: the
+/// verified uberblocks of its members ([`uberblock_candidates`]) and
+/// the headers found in raw space that the run was given.
+///
+/// A header of a transaction group an uberblock is of is not taken: the
+/// uberblock leads to the same MOS, and vouches for it. Of two headers
+/// of one group the first given is kept — they are given best first.
+pub fn root_candidates(
+    scans: &[Option<DeviceScan>],
+    pool: &PoolAssembly,
+    roots: &[CarvedRoot],
+) -> Vec<Candidate> {
+    let mut out = uberblock_candidates(scans, pool);
+    for r in roots {
+        if out.iter().any(|c| c.ub.txg == r.txg) {
+            trace!(
+                "txg",
+                "header at byte {} of device {}: txg {} is had already",
+                r.offset,
+                r.device,
+                r.txg
+            );
+            continue;
+        }
+        let at = out
+            .iter()
+            .position(|c| c.ub.txg < r.txg)
+            .unwrap_or(out.len());
+        out.insert(at, r.candidate());
+    }
+    out
 }
 
 /// Every checksum-verified uberblock of `pool` across its scanned members,
@@ -835,6 +945,7 @@ pub fn uberblock_candidates(scans: &[Option<DeviceScan>], pool: &PoolAssembly) -
                     device: dev,
                     label: label.index,
                     checkpoint: false,
+                    carved: None,
                 };
                 let Some(one) = by_txg.get_mut(&slot.ub.txg) else {
                     by_txg.insert(
@@ -911,7 +1022,11 @@ pub fn select_uberblock(candidates: &[Candidate], sel: TxgSelect) -> Option<&Can
     match sel {
         TxgSelect::Newest => candidates.first(),
         TxgSelect::Exact(txg) => candidates.iter().find(|c| c.ub.txg == txg),
-        TxgSelect::Before(ts) => candidates.iter().find(|c| c.ub.timestamp <= ts),
+        // A header found in raw space says no time, and is at or
+        // before none.
+        TxgSelect::Before(ts) => candidates
+            .iter()
+            .find(|c| c.time().is_some_and(|t| t <= ts)),
     }
 }
 
