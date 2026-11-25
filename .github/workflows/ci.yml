@@ -1789,8 +1789,16 @@ jobs:
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "linux-modules-extra-$(uname -r)"
             sudo modprobe zfs
           }
-      - run: cargo build --release -p zvolfiles
+      - run: cargo build --release -p zvolfiles -p zvolrescue
       - run: sudo python3 tests/crosscheck-zpl.py ./target/release/zvolfiles /tmp/zpl-crosscheck
+      # The labels `scan --emit-label` writes were checked against
+      # `zdb -e` only, OpenZFS in userland (SPEC F-67). Here the kernel
+      # imports a pool from them: every label configuration of a mirror
+      # and a raidz1 erased on copies, a label emitted for each member
+      # and position, `zpool import` read-only, and the files compared
+      # with what the kernel wrote.
+      - name: A pool the kernel imports from the labels scan --emit-label wrote (SPEC F-67)
+        run: sudo python3 tests/crosscheck-labels.py ./target/release/zvolrescue /tmp/labels-crosscheck
 
   # The damage matrix found two real defects in the tool during one
   # afternoon and then ran only when someone remembered to run it. This

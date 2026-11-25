@@ -32,6 +32,18 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ### Added
 
+* **The kernel imports a pool from the labels `scan --emit-label`
+  writes, in CI.** They were checked against `zdb -e`, OpenZFS in
+  userland, and v0.9.17 said what was not tried: `zpool import` on a
+  kernel, which is what a person does with them. CI's job that loads
+  the zfs module now makes a pool of a mirror and a raidz1 on image
+  files with the kernel, writes files into it and exports it; erases
+  the configuration of every label on copies of the members, so that
+  `zpool import` finds no pool there; emits a label for every member
+  and position through the layout `scan` tells and places it; and
+  imports the copies read-only — every vdev online, every file the
+  bytes the kernel wrote (`tests/crosscheck-labels.py`).
+
 * **A report says which run each extraction is of, and what a carved
   volume was called.** A volume dumped, interrupted and resumed is
   three rows of a report that read alike, and which command — at what
