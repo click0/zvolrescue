@@ -170,12 +170,13 @@ pub fn render(r: &Report) -> String {
 
     let _ = writeln!(s, "## Commands");
     let _ = writeln!(s);
-    let _ = writeln!(s, "| Time (UTC) | Tool | Exit | Command |");
-    let _ = writeln!(s, "|---|---|---|---|");
-    for c in &r.commands {
+    let _ = writeln!(s, "| # | Time (UTC) | Tool | Exit | Command |");
+    let _ = writeln!(s, "|---|---|---|---|---|");
+    for (n, c) in r.commands.iter().enumerate() {
         let _ = writeln!(
             s,
-            "| {} | {} {} | {} | {} |",
+            "| {} | {} | {} {} | {} | {} |",
+            n + 1,
             iso8601(c.ts),
             cell(&c.tool),
             cell(&c.version),
@@ -190,9 +191,9 @@ pub fn render(r: &Report) -> String {
         let _ = writeln!(s);
         let _ = writeln!(
             s,
-            "| Dataset | TXG | Output | Size | SHA-256 | Zeroed blocks | Complete |"
+            "| Dataset | TXG | Output | Size | SHA-256 | Zeroed blocks | Complete | Run |"
         );
-        let _ = writeln!(s, "|---|---|---|---|---|---|---|");
+        let _ = writeln!(s, "|---|---|---|---|---|---|---|---|");
         let later = crate::model::later_of_the_same(&r.extractions);
         for (i, e) in r.extractions.iter().enumerate() {
             // What the file holds now comes first: an image a later run
@@ -212,14 +213,22 @@ pub fn render(r: &Report) -> String {
             };
             let _ = writeln!(
                 s,
-                "| {} | {} | {} | {} | {} | {} | {} |",
-                cell(&e.dataset),
+                "| {} | {} | {} | {} | {} | {} | {} | {} |",
+                // A carved volume by what the pool called it, where
+                // that is known, beside its place in the scan.
+                match &e.dataset_name {
+                    Some(name) => cell(&format!("{} ({name})", e.dataset)),
+                    None => cell(&e.dataset),
+                },
                 e.txg,
                 code(&e.output.display().to_string()),
                 size(e.size),
                 e.sha256.as_deref().map_or("—".to_string(), code),
                 e.errors,
-                complete
+                complete,
+                // The command it is of, as the table above numbers
+                // them.
+                e.command.map_or("—".to_string(), |c| format!("#{}", c + 1))
             );
         }
         let _ = writeln!(s);

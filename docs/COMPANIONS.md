@@ -390,7 +390,7 @@ zvolreport keygen  -o KEY [--public KEY.pub]
 | ID | Pri | Requirement |
 |---|---|---|
 | R-01 | M | Parse evidence records of format version 1 (§1.3) from any number of logs; reject unknown versions with a clear message. |
-| R-02 | M | Report sections: case metadata; evidence list (path, size, hash if known); tool versions; every command in chronological order with status; pool summary and TXG window (from `scan` records); extractions (dataset, TXG, output, size, hash, error count); warnings. |
+| R-02 | M | Report sections: case metadata; evidence list (path, size, hash if known); tool versions; every command in chronological order with status; pool summary and TXG window (from `scan` records); extractions (dataset, TXG, output, size, hash, error count, and the command each is of — a volume dumped, interrupted and resumed is three rows that read alike; a carved volume also by what the pool called it, where the run that carved it knew); warnings. The report says which format it is of (`report_version`, 2), and `verify` builds one of an older format again as that format had it. |
 | R-03 | M | `build` is pure: the same logs and flags produce the same `report.json` byte for byte (timestamps only from the records). |
 | R-04 | M | `verify` recomputes SHA-256 of every output listed and of every input that has a recorded hash; prints a per-file PASS/FAIL table; exit 4 on any FAIL. |
 | R-05 | S | Markdown rendering (`--md`) suitable for attaching to a ticket or a forensic case file. |

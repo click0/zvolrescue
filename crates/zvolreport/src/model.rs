@@ -10,8 +10,22 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use zvol_common::evidence::PathText;
 
-/// Report format this build writes and understands.
-pub const REPORT_VERSION: u32 = 1;
+/// Report format this build writes.
+///
+/// Version 2 gives an extraction what version 1 had no place for: the
+/// run it is of, as a place in `commands` (`command`), and of a carved
+/// volume the name and the GUID of the dataset it was (`dataset_name`,
+/// `dataset_guid`).
+pub const REPORT_VERSION: u32 = 2;
+
+/// The oldest report format `verify` checks.
+///
+/// `verify` builds a report again from its logs and compares all of it,
+/// so a field a newer format adds would make every report of the older
+/// one differ from what this build builds. A report is therefore built
+/// again in the format it says it is of: what that format had, and
+/// nothing a later one added.
+pub const OLDEST_REPORT_VERSION: u32 = 1;
 
 fn is_zero(n: &u64) -> bool {
     *n == 0
@@ -246,6 +260,22 @@ pub struct Extraction {
     /// was born at, which no uberblock need lead to any more.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub carved: bool,
+    /// Of a carved volume, the dataset it was, where `zvolcarve roots`
+    /// found a MOS header that names it: `dataset` is the candidate's
+    /// place in the scan, which says nothing to a reader, and this is
+    /// what the pool called the volume. Report format 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataset_name: Option<String>,
+    /// And that dataset's GUID, by which the candidate was matched to
+    /// the name. Report format 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataset_guid: Option<String>,
+    /// The run this extraction is of: its place in `commands`, counted
+    /// from 0. A volume dumped, interrupted and resumed is three rows
+    /// that read alike, and which command — at what time, with what
+    /// exit status — gave which was not in the report. Report format 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<usize>,
     /// Kept, not extracted: a `dump -r --resume` found the image an
     /// earlier run had finished, whole and hashing as that run's
     /// manifest records, and left it. The run read nothing of the pool

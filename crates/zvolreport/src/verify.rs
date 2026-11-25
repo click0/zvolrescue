@@ -13,7 +13,7 @@ use serde::Serialize;
 use zvol_common::evidence::{digests_of_prefix, Extra};
 use zvol_common::{exit, Format, Global};
 
-use crate::model::{Report, REPORT_VERSION};
+use crate::model::{Report, OLDEST_REPORT_VERSION, REPORT_VERSION};
 
 /// Options of a `verify` run.
 pub struct Options {
@@ -439,6 +439,10 @@ fn against_logs(at: &Path, report: &Report, logs: &[(&crate::model::LogRef, Path
         notes: report.notes.clone(),
         sign: None,
         signature: None,
+        // In the format the report says it is of: one of an older
+        // format has not what a later one added, and held to this
+        // build's it would differ in every such field.
+        format: report.report_version,
     };
     let again = crate::build::assemble(&read, &opts);
     let built = serde_json::to_value(&again).expect("serialisable");
@@ -510,9 +514,16 @@ fn against_logs(at: &Path, report: &Report, logs: &[(&crate::model::LogRef, Path
         },
         recorded: None,
         found: None,
-        detail: differs.map(|d| {
-            format!("{d} (edited since it was built, or built by another version of zvolreport)")
-        }),
+        detail: match differs {
+            Some(d) => Some(format!(
+                "{d} (edited since it was built, or built by another version of zvolreport)"
+            )),
+            None if report.report_version < REPORT_VERSION => Some(format!(
+                "report format version {}: held to what that format has, which is not all that version {REPORT_VERSION} writes",
+                report.report_version
+            )),
+            None => None,
+        },
     }
 }
 
@@ -581,11 +592,11 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
     // changed was "format version 2", exit 2, and the signature that
     // said it had been tampered with went unsaid.
     let parsed = parsed.and_then(|r: Report| {
-        if r.report_version == REPORT_VERSION {
+        if (OLDEST_REPORT_VERSION..=REPORT_VERSION).contains(&r.report_version) {
             Ok(r)
         } else {
             Err(format!(
-                "report format version {}; this build reads version {REPORT_VERSION}",
+                "report format version {}; this build reads versions {OLDEST_REPORT_VERSION} to {REPORT_VERSION}",
                 r.report_version
             ))
         }

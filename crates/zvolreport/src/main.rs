@@ -148,6 +148,7 @@ fn main() -> ExitCode {
                 notes: note,
                 sign,
                 signature,
+                format: model::REPORT_VERSION,
             },
         ),
         Command::Verify {

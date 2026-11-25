@@ -17,6 +17,23 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ### Added
 
+* **A report says which run each extraction is of, and what a carved
+  volume was called.** A volume dumped, interrupted and resumed is
+  three rows of a report that read alike, and which command — at what
+  time, with what exit status — gave which was not in it: an
+  extraction names its command, by its place among them (`command`),
+  and the Markdown numbers the commands and has a `Run` column. A
+  volume `zvolcarve dump` wrote was in the report as `c0005`, its place
+  in a scan, though the run's record has had the dataset's name since
+  `roots` gives it: the name and the GUID are in the report
+  (`dataset_name`, `dataset_guid`), and the table shows
+  `c0005 (e1/v1)`. These are fields the report had no place for, and
+  `verify` builds a report again from its logs and holds it to all of
+  that — a field added is a difference in every report built before
+  it. So the report format is version 2 (`report_version`), and
+  `verify` builds a report of version 1 again as version 1 had it and
+  says so; a report of a version this build does not know is refused,
+  as before.
 * **A pool no uberblock leads to is read at the headers `zvolcarve
   roots` found.** With every uberblock ring gone `list`, `zvolfiles`
   and `zvoltimeline` ended "no verified uberblock" (exit 3): the carver

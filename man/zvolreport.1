@@ -75,6 +75,19 @@ one that left objects unread or was taken at an older TXG because a
 newer one did not read is not complete, and says which; an image a
 .Fl -resume
 kept from an earlier run is marked as kept.
+Each extraction names the run it is of, by its place among the
+commands
+.Pq Ql command ,
+which the Markdown numbers: a volume dumped, interrupted and resumed is
+three rows, and which command gave which is said.
+A volume
+.Xr zvolcarve 1
+carved is listed by its place in the scan and, where the run that
+carved it knew what the pool called it, by that name as well
+.Pq Ql dataset_name , Ql dataset_guid .
+The report is of format version 2
+.Pq Ql report_version ,
+which added these three fields to version 1.
 What
 .Nm
 itself read \(em an earlier report, its signature, the keys, the
@@ -148,6 +161,9 @@ tools, hosts, evidence, commands, pools, outputs, extractions, warnings
 .Ql report
 fails \(em a report edited to match a changed file is caught here even
 when it is not signed.
+A report of format version 1 is built again as that version had it,
+without what version 2 added, and the row says so; one of a version
+this build does not know is refused with exit status 2.
 A report that names no log is borne out by nothing, and fails.
 A signature beside the report that
 .Fl -key

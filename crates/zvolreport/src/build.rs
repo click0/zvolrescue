@@ -7,7 +7,6 @@ use zvol_common::{errln, outln};
 use zvol_common::evidence::{self, Record, FORMAT_VERSION};
 use zvol_common::{exit, Format, Global};
 
-use crate::model::REPORT_VERSION;
 use crate::model::{Command, Evidence, Extraction, FileRef, LogRef, Pool, Report, ToolRef};
 
 /// Options of a `build` run.
@@ -20,6 +19,10 @@ pub struct Options {
     pub notes: Vec<String>,
     pub sign: Option<PathBuf>,
     pub signature: Option<PathBuf>,
+    /// The report format to build: the one this build writes
+    /// ([`REPORT_VERSION`]), or, for `verify`, the older one a report
+    /// says it is of — built again as that format had it.
+    pub format: u32,
 }
 
 /// One evidence log, as `build` and `verify` read it.
@@ -286,6 +289,9 @@ fn tree_extraction(r: &Record) -> Option<Extraction> {
         stopped_by_medium: None,
         output_failed: None,
         carved: false,
+        dataset_name: None,
+        dataset_guid: None,
+        command: None,
         kept: false,
         unread,
         overwritten_by: None,
@@ -302,14 +308,19 @@ fn unreplayed_of(v: &serde_json::Value) -> u64 {
         .unwrap_or(0)
 }
 
-/// The extractions a `dump` record described.
-fn extractions_of(result: &serde_json::Value) -> Vec<Extraction> {
+/// The extractions a `dump` record described, as report format `format`
+/// has them.
+fn extractions_of(result: &serde_json::Value, format: u32) -> Vec<Extraction> {
     let Some(list) = result.get("volumes").and_then(serde_json::Value::as_array) else {
         return Vec::new();
     };
     let pool_guid = str_at(result, "pool_guid");
     list.iter()
         .filter_map(|v| {
+            let carved = flag(v, "carved").unwrap_or(false);
+            // What a carved volume was called, where the run that
+            // carved it knew: its `dataset` is a place in a list.
+            let named = |key: &str| (carved && format >= 2).then(|| str_at(v, key)).flatten();
             Some(Extraction {
                 dataset: str_at(v, "dataset")?,
                 txg: u64_at(v, "txg").unwrap_or(0),
@@ -332,7 +343,10 @@ fn extractions_of(result: &serde_json::Value) -> Vec<Extraction> {
                 interrupted_at: u64_at(v, "interrupted_at"),
                 stopped_by_medium: str_at(v, "stopped_by_medium"),
                 output_failed: str_at(v, "output_failed"),
-                carved: flag(v, "carved").unwrap_or(false),
+                carved,
+                dataset_name: named("dataset_name"),
+                dataset_guid: named("dataset_guid"),
+                command: None,
                 kept: flag(v, "kept").unwrap_or(false),
                 unread: Vec::new(),
                 overwritten_by: None,
@@ -534,7 +548,7 @@ pub fn assemble(records: &[(LogRef, Vec<Record>)], opts: &Options) -> Report {
         if r.tool == "zvolfiles" {
             extractions.extend(tree_extraction(r));
         } else {
-            let of_run: Vec<Extraction> = extractions_of(&r.result)
+            let of_run: Vec<Extraction> = extractions_of(&r.result, opts.format)
                 .into_iter()
                 .map(|mut e| {
                     e.output = at_cwd(r, &e.output);
@@ -566,8 +580,10 @@ pub fn assemble(records: &[(LogRef, Vec<Record>)], opts: &Options) -> Report {
         // Read from a header found in raw space and no uberblock (SPEC
         // F-64): what was extracted is verified block by block as any
         // other, and the report says what the header is not vouched
-        // for by.
-        if let Some(root) = r.result.get("carved_root").filter(|c| c.is_object()) {
+        // for by. A report of format 1 built from such a record has no
+        // such line: the build that wrote it knew of no such run.
+        let carved_root = r.result.get("carved_root").filter(|c| c.is_object());
+        if let Some(root) = carved_root.filter(|_| opts.format >= 2) {
             warnings.push(format!(
                 "{}: the pool was read from the object-set header at byte {} of {} (--roots), not from an uberblock: no checksum vouches for that header, and when its transaction group was written is not known : {}",
                 r.tool,
@@ -576,7 +592,17 @@ pub fn assemble(records: &[(LogRef, Vec<Record>)], opts: &Options) -> Report {
                 r.argv.join(" ")
             ));
         }
+        // Which run each row is of, where the format has a place for
+        // it: the command just read, by its place among them. The rows
+        // of this record only — every row looked at for each record
+        // is the square this was rid of.
+        let first = extracted_by.len();
         extracted_by.resize(extractions.len(), commands.len() - 1);
+        if opts.format >= 2 {
+            for e in &mut extractions[first..] {
+                e.command = Some(commands.len() - 1);
+            }
+        }
         if r.status != 0 {
             warnings.push(format!(
                 "{} exited {} : {}",
@@ -747,7 +773,7 @@ pub fn assemble(records: &[(LogRef, Vec<Record>)], opts: &Options) -> Report {
     warnings.dedup();
 
     Report {
-        report_version: REPORT_VERSION,
+        report_version: opts.format,
         case: opts.case.clone(),
         examiner: opts.examiner.clone(),
         notes: opts.notes.clone(),
@@ -980,6 +1006,7 @@ pub fn run(g: &Global, opts: &Options) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::REPORT_VERSION;
     use zvol_common::evidence::FileRef as EvFileRef;
 
     fn opts() -> Options {
@@ -992,6 +1019,7 @@ mod tests {
             notes: Vec::new(),
             sign: None,
             signature: None,
+            format: REPORT_VERSION,
         }
     }
 
@@ -1936,7 +1964,7 @@ mod tests {
                 if next() % 3 != 0 {
                     d["volumes"][0]["interrupted_at"] = 7.into();
                 }
-                extractions_of(&d).remove(0)
+                extractions_of(&d, REPORT_VERSION).remove(0)
             })
             .collect();
         let same = |a: &Extraction, b: &Extraction| {

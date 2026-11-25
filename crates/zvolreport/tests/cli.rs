@@ -459,7 +459,7 @@ fn a_build_whose_key_cannot_be_read_writes_nothing() {
 }
 
 /// A signed report whose format version was changed is a signature that
-/// does not hold (exit 4), and says so; it was "format version 2", exit
+/// does not hold (exit 4), and says so; it was "format version 9", exit
 /// 2, with not a word of the signature.
 #[test]
 fn a_signed_report_of_another_version_is_a_broken_signature() {
@@ -483,7 +483,7 @@ fn a_signed_report_of_another_version_is_a_broken_signature() {
     assert_eq!(code, 0, "{err}");
     let text = std::fs::read_to_string(&r).unwrap();
     let mut v: serde_json::Value = serde_json::from_str(&text).unwrap();
-    v["report_version"] = 2.into();
+    v["report_version"] = 9.into();
     std::fs::write(&r, serde_json::to_string_pretty(&v).unwrap()).unwrap();
     let (code, _, err) = run(&["-q", "verify", &r, "--key", &format!("{key}.pub")]);
     assert_eq!(code, 4, "{err}");
@@ -491,7 +491,105 @@ fn a_signed_report_of_another_version_is_a_broken_signature() {
     // Unsigned, it is a version this build does not read.
     let (code, _, err) = run(&["-q", "verify", &r]);
     assert_eq!(code, 2, "{err}");
-    assert!(err.contains("report format version 2"), "{err}");
+    assert!(
+        err.contains("report format version 9; this build reads versions 1 to 2"),
+        "{err}"
+    );
+}
+
+/// A carved volume is in the report under what the pool called it,
+/// where the run that carved it knew (`zvolcarve dump` beside what
+/// `roots` found): its `dataset` is a place in a scan, `c0005`, and the
+/// reader of a report was left to find out which volume that was. And
+/// every extraction says which of the commands it is of. These are
+/// fields report format 1 had no place for, and `verify` builds a
+/// report again from its logs and compares all of it: a report of
+/// format 1 is built again as format 1, and is not thereby one that
+/// was edited; with a field of a format it is not of, it is.
+#[test]
+fn a_carved_volume_is_named_and_an_older_report_still_verifies() {
+    let dir = scratch("carved-name");
+    let img = dir.join("c0005.img");
+    std::fs::write(&img, b"the bytes of a volume that was carved").unwrap();
+    let d = digests_of(
+        &img,
+        Extra {
+            md5: false,
+            sha1: false,
+        },
+    )
+    .expect("hash");
+    let size = std::fs::metadata(&img).unwrap().len();
+    let member = dir.join("member.img");
+    std::fs::write(&member, b"the pool member").unwrap();
+    let record = serde_json::json!({
+        "v": FORMAT_VERSION,
+        "ts": 1_757_100_000u64,
+        "tool": "zvolcarve",
+        "version": "0.9.17",
+        "argv": ["zvolcarve", "dump", "ws", "c0005"],
+        "inputs": [{"path": member, "kind": "file", "size": 15}],
+        "outputs": [{"path": img, "kind": "file", "size": size, "sha256": d.sha256}],
+        "result": {"candidate": "c0005", "volumes": [{
+            "dataset": "c0005", "carved": true, "txg": 28, "output": img, "volsize": size,
+            "sha256": d.sha256, "blocks_zeroed": 0, "aborted": false,
+            "dataset_guid": "0x8d7a777f20c673c9", "dataset_name": "e1/v1",
+        }]},
+        "status": 0,
+    });
+    let log = dir.join("case.jsonl");
+    std::fs::write(&log, format!("{record}\n")).unwrap();
+    let r = dir.join("report.json").to_string_lossy().into_owned();
+    let md = dir.join("report.md").to_string_lossy().into_owned();
+    let (code, _, err) = run(&["-q", "build", &log.to_string_lossy(), "-o", &r, "--md", &md]);
+    assert_eq!(code, 0, "{err}");
+    let built: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&r).unwrap()).unwrap();
+    assert_eq!(built["report_version"], 2, "{built}");
+    let e = &built["extractions"][0];
+    assert_eq!(e["dataset"], "c0005", "{e}");
+    assert_eq!(e["dataset_name"], "e1/v1", "{e}");
+    assert_eq!(e["dataset_guid"], "0x8d7a777f20c673c9", "{e}");
+    // And the run it is of: the first of the commands.
+    assert_eq!(e["command"], 0, "{e}");
+    let table = std::fs::read_to_string(&md).unwrap();
+    assert!(table.contains("| c0005 (e1/v1) | 28 |"), "{table}");
+    assert!(
+        table.contains("| # | Time (UTC) |")
+            && table.contains("| 1 | 2025-09-05T19:20:00Z | zvolcarve 0.9.17 |")
+            && table.contains("| yes | #1 |"),
+        "{table}"
+    );
+    let (code, out, err) = run(&["verify", &r]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(!out.contains("report format version"), "{out}");
+
+    // The same report as format 1 had it: without the two fields.
+    let write = |version: u32, named: bool| {
+        let mut v = built.clone();
+        v["report_version"] = version.into();
+        if !named {
+            let e = v["extractions"][0].as_object_mut().unwrap();
+            e.remove("dataset_name");
+            e.remove("dataset_guid");
+            e.remove("command");
+        }
+        std::fs::write(&r, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+    };
+    write(1, false);
+    let (code, out, err) = run(&["verify", &r]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(
+        out.contains("report format version 1: held to what that format has"),
+        "{out}"
+    );
+    // Neither is what its format is built as.
+    for (version, named) in [(1, true), (2, false)] {
+        write(version, named);
+        let (code, out, err) = run(&["verify", &r]);
+        assert_eq!(code, 4, "format {version}, named {named}: {out}{err}");
+        assert!(out.contains("extractions[0]: the report says"), "{out}");
+    }
 }
 
 /// An empty file, or `/dev/null`, is not a log of a case: a report built
