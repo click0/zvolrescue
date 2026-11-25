@@ -42,7 +42,8 @@ tagged. `v0.7.1` is the release that carries those six.
   `zpool import` finds no pool there; emits a label for every member
   and position through the layout `scan` tells and places it; and
   imports the copies read-only — every vdev online, every file the
-  bytes the kernel wrote (`tests/crosscheck-labels.py`).
+  bytes the kernel wrote (`tests/crosscheck-labels.py`). The kernel of
+  Ubuntu 24.04, OpenZFS 2.2.2, imports them as they are, without `-f`.
 
 * **A report says which run each extraction is of, and what a carved
   volume was called.** A volume dumped, interrupted and resumed is

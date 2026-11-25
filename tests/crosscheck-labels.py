@@ -150,9 +150,11 @@ def main():
             for li, member in enumerate(leaves(top)):
                 aligned = os.path.getsize(member) & ~(LABEL - 1)
                 for index, at in enumerate((0, LABEL, aligned - 2 * LABEL, aligned - LABEL)):
+                    # What scan prints of the members, forty times over,
+                    # is not what this is about: the label file is.
                     run(zr, "-q", "scan", *copies, "--hints", hints_file,
                         "--emit-label", label, "--emit-for", f"{ti}:{li}",
-                        "--emit-label-index", str(index))
+                        "--emit-label-index", str(index), capture=True)
                     with open(label + ".json") as f:
                         geometry = json.load(f)
                     if geometry["config"] != "pool":
