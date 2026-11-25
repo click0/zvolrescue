@@ -1,6 +1,6 @@
 # zvolrescue — Technical Specification (ТЗ)
 
-**Status:** living document, revised 2026-11-25 (tool at v0.9.17) · **Owner:** Vladyslav V. Prodan
+**Status:** living document, revised 2026-11-25 (tool at v0.9.18) · **Owner:** Vladyslav V. Prodan
 
 **Ukrainian version:** [SPEC.uk.md](SPEC.uk.md) · **Companion tools:** [COMPANIONS.md](COMPANIONS.md)
 
@@ -721,6 +721,12 @@ that give each top-level vdev its ashift (F-65), tells the line a
 rewind left behind by what its groups hold and not by their dates, and
 names carved candidates by the datasets the object-set headers of
 `zvolcarve roots` give (F-64).
+`v0.9.18` reads a pool no uberblock is left of at those headers, in
+every program that reads a pool (F-64), and searches a raidz's member
+order from them (F-66), so that a pool with neither label nor
+uberblock is read through a layout given by hand (F-65) with its
+order not known; it lists a dnode found in two copies of its block
+once, and a report names the run of each extraction (R-02).
 `1.0.0` is the full release, and waits for what no CI can supply: three real-world incidents with
 documented outcomes ([REALWORLD-TESTS.md](REALWORLD-TESTS.md)). The
 packaging it also waited for — a FreeBSD port, a `.deb`, an AUR

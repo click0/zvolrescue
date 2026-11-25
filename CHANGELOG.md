@@ -13,7 +13,22 @@ development milestone that names what changed when — the sections below
 are their record — and ships inside the next version that does get
 tagged. `v0.7.1` is the release that carries those six.
 
-## Unreleased
+## v0.9.18 — 2026-11-25
+
+**A pool with no uberblock left is read at the headers the carver found.**
+Every program that reads a pool — `zvolrescue list` and `dump`,
+`zvolfiles`, `zvoltimeline` and `zvolcarve` — reads one whose uberblock
+rings are all gone at the object-set headers `zvolcarve roots` found
+(`--roots`): a volume by its name, a filesystem's files, the history,
+and the destroyed with the commands that get them back. With no label
+left either, the pool's name and GUID come from the MOS a header leads
+to, the layout from `--hints`, and `--search-order` finds a raidz's
+member order from the headers. A report names the run each extraction
+is of and the dataset a carved volume was, in a format of version 2
+that still verifies a report of version 1. A dnode a scan finds in two
+copies of its block is one candidate, not two. And the labels
+`scan --emit-label` writes are imported by the kernel, in CI, as
+`zpool import` takes them.
 
 ### Fixed
 
@@ -62,6 +77,7 @@ tagged. `v0.7.1` is the release that carries those six.
   `verify` builds a report of version 1 again as version 1 had it and
   says so; a report of a version this build does not know is refused,
   as before.
+
 * **A pool no uberblock leads to is read at the headers `zvolcarve
   roots` found.** With every uberblock ring gone `list`, `zvolfiles`
   and `zvoltimeline` ended "no verified uberblock" (exit 3): the carver
@@ -93,9 +109,10 @@ tagged. `v0.7.1` is the release that carries those six.
   the headers as from uberblocks, so a raidz with no label and no
   uberblock left no longer needs its members given in order: where
   none is left, every order had nothing to be read from, and the search
-  ended "no order … reads this pool at all". A pool with no label either takes its name and
-  GUID from the MOS such a header leads to. On a pool made through
-  libzpool with every label zeroed whole and the layout in `--hints`:
+  ended "no order … reads this pool at all". A pool with no label
+  either takes its name and GUID from the MOS such a header leads to.
+  On a pool made through libzpool with every label zeroed whole and
+  the layout in `--hints`:
   `list` lists it, `dump` writes a live volume and two destroyed ones
   by their names, byte for byte, and `zvoltimeline` tells their
   creation and destruction with the commands that get them back; on
