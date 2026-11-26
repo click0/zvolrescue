@@ -34,6 +34,9 @@ pub const CHECKSUM_SALT: &str = "org.illumos:checksum_salt";
 /// Object-directory entry naming the packed nvlist of the pool's current
 /// configuration (`DMU_POOL_CONFIG`).
 pub const CONFIG: &str = "config";
+/// Object-directory entry naming the ZAP of read-incompatible features,
+/// each with the number of things that hold it active.
+pub const FEATURES_FOR_READ: &str = "features_for_read";
 /// Object-directory entry holding the uberblock a pool checkpoint put
 /// aside (`DMU_POOL_ZPOOL_CHECKPOINT`): `uberblock_t` as an array of
 /// 64-bit words.
@@ -491,6 +494,49 @@ pub fn open_mos_at<'r, 'a>(
     }
 }
 
+/// What the MOS says of the read-incompatible features the labels say
+/// nothing of. A pool's labels list the features active for read
+/// (`features_for_read`), and the reader takes them from there; a pool
+/// read through `--hints` has no label to take them from, and read
+/// 2.4's gang headers as 512 bytes, zeroing every block behind one. The
+/// MOS keeps the same list, with the count of what holds each feature
+/// active: one held by anything is active at this transaction group.
+fn learn_features(
+    reader: &PoolReader<'_>,
+    mos: &DnodeArray<'_, '_>,
+    entries: &[zfs_ondisk::zap::Entry],
+) {
+    if reader.dynamic_gang() {
+        return;
+    }
+    let Some(obj) = entries
+        .iter()
+        .find(|e| e.name == FEATURES_FOR_READ)
+        .and_then(|e| e.value.as_u64())
+    else {
+        return;
+    };
+    match mos.object(obj).and_then(|o| read_zap(&o)) {
+        Ok(features) => {
+            let active = features.iter().any(|f| {
+                f.name == "com.klarasystems:dynamic_gang_header"
+                    && f.value.as_u64().is_some_and(|n| n > 0)
+            });
+            if active {
+                trace!(
+                    "dsl",
+                    "the MOS has dynamic_gang_header active, and no label said so: gang headers are sized by their vdev"
+                );
+                reader.set_dynamic_gang();
+            }
+        }
+        Err(e) => trace!(
+            "dsl",
+            "features_for_read (object {obj}) unreadable: gang headers stay 512 bytes: {e}"
+        ),
+    }
+}
+
 /// The same, from an objset already in hand rather than one reached
 /// through an uberblock's root pointer (SPEC F-64).
 ///
@@ -545,6 +591,7 @@ pub fn open_mos_objset<'r, 'a>(
                 if salt.is_some() { "present" } else { "absent" }
             );
             reader.set_salt(salt);
+            learn_features(reader, &mos, &entries);
         }
         Err(e) => trace!(
             "dsl",
@@ -2366,5 +2413,83 @@ mod property_value_tests {
             PropertyValue::Raw(vec![1, 2])
         );
         assert_eq!(PropertyValue::Raw(vec![0xab, 0x01]).to_display(), "ab01");
+    }
+}
+
+#[cfg(test)]
+mod mos_features_tests {
+    use super::*;
+    use crate::fixture::{build_sample_mos, Alloc, Pool};
+    use crate::pool::{assemble, uberblock_candidates};
+    use crate::vdev::scan_device;
+    use zfs_ondisk::blkptr::BlkPtr;
+    use zfs_ondisk::dmu::ot;
+    use zfs_ondisk::label::LABEL_SIZE;
+    use zvolrescue_io::{BlockSource, MemSource};
+
+    const SIZE: u64 = 64 * LABEL_SIZE;
+    const DGH: &str = "com.klarasystems:dynamic_gang_header";
+
+    /// A mirror whose MOS holds `dynamic_gang_header` with `count`
+    /// holders and whose labels name no feature, and a 4 KiB gang header
+    /// with five children, as OpenZFS 2.4 writes it: what a pool read
+    /// through `--hints` is, its labels' account of the pool replaced.
+    fn pool_with(count: u64) -> (Vec<MemSource>, BlkPtr) {
+        let mut pool = Pool::mirror("tank", 0x9a9a, 12).txgs(&[(100, 1)]);
+        let mut images: Vec<Vec<u8>> = (0..2).map(|_| vec![0u8; SIZE as usize]).collect();
+        let mut alloc = Alloc::new(0x20_0000);
+        alloc.mos_features = vec![(DGH, count)];
+        build_sample_mos(&mut pool, &mut images, &mut alloc);
+        let payload: Vec<u8> = (0..20480u32).map(|i| (i % 251) as u8).collect();
+        let bp = alloc.put_gang_sized(&mut images, &payload, &[4096; 5], ot::ZVOL, 100, 4096);
+        for (i, img) in images.iter_mut().enumerate() {
+            pool.write_labels(i, img);
+        }
+        let bp = BlkPtr::parse(&bp, Endian::Little).unwrap();
+        (images.into_iter().map(MemSource::new).collect(), bp)
+    }
+
+    /// The labels say nothing of the feature, and the MOS does: once the
+    /// MOS is open, the header is read at its 4 KiB and every pointer in
+    /// it followed. Before, it was read at 512 bytes, failed its checksum
+    /// on every copy, and every block behind such a header was zeroed —
+    /// nine of the eleven volumes of the golden image read through
+    /// `--hints` with every label's configuration gone.
+    #[test]
+    fn a_feature_no_label_names_is_taken_from_the_mos() {
+        let (sources, bp) = pool_with(1);
+        let scans: Vec<_> = sources.iter().map(|s| scan_device(s).ok()).collect();
+        let pool = assemble(&scans).into_iter().next().expect("one pool");
+        assert!(!pool.features_for_read.iter().any(|f| f == DGH));
+        let devices: Vec<Option<&dyn BlockSource>> = sources
+            .iter()
+            .map(|s| Some(s as &dyn BlockSource))
+            .collect();
+        let reader = PoolReader::new(&pool, devices);
+        assert!(!reader.dynamic_gang());
+        assert!(reader.read_block(&bp, false).is_err());
+
+        let ub = uberblock_candidates(&scans, &pool).remove(0).ub;
+        open_mos(&reader, &ub).expect("the MOS opens");
+        assert!(reader.dynamic_gang());
+        let block = reader.read_block(&bp, false).expect("the gang block reads");
+        assert_eq!(block.data.len(), 20480);
+    }
+
+    /// A feature the MOS lists with nothing holding it is enabled, not
+    /// active: gang headers stay what they always were.
+    #[test]
+    fn a_feature_nothing_holds_leaves_the_headers_as_they_were() {
+        let (sources, _) = pool_with(0);
+        let scans: Vec<_> = sources.iter().map(|s| scan_device(s).ok()).collect();
+        let pool = assemble(&scans).into_iter().next().expect("one pool");
+        let devices: Vec<Option<&dyn BlockSource>> = sources
+            .iter()
+            .map(|s| Some(s as &dyn BlockSource))
+            .collect();
+        let reader = PoolReader::new(&pool, devices);
+        let ub = uberblock_candidates(&scans, &pool).remove(0).ub;
+        open_mos(&reader, &ub).expect("the MOS opens");
+        assert!(!reader.dynamic_gang());
     }
 }

@@ -418,6 +418,10 @@ pub struct Alloc {
     /// another than `disk0`. A name is whatever the pool says: one
     /// written by something other than ZFS may hold an escape sequence.
     pub volume_name: Option<&'static str>,
+    /// The MOS's `features_for_read`: each read-incompatible feature
+    /// with the count of what holds it active. Empty, the object
+    /// directory names no such ZAP, as the sample has always been.
+    pub mos_features: Vec<(&'static str, u64)>,
 }
 
 /// A dense volume for measurements (SPEC N-03, N-08): `bytes` of data
@@ -552,6 +556,7 @@ impl Alloc {
             born: None,
             log_left: None,
             volume_name: None,
+            mos_features: Vec::new(),
         }
     }
 
@@ -1297,6 +1302,13 @@ pub fn build_sample_mos_variant(
             ("root_dataset", 8, 2u64.to_be_bytes().to_vec()),
             ("config", 8, 11u64.to_be_bytes().to_vec()),
         ];
+        if !a.mos_features.is_empty() {
+            entries.push((
+                crate::dsl::FEATURES_FOR_READ,
+                8,
+                14u64.to_be_bytes().to_vec(),
+            ));
+        }
         entries.extend(wide);
         let hdr = zfs_ondisk::zap::encode::fat_header(4096, 1, entries.len() as u64);
         let lf = zfs_ondisk::zap::encode::leaf(4096, &entries);
@@ -1314,7 +1326,15 @@ pub fn build_sample_mos_variant(
             .build(),
         );
     } else {
-        put(1, zap_obj(a, m, &[("root_dataset", 2), ("config", 11)]));
+        let mut entries = vec![("root_dataset", 2), ("config", 11)];
+        if !a.mos_features.is_empty() {
+            entries.push((crate::dsl::FEATURES_FOR_READ, 14));
+        }
+        put(1, zap_obj(a, m, &entries));
+    }
+    if !a.mos_features.is_empty() {
+        let features = a.mos_features.clone();
+        put(14, zap_obj(a, m, &features));
     }
     put(2, dir_obj(3, 4, 0));
     put(3, ds_obj(&dataset_phys(2, 0, &os_fs, 4, 0xa1, 0)));

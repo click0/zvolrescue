@@ -261,8 +261,11 @@ pub struct PoolReader<'a> {
     /// `com.klarasystems:dynamic_gang_header` is active (OpenZFS 2.4):
     /// a gang header fills the smallest allocation its top-level vdev
     /// makes instead of one 512-byte sector, and holds as many child
-    /// pointers as fit. Without it, every header is 512 bytes.
-    dynamic_gang: bool,
+    /// pointers as fit. Without it, every header is 512 bytes. Known
+    /// from the labels' `features_for_read`, or, where no label says
+    /// it — a pool read through `--hints` — from the MOS's own
+    /// (`crate::dsl::open_mos_objset`).
+    dynamic_gang: Cell<bool>,
     /// How many leaf reads each device has served. Used when deciding
     /// whether a member really contributed to what was read (F-62).
     reads: RefCell<Vec<u64>>,
@@ -595,7 +598,7 @@ impl<'a> PoolReader<'a> {
             mismatches: Cell::new(0),
             tops,
             top_ashift,
-            dynamic_gang,
+            dynamic_gang: Cell::new(dynamic_gang),
             salt: Cell::new(None),
             keys: RefCell::new(None),
             removed: RefCell::new(removed),
@@ -634,6 +637,20 @@ impl<'a> PoolReader<'a> {
     /// the MOS object directory); needed by blake3/skein/edonr blocks.
     pub fn set_salt(&self, salt: Option<Salt>) {
         self.salt.set(salt);
+    }
+
+    /// Whether gang headers are read at the size `dynamic_gang_header`
+    /// gives them.
+    pub fn dynamic_gang(&self) -> bool {
+        self.dynamic_gang.get()
+    }
+
+    /// Read gang headers at the size `dynamic_gang_header` gives them,
+    /// from now on: the MOS says the feature is active where no label
+    /// did. A header written before it went active is still read at 512
+    /// bytes when the full size does not verify.
+    pub fn set_dynamic_gang(&self) {
+        self.dynamic_gang.set(true);
     }
 
     /// The pool checksum salt, if known.
@@ -1909,7 +1926,7 @@ impl<'a> PoolReader<'a> {
     /// size when the full one does not verify, as `zio_checksum_error`
     /// does.
     fn gang_header_size(&self, bp: &BlkPtr) -> usize {
-        if !self.dynamic_gang {
+        if !self.dynamic_gang.get() {
             return blkptr::GANG_HEADER_SIZE;
         }
         bp.dvas()

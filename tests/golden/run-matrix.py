@@ -21,6 +21,19 @@ Either way the answer comes from the oracle, never from an earlier run of
 the tool. Outcomes: bit-exact / reconstructed / refused / defect; exit 1
 when any run is a defect.
 
+What an operator would tell the tool, a manifest's `[recovery]` says,
+and the harness passes on to every run of the case: `assume_members`
+(`--assume-member`); `hints = "layout"`, the pool's layout as the
+oracle records it, in `--hints` (with `order = "reversed"`, every raidz
+and dRAID group's members the other way round); `search_order`
+(`--search-order`); `roots`, the object-set headers `zvolcarve roots`
+finds on the damaged members (`--roots`); `key = "wrong"` or `"none"`
+for the encrypted volumes. The pattern `unreadable` zeroes its range as
+an imager leaves what it could not read, and marks it so in a ddrescue
+map given with `--map`. All of these but `assume_members` are the
+dump's: a pool with no volumes is walked by a reader that takes none of
+them, and such a case is n/a there.
+
 A manifest that names its pool (`image = "<pool>"`, the name the
 oracle's `layout.json` gives) runs against that pool alone; one that
 names none runs against any. `--print-needs` runs nothing: it prints
@@ -905,6 +918,7 @@ def apply_damage(oracle, manifest, work, rng):
     manifest addresses something this image does not have."""
     paths = {r: oracle.path(r) for r in oracle.roles}
     missing, notes, plans = set(), [], {}
+    unread = {}   # role -> ranges an imager could not read, for its map
     forged = {}   # (role, from txg, forged txg, slot) -> rings it went into
     for d in manifest.get("damage", []):
         pat = d["pattern"]
@@ -939,6 +953,12 @@ def apply_damage(oracle, manifest, work, rng):
                 if pat == "zeros":
                     f.seek(off)
                     f.write(b"\0" * length)
+                elif pat == "unreadable":
+                    # What an imager leaves where it could not read: zeros
+                    # in the image, and the range marked in its map.
+                    f.seek(off)
+                    f.write(b"\0" * length)
+                    unread.setdefault(role, []).append((off, length))
                 elif pat == "random":
                     f.seek(off)
                     left = length
@@ -991,7 +1011,7 @@ def apply_damage(oracle, manifest, work, rng):
     for (role, frm, to, index), rings in forged.items():
         notes.append(f"{role}: txg {to} forged from {frm} into slot {index} of {rings} ring(s)")
     ordered = [paths[r] for r in oracle.roles if r not in missing]
-    return ordered, notes, paths
+    return ordered, notes, paths, unread
 
 
 # Why a block could not be produced, in the words `ReadError` uses in
@@ -1043,6 +1063,81 @@ CHECKSUMLESS = re.compile(r"\boff(?: encrypted)?(?: gang)?: ERROR")
 # account for.
 UNBOUND = "nothing reads through this member"
 
+# The tool's answer to a volume it cannot unlock: a key that does not
+# verify, or none given for a dataset that needs one. Exit 1, because the
+# way on is the operator's — the right key — and nothing is written.
+KEY_REFUSED = ("MAC does not verify", "is encrypted (")
+
+
+def write_map(path, length, bad):
+    """A ddrescue mapfile of a `length`-byte image: every byte read but
+    `bad`, a list of (offset, length), which is marked bad (`-`).
+
+    >>> import io, os, tempfile
+    >>> p = os.path.join(tempfile.mkdtemp(), "m.map")
+    >>> write_map(p, 0x3000, [(0x1000, 0x200), (0x1100, 0x200)])
+    >>> print(open(p).read().split("#      pos        size  status\\n")[1], end="")
+    0x00000000  0x00001000  +
+    0x00001000  0x00000300  -
+    0x00001300  0x00001d00  +
+    """
+    merged = []
+    for off, n in sorted(bad):
+        if merged and off <= merged[-1][0] + merged[-1][1]:
+            end = max(merged[-1][0] + merged[-1][1], off + n)
+            merged[-1] = (merged[-1][0], end - merged[-1][0])
+        else:
+            merged.append((off, n))
+    lines, pos = [], 0
+    for off, n in merged:
+        if off > pos:
+            lines.append((pos, off - pos, "+"))
+        lines.append((off, n, "-"))
+        pos = off + n
+    if pos < length:
+        lines.append((pos, length - pos, "+"))
+    with open(path, "w") as f:
+        f.write("# Mapfile. Written by run-matrix.py for the pattern `unreadable`\n")
+        f.write("# current_pos  current_status  current_pass\n")
+        f.write(f"0x{length:08x}     +               1\n")
+        f.write("#      pos        size  status\n")
+        for p, n, st in lines:
+            f.write(f"0x{p:08x}  0x{n:08x}  {st}\n")
+
+
+def layout_hints(oracle, paths, missing, order="as-is"):
+    """The pool's layout, as the oracle records it, in the shape
+    `--hints` takes: what an operator who knew the pool would write.
+    A member not given is `null`. `order = "reversed"` turns every raidz
+    and dRAID group the other way round, which `--search-order` is then
+    to put right; a mirror has no order to get wrong."""
+    ngroups = []
+    zc = os.path.join(oracle.dir, "zdb-C.txt")
+    if os.path.exists(zc):
+        ngroups = [int(m) for m in re.findall(r"draid_ngroups:\s*(\d+)", open(zc).read())]
+    tops = []
+    for top in sorted(oracle.layout["tops"], key=lambda t: t["index"]):
+        group = top["groups"][0]
+        kind = top["kind"]
+        members = [None if r in missing else paths[r] for r in top["members"]]
+        hint = {}
+        if kind == "mirror":
+            hint["kind"] = "mirror"
+        elif kind.startswith("raidz"):
+            hint.update(kind="raidz", nparity=group["nparity"])
+        elif kind.startswith("draid"):
+            if not ngroups:
+                raise Unresolved("the oracle has no draid_ngroups for its dRAID (zdb-C.txt)")
+            hint.update(kind="draid", nparity=group["nparity"], draid_ndata=group["ndata"],
+                        draid_nspares=group["nspares"], draid_ngroups=ngroups.pop(0))
+        else:
+            hint["kind"] = "disk"
+        if order == "reversed" and hint["kind"] in ("raidz", "draid"):
+            members = members[::-1]
+        hint["members"] = members
+        tops.append(hint)
+    return {"name": oracle.pool, "ashift": oracle.layout.get("ashift", 12), "tops": tops}
+
 
 def refusal(returncode, stderr):
     """The refusal a tool exit amounts to, or None when it is not one.
@@ -1050,7 +1145,8 @@ def refusal(returncode, stderr):
     2 is "not readable as a pool at all", 3 is "the pool is there but
     cannot be recovered at that TXG"; both are refusals. So is 1 when it
     carries the F-62 message: the tool was told a member belongs and
-    found by reading that it does not.
+    found by reading that it does not; and 1 when the key does not
+    unlock the volume, or none was given for one that needs it.
 
     >>> refusal(2, "")
     'refused'
@@ -1058,6 +1154,10 @@ def refusal(returncode, stderr):
     'refused'
     >>> refusal(1, "zvolrescue: --assume-member /x: nothing reads through this member — it is not one of the 2 leaves pool 'p' is missing.")
     'refused (asserted member reads as no leaf)'
+    >>> refusal(1, "zvolrescue: golden/secret-raw/disk: MAC does not verify: wrong key or damaged data")
+    'refused (the key does not unlock it)'
+    >>> refusal(1, "zvolrescue: golden/secret-pw/disk is encrypted (aes-128-ccm, keyformat passphrase); supply --key")
+    'refused (the key does not unlock it)'
     >>> refusal(1, "zvolrescue: --before wants Unix seconds") is None
     True
     >>> refusal(0, "") is None
@@ -1067,6 +1167,8 @@ def refusal(returncode, stderr):
         return "refused"
     if returncode == 1 and UNBOUND in stderr:
         return "refused (asserted member reads as no leaf)"
+    if returncode == 1 and any(k in stderr for k in KEY_REFUSED):
+        return "refused (the key does not unlock it)"
     return None
 
 
@@ -1076,7 +1178,7 @@ def refusal(returncode, stderr):
 INCOMPLETE = "incomplete (blocks written as zeros)"
 
 
-def judge_dump(args, oracle, manifest, members, work, assume=()):
+def judge_dump(args, oracle, manifest, members, work, assume=(), extra=(), key_mode=None):
     want = manifest["expect"].get("volumes", "all")
     volumes = list(oracle.volumes) if want == "all" else list(want)
     outcomes, redundancy = {}, False
@@ -1086,8 +1188,11 @@ def judge_dump(args, oracle, manifest, members, work, assume=()):
         cmd = [args.tool, "-q", "-f", "json", "--debug-log", log, "dump", vol, *members, "-o", out]
         for path in assume:
             cmd += ["--assume-member", path]
+        cmd += list(extra)
         key = oracle.key_for(vol)
-        if key:
+        if key and key_mode == "wrong":
+            key = wrong_key(key, work)
+        if key and key_mode != "none":
             cmd += ["--key", key]
         proc = subprocess.run(cmd, capture_output=True, text=True)
         trace = open(log, errors="replace").read() if os.path.exists(log) else ""
@@ -1110,6 +1215,20 @@ def judge_dump(args, oracle, manifest, members, work, assume=()):
         else:
             outcomes[vol] = f"exit {proc.returncode}: {proc.stderr.strip()[:160]}"
     return outcomes, redundancy
+
+
+def wrong_key(spec, work):
+    """A key of the same kind as `spec` that is not the key: the raw
+    key with every bit turned over, or a passphrase it is not."""
+    kind, _, path = spec.partition(":")
+    wrong = os.path.join(work, f"wrong-{kind}")
+    if kind == "passphrase":
+        with open(wrong, "w") as f:
+            f.write("not the passphrase of this dataset\n")
+    else:
+        with open(path, "rb") as f, open(wrong, "wb") as w:
+            w.write(bytes(b ^ 0xff for b in f.read()))
+    return f"{kind}:{wrong}"
 
 
 def judge_datasets(missing, extra, wrong_txg, blocks):
@@ -1253,6 +1372,17 @@ def judge_walk(args, oracle, members, work, assume=()):
     return outcomes, redundancy
 
 
+def extra_for_carver(extra):
+    """Of what the dump is told, what `zvolcarve roots` takes too: the
+    layout and the maps. `--search-order` is the dump's: roots does not
+    read through the layout to find a header, only to walk one."""
+    out, it = [], iter(extra)
+    for a in it:
+        if a in ("--hints", "--map"):
+            out += [a, next(it)]
+    return out
+
+
 def for_this_image(oracle, manifest):
     """Whether a manifest is written for the pool the oracle describes:
     one naming no pool is written for any."""
@@ -1314,7 +1444,7 @@ def run_case(args, oracle, manifest, rng):
               "expected": expected, "notes": []}
     try:
         try:
-            members, notes, paths = apply_damage(oracle, manifest, work, rng)
+            members, notes, paths, unread = apply_damage(oracle, manifest, work, rng)
         except Unresolved as e:
             # Nothing was copied and nothing was damaged, so the evidence
             # is untouched by construction. Saying so rather than leaving
@@ -1343,9 +1473,44 @@ def run_case(args, oracle, manifest, rng):
                 assume.append(paths[role])
         if assume:
             result["notes"].append("told about " + ", ".join(os.path.basename(a) for a in assume))
+        recovery = manifest.get("recovery", {})
+        dump_only = sorted(k for k in recovery if k != "assume_members") + (["unreadable"] if unread else [])
+        if dump_only and not oracle.has_volumes:
+            result.update(actual="n/a", verdict="n/a", inputs_unchanged=True,
+                          notes=[f"{', '.join(dump_only)}: a pool with no volumes is walked, and the walker takes none of it"])
+            return result
+        # What the operator tells the tool besides, as the recovery says.
+        extra = []
+        for role, bad in unread.items():
+            mapfile = os.path.join(work, role + ".map")
+            write_map(mapfile, os.path.getsize(paths[role]), bad)
+            extra += ["--map", f"{paths[role]}={mapfile}"]
+        missing_roles = {r for r in oracle.roles if paths[r] not in members}
+        if recovery.get("hints"):
+            if recovery["hints"] != "layout":
+                raise ValueError(f"hints {recovery['hints']!r}: the harness gives `layout`, the oracle's")
+            hints_file = os.path.join(work, "layout.hints")
+            with open(hints_file, "w") as f:
+                json.dump(layout_hints(oracle, paths, missing_roles, recovery.get("order", "as-is")), f, indent=1)
+            extra += ["--hints", hints_file]
+            result["notes"].append("hints from the oracle's layout"
+                                   + (", every raidz and dRAID group reversed" if recovery.get("order") == "reversed" else ""))
+        if recovery.get("search_order"):
+            extra.append("--search-order")
+        if recovery.get("roots"):
+            workspace = os.path.join(work, "roots")
+            proc = subprocess.run([args.carver, "-q", "roots", *members, *extra_for_carver(extra),
+                                   "-o", workspace], capture_output=True, text=True)
+            if proc.returncode == 0:
+                extra += ["--roots", workspace]
+                result["notes"].append("object-set headers from zvolcarve roots")
+            else:
+                why = proc.stderr.strip().splitlines()
+                result["notes"].append(f"zvolcarve roots exit {proc.returncode}: {why[-1][:160] if why else ''}")
         before = {p: sha256_file(p) for p in members}
         if oracle.has_volumes:
-            outcomes, redundancy = judge_dump(args, oracle, manifest, members, work, assume)
+            outcomes, redundancy = judge_dump(args, oracle, manifest, members, work, assume,
+                                              extra, recovery.get("key"))
             good = {"ok"}
         else:
             outcomes, redundancy = judge_walk(args, oracle, members, work, assume)
@@ -1384,6 +1549,8 @@ def main():
     ap.add_argument("--manifests", required=True)
     ap.add_argument("--tool", default="./target/release/zvolrescue")
     ap.add_argument("--walker", default="./target/release/examples/walk-objects")
+    ap.add_argument("--carver", default="./target/release/zvolcarve",
+                    help="zvolcarve, for a manifest whose recovery reads the object-set headers it finds")
     ap.add_argument("--out", default="golden-report")
     ap.add_argument("--label", default="", help="name of this image in the report")
     ap.add_argument("--tmp", default=None)

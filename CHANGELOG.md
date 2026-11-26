@@ -13,6 +13,48 @@ development milestone that names what changed when — the sections below
 are their record — and ships inside the next version that does get
 tagged. `v0.7.1` is the release that carries those six.
 
+## Unreleased
+
+### Fixed
+
+* **A pool read through `--hints` reads the gang headers OpenZFS 2.4
+  writes.** With `dynamic_gang_header` active a gang header fills the
+  smallest allocation of its vdev — 4 KiB at ashift 12 — rather than
+  512 bytes, and the reader learned that the feature was active from
+  the labels' `features_for_read` alone. A pool read through `--hints`
+  takes nothing from its labels, so every gang header was read at 512
+  bytes, failed its checksum on every copy, and every block behind one
+  was written as zeros: of the golden image's eleven volumes, read
+  through its layout with the configuration of every label zeroed, nine
+  came out partial (exit 4). The MOS keeps the same list, with the count
+  of what holds each feature active; where no label names the feature,
+  it is taken from there as the MOS opens, and the eleven volumes read
+  bit-exact.
+
+### Added
+
+* **The damage matrix tells the tool what an operator would, and
+  fetches what its cases need.** A manifest's `[recovery]` gives the
+  pool's layout as the oracle records it (`hints = "layout"`, every
+  raidz and dRAID group reversed with `order = "reversed"`), the order
+  searched (`search_order`), the object-set headers `zvolcarve roots`
+  finds on the damaged members (`roots`), and a wrong key or none
+  (`key`); the pattern `unreadable` zeroes a range as an imager leaves
+  what it could not read and marks it in a ddrescue map given with
+  `--map`. Ten such cases against image-v1, all run against its
+  published members: the uberblock rings of every member zeroed —
+  refused, and read at the headers found; the configuration of every
+  label zeroed — refused, read through the hints, and read through them
+  in the wrong order with the order searched; every label of every
+  member zeroed whole and read through hints out of order, the order
+  searched from the headers found; the boot area overwritten, read
+  bit-exact; one raidz2 member unreadable by its map; a wrong key and
+  none refused. A manifest may name its pool (`image`), and
+  `run-matrix.py --print-needs` lists the release files the selected
+  cases need, which `fetch-image.sh` then fetches alone (`NEEDS`): the
+  published image's matrix fetches 16 of its 20 files, the oracle
+  capture the 10 members.
+
 ## v0.9.18 — 2026-11-25
 
 **A pool with no uberblock left is read at the headers the carver found.**
