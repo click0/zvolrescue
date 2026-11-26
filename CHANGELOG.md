@@ -56,6 +56,14 @@ tagged. `v0.7.1` is the release that carries those six.
   the selected cases need, which `fetch-image.sh` then fetches alone
   (`NEEDS`): the published image's matrix fetches 16 of its 20 files,
   the oracle capture the 10 members.
+* **Every run of the matrix against the published image keeps its
+  report beside the image.** The weekly run of `realworld.yml`, and any
+  made by hand on `main`, passes or not, writes its report into
+  zvolrescue-testdata as the next `reports/<tag>-rN` — laid out by that
+  repository's `tools/add-report.py`, with a README naming the run, the
+  commits and every case that was not a plain pass — and pushes it with
+  the token `publish-golden.yml` already uses; until then a report was
+  only an artifact of its run, gone when the run's artifacts expire.
 
 ## v0.9.18 — 2026-11-25
 

@@ -33,7 +33,9 @@ name: Real-world (kernel ZFS)
 #
 # Each job uploads the run's record (results, the row for the matrix,
 # the evidence log, every log of a failed scenario) whether it passed
-# or not; the job's own status is the script's exit code.
+# or not; the job's own status is the script's exit code. The published
+# golden image's job keeps its report in zvolrescue-testdata as well,
+# as the next reports/<tag>-rN there, with publish-golden.yml's secret.
 
 on:
   workflow_dispatch:
@@ -519,11 +521,13 @@ jobs:
           held=""
           case "${{ github.event.inputs.only }}" in *held-out*) held=--held-out ;; esac
           set +e
+          start=$(date +%s)
           python3 tests/golden/run-matrix.py \
             --image /var/tmp/image/members --oracle testdata/oracle/golden \
             --manifests testdata/manifests --out /var/tmp/image/report --label "$TAG" \
             --tmp /var/tmp $held 2>&1 | tee /var/tmp/image/matrix.log
           rc=${PIPESTATUS[0]}
+          echo $(( $(date +%s) - start )) > /var/tmp/image/seconds
           set -e
           echo "run-matrix.py exit $rc"
           python3 tests/golden/summarize-report.py "/var/tmp/image/report/report-$TAG.json" \
@@ -539,3 +543,56 @@ jobs:
         with:
           name: golden-published-${{ env.TAG }}-report
           path: /var/tmp/image/report
+      # Every run's report kept where the image is, not only as this
+      # run's artifact: the next reports/<tag>-rN of zvolrescue-testdata,
+      # laid out by that repository's own tools/add-report.py, pushed
+      # with the secret publish-golden.yml uses (its header says how to
+      # make it). A pass and a failure alike: a failing run's report is
+      # the one most worth keeping. Nothing is kept from a branch other
+      # than main, from a run that wrote no report, or without the secret,
+      # and the step says which.
+      - name: The report, kept in zvolrescue-testdata
+        if: always()
+        env:
+          TESTDATA_TOKEN: ${{ secrets.TESTDATA_TOKEN }}
+          ONLY: ${{ github.event.inputs.only }}
+        run: |
+          report=/var/tmp/image/report
+          if [ "$GITHUB_REF" != refs/heads/main ]; then
+            echo "a run of $GITHUB_REF: its report stays an artifact of the run"; exit 0
+          fi
+          if [ ! -f "$report/report-$TAG.json" ]; then
+            echo "::notice::no report-$TAG.json: the matrix wrote no report, so none is kept"; exit 0
+          fi
+          if [ -z "$TESTDATA_TOKEN" ]; then
+            echo "::notice::no TESTDATA_TOKEN in this repository's Actions secrets: the report stays an artifact of this run (publish-golden.yml says how to make the token)"; exit 0
+          fi
+          case "$GITHUB_EVENT_NAME" in
+            schedule) by='`realworld.yml` in zvolrescue, the weekly run' ;;
+            *) by="\`realworld.yml\` in zvolrescue, run by hand${ONLY:+ with only: $ONLY}" ;;
+          esac
+          held=""
+          case "$ONLY" in *held-out*) held=--held-out ;; esac
+          url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          manifests=$(git -C testdata rev-parse HEAD)
+          counts=$(python3 -c 'import collections, json, sys; c = collections.Counter(r["verdict"] for r in json.load(open(sys.argv[1]))); print(", ".join(f"{k} {v}" for k, v in sorted(c.items())))' "$report/report-$TAG.json")
+          # Another run may push between this clone and its push: the
+          # directory is then taken again from a fresh clone.
+          for attempt in 1 2 3; do
+            rm -rf /var/tmp/td
+            git clone -q --depth 1 "https://x-access-token:${TESTDATA_TOKEN}@github.com/$TESTDATA" /var/tmp/td
+            dir=$(python3 -I /var/tmp/td/tools/add-report.py "$report" --tag "$TAG" --root /var/tmp/td \
+              --by "$by" --run-url "$url" --tool-commit "$GITHUB_SHA" --manifests-commit "$manifests" \
+              --seconds "$(cat /var/tmp/image/seconds 2>/dev/null || echo 0)" $held)
+            git -C /var/tmp/td add "$dir"
+            git -C /var/tmp/td -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -q \
+              -m "$dir: the damage matrix against $TAG, run $GITHUB_RUN_ID of realworld.yml" \
+              -m "From $url ($GITHUB_EVENT_NAME), zvolrescue ${GITHUB_SHA:0:7}, the manifests at ${manifests:0:7}: $counts."
+            if git -C /var/tmp/td push -q origin HEAD:main; then
+              echo "report kept: https://github.com/$TESTDATA/tree/main/$dir" | tee -a "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            sleep $((attempt * 15))
+          done
+          echo "::error::the report could not be pushed to $TESTDATA"; exit 1

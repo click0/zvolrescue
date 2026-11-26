@@ -13,6 +13,8 @@ name: Publish the golden image
 # Personal access tokens → Fine-grained) for click0/zvolrescue-testdata
 # alone, with repository permission Contents: read and write. GITHUB_TOKEN
 # cannot write to another repository, which is the whole reason for it.
+# realworld.yml's golden-published job keeps every run's report there
+# with the same secret.
 # The testdata release may exist already (its tag made from the web with
 # nothing attached) or not: it is created as a draft, filled, checked and
 # published. A release that is already published and frozen by release
