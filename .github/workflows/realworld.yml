@@ -360,10 +360,13 @@ jobs:
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v5
+      # The manifests are all this job reads of the test data: the image
+      # and its oracle are the ones it builds.
       - uses: actions/checkout@v5
         with:
           repository: click0/zvolrescue-testdata
           path: testdata
+          sparse-checkout: manifests
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release -p zvolrescue && cargo build --release -p zfs-read --examples
       - name: Kernel ZFS on the runner

@@ -1833,10 +1833,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      # The manifests are all this job reads of the test data: its pool
+      # and oracle are built here. The rest is the published image's
+      # oracle, 65 MB of it, and is left on the server.
       - uses: actions/checkout@v5
         with:
           repository: click0/zvolrescue-testdata
           path: testdata
+          sparse-checkout: manifests
       - uses: dtolnay/rust-toolchain@stable
       - run: sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends zfsutils-linux zfs-test zstd
       - run: cargo build --release && cargo build --release -p zfs-read --examples
