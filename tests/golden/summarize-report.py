@@ -17,13 +17,14 @@ rs = json.load(open(path))
 
 print(f"## {title}")
 print()
-# The files and the history, where the oracle had them to judge by.
+# The files, the history, the datasets listed and what scan read, where
+# the oracle had them to judge by.
 side = lambda r, k: r[k]["actual"] if k in r else "—"
-print("| Manifest | Expected | Actual | Files | Timeline | Verdict |")
-print("|---|---|---|---|---|---|")
+print("| Manifest | Expected | Actual | Files | Timeline | Datasets | Scan | Verdict |")
+print("|---|---|---|---|---|---|---|---|")
 for r in rs:
     cell = lambda t: str(t).replace("|", "\\|")
-    print(f"| `{r['id']}` | {cell(r['expected'])} | {r['actual']} | {side(r, 'files')} | {side(r, 'timeline')} | {r['verdict']} |")
+    print(f"| `{r['id']}` | {cell(r['expected'])} | {r['actual']} | {side(r, 'files')} | {side(r, 'timeline')} | {side(r, 'datasets')} | {side(r, 'scan')} | {r['verdict']} |")
 c = collections.Counter(r["verdict"] for r in rs)
 print()
 print(f"{len(rs)} manifests: " + ", ".join(f"{k} {v}" for k, v in sorted(c.items())))
@@ -49,7 +50,7 @@ for r in bad:
                 print(f"  - {vol}: {why}")
         elif v != "ok":
             print(f"  - {k}: {v}")
-    for k in ("files", "timeline"):
+    for k in ("files", "timeline", "datasets", "scan"):
         if r.get(k, {}).get("verdict", "pass") != "pass":
             print(f"  - {k}: expected {r[k]['expected']}, got {r[k]['actual']}")
             detail = r[k].get("detail") or {}

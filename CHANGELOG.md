@@ -104,6 +104,19 @@ tagged. `v0.7.1` is the release that carries those six.
   the files and the history must come to (`expect.files`,
   `expect.timeline`); the control case, which damages and tells
   nothing, judges every snapshot's files as well.
+* **The damage matrix judges `list` and `scan` against zdb.** The
+  golden image's oracle had more than it was judged by. Every case now
+  also holds `zvolrescue list -r` against `zdb -t T -d` at the TXG it
+  listed at — every dataset with its kind, object number, creation TXG
+  and referenced size as zdb prints it, and nothing zdb does not name —
+  and `scan -vv` against `zdb -l`, `zdb -u` and `zpool status`: the
+  nvlist of the label it read of each member, every copy of the
+  uberblock zdb printed that verifies, and each top-level vdev it
+  assembled, its kind, parity, dRAID geometry and GUID. The control
+  case lists at every TXG of the ring zdb recorded, and each TXG at
+  which zdb's listing changes must be one `list` names. A listing, a
+  label, an uberblock or a vdev that says other than zdb read is a
+  defect.
 
 ## v0.9.18 — 2026-11-25
 
