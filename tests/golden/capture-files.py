@@ -10,8 +10,10 @@ under it is recorded, the root included, in byte order of its path:
 its type, mode, owner, size, link count, inode (the object number on
 ZFS), modification time, the SHA-256 of a regular file's content, a
 symbolic link's target, and every extended attribute's name with the
-size and SHA-256 of its value. A listing equal to one already recorded
-is written as `{"same_as": NAME}`. Nothing is followed across a mount
+size and SHA-256 of its value. A snapshot's root has no inode recorded:
+Linux numbers it after the snapshot (ZFSCTL_INO_SNAPDIRS less its
+object-set id), not by its object. A listing equal to one already
+recorded, the root's inode aside, is written as `{"same_as": NAME}`. Nothing is followed across a mount
 point or through a link, and a filesystem's `.zfs` is left out. With
 `--add` the datasets go into OUT.json beside those already there, so
 that each filesystem can be mounted alone — a child mounted inside its
@@ -118,11 +120,14 @@ def main(argv):
         name, path = spec.split("=", 1)
         try:
             entries = listing(path)
+            if "@" in name:
+                del entries[0]["ino"]
         except OSError as e:
             where = os.fsdecode(e.filename) if e.filename is not None else path
             result["datasets"][name] = {"path": path, "error": f"{e.strerror}: {where}"}
             continue
-        canon = json.dumps(entries, sort_keys=True).encode()
+        root = {k: v for k, v in entries[0].items() if k != "ino"}
+        canon = json.dumps([root] + entries[1:], sort_keys=True).encode()
         digest = hashlib.sha256(canon).hexdigest()
         if digest in seen:
             result["datasets"][name] = {"same_as": seen[digest]}
