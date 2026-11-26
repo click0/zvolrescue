@@ -64,6 +64,18 @@ tagged. `v0.7.1` is the release that carries those six.
   commits and every case that was not a plain pass — and pushes it with
   the token `publish-golden.yml` already uses; until then a report was
   only an artifact of its run, gone when the run's artifacts expire.
+* **The oracle can say what the files of a published image hold, and
+  what its pool's history is.** `oracle-capture.yml` takes `what =
+  files-history`: on the ubuntu-26.04 runner the release's members,
+  checked against their sums, are imported read-only by the kernel,
+  every dataset matched to the GUID the builder recorded, and
+  `tests/golden/capture-files.py` records every entry of every
+  filesystem and of each of its snapshots as the VFS gives it — each
+  filesystem mounted alone, so that a child does not hide what its
+  parent holds — with the SHA-256 of a file's content and of each
+  extended attribute's value; `zpool history -il` goes beside it, and
+  the members' sums are checked again after the export. It is what
+  `zvolfiles` and `zvoltimeline` are to be judged against.
 
 ## v0.9.18 — 2026-11-25
 

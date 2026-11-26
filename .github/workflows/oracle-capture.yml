@@ -1,18 +1,28 @@
 name: Capture the oracle again
 
-# zdb over the published members of a golden image, offline (`zdb -e -p`),
-# on a userland whose OpenZFS is at least the image's — the ubuntu-26.04
-# runner's 2.4.1 for image-v1 — to add to the oracle what its builder did
-# not keep: `zdb -dddddd`, every object's block pointers level by level,
-# which is what lets a manifest aim at a dnode block, an indirect block or
-# one data block of a named object. The capture is OpenZFS's own reading
-# of the bytes the release holds, checked against the pinned sums first;
-# the tool under test is not involved.
+# OpenZFS over the published members of a golden image, on a runner whose
+# OpenZFS is at least the image's — the ubuntu-26.04 runner's 2.4.1 for
+# image-v1 — to add to the oracle what its builder did not keep. Two
+# captures, chosen by `what`:
 #
-# The file goes into oracle/<pool>/ of zvolrescue-testdata when
+#  * zdb-dddddd: zdb offline (`zdb -e -p`), every object's block pointers
+#    level by level, which is what lets a manifest aim at a dnode block,
+#    an indirect block or one data block of a named object;
+#  * files-history: the pool imported read-only by the kernel, every
+#    entry of every filesystem and of each of its snapshots as the VFS
+#    gives it (type, mode, owner, size, inode, mtime, the SHA-256 of a
+#    file's content and of each extended attribute's value;
+#    tests/golden/capture-files.py), and `zpool history -il` — what
+#    zvolfiles and zvoltimeline are judged against. The members are
+#    checked against their sums again after the export.
+#
+# Either is OpenZFS's own reading of the bytes the release holds, checked
+# against the pinned sums first; the tool under test is not involved.
+#
+# The files go into oracle/<pool>/ of zvolrescue-testdata when
 # TESTDATA_TOKEN (see publish-golden.yml) is there; without it, onto the
 # branch oracle-capture/<tag> of this repository, to be moved by hand.
-# Either way it is uploaded as an artifact.
+# Either way they are uploaded as an artifact.
 
 on:
   workflow_dispatch:
@@ -25,17 +35,26 @@ on:
         description: "The pool's name, which is the oracle's directory there (oracle/<pool>)"
         required: true
         default: golden
+      what:
+        description: "zdb-dddddd (zdb offline: every object's block pointers) or files-history (the kernel, read-only: every file of every filesystem and snapshot, and zpool history -il)"
+        required: true
+        type: choice
+        options:
+          - zdb-dddddd
+          - files-history
+        default: zdb-dddddd
 
 permissions:
   contents: write
 
 jobs:
   capture:
-    name: zdb -dddddd over ${{ inputs.tag }}
+    name: ${{ inputs.what }} over ${{ inputs.tag }}
     runs-on: ubuntu-26.04
     env:
       TAG: ${{ inputs.tag }}
       POOL: ${{ inputs.pool }}
+      WHAT: ${{ inputs.what }}
       TESTDATA: ${{ github.repository }}-testdata
     steps:
       - uses: actions/checkout@v5
@@ -43,10 +62,14 @@ jobs:
         with:
           repository: click0/zvolrescue-testdata
           path: testdata
-      - name: OpenZFS userland, zstd
+      - name: OpenZFS userland, zstd, and the kernel's module for files-history
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends zfsutils-linux zstd
+          if [ "$WHAT" = files-history ]; then
+            sudo modprobe zfs || { sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)" && sudo modprobe zfs; }
+            uname -r
+          fi
           # The utilities insist on root even to say their version.
           sudo zfs version
       - name: The release files, kept between runs
@@ -58,56 +81,150 @@ jobs:
         run: |
           cmp "tests/golden/$TAG.SHA256SUMS" "testdata/oracle/$POOL/SHA256SUMS-release.txt"
           sudo mkdir -p /var/tmp/image && sudo chown -R "$USER" /var/tmp/image
-          # The members alone: zdb reads the pool as it is, and the older
-          # copies (1.11 GB of image-v1's 2.51) are no part of it.
+          # The members alone: OpenZFS reads the pool as it is, and the
+          # older copies (1.11 GB of image-v1's 2.51) are no part of it.
           awk '$2 !~ /^round6-/ { print $2 }' "tests/golden/$TAG.SHA256SUMS" > /var/tmp/image/needs.txt
           NEEDS=/var/tmp/image/needs.txt sh tests/golden/fetch-image.sh "$TAG" "tests/golden/$TAG.SHA256SUMS" /var/tmp/image "testdata/oracle/$POOL/members.sha256"
       - name: zdb, offline, over the members
+        if: ${{ inputs.what == 'zdb-dddddd' }}
         run: |
-          mkdir -p capture
+          mkdir -p capture/oracle
           # -e: an exported pool; -p: where its members are; the pool by name.
-          sudo zdb -e -p /var/tmp/image/members -dddddd "$POOL" > capture/zdb-dddddd.txt 2> capture/zdb-dddddd.err || {
+          sudo zdb -e -p /var/tmp/image/members -dddddd "$POOL" > capture/oracle/zdb-dddddd.txt 2> capture/zdb-dddddd.err || {
             echo "::error::zdb -dddddd exited $?"; tail -n 20 capture/zdb-dddddd.err; exit 1; }
-          wc -l capture/zdb-dddddd.txt capture/zdb-dddddd.err
-          grep -c '^Dataset ' capture/zdb-dddddd.txt
-          grep -c 'Indirect blocks:' capture/zdb-dddddd.txt
-          grep -m 3 -n 'DVA\[0\]' capture/zdb-dddddd.txt | cut -c1-200
+          wc -l capture/oracle/zdb-dddddd.txt capture/zdb-dddddd.err
+          grep -c '^Dataset ' capture/oracle/zdb-dddddd.txt
+          grep -c 'Indirect blocks:' capture/oracle/zdb-dddddd.txt
+          grep -m 3 -n 'DVA\[0\]' capture/oracle/zdb-dddddd.txt | cut -c1-200
           # What the capture is of: the pool's own record, so that nobody
           # mistakes it for another image's.
           sudo zdb -e -p /var/tmp/image/members -C "$POOL" > capture/zdb-C.txt 2>/dev/null || true
           grep -E 'pool_guid|txg' capture/zdb-C.txt | head -n 4
           cmp <(grep -E '^\s*pool_guid' capture/zdb-C.txt) <(grep -E '^\s*pool_guid' "testdata/oracle/$POOL/zdb-C.txt")
-      - uses: actions/upload-artifact@v4
-        with:
-          name: oracle-capture-${{ inputs.tag }}
-          path: capture
-      - name: Into the oracle
-        env:
-          TESTDATA_TOKEN: ${{ secrets.TESTDATA_TOKEN }}
-        run: |
-          if [ -n "$TESTDATA_TOKEN" ]; then
-            git clone -q --depth 1 "https://x-access-token:${TESTDATA_TOKEN}@github.com/$TESTDATA" td
-            cp capture/zdb-dddddd.txt "td/oracle/$POOL/zdb-dddddd.txt"
-            cd td
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add -A
-            git commit -q -F - <<MSG
+          cat > capture/message.txt <<MSG
           oracle: zdb -dddddd of $TAG, captured offline over the release's members
 
           Every object's block pointers, level by level, from OpenZFS's own zdb
           over the published members (checked against the pinned sums first):
           what the builder of $TAG did not keep, and what lets a manifest aim at
           a dnode block, an indirect block or one data block of a named object.
+          From $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID.
           MSG
+      - name: The kernel, read-only, over the members
+        if: ${{ inputs.what == 'files-history' }}
+        run: |
+          set -euo pipefail
+          mkdir -p capture/oracle
+          M=/var/tmp/image/members
+          ALT=/var/tmp/altroot
+          # Read-only: nothing is written to a member, no cache file is
+          # kept, nothing is mounted by the import, and whatever would be
+          # lies under ALT.
+          zimport() { sudo zpool import -d "$M" -o readonly=on -o cachefile=none -R "$ALT" -N "$@" "$POOL"; }
+          forced=""
+          zimport || { forced=" -f"; zimport -f; }
+          # The pool imported is the oracle's: every dataset and snapshot
+          # by the GUID the builder recorded.
+          cmp <(sudo zfs list -H -p -t all -r -o name,guid "$POOL" | sort) \
+              <(cut -f1,3 "testdata/oracle/$POOL/zfs-list.txt" | sort)
+          # Each encryption root's key from the oracle, by its format.
+          keys="$GITHUB_WORKSPACE/testdata/oracle/$POOL/keys"
+          sudo zfs list -H -t filesystem,volume -r -o name,encryptionroot,keyformat "$POOL" |
+            awk -F'\t' '$1 == $2 && $3 != "none" { print $1 "\t" $3 }' |
+            while IFS=$'\t' read -r root format; do
+              case $format in raw) file=raw.key ;; passphrase) file=passphrase.txt ;; *) file=$format.key ;; esac
+              sudo zfs load-key -L "file://$keys/$file" "$root"
+            done
+          # One filesystem at a time, each read-only on a directory of its
+          # own: a child mounted inside its parent would hide the directory
+          # the parent itself holds there. With it each of its snapshots,
+          # under its .zfs/snapshot, mounted by the kernel as it is entered.
+          n=0
+          while read -r name; do
+            n=$((n + 1)); dir=/var/tmp/mnt/$n
+            sudo mkdir -p "$dir"
+            sudo mount -t zfs -o ro,zfsutil "$name" "$dir" || { echo "::error::$name did not mount"; exit 1; }
+            specs=("$name=$dir")
+            while read -r snap; do
+              specs+=("$snap=$dir/.zfs/snapshot/${snap#*@}")
+            done < <(sudo zfs list -H -o name -t snapshot -d 1 "$name")
+            sudo python3 -I tests/golden/capture-files.py --add capture/oracle/files.json "$POOL" "${specs[@]}"
+            sudo umount -R "$dir"
+          done < <(sudo zfs list -H -t filesystem -r -o name "$POOL")
+          sudo chown "$USER" capture/oracle/files.json
+          python3 - capture/oracle/files.json <<'EOF'
+          import json, sys
+          d = json.load(open(sys.argv[1]))["datasets"]
+          bad = {k: v["error"] for k, v in d.items() if "error" in v}
+          if bad:
+              sys.exit(f"::error::not read: {bad}")
+          files = sum(1 for v in d.values() for e in v.get("entries", []) if e["type"] == "f")
+          xattrs = sum(len(e.get("xattrs", {})) for v in d.values() for e in v.get("entries", []))
+          print(f"{len(d)} filesystems and snapshots, {files} files, {xattrs} extended attributes")
+          EOF
+          sudo zpool history -il "$POOL" > capture/oracle/zpool-history-il.txt
+          test -s capture/oracle/zpool-history-il.txt
+          wc -l capture/oracle/zpool-history-il.txt
+          {
+            echo "# How files.json and zpool-history-il.txt were captured"
+            echo
+            echo "run:     $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo "commit:  $GITHUB_SHA (tests/golden/capture-files.py)"
+            echo "runner:  $(. /etc/os-release && echo "$PRETTY_NAME"), kernel $(uname -r)"
+            echo "openzfs: $(sudo zfs version | tr '\n' ' ')"
+            echo "members: the release files of $TAG, checked against tests/golden/$TAG.SHA256SUMS,"
+            echo "         decompressed and checked against oracle/$POOL/members.sha256"
+            echo "import:  zpool import -d MEMBERS -o readonly=on -o cachefile=none -R ALTROOT -N$forced $POOL"
+            echo "keys:    zfs load-key -L file://oracle/$POOL/keys/... for each encryption root"
+            echo "mounts:  each filesystem alone, mount -t zfs -o ro,zfsutil, its snapshots under .zfs/snapshot"
+            echo
+            sudo zpool status -v "$POOL"
+            echo
+            sudo zfs list -t all -r -o name,mounted,mountpoint,used,referenced "$POOL"
+          } > capture/oracle/files-capture.txt
+          sudo zpool export "$POOL"
+          # Nothing was written: the members are the bytes the release holds.
+          (cd "$M" && sha256sum -c --quiet "$GITHUB_WORKSPACE/testdata/oracle/$POOL/members.sha256")
+          echo "members: unchanged after the export (sha256sum -c against members.sha256)" >> capture/oracle/files-capture.txt
+          cat > capture/message.txt <<MSG
+          oracle: the files of $TAG's filesystems and its pool history, from the kernel
+
+          The release's members, checked against the pinned sums, imported
+          read-only by the kernel OpenZFS of the ubuntu-26.04 runner, every
+          dataset by the GUID the builder recorded: files.json holds every
+          entry of every filesystem and of each of its snapshots as the VFS
+          gives it - type, mode, owner, size, inode, mtime, the SHA-256 of a
+          file's content and of each extended attribute's value - and
+          zpool-history-il.txt the pool's history, internal events and long
+          form; files-capture.txt says how. The members' sums were checked
+          again after the export. What zvolfiles and zvoltimeline are judged
+          against. From $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID.
+          MSG
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oracle-capture-${{ inputs.tag }}-${{ inputs.what }}
+          path: capture
+      - name: Into the oracle
+        env:
+          TESTDATA_TOKEN: ${{ secrets.TESTDATA_TOKEN }}
+        run: |
+          ls -l capture/oracle
+          if [ -n "$TESTDATA_TOKEN" ]; then
+            git clone -q --depth 1 "https://x-access-token:${TESTDATA_TOKEN}@github.com/$TESTDATA" td
+            cp capture/oracle/* "td/oracle/$POOL/"
+            cd td
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -A
+            git commit -q -F ../capture/message.txt
             git push -q origin HEAD:main
             echo "committed to $TESTDATA main: $(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
           else
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git checkout -q -b "oracle-capture/$TAG"
-            mkdir -p "oracle-capture/$POOL" && cp capture/zdb-dddddd.txt "oracle-capture/$POOL/"
-            git add oracle-capture && git commit -q -m "oracle capture of $TAG (zdb -dddddd), to be moved to zvolrescue-testdata"
+            mkdir -p "oracle-capture/$POOL" && cp capture/oracle/* "oracle-capture/$POOL/"
+            git add oracle-capture && git commit -q -m "oracle capture of $TAG ($WHAT), to be moved to zvolrescue-testdata"
             git push -q -f origin "oracle-capture/$TAG"
             echo "no TESTDATA_TOKEN: pushed to branch oracle-capture/$TAG of $GITHUB_REPOSITORY" | tee -a "$GITHUB_STEP_SUMMARY"
           fi
