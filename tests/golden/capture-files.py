@@ -77,8 +77,13 @@ def record(top, rel, dev):
 
 
 def listing(top):
-    """Every entry under `top`, the root first, in byte order of path."""
-    top = os.fsencode(top)
+    """Every entry under `top`, the root first, in byte order of path.
+
+    `top` is walked as `top/.`: a snapshot's `.zfs/snapshot/<name>` is
+    mounted by the kernel only when a path goes through it, and an
+    lstat of the name alone answers for the control directory's node
+    rather than for the snapshot's own root."""
+    top = os.path.join(os.fsencode(top), b".")
     dev = os.lstat(top).st_dev
     entries, stack = [], [b""]
     while stack:
