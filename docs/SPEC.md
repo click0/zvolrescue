@@ -566,7 +566,7 @@ on in-memory fixtures and portable.
   quietly stopped applying and took its coverage with it. Both are the
   silent loss the subset exists to prevent, and both were checked by
   causing them.
-* **Fuzzing**: `cargo fuzz` targets for the nvlist, blkptr, dnode and ZAP parsers, run for a bounded time in CI on every push.
+* **Fuzzing**: `cargo fuzz` targets (`fuzz/`) for the parsers of `zfs-ondisk` on hostile input — the nvlist, the block pointer, the dnode, the ZAP, the uberblock, every bonus buffer, every decompressor and the partition tables — each starting from a well-formed instance (`fuzz/seeds`, written by the example `fuzz-seeds`), run for 30 seconds each under the address sanitizer in CI on every push.
 * **Static analysis**: `cargo clippy -D warnings`, `cargo fmt --check`, `cargo deny` (licences, advisories, banned crates); Miri on the `zfs-ondisk` unit tests.
 
 ### 9.1 The golden image and the damage matrix

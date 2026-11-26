@@ -571,7 +571,7 @@ docs/                   SPEC.md, SPEC.uk.md, COMPANIONS.md, COMPANIONS.uk.md, re
   застосовуватись і забрав своє покриття. І те, й те — саме та мовчазна
   втрата, заради якої ця підмножина існує; обидві перевірені тим, що їх
   викликали навмисно.
-* **Fuzzing**: `cargo fuzz` target-и для парсерів nvlist, blkptr, dnode і ZAP, запускаються обмежений час у CI на кожен push.
+* **Fuzzing**: `cargo fuzz` target-и (`fuzz/`) для парсерів `zfs-ondisk` на ворожому вході — nvlist, вказівника блоку, dnode, ZAP, uberblock-а, кожного bonus-буфера, кожного декомпресора й таблиць розділів, — кожен від правильно сформованого екземпляра (`fuzz/seeds`, їх пише приклад `fuzz-seeds`), запускаються по 30 секунд під address sanitizer у CI на кожен push.
 * **Статичний аналіз**: `cargo clippy -D warnings`, `cargo fmt --check`, `cargo deny` (ліцензії, advisories, заборонені crate-и); Miri на unit-тестах `zfs-ondisk`.
 
 ### 9.1 Золотий образ і матриця пошкоджень
