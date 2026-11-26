@@ -370,7 +370,7 @@ jobs:
           path: testdata
           sparse-checkout: manifests
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release -p zvolrescue -p zvolcarve && cargo build --release -p zfs-read --examples
+      - run: cargo build --release -p zvolrescue -p zvolcarve -p zvolfiles -p zvoltimeline && cargo build --release -p zfs-read --examples
       - name: Kernel ZFS on the runner
         run: |
           sudo apt-get update -qq
@@ -473,7 +473,7 @@ jobs:
           repository: click0/zvolrescue-testdata
           path: testdata
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release -p zvolrescue -p zvolcarve && cargo build --release -p zfs-read --examples
+      - run: cargo build --release -p zvolrescue -p zvolcarve -p zvolfiles -p zvoltimeline && cargo build --release -p zfs-read --examples
       - name: The release files, kept between runs
         uses: actions/cache@v4
         with:

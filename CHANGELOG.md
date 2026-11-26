@@ -75,7 +75,22 @@ tagged. `v0.7.1` is the release that carries those six.
   parent holds — with the SHA-256 of a file's content and of each
   extended attribute's value; `zpool history -il` goes beside it, and
   the members' sums are checked again after the export. It is what
-  `zvolfiles` and `zvoltimeline` are to be judged against.
+  `zvolfiles` and `zvoltimeline` are judged against.
+* **The damage matrix judges `zvolfiles` and `zvoltimeline`, not only
+  `zvolrescue`.** Where the oracle has the kernel's reading of the
+  pool's filesystems and its history, every case also extracts every
+  filesystem with `zvolfiles` and holds each entry against what the
+  kernel read — type, mode, owner, object number, mtime, a file's size
+  and SHA-256, a link's target, every extended attribute — and asks
+  `zvoltimeline` for the history, holding every dataset and snapshot to
+  the TXG, the manner and the GUID the pool's record gives, and every
+  rename, promotion and destroy after the oldest TXG it read to the
+  first TXG it read from then on. An entry or an event presented as
+  right that is not is a defect whatever the manifest expects; one the
+  tool says it did not read whole is partial. A manifest may say what
+  the files and the history must come to (`expect.files`,
+  `expect.timeline`); the control case, which damages and tells
+  nothing, judges every snapshot's files as well.
 
 ## v0.9.18 — 2026-11-25
 

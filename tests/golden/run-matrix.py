@@ -36,6 +36,17 @@ capture, up to L2. All of these but `assume_members` are the
 dump's: a pool with no volumes is walked by a reader that takes none of
 them, and such a case is n/a there.
 
+Where the oracle has the kernel's reading of the pool's filesystems
+(`files.json`) and its history (`zpool-history-il.txt`), every case also
+judges `zvolfiles` — every filesystem extracted, each entry against what
+the kernel read — and `zvoltimeline` — every dataset and snapshot at the
+TXG, in the manner and with the GUID the pool's record gives, every
+rename, promotion and destroy inside the TXGs it read. Whatever the
+manifest expects, an entry or an event presented as right that is not
+is a defect; `expect.files` and `expect.timeline` say more where the
+redundancy does. A case that damages and tells nothing (the control)
+judges every snapshot's files too.
+
 A manifest that names its pool (`image = "<pool>"`, the name the
 oracle's `layout.json` gives) runs against that pool alone; one that
 names none runs against any. `--print-needs` runs nothing: it prints
@@ -55,6 +66,7 @@ import subprocess
 import struct
 import sys
 import tempfile
+import time
 import tomllib
 
 UNITS = {"": 1, "K": 1024, "KiB": 1024, "M": 1 << 20, "MiB": 1 << 20, "G": 1 << 30, "GiB": 1 << 30}
@@ -410,6 +422,29 @@ class Oracle:
         self.pool = self.layout["pool"]
         self.has_volumes = bool(self.layout.get("volumes"))
         self.roles = list(self.layout["members"])
+        # What the kernel read out of each filesystem and snapshot
+        # (oracle-capture.yml, what = files-history), a listing that is
+        # its head's or an earlier one's written once.
+        self.files = {}
+        fj = os.path.join(d, "files.json")
+        if os.path.exists(fj):
+            listed = json.load(open(fj))["datasets"]
+            for name, v in listed.items():
+                while "same_as" in v:
+                    v = listed[v["same_as"]]
+                if "entries" in v:
+                    self.files[name] = v["entries"]
+        # The pool's own record of its history, and every dataset's and
+        # snapshot's GUID as the builder listed them at the end.
+        hist = os.path.join(d, "zpool-history-il.txt")
+        self.history = open(hist, errors="replace").read() if os.path.exists(hist) else ""
+        self.guids = {}
+        listing = os.path.join(d, "zfs-list.txt")
+        if os.path.exists(listing):
+            for line in open(listing):
+                f = line.rstrip("\n").split("\t")
+                if len(f) > 2 and f[2].isdigit():
+                    self.guids[f[0]] = int(f[2])
         self.inventory = {}
         inv = os.path.join(d, "inventory.txt")
         if os.path.exists(inv):
@@ -1342,6 +1377,368 @@ def judge_dump(args, oracle, manifest, members, work, assume=(), extra=(), key_m
     return outcomes, redundancy
 
 
+# zvolfiles's answer when some of a tree did not read whole: the entries
+# it says so of (blocks written as zeros, attributes or directory contents
+# unread, an entry that failed), and exit 4.
+INCOMPLETE_FILES = "incomplete (entries said not whole)"
+KINDS = {"-": "f", "d": "d", "l": "l"}
+
+
+def iso_ns(stamp):
+    """Nanoseconds since the epoch of zvolfiles's `2026-10-10T10:23:13.624952330Z`.
+
+    >>> iso_ns("1970-01-01T00:00:01.5Z")
+    1500000000
+    >>> iso_ns("2026-10-10T10:23:13.624952330Z")
+    1791627793624952330
+    """
+    import calendar
+    whole, _, frac = stamp.rstrip("Z").partition(".")
+    secs = calendar.timegm(time.strptime(whole, "%Y-%m-%dT%H:%M:%S"))
+    return secs * 10**9 + int((frac + "000000000")[:9])
+
+
+def compare_files(oracle_entries, manifest, returncode):
+    """A filesystem's tree as zvolfiles extracted it (its manifest, its
+    exit code) against what the kernel read out of it. The answer is
+    `ok` when every entry is there and the same and nothing else is;
+    INCOMPLETE_FILES when the run said, with exit 4, that something did
+    not read whole and everything it did not say that of is right; and
+    otherwise what differs — an entry presented as whole that is not,
+    one missing that nothing accounts for, one the pool does not hold.
+
+    >>> o = [{"path": ".", "type": "d", "ino": 34},
+    ...      {"path": "f", "type": "f", "mode": "644", "uid": 0, "gid": 0, "ino": 2, "size": 3,
+    ...       "sha256": "ab", "mtime_ns": 1500000000,
+    ...       "xattrs": {"user.x": {"size": 1, "sha256": hashlib.sha256(b"v").hexdigest()}}}]
+    >>> got = {"files": [{"path": "f", "type": "-", "mode": "0644", "uid": 0, "gid": 0, "object": 2,
+    ...                   "size": 3, "sha256": "ab", "times": {"mtime": "1970-01-01T00:00:01.5Z"},
+    ...                   "xattrs": [{"name": "user.x", "value": "v", "bytes": 1}], "errors": 0}]}
+    >>> compare_files(o, got, 0)
+    ('ok', [])
+    >>> got["files"][0]["sha256"] = "cd"
+    >>> compare_files(o, got, 0)
+    ('mismatch', ['f: sha256 ab != cd'])
+    >>> got["files"][0]["errors"] = 2
+    >>> compare_files(o, got, 4)
+    ('incomplete (entries said not whole)', [])
+    >>> compare_files(o, {"files": []}, 0)
+    ('mismatch', ['f: missing, and nothing said of it'])
+    >>> compare_files(o, {"files": [{"path": "f", "error": "unreadable"}]}, 4)
+    ('incomplete (entries said not whole)', [])
+    >>> compare_files(o[:1], got, 0)
+    ('mismatch', ['f: not in the pool'])
+    """
+    want = {e["path"]: e for e in oracle_entries if e.get("path") != "."}
+    got = {f.get("path"): f for f in manifest.get("files", [])}
+    said = lambda f: (f.get("error") or f.get("errors") or f.get("xattr_errors")
+                      or f.get("contents_errors") or any(x.get("error") for x in f.get("xattrs", [])))
+    owned_up = returncode == 4 and any(said(f) for f in got.values())
+    diffs, admitted = [], False
+    for path, o in want.items():
+        g = got.get(path)
+        if g is None:
+            if owned_up:
+                admitted = True
+            else:
+                diffs.append(f"{path}: missing, and nothing said of it")
+            continue
+        if said(g):
+            admitted = True
+            continue
+        checks = [("type", o["type"], KINDS.get(g.get("type"), "o")),
+                  ("mode", int(o["mode"], 8), int(g.get("mode", "-1"), 8)),
+                  ("uid", o["uid"], g.get("uid")), ("gid", o["gid"], g.get("gid")),
+                  ("object", o["ino"], g.get("object"))]
+        if "mtime_ns" in o:
+            checks.append(("mtime", o["mtime_ns"],
+                           iso_ns(g["times"]["mtime"]) if g.get("times") else g.get("mtime")))
+        if o["type"] in ("f", "l"):
+            checks.append(("size", o["size"], g.get("size")))
+        if o["type"] == "f" and not g.get("hardlink_to"):
+            checks.append(("sha256", o["sha256"], g.get("sha256")))
+        if o["type"] == "l":
+            checks.append(("target", o.get("target", o.get("target_hex")), g.get("target", g.get("target_hex"))))
+        gx = {x["name"]: x for x in g.get("xattrs", [])}
+        checks.append(("xattr names", sorted(o.get("xattrs", {})), sorted(gx)))
+        for name, ox in o.get("xattrs", {}).items():
+            x = gx.get(name)
+            if x is None or x.get("recorded") is not None:
+                continue
+            raw = x["value"].encode() if "value" in x else bytes.fromhex(x.get("value_hex", ""))
+            checks.append((f"xattr {name}", (ox["size"], ox["sha256"]),
+                           (x.get("bytes"), hashlib.sha256(raw).hexdigest())))
+        diffs += [f"{path}: {what} {a} != {b}" for what, a, b in checks if a != b]
+    diffs += [f"{path}: not in the pool" for path in got if path not in want]
+    if diffs:
+        return "mismatch", diffs
+    if admitted or returncode == 4:
+        return (INCOMPLETE_FILES, []) if returncode == 4 else ("mismatch", ["exit 0 with entries said not whole"])
+    return ("ok", []) if returncode == 0 else ("mismatch", [f"exit {returncode} with every entry whole"])
+
+
+def judge_files(args, oracle, members, work, assume=(), extra=(), key_mode=None, datasets=()):
+    """Every filesystem `datasets` names extracted with zvolfiles and
+    held against the kernel's reading of it (`compare_files`)."""
+    outcomes, details, redundancy = {}, {}, False
+    for name in datasets:
+        safe = name.replace("/", "_").replace("@", "_at_")
+        out, log = os.path.join(work, "files-" + safe), os.path.join(work, "files-" + safe + ".debug")
+        cmd = [args.files_tool, "-q", "-f", "json", "--debug-log", log, "extract", name,
+               "--output", out, *members]
+        for path in assume:
+            cmd += ["--assume-member", path]
+        cmd += list(extra)
+        key = oracle.key_for(name.split("@")[0])
+        if key and key_mode == "wrong":
+            key = wrong_key(key, work)
+        if key and key_mode != "none":
+            cmd += ["--key", key]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        trace = open(log, errors="replace").read() if os.path.exists(log) else ""
+        redundancy |= bool(REDUNDANCY.search(trace))
+        if refusal(proc.returncode, proc.stderr):
+            outcomes[name] = "refused"
+        elif proc.returncode in (0, 4):
+            try:
+                doc = json.loads(proc.stdout)
+            except ValueError:
+                outcomes[name] = f"exit {proc.returncode}, no manifest on stdout"
+                continue
+            outcomes[name], diffs = compare_files(oracle.files[name], doc, proc.returncode)
+            if diffs:
+                details[name] = diffs[:10] + ([f"... {len(diffs) - 10} more"] if len(diffs) > 10 else [])
+        else:
+            why = proc.stderr.strip().splitlines()
+            outcomes[name] = f"exit {proc.returncode}: {why[-1][:160] if why else ''}"
+        shutil.rmtree(out, ignore_errors=True)
+    return outcomes, details, redundancy
+
+
+HISTORY_EVENT = re.compile(r"^\S+ \[txg:(\d+)\] (create|snapshot|clone|destroy|rename|promote) (\S+) \((\d+)\)(.*)$")
+INCOMPLETE_TIMELINE = "incomplete (history said not whole)"
+
+
+def history_objects(text):
+    """What `zpool history -il` says of every dataset and snapshot, by
+    the object id it names: every name it had and from which TXG, the
+    TXG it came into being at and how (created, clone, snapshot), and the
+    TXG it was destroyed at; with the renames of datasets and the
+    promotions, each with its TXG. A snapshot takes its dataset's new
+    name with it, and so does a child.
+
+    >>> h = '''History for 'p':
+    ... t [txg:10] create p/a (5)   [on h]
+    ... t [txg:12] snapshot p/a@s0 (6)   [on h]
+    ... t [txg:13] create p/a/b (7)   [on h]
+    ... t [txg:20] rename p/a (5) -> p/c [on h]
+    ... t [txg:21] clone p/d (8) origin=p/c@s0 (6) [on h]
+    ... t [txg:22] create p/gone (9)   [on h]
+    ... t [txg:30] destroy p/gone (9) (bptree, mintxg=1) [on h]
+    ... '''
+    >>> objects, renames, promotions = history_objects(h)
+    >>> for o in objects.values(): print(o["names"], o["born"], o["how"], o["destroyed"])
+    [(10, 'p/a'), (20, 'p/c')] 10 created None
+    [(12, 'p/a@s0'), (20, 'p/c@s0')] 12 snapshot None
+    [(13, 'p/a/b'), (20, 'p/c/b')] 13 created None
+    [(21, 'p/d')] 21 clone None
+    [(22, 'p/gone')] 22 created 30
+    >>> renames
+    [(20, 'p/a', 'p/c')]
+    """
+    objects, renames, promotions = {}, [], []
+    how = {"create": "created", "clone": "clone", "snapshot": "snapshot"}
+    for line in text.splitlines():
+        m = HISTORY_EVENT.match(line)
+        if not m:
+            continue
+        txg, op, name, oid, rest = int(m.group(1)), m.group(2), m.group(3), m.group(4), m.group(5)
+        if op in how:
+            objects[oid] = {"names": [(txg, name)], "born": txg, "how": how[op], "destroyed": None}
+        elif op == "destroy" and oid in objects:
+            objects[oid]["destroyed"] = txg
+        elif op == "rename":
+            new = rest.split("->", 1)[1].split()[0]
+            old = objects[oid]["names"][-1][1] if oid in objects else name
+            renames.append((txg, old, new))
+            for o in objects.values():
+                cur = o["names"][-1][1]
+                if o["destroyed"] is None and (cur == old or cur.startswith((old + "@", old + "/"))):
+                    o["names"].append((txg, new + cur[len(old):]))
+        elif op == "promote":
+            promotions.append((txg, objects[oid]["names"][-1][1] if oid in objects else name))
+    return objects, renames, promotions
+
+
+def compare_timeline(history_text, guids, pool, doc, returncode):
+    """zvoltimeline's history of a pool (its JSON, its exit code) against
+    `zpool history -il` and the GUIDs the builder recorded.
+
+    Every dataset and snapshot it says came into being must, under any
+    name it had, have come into being at that TXG and in that manner,
+    and have the GUID recorded for it; every one the pool holds must be
+    there. Every rename, promotion and destroy it reports must be one
+    the record has, at the first TXG it read after it; and every one of
+    a dataset it read before then must be reported. Only the TXGs it
+    read count: one it says did not read shows nothing. The pool's root
+    is left out: its dataset comes before the history does.
+
+    >>> h = "History for 'p':\\nt [txg:10] create p/a (5)   [on h]\\nt [txg:40] rename p/a (5) -> p/c [on h]\\n"
+    >>> doc = {"txgs": [30, 50], "events": [
+    ...     {"event": "created", "object": "p/a", "txg": 10, "guid": "0x10"},
+    ...     {"event": "renamed", "object": "p/c", "txg": 50, "details": "was p/a"}]}
+    >>> compare_timeline(h, {"p/c": 16}, "p", doc, 0)
+    ('ok', [])
+    >>> doc["events"][0]["txg"] = 11
+    >>> compare_timeline(h, {"p/c": 16}, "p", doc, 0)
+    ('mismatch', ['p/a: created at txg 11, the record says 10'])
+    >>> doc["events"][0]["txg"] = 10; doc["events"][1]["details"] = "was p/b"
+    >>> compare_timeline(h, {"p/c": 16}, "p", doc, 0)
+    ('mismatch', ['p/c: renamed at txg 50 from p/b, which the record has no rename for'])
+    >>> compare_timeline(h, {"p/c": 16}, "p", {"txgs": [30, 50], "events": []}, 0)
+    ('mismatch', ['p/c: not said to have come into being', 'renamed p/a -> p/c at txg 40: not reported'])
+    >>> compare_timeline(h, {"p/c": 16}, "p", {"txgs": [30, 50], "events": []}, 4)
+    ('incomplete (history said not whole)', [])
+    >>> compare_timeline(h, {"p/c": 16}, "p", {"txgs": [45, 50], "events": [
+    ...     {"event": "created", "object": "p/c", "txg": 10, "guid": "0x10"}]}, 0)
+    ('ok', [])
+    """
+    objects, renames, promotions = history_objects(history_text)
+    unread = {e.get("txg") for e in doc.get("events", []) if e.get("event") == "unreadable"}
+    unread |= set(doc.get("unreadable_txgs") or [])
+    read = sorted(t for t in (doc.get("txgs") or []) if t not in unread)
+    first_after = lambda h: next((t for t in read if t >= h), None)
+    exists_at = lambda o, t: o["born"] <= t and (o["destroyed"] is None or t < o["destroyed"])
+    named = lambda o, name: any(n == name for _, n in o["names"])
+    final = lambda o: o["names"][-1][1]
+    diffs, seen, reported = [], set(), set()
+    for e in doc.get("events", []):
+        kind, name, txg = e.get("event"), e.get("object"), e.get("txg")
+        if kind in ("created", "clone", "snapshot"):
+            if name == pool:
+                continue
+            had = [(k, o) for k, o in objects.items() if named(o, name)]
+            if not had:
+                diffs.append(f"{name}: {kind} at txg {txg}, and the record has no such dataset")
+                continue
+            k, o = next(((k, o) for k, o in had if o["born"] == txg), had[-1])
+            seen.add(k)
+            if txg != o["born"]:
+                diffs.append(f"{name}: {kind} at txg {txg}, the record says {o['born']}")
+            if kind != o["how"]:
+                diffs.append(f"{name}: {kind}, the record says {o['how']}")
+            g = guids.get(final(o)) if o["destroyed"] is None else None
+            if g is not None and e.get("guid") and int(e["guid"], 16) != g:
+                diffs.append(f"{name}: guid {e['guid']}, the record says {g:#x}")
+        elif kind in ("destroyed", "snapshot-destroyed"):
+            if not any(o["destroyed"] is not None and first_after(o["destroyed"]) == txg and named(o, name)
+                       for o in objects.values()):
+                diffs.append(f"{name}: {kind} at txg {txg}, which the record has no destroy for")
+            reported.add((kind, name, txg))
+        elif kind == "renamed":
+            was = re.search(r"was (\S+)", e.get("details", ""))
+            was = was.group(1) if was else ""
+            # A dataset's rename takes its snapshots and children with it,
+            # and each may be reported as renamed in its own right.
+            if not any(first_after(h) == txg and name.startswith(new) and name[len(new):][:1] in ("", "@", "/")
+                       and was == old + name[len(new):] for h, old, new in renames):
+                diffs.append(f"{name}: renamed at txg {txg} from {was}, which the record has no rename for")
+            reported.add((kind, name, txg))
+        elif kind == "promoted":
+            if not any(first_after(h) == txg and n == name for h, n in promotions):
+                diffs.append(f"{name}: promoted at txg {txg}, which the record has no promotion for")
+            reported.add((kind, name, txg))
+    # What it must have said: every dataset and snapshot the pool still
+    # holds, and every change to one that a TXG it read before the change
+    # held.
+    missing = [f"{final(o)}: not said to have come into being"
+               for k, o in sorted(objects.items(), key=lambda kv: final(kv[1]))
+               if o["destroyed"] is None and k not in seen]
+    unreported = []
+    for h, old, new in renames:
+        at = first_after(h)
+        held = any(named(o, old) and exists_at(o, t) for o in objects.values() for t in read if t < h)
+        if at is not None and held and ("renamed", new, at) not in reported:
+            unreported.append(f"renamed {old} -> {new} at txg {h}: not reported")
+    for o in objects.values():
+        h = o["destroyed"]
+        if h is None or first_after(h) is None or not any(exists_at(o, t) for t in read if t < h):
+            continue
+        kind = "snapshot-destroyed" if "@" in final(o) else "destroyed"
+        if (kind, final(o), first_after(h)) not in reported:
+            unreported.append(f"{kind} {final(o)} at txg {h}: not reported")
+    for h, name in promotions:
+        at = first_after(h)
+        if read and read[0] < h and at is not None and ("promoted", name, at) not in reported:
+            unreported.append(f"promoted {name} at txg {h}: not reported")
+    if diffs:
+        return "mismatch", missing + diffs + unreported
+    if missing or unreported:
+        return (INCOMPLETE_TIMELINE, []) if returncode == 4 else ("mismatch", missing + unreported)
+    return ("ok", []) if returncode == 0 else (INCOMPLETE_TIMELINE, [])
+
+
+def judge_timeline(args, oracle, members, work, assume=(), extra=()):
+    """zvoltimeline over the members, held against the pool's own record
+    of its history (`compare_timeline`)."""
+    log = os.path.join(work, "timeline.debug")
+    cmd = [args.timeline_tool, "-q", "-f", "json", "--debug-log", log, *members]
+    for path in assume:
+        cmd += ["--assume-member", path]
+    cmd += list(extra)
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    trace = open(log, errors="replace").read() if os.path.exists(log) else ""
+    redundancy = bool(REDUNDANCY.search(trace))
+    if refusal(proc.returncode, proc.stderr):
+        return "refused", [], redundancy
+    if proc.returncode not in (0, 4):
+        why = proc.stderr.strip().splitlines()
+        return f"exit {proc.returncode}: {why[-1][:160] if why else ''}", [], redundancy
+    try:
+        doc = json.loads(proc.stdout)
+    except ValueError:
+        return f"exit {proc.returncode}, no JSON on stdout", [], redundancy
+    outcome, diffs = compare_timeline(oracle.history, oracle.guids, oracle.pool, doc, proc.returncode)
+    return outcome, diffs[:10] + ([f"... {len(diffs) - 10} more"] if len(diffs) > 10 else []), redundancy
+
+
+def accepted_outcomes(expected):
+    """The outcomes an expectation admits: `recovered` is either of
+    bit-exact and reconstructed, and where a refusal is expected an
+    honest partial answer is accepted too.
+
+    >>> accepted_outcomes("recovered")
+    ['bit-exact', 'reconstructed']
+    >>> accepted_outcomes(["refused", "bit-exact"])
+    ['refused', 'bit-exact', 'partial']
+    """
+    accepted = [expected] if isinstance(expected, str) else list(expected)
+    if "recovered" in accepted:
+        accepted = [a for a in accepted if a != "recovered"] + ["bit-exact", "reconstructed"]
+    if "refused" in accepted:
+        accepted = accepted + ["partial"]
+    return list(dict.fromkeys(accepted))
+
+
+def classify(values, redundancy, good=frozenset({"ok"}), incomplete=INCOMPLETE):
+    """The category a run's outcomes add up to.
+
+    >>> classify({"ok"}, False), classify({"ok"}, True)
+    ('bit-exact', 'reconstructed')
+    >>> classify({"ok", "refused"}, False), classify({"refused", INCOMPLETE}, False)
+    ('refused', 'partial')
+    >>> classify({"ok", "hash mismatch"}, False)
+    'defect'
+    """
+    if values <= good:
+        return "reconstructed" if redundancy else "bit-exact"
+    if values <= good | {"refused"}:
+        return "refused"
+    if values <= good | {"refused", incomplete}:
+        return "partial"
+    return "defect"
+
+
 def wrong_key(spec, work):
     """A key of the same kind as `spec` that is not the key: the raw
     key with every bit turned over, or a passphrase it is not."""
@@ -1551,20 +1948,16 @@ def run_case(args, oracle, manifest, rng):
             break
     # A manifest may name several acceptable outcomes when the damage does
     # not deterministically hit live data (scattered bit flips, say).
-    accepted = [expected] if isinstance(expected, str) else list(expected)
     # `recovered` = the data came back, whether or not redundancy had to be
     # engaged visibly. Which of the two happens depends on member order and
     # on where the damage landed, and neither is a property worth pinning.
-    if "recovered" in accepted:
-        accepted = [a for a in accepted if a != "recovered"] + ["bit-exact", "reconstructed"]
     # Where the redundancy is gone and a refusal is the honest answer, an
     # image with the lost blocks written as zeros, counted and announced
     # (exit 4) is honest too: it presents nothing as good that is not,
     # and keeps what still reads. Where recovery is expected it stays a
     # failure.
-    if "refused" in accepted:
-        accepted = accepted + ["partial"]
-    expected = " | ".join(dict.fromkeys(accepted))
+    accepted = accepted_outcomes(expected)
+    expected = " | ".join(accepted)
     result = {"id": mid, "description": manifest.get("description", ""),
               "expected": expected, "notes": []}
     try:
@@ -1643,15 +2036,40 @@ def run_case(args, oracle, manifest, rng):
         result["outcomes"] = outcomes
         judged = {k: v for k, v in outcomes.items()
                   if k not in ("counts", "refused_detail", "datasets_detail", "tree_detail")}
-        values = set(judged.values())
-        if values <= good:
-            actual = "reconstructed" if redundancy else "bit-exact"
-        elif values <= good | {"refused"}:
-            actual = "refused"
-        elif values <= good | {"refused", INCOMPLETE}:
-            actual = "partial"
-        else:
-            actual = "defect"
+        actual = classify(set(judged.values()), redundancy, good)
+        # The files of the pool's filesystems, where the oracle has the
+        # kernel's reading of them: every head, and on a case that damages
+        # and tells nothing, every snapshot too. A manifest may say what
+        # they must come to (`expect.files`); where it does not, they must
+        # still never be presented as whole and be otherwise.
+        files_verdict = timeline_verdict = None
+        if oracle.files and oracle.has_volumes and os.path.exists(args.files_tool):
+            control = not manifest.get("damage") and not recovery
+            names = [n for n in oracle.files if control or "@" not in n]
+            f_out, f_detail, f_red = judge_files(args, oracle, members, work, assume, extra,
+                                                 recovery.get("key"), names)
+            f_actual = classify(set(f_out.values()), f_red, incomplete=INCOMPLETE_FILES)
+            f_accepted = accepted_outcomes(expect["files"]) if "files" in expect else None
+            files_verdict = ("defect" if f_actual == "defect"
+                             else "unexpected" if f_accepted and f_actual not in f_accepted else "pass")
+            result["files"] = {"expected": " | ".join(f_accepted) if f_accepted else "not defect",
+                               "actual": f_actual, "verdict": files_verdict,
+                               "outcomes": f_out, **({"detail": f_detail} if f_detail else {})}
+        # The pool's history, where the oracle has its record: the same
+        # rule, and `expect.timeline` where the manifest says more.
+        if oracle.history and oracle.guids and os.path.exists(args.timeline_tool):
+            t_out, t_detail, _ = judge_timeline(args, oracle, members, work, assume, extra)
+            # Reading the older TXGs meets blocks freed and written over
+            # since as a matter of course, and its log is full of failed
+            # reconstructions that say nothing of the damage: a history
+            # that holds is bit-exact.
+            t_actual = classify({t_out}, False, incomplete=INCOMPLETE_TIMELINE)
+            t_accepted = accepted_outcomes(expect["timeline"]) if "timeline" in expect else None
+            timeline_verdict = ("defect" if t_actual == "defect"
+                                else "unexpected" if t_accepted and t_actual not in t_accepted else "pass")
+            result["timeline"] = {"expected": " | ".join(t_accepted) if t_accepted else "not defect",
+                                  "actual": t_actual, "verdict": timeline_verdict, "outcome": t_out,
+                                  **({"detail": t_detail} if t_detail else {})}
         after = {p: sha256_file(p) for p in members}
         changed = [os.path.basename(p) for p in members if before[p] != after[p]]
         result["inputs_unchanged"] = not changed
@@ -1661,6 +2079,10 @@ def run_case(args, oracle, manifest, rng):
         result["actual"] = actual
         result["verdict"] = ("pass" if actual in accepted
                              else "defect" if actual == "defect" else "unexpected")
+        # The case is as good as the worst of what was judged in it.
+        rank = {"pass": 0, "unexpected": 1, "defect": 2}
+        result["verdict"] = max([result["verdict"], files_verdict or "pass", timeline_verdict or "pass"],
+                                key=rank.__getitem__)
     finally:
         if not args.keep:
             shutil.rmtree(work, ignore_errors=True)
@@ -1676,6 +2098,10 @@ def main():
     ap.add_argument("--walker", default="./target/release/examples/walk-objects")
     ap.add_argument("--carver", default="./target/release/zvolcarve",
                     help="zvolcarve, for a manifest whose recovery reads the object-set headers it finds")
+    ap.add_argument("--files-tool", default="./target/release/zvolfiles",
+                    help="zvolfiles, judged against the oracle's files.json where it has one")
+    ap.add_argument("--timeline-tool", default="./target/release/zvoltimeline",
+                    help="zvoltimeline, judged against the oracle's zpool-history-il.txt where it has one")
     ap.add_argument("--out", default="golden-report")
     ap.add_argument("--label", default="", help="name of this image in the report")
     ap.add_argument("--tmp", default=None)
@@ -1713,7 +2139,9 @@ def main():
         r = run_case(args, oracle, manifest, random.Random(manifest["id"]))
         r["image"] = label
         results.append(r)
-        print(f"{label:<8} {r['verdict']:<10} {r['id']:<32} expected {r['expected']:<14} actual {r['actual']}")
+        files = (f"  files {r['files']['actual']}" if "files" in r else "") + \
+            (f"  timeline {r['timeline']['actual']}" if "timeline" in r else "")
+        print(f"{label:<8} {r['verdict']:<10} {r['id']:<32} expected {r['expected']:<14} actual {r['actual']}{files}")
     # One asked for by name and written for another pool is n/a here, and
     # shown; the rest of another pool's manifests are not this run's.
     for manifest in elsewhere:
@@ -1731,10 +2159,15 @@ def main():
         json.dump(results, f, indent=1)
     with open(os.path.join(args.out, f"report-{label}.md"), "w") as f:
         f.write(f"# Damage matrix: {label}\n\n")
-        f.write("| Manifest | Expected | Actual | Verdict | Inputs unchanged | Detail |\n|---|---|---|---|---|---|\n")
+        f.write("| Manifest | Expected | Actual | Files | Timeline | Verdict | Inputs unchanged | Detail |\n|---|---|---|---|---|---|---|---|\n")
         for r in results:
-            detail = "; ".join(list(r.get("notes", [])) + [f"{k}: {v}" for k, v in r.get("outcomes", {}).items() if v != "ok"])
-            f.write(f"| `{r['id']}` | {r['expected']} | {r['actual']} | {r['verdict']} | "
+            detail = "; ".join(list(r.get("notes", [])) + [f"{k}: {v}" for k, v in r.get("outcomes", {}).items() if v != "ok"]
+                               + [f"files {k}: {v}" for k, v in r.get("files", {}).get("outcomes", {}).items() if v != "ok"])
+            files = r["files"]["actual"] if "files" in r else "—"
+            timeline = r["timeline"]["actual"] if "timeline" in r else "—"
+            if r.get("timeline", {}).get("outcome", "ok") != "ok":
+                detail += f"; timeline: {r['timeline']['outcome']}"
+            f.write(f"| `{r['id']}` | {r['expected'].replace('|', chr(92) + '|')} | {r['actual']} | {files} | {timeline} | {r['verdict']} | "
                     f"{'yes' if r.get('inputs_unchanged') else ('—' if r['verdict'] == 'n/a' else 'NO')} | {detail} |\n")
     counts = {}
     for r in results:
