@@ -376,7 +376,8 @@ Without
 .Fl -txg
 the TXG is the newest at which the pool and the root of its dataset
 tree read; one at which they do not is passed over for an older one
-and named on standard error and in the record.
+and named on standard error and in the record, and the exit status is
+4: what is listed may be older than the pool's newest state.
 A tree that reads in part is listed with what did not read named, and
 the exit status is 4: a dataset under that part is not in the list,
 and is not thereby absent.
@@ -486,6 +487,12 @@ destroy is passed over for an older one, and the record says so.
 So is one at which the dataset tree does not read where the dataset
 would be: whether it is there cannot be told, which is not the same as
 its not being there.
+Either way the exit status is 4, as it is for
+.Xr zvolfiles 1 :
+the image may be of an older state than the newest that named the
+dataset, the state
+.Ql zpool import -F
+would rewind the pool to, counting the transactions after it as lost.
 .Pp
 The volume's intent log is not replayed.
 The image is the volume as the TXG read left it; writes the volume's
@@ -664,6 +671,10 @@ Or
 .Cm list
 could not read part of the dataset tree: what it lists is not all
 there is.
+Or, without
+.Fl -txg ,
+a newer TXG did not read and was passed over for an older one:
+what was read or listed may be older than the pool's newest state.
 .It 5
 Refused: the output would land on an input, or a device would have
 been surface-scanned without leave.

@@ -2699,7 +2699,8 @@ fn forge_uberblock(img: &mut [u8], from: u64, txg: u64) {
 /// pool ever reached, pointing at an object set no block matches —
 /// is the newest verified uberblock and not the pool's newest state.
 /// `list` and `dump` pass it over for the newest TXG that reads, say
-/// so, and record it; asked for it by `--txg`, they refuse with the
+/// so, record it and end 4 — what they read may be older than the
+/// pool's newest state; asked for it by `--txg`, they refuse with the
 /// reason.
 #[test]
 fn a_forged_newer_txg_with_nothing_behind_it_is_passed_over() {
@@ -2711,7 +2712,13 @@ fn a_forged_newer_txg_with_nothing_behind_it_is_passed_over() {
     let paths = write_members(&dir, &members);
 
     let (code, out, err) = run(&["-f", "json", "list", &paths[0], &paths[1]]);
-    assert_eq!(code, 0, "{out}\n{err}");
+    // A newer TXG passed over: what is read may be older than the
+    // pool's newest state, and the run ends 4 (as zvolfiles does).
+    assert_eq!(code, 4, "{out}\n{err}");
+    assert!(
+        err.contains("was passed over") && err.contains("(exit 4)"),
+        "{err}"
+    );
     let v = json(&out);
     assert_eq!(v["available_txgs"][0], 103, "{v}");
     assert_eq!(v["txg"], 100, "{v}");
@@ -2746,7 +2753,13 @@ fn a_forged_newer_txg_with_nothing_behind_it_is_passed_over() {
         "-o",
         &dir.join("vol.img").to_string_lossy(),
     ]);
-    assert_eq!(code, 0, "{out}\n{err}");
+    // A newer TXG passed over: what is read may be older than the
+    // pool's newest state, and the run ends 4 (as zvolfiles does).
+    assert_eq!(code, 4, "{out}\n{err}");
+    assert!(
+        err.contains("was passed over") && err.contains("(exit 4)"),
+        "{err}"
+    );
     let v = json(&out);
     assert_eq!(v["txgs_searched"], serde_json::json!([103, 100]), "{v}");
     assert_eq!(v["unreadable_at"][0]["txg"], 103, "{v}");
@@ -2814,7 +2827,13 @@ fn a_txg_whose_object_set_was_reused_is_passed_over_for_an_older_one() {
         "-o",
         &dir.join("older.img").to_string_lossy(),
     ]);
-    assert_eq!(code, 0, "{out}\n{err}");
+    // A newer TXG passed over: what is read may be older than the
+    // pool's newest state, and the run ends 4 (as zvolfiles does).
+    assert_eq!(code, 4, "{out}\n{err}");
+    assert!(
+        err.contains("was passed over") && err.contains("(exit 4)"),
+        "{err}"
+    );
     let v = json(&out);
     assert_eq!(v["txgs_searched"], serde_json::json!([300, 200, 100]));
     assert_eq!(v["unreadable_at"][0]["txg"], 200, "{v}");
@@ -2881,7 +2900,13 @@ fn a_txg_whose_dataset_tree_does_not_read_is_not_one_without_the_dataset() {
         "-o",
         &dir.join("older.img").to_string_lossy(),
     ]);
-    assert_eq!(code, 0, "{out}\n{err}");
+    // A newer TXG passed over: what is read may be older than the
+    // pool's newest state, and the run ends 4 (as zvolfiles does).
+    assert_eq!(code, 4, "{out}\n{err}");
+    assert!(
+        err.contains("was passed over") && err.contains("(exit 4)"),
+        "{err}"
+    );
     let v = json(&out);
     assert_eq!(v["volumes"][0]["txg"], 100, "{v}");
     assert_eq!(v["unreadable_at"][0]["txg"], 200, "{v}");
@@ -2998,7 +3023,13 @@ fn a_txg_whose_volume_dnodes_were_reused_is_passed_over_for_an_older_one() {
         "-o",
         &dir.join("older.img").to_string_lossy(),
     ]);
-    assert_eq!(code, 0, "{out}\n{err}");
+    // A newer TXG passed over: what is read may be older than the
+    // pool's newest state, and the run ends 4 (as zvolfiles does).
+    assert_eq!(code, 4, "{out}\n{err}");
+    assert!(
+        err.contains("was passed over") && err.contains("(exit 4)"),
+        "{err}"
+    );
     let v = json(&out);
     assert_eq!(v["txgs_searched"], serde_json::json!([300, 200, 100]));
     assert_eq!(v["unreadable_at"][0]["txg"], 200, "{v}");

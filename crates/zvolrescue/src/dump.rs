@@ -1329,6 +1329,19 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         peak_rss_kib: None,
     };
     let mut code = 0u8;
+    // A newer TXG that names the dataset, or where it would be, did not
+    // read and an older one is read: what comes out may be older than the
+    // pool's newest state, whatever it holds. That is what `zpool import
+    // -F` warns loses data, and the run ends 4 as zvolfiles does after
+    // the same.
+    if let Some(newest) = out.unreadable_at.first() {
+        errln!(
+            "zvolrescue: {}: read at txg {txg}; txg {} did not read and was passed over, so what is extracted may be older than the pool's newest state (exit 4)",
+            opts.dataset,
+            newest.txg
+        );
+        code = exit::PARTIAL;
+    }
     let mut key_cache: std::collections::BTreeMap<u64, DatasetKeys> = Default::default();
     // What the run a `-r --resume` takes up finished, read before this
     // run writes a manifest of its own over that one's.

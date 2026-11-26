@@ -648,6 +648,19 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         ),
         Format::Text => print_text(&out),
     }
+    // A newer TXG did not read and an older one is listed: the list may
+    // be older than the pool's newest state, as `dump` and zvolfiles say
+    // after the same.
+    if let Some(newest) = out.unreadable_at.first() {
+        errln!(
+            "zvolrescue: listed at txg {}; txg {} did not read and was passed over, so what is listed may be older than the pool's newest state (exit 4)",
+            out.txg,
+            newest.txg
+        );
+        if code == 0 {
+            code = exit::PARTIAL;
+        }
+    }
     // What is listed is not all there is: a part of the tree that did
     // not read is named in the list and is not a list that succeeded.
     if !out.errors.is_empty() {

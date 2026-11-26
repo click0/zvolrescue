@@ -30,6 +30,19 @@ tagged. `v0.7.1` is the release that carries those six.
   of what holds each feature active; where no label names the feature,
   it is taken from there as the MOS opens, and the eleven volumes read
   bit-exact.
+* **`zvolrescue dump` and `list` end 4 when the newest TXG did not read
+  and an older one was used.** A TXG whose MOS does not read, whose
+  dataset tree does not read where the dataset would be, or whose
+  object set the dataset's blocks were reused from is passed over for
+  an older one, said on stderr and listed under `unreadable_at`, and
+  the run ended 0 all the same, while `zvolfiles`, passing the same TXG
+  over, ended 4: an image read whole at an older TXG may be of an older
+  state than the newest that named the dataset — the state `zpool
+  import -F` would rewind the pool to, counting the transactions after
+  it as lost — and a caller that reads only the status was told it was
+  the newest. Now both end 4, and say why (SPEC F-10, F-20). The damage
+  matrix judges such a run by its bytes and records what it passed over;
+  a run that passes a TXG over and ends 0 is a defect.
 
 ### Added
 

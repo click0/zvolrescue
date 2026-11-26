@@ -18,8 +18,11 @@ Two judging modes, chosen by the oracle's `layout.json`:
   and the object walker must read and verify every block of every object.
 
 Either way the answer comes from the oracle, never from an earlier run of
-the tool. Outcomes: bit-exact / reconstructed / refused / defect; exit 1
-when any run is a defect.
+the tool. Outcomes: bit-exact / reconstructed / refused / partial /
+defect; exit 1 when any run is a defect. A run that ends 4 because the
+newest TXG did not read and it read an older one whole (SPEC F-10,
+F-20) is judged by its bytes, and the TXGs it passed over are recorded
+(`passed_over`); one that passed a TXG over and ended 0 is a defect.
 
 What an operator would tell the tool, a manifest's `[recovery]` says,
 and the harness passes on to every run of the case: `assume_members`
@@ -1338,6 +1341,60 @@ def refusal(returncode, stderr):
 INCOMPLETE = "incomplete (blocks written as zeros)"
 
 
+def said_passed_over(stdout):
+    """The newer TXGs a run's JSON says it passed over because they did
+    not read, as `txg N (stage): why`; empty when it names none.
+
+    >>> said_passed_over('{"unreadable_at": [{"txg": 9, "stage": "pool", "error": "MOS: bad"}]}')
+    ['txg 9 (pool): MOS: bad']
+    >>> said_passed_over('{"unreadable_at": []}'), said_passed_over('not json')
+    ([], [])
+    """
+    try:
+        doc = json.loads(stdout)
+    except ValueError:
+        return []
+    if not isinstance(doc, dict):
+        return []
+    return [f"txg {u.get('txg')}" + (f" ({u['stage']})" if u.get("stage") else "")
+            + f": {str(u.get('error', ''))[:120]}"
+            for u in (doc.get("unreadable_at") or [])]
+
+
+def passed_over(returncode, stdout):
+    """What a `dump` that exited 4 passed over, when that is all it
+    exited 4 for; otherwise None.
+
+    `dump` ends 4 when the newest TXG that names the volume, or the pool
+    or the tree it is under, did not read and an older one was used: an
+    image of an older state than the pool's, the rewind `zpool import -F`
+    makes and counts as transactions lost. When every block of it was
+    read, the bytes are an answer to judge, not zeros written for blocks.
+
+    >>> rec = {"unreadable_at": [{"txg": 9, "stage": "pool", "error": "MOS"}],
+    ...        "volumes": [{"blocks_zeroed": 0, "blocks_salvaged": 0}]}
+    >>> passed_over(4, json.dumps(rec))
+    'txg 9 (pool): MOS'
+    >>> passed_over(0, json.dumps(rec)) is None
+    True
+    >>> rec["volumes"][0]["blocks_zeroed"] = 1
+    >>> passed_over(4, json.dumps(rec)) is None
+    True
+    >>> passed_over(4, json.dumps({"unreadable_at": [], "volumes": [{}]})) is None
+    True
+    """
+    if returncode != 4:
+        return None
+    said = said_passed_over(stdout)
+    if not said:
+        return None
+    doc = json.loads(stdout)
+    vols = doc.get("volumes") or []
+    whole = vols and all(not v.get("blocks_zeroed") and not v.get("blocks_salvaged")
+                         and not v.get("aborted") and not v.get("interrupted_at") for v in vols)
+    return "; ".join(said) if whole else None
+
+
 def judge_dump(args, oracle, manifest, members, work, assume=(), extra=(), key_mode=None):
     want = manifest["expect"].get("volumes", "all")
     volumes = list(oracle.volumes) if want == "all" else list(want)
@@ -1357,8 +1414,17 @@ def judge_dump(args, oracle, manifest, members, work, assume=(), extra=(), key_m
         proc = subprocess.run(cmd, capture_output=True, text=True)
         trace = open(log, errors="replace").read() if os.path.exists(log) else ""
         redundancy |= bool(REDUNDANCY.search(trace))
-        if proc.returncode == 0 and os.path.exists(out):
+        passed = passed_over(proc.returncode, proc.stdout)
+        if passed is not None and os.path.exists(out):
+            # Read whole at an older TXG than one that did not read:
+            # exit 4 for that alone (SPEC F-10, F-20), and the bytes are
+            # judged as an exit 0's are.
             outcomes[vol] = "ok" if sha256_file(out) == oracle.volumes[vol] else "hash mismatch"
+            outcomes.setdefault("passed_over", {})[vol] = passed
+        elif proc.returncode == 0 and os.path.exists(out):
+            outcomes[vol] = "ok" if sha256_file(out) == oracle.volumes[vol] else "hash mismatch"
+            if said_passed_over(proc.stdout):
+                outcomes[vol] = "exit 0, a newer txg passed over"
         elif refusal(proc.returncode, proc.stderr):
             outcomes[vol] = "refused"
             # The reason, in the tool's words: a refusal where recovery
@@ -1403,7 +1469,9 @@ def compare_files(oracle_entries, manifest, returncode):
     exit code) against what the kernel read out of it. The answer is
     `ok` when every entry is there and the same and nothing else is;
     INCOMPLETE_FILES when the run said, with exit 4, that something did
-    not read whole and everything it did not say that of is right; and
+    not read whole and everything it did not say that of is right; `ok`
+    too when it ended 4 for a newer TXG passed over alone, that did not
+    read (`passed_over`, SPEC F-20), and every entry is right; and
     otherwise what differs — an entry presented as whole that is not,
     one missing that nothing accounts for, one the pool does not hold.
 
@@ -1428,6 +1496,13 @@ def compare_files(oracle_entries, manifest, returncode):
     ('incomplete (entries said not whole)', [])
     >>> compare_files(o[:1], got, 0)
     ('mismatch', ['f: not in the pool'])
+    >>> got["files"][0].update(sha256="ab", errors=0)
+    >>> compare_files(o, got, 4)
+    ('incomplete (entries said not whole)', [])
+    >>> compare_files(o, dict(got, passed_over=[{"txg": 9, "unread": True}]), 4)
+    ('ok', [])
+    >>> compare_files(o, dict(got, passed_over=[{"txg": 9, "unread": False}]), 4)
+    ('incomplete (entries said not whole)', [])
     """
     want = {e["path"]: e for e in oracle_entries if e.get("path") != "."}
     got = {f.get("path"): f for f in manifest.get("files", [])}
@@ -1472,9 +1547,10 @@ def compare_files(oracle_entries, manifest, returncode):
     diffs += [f"{path}: not in the pool" for path in got if path not in want]
     if diffs:
         return "mismatch", diffs
-    if admitted or returncode == 4:
+    passed = returncode == 4 and any(p.get("unread") for p in manifest.get("passed_over") or [])
+    if admitted or (returncode == 4 and not passed):
         return (INCOMPLETE_FILES, []) if returncode == 4 else ("mismatch", ["exit 0 with entries said not whole"])
-    return ("ok", []) if returncode == 0 else ("mismatch", [f"exit {returncode} with every entry whole"])
+    return ("ok", []) if returncode == 0 or passed else ("mismatch", [f"exit {returncode} with every entry whole"])
 
 
 def judge_files(args, oracle, members, work, assume=(), extra=(), key_mode=None, datasets=()):
@@ -1841,8 +1917,13 @@ def judge_walk(args, oracle, members, work, assume=()):
     # not. What it lists is judged as ever; what it does not is its own
     # stated refusal.
     in_part = tree_in_part(proc.returncode, doc)
-    if proc.returncode == 4 and not in_part:
+    # 4 as well when the newest TXG did not read and an older one was
+    # listed (SPEC F-10): what it lists is judged as ever.
+    passed = said_passed_over(proc.stdout) if proc.returncode == 4 else []
+    if proc.returncode == 4 and not in_part and not passed:
         return {"pool": f"list exit 4, and no part of the tree named: {proc.stderr.strip()[:160]}"}, False
+    if proc.returncode == 0 and said_passed_over(proc.stdout):
+        return {"pool": "list exit 0, a newer txg passed over"}, False
     expected = {n: v["creation_txg"] for n, v in oracle.inventory.items()}
     missing = sorted(set(expected) - set(listed))
     extra = sorted(set(listed) - set(expected))
@@ -1888,6 +1969,8 @@ def judge_walk(args, oracle, members, work, assume=()):
     if in_part:
         outcomes["tree"] = "refused"
         outcomes["tree_detail"] = "; ".join(str(e)[:160] for e in doc["errors"][:3])
+    if passed:
+        outcomes["passed_over"] = "; ".join(passed)
     m = re.search(r"^datasets (\d+) objects (\d+) blocks (\d+)", text, re.M)
     if m:
         outcomes["counts"] = f"{m.group(1)} datasets, {m.group(2)} objects, {m.group(3)} blocks"
@@ -2035,7 +2118,8 @@ def run_case(args, oracle, manifest, rng):
             good = {"ok"}
         result["outcomes"] = outcomes
         judged = {k: v for k, v in outcomes.items()
-                  if k not in ("counts", "refused_detail", "datasets_detail", "tree_detail")}
+                  if k not in ("counts", "refused_detail", "datasets_detail", "tree_detail",
+                               "passed_over")}
         actual = classify(set(judged.values()), redundancy, good)
         # The files of the pool's filesystems, where the oracle has the
         # kernel's reading of them: every head, and on a case that damages
