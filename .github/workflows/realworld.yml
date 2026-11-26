@@ -483,7 +483,14 @@ jobs:
           # The pin and the oracle's own record of the release agree.
           cmp "tests/golden/$TAG.SHA256SUMS" "testdata/oracle/golden/SHA256SUMS-release.txt"
           sudo mkdir -p /var/tmp/image && sudo chown -R "$USER" /var/tmp/image
-          sh tests/golden/fetch-image.sh "$TAG" "tests/golden/$TAG.SHA256SUMS" /var/tmp/image testdata/oracle/golden/members.sha256
+          # What the manifests this run selects need, and no more: every
+          # member, and the older copy of each member an older-self damage
+          # names (6 of the release's 10 for image-v1's manifests).
+          held=""
+          case "${{ github.event.inputs.only }}" in *held-out*) held=--held-out ;; esac
+          python3 tests/golden/run-matrix.py --print-needs --oracle testdata/oracle/golden \
+            --manifests testdata/manifests $held > /var/tmp/image/needs.txt
+          NEEDS=/var/tmp/image/needs.txt sh tests/golden/fetch-image.sh "$TAG" "tests/golden/$TAG.SHA256SUMS" /var/tmp/image testdata/oracle/golden/members.sha256
           df -h /var/tmp | tail -n 1
       - name: The undamaged image first, every volume
         run: |

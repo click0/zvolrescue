@@ -3,6 +3,7 @@
 
     run-matrix.py --image DIR --oracle DIR --manifests DIR [--tool ...] [--walker ...]
                   [--older DIR] [--out DIR] [--only ID ...] [--held-out] [--keep]
+    run-matrix.py --print-needs --oracle DIR --manifests DIR [--only ID ...] [--held-out]
 
 For every manifest: copy the members it damages, apply the damage, hash
 every input, run the tool, compare what came out with the oracle, classify
@@ -19,6 +20,14 @@ Two judging modes, chosen by the oracle's `layout.json`:
 Either way the answer comes from the oracle, never from an earlier run of
 the tool. Outcomes: bit-exact / reconstructed / refused / defect; exit 1
 when any run is a defect.
+
+A manifest that names its pool (`image = "<pool>"`, the name the
+oracle's `layout.json` gives) runs against that pool alone; one that
+names none runs against any. `--print-needs` runs nothing: it prints
+the release files the selected manifests need of the oracle's image,
+one per line — every member, since no part of a pool reads without the
+rest, and the older copy of each member an `older-self` damage names —
+for `fetch-image.sh` to fetch those and no others.
 """
 import argparse
 import hashlib
@@ -1244,6 +1253,33 @@ def judge_walk(args, oracle, members, work, assume=()):
     return outcomes, redundancy
 
 
+def for_this_image(oracle, manifest):
+    """Whether a manifest is written for the pool the oracle describes:
+    one naming no pool is written for any."""
+    return manifest.get("image", oracle.pool) == oracle.pool
+
+
+def needs(oracle, manifests):
+    """The release files the given manifests need of the oracle's image.
+
+    Every member: ZFS spreads every volume over every top-level vdev, so
+    no part of a pool reads without the rest. And of the older copies
+    only those an `older-self` damage names, which are a few of a large
+    set. A reference the oracle cannot resolve needs nothing: the case
+    is n/a when it runs, whatever was fetched."""
+    files = {oracle.layout["members"][r]["file"] + ".zst" for r in oracle.roles}
+    for manifest in manifests:
+        for d in manifest.get("damage", []):
+            if "member" not in d or not d.get("pattern", "").startswith("older-self:"):
+                continue
+            try:
+                role = oracle.resolve(d["member"])
+            except Unresolved:
+                continue
+            files.add("round6-" + oracle.layout["members"][role]["file"] + ".zst")
+    return sorted(files)
+
+
 def run_case(args, oracle, manifest, rng):
     mid = manifest["id"]
     work = tempfile.mkdtemp(prefix=f"golden-{mid}-", dir=args.tmp)
@@ -1343,7 +1379,7 @@ def run_case(args, oracle, manifest, rng):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--image", required=True, help="directory holding the member files")
+    ap.add_argument("--image", help="directory holding the member files")
     ap.add_argument("--oracle", required=True)
     ap.add_argument("--manifests", required=True)
     ap.add_argument("--tool", default="./target/release/zvolrescue")
@@ -1356,11 +1392,13 @@ def main():
     ap.add_argument("--keep", action="store_true")
     ap.add_argument("--older", default=None,
                     help="the members at an earlier point of the pool's life, for older-self (default: <image>-round6)")
+    ap.add_argument("--print-needs", action="store_true",
+                    help="print the release files the selected manifests need, and run nothing")
     args = ap.parse_args()
-    oracle = Oracle(args.oracle, args.image, args.older)
-    os.makedirs(args.out, exist_ok=True)
-    label = args.label or os.path.basename(args.oracle.rstrip("/"))
-    results = []
+    if not args.print_needs and not args.image:
+        ap.error("--image is required unless --print-needs is given")
+    oracle = Oracle(args.oracle, args.image or "", args.older)
+    selected, elsewhere = [], []
     for name in sorted(os.listdir(args.manifests)):
         if not name.endswith(".toml"):
             continue
@@ -1369,10 +1407,34 @@ def main():
             continue
         if manifest.get("held_out") and not args.held_out:
             continue
+        if not for_this_image(oracle, manifest):
+            elsewhere.append(manifest)
+            continue
+        selected.append(manifest)
+    if args.print_needs:
+        print("\n".join(needs(oracle, selected)))
+        return
+    os.makedirs(args.out, exist_ok=True)
+    label = args.label or os.path.basename(args.oracle.rstrip("/"))
+    results = []
+    for manifest in selected:
         r = run_case(args, oracle, manifest, random.Random(manifest["id"]))
         r["image"] = label
         results.append(r)
         print(f"{label:<8} {r['verdict']:<10} {r['id']:<32} expected {r['expected']:<14} actual {r['actual']}")
+    # One asked for by name and written for another pool is n/a here, and
+    # shown; the rest of another pool's manifests are not this run's.
+    for manifest in elsewhere:
+        if not args.only:
+            continue
+        r = {"id": manifest["id"], "description": manifest.get("description", ""),
+             "expected": "—", "actual": "n/a", "verdict": "n/a", "inputs_unchanged": True,
+             "notes": [f"written for the pool {manifest['image']!r}, and this is {oracle.pool!r}"],
+             "image": label}
+        results.append(r)
+        print(f"{label:<8} {r['verdict']:<10} {r['id']:<32} {r['notes'][0]}")
+    if elsewhere and not args.only:
+        print(f"{label}: {len(elsewhere)} manifest(s) written for another pool, not run here")
     with open(os.path.join(args.out, f"report-{label}.json"), "w") as f:
         json.dump(results, f, indent=1)
     with open(os.path.join(args.out, f"report-{label}.md"), "w") as f:

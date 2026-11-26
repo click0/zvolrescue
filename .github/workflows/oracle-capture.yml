@@ -58,7 +58,10 @@ jobs:
         run: |
           cmp "tests/golden/$TAG.SHA256SUMS" "testdata/oracle/$POOL/SHA256SUMS-release.txt"
           sudo mkdir -p /var/tmp/image && sudo chown -R "$USER" /var/tmp/image
-          sh tests/golden/fetch-image.sh "$TAG" "tests/golden/$TAG.SHA256SUMS" /var/tmp/image "testdata/oracle/$POOL/members.sha256"
+          # The members alone: zdb reads the pool as it is, and the older
+          # copies (1.11 GB of image-v1's 2.51) are no part of it.
+          awk '$2 !~ /^round6-/ { print $2 }' "tests/golden/$TAG.SHA256SUMS" > /var/tmp/image/needs.txt
+          NEEDS=/var/tmp/image/needs.txt sh tests/golden/fetch-image.sh "$TAG" "tests/golden/$TAG.SHA256SUMS" /var/tmp/image "testdata/oracle/$POOL/members.sha256"
       - name: zdb, offline, over the members
         run: |
           mkdir -p capture
