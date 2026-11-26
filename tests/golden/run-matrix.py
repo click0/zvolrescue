@@ -30,7 +30,9 @@ and dRAID group's members the other way round); `search_order`
 finds on the damaged members (`--roots`); `key = "wrong"` or `"none"`
 for the encrypted volumes. The pattern `unreadable` zeroes its range as
 an imager leaves what it could not read, and marks it so in a ddrescue
-map given with `--map`. All of these but `assume_members` are the
+map given with `--map`. The range `slack` is a member's bytes past the
+last metaslab of its top-level vdev, from the oracle's `zdb -C`
+capture, up to L2. All of these but `assume_members` are the
 dump's: a pool with no volumes is walked by a reader that takes none of
 them, and such a case is n/a there.
 
@@ -249,6 +251,101 @@ def span_ranges(spec, length):
     return [(frm, max(to - frm, 0))]
 
 
+ROWHEIGHT = 16 << 20            # VDEV_DRAID_ROWHEIGHT
+
+
+def zdb_tops(text):
+    """The top-level vdevs of a `zdb -C` capture, in `vdev_tree`'s order:
+    each one's `key: value` lines, and `children`, how many it has.
+
+    >>> cap = '''MOS Configuration:
+    ...         com.delphix:has_per_vdev_zaps
+    ...         vdev_tree:
+    ...             type: 'root'
+    ...             children[0]:
+    ...                 type: 'raidz'
+    ...                 nparity: 2
+    ...                 com.delphix:vdev_zap_top: 133
+    ...                 children[0]:
+    ...                     type: 'file'
+    ...                     path: '/var/tmp/a:b.img'
+    ...                 children[1]:
+    ...                     type: 'file'
+    ...             children[1]:
+    ...                 type: 'mirror'
+    ...                 children[0]:
+    ...                     type: 'file'
+    ...         version: 5000
+    ...             children[0]:
+    ... '''
+    >>> [(t["type"], t.get("nparity"), t["children"]) for t in zdb_tops(cap)]
+    [('raidz', '2', 2), ('mirror', None, 1)]
+    """
+    tops, top, base, level, inner = [], None, None, None, None
+    for line in text.splitlines():
+        m = re.match(r"(\s*)(\S+):(?:\s+(.*))?$", line)
+        if not m:
+            continue
+        indent, key, value = len(m.group(1)), m.group(2), m.group(3)
+        if base is None:
+            if key == "vdev_tree" and value is None:
+                base = indent
+            continue
+        if indent <= base:
+            break
+        if level is None:
+            level = indent
+        if indent == level:
+            top = None
+            if key.startswith("children[") and value is None:
+                top, inner = {"children": 0}, None
+                tops.append(top)
+            continue
+        if top is None:
+            continue
+        if inner is None:
+            inner = indent
+        if indent == inner:
+            if key.startswith("children[") and value is None:
+                top["children"] += 1
+            elif value is not None:
+                top[key] = value.strip("'")
+    return tops
+
+
+def metaslab_end(top):
+    """How far into each child's data area a top-level vdev's metaslabs
+    reach: `asize >> metaslab_shift` whole metaslabs from its start, the
+    remainder of `asize` never allocated, mapped onto a child the way
+    the vdev maps any offset. A mirror's offset is its children's; a
+    raidz's sector `s` is in row `s / children`; a dRAID's group `g` is
+    `groupwidth` columns from column `g * groupwidth` of rows of
+    `ROWHEIGHT`, wrapping at `ndisks` (`vdev_draid_logical_to_physical`),
+    and a group partly in a metaslab counts whole.
+
+    >>> metaslab_end({"type": "mirror", "asize": "532152320", "metaslab_shift": "25", "ashift": "12", "children": 2}) >> 20
+    480
+    >>> metaslab_end({"type": "raidz", "asize": "2128609280", "metaslab_shift": "27", "ashift": "12", "children": 4}) >> 20
+    480
+    >>> metaslab_end({"type": "draid", "asize": "1459617792", "metaslab_shift": "27", "ashift": "12", "children": 4,
+    ...               "nparity": "1", "draid_ndata": "2", "draid_nspares": "1"}) >> 20
+    432
+    """
+    shift = int(top["metaslab_shift"])
+    used = (int(top["asize"]) >> shift) << shift
+    if not used:
+        return 0
+    if top["type"] == "raidz":
+        sectors = used >> int(top["ashift"])
+        return ((sectors - 1) // top["children"] + 1) << int(top["ashift"])
+    if top["type"] == "draid":
+        width = int(top["draid_ndata"]) + int(top["nparity"])
+        ndisks = top["children"] - int(top["draid_nspares"])
+        group = (used - 1) // (width * ROWHEIGHT)
+        return (((group + 1) * width - 1) // ndisks + 1) * ROWHEIGHT
+    return used
+
+
 def ranges_for(spec, path, length, reference=None):
     """`reference` is the smallest member of the image: `span:` percentages
     are measured against it so that the same span means the same bytes on
@@ -380,6 +477,30 @@ class Oracle:
         if os.path.getsize(p) != os.path.getsize(self.path(role)):
             raise Unresolved(f"older-self copy {p} is not the member's size")
         return p
+
+    def slack(self, role, length):
+        """`range = "slack"`: the bytes of a member past the end of its
+        top-level vdev's last metaslab, as the oracle's `zdb -C` capture
+        gives it, up to L2. ZFS allocates nothing outside its metaslabs,
+        so nothing of the pool is there to read."""
+        zc = os.path.join(self.dir, "zdb-C.txt")
+        if not os.path.exists(zc):
+            raise Unresolved("the oracle has no zdb -C capture, which is what places a vdev's metaslabs")
+        tops = zdb_tops(open(zc).read())
+        index = self.layout["members"][role]["top"]
+        if index >= len(tops):
+            raise Unresolved(f"the zdb -C capture has no top-level vdev {index}")
+        top = tops[index]
+        lacking = [k for k in ("type", "asize", "metaslab_shift", "ashift") if k not in top]
+        if lacking:
+            raise Unresolved(f"top-level vdev {index} has no {', '.join(lacking)} in the zdb -C capture")
+        if top["type"] not in ("mirror", "raidz", "draid", "file", "disk"):
+            raise Unresolved(f"top-level vdev {index} is a {top['type']}, whose offsets this harness does not map")
+        start = LABEL_START + metaslab_end(top)
+        end = label_offsets(length)[2]
+        if start >= end:
+            raise Unresolved(f"{role} has no slack: its metaslabs reach L2")
+        return [(start, end - start)]
 
     def key_for(self, dataset):
         """The `--key` spec that unlocks `dataset`, None for a plain one.
@@ -939,8 +1060,12 @@ def apply_damage(oracle, manifest, work, rng):
             rng_spec = d.get("range", "")
             if not (rng_spec.startswith("label:") and rng_spec.endswith(("/rings", "/uberblocks"))):
                 raise ValueError(f"{pat} needs a `label:…/rings` range, not {rng_spec!r}")
-        for off, length in ranges_for(d.get("range", "0.."), src, os.path.getsize(src),
-                                      reference=oracle.min_length):
+        if d.get("range") == "slack":
+            rngs = oracle.slack(role, os.path.getsize(src))
+        else:
+            rngs = ranges_for(d.get("range", "0.."), src, os.path.getsize(src),
+                              reference=oracle.min_length)
+        for off, length in rngs:
             plans.setdefault(role, []).append((off, length, pat))
     for role, plan in plans.items():
         if role in missing:

@@ -33,27 +33,29 @@ tagged. `v0.7.1` is the release that carries those six.
 
 ### Added
 
-* **The damage matrix tells the tool what an operator would, and
-  fetches what its cases need.** A manifest's `[recovery]` gives the
-  pool's layout as the oracle records it (`hints = "layout"`, every
-  raidz and dRAID group reversed with `order = "reversed"`), the order
-  searched (`search_order`), the object-set headers `zvolcarve roots`
-  finds on the damaged members (`roots`), and a wrong key or none
-  (`key`); the pattern `unreadable` zeroes a range as an imager leaves
-  what it could not read and marks it in a ddrescue map given with
-  `--map`. Ten such cases against image-v1, all run against its
-  published members: the uberblock rings of every member zeroed —
+* **The damage matrix tells the tool what an operator would, and fetches
+  what its cases need.** A manifest's `[recovery]` gives the pool's
+  layout as the oracle records it (`hints = "layout"`, every raidz and
+  dRAID group reversed with `order = "reversed"`), the order searched
+  (`search_order`), the object-set headers `zvolcarve roots` finds on
+  the damaged members (`roots`), and a wrong key or none (`key`); the
+  pattern `unreadable` zeroes a range as an imager leaves what it could
+  not read and marks it in a ddrescue map given with `--map`. The range
+  `slack` is what lies on a member past the last metaslab of its
+  top-level vdev, placed from the oracle's `zdb -C` capture: space ZFS
+  never allocates. Eleven such cases against image-v1, all run against
+  its published members: the uberblock rings of every member zeroed —
   refused, and read at the headers found; the configuration of every
   label zeroed — refused, read through the hints, and read through them
   in the wrong order with the order searched; every label of every
   member zeroed whole and read through hints out of order, the order
-  searched from the headers found; the boot area overwritten, read
-  bit-exact; one raidz2 member unreadable by its map; a wrong key and
-  none refused. A manifest may name its pool (`image`), and
-  `run-matrix.py --print-needs` lists the release files the selected
-  cases need, which `fetch-image.sh` then fetches alone (`NEEDS`): the
-  published image's matrix fetches 16 of its 20 files, the oracle
-  capture the 10 members.
+  searched from the headers found; the boot area overwritten, and the
+  slack of every member, read bit-exact; one raidz2 member unreadable by
+  its map; a wrong key and none refused. A manifest may name its pool
+  (`image`), and `run-matrix.py --print-needs` lists the release files
+  the selected cases need, which `fetch-image.sh` then fetches alone
+  (`NEEDS`): the published image's matrix fetches 16 of its 20 files,
+  the oracle capture the 10 members.
 
 ## v0.9.18 — 2026-11-25
 
