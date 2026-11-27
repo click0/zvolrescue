@@ -243,7 +243,20 @@ tagged. `v0.7.1` is the release that carries those six.
   top-level vdev of one device by the layout, an array of one integer
   as `zdb -l` prints it (`raidz_expand_txgs`), and a dataset `list`
   says it could not read the kind of (`snapshot(unreadable)`) as said,
-  not as a wrong kind. A satellite's members are 256 MiB and its
+  not as a wrong kind. With `multihost=on` the last slot of every ring
+  is the heartbeat's: a sync puts its uberblock in slot txg % 31, the
+  heartbeat rewrites the newest one there with the time of the beat, and
+  `zdb -lu` does not print it. Of a pool with a checkpoint, `zdb -u`
+  prints the checkpoint's uberblock after the pool's, and the two are
+  read apart; at the checkpoint's TXG the datasets are those `zdb -k -d`
+  names, not `zdb -t`'s, which reads the newest uberblock of the rings
+  before it; a feature's state at a TXG older than the end is what zdb
+  counted there, not what `zpool get` says at the end; and what `dump`
+  meets looking through the newer TXGs for the destroyed volume is not
+  the case's redundancy at work. A carve's candidates born after the
+  newest TXG an uberblock reached — blocks of a pool frozen mid-sync,
+  written and never committed — are set aside: the oracle says nothing
+  of them. A satellite's members are 256 MiB and its
   volumes sparse: OpenZFS holds back up to 128 MiB of a pool as slop,
   and the first builds of 128 MiB members ran out of space.
 

@@ -516,9 +516,9 @@ class Oracle:
         self.checkpoint_txg = None
         ue = os.path.join(d, "zdb-u-export.txt")
         if os.path.exists(ue):
-            self.checkpoint_txg = zdb_uberblock(open(ue, errors="replace").read()).get("checkpoint_txg") or None
+            self.checkpoint_txg = zdb_checkpoint(open(ue, errors="replace").read()).get("txg")
         if self.at_checkpoint and not self.checkpoint_txg:
-            raise SystemExit(f"{d}: volumes hashed at a checkpoint, and zdb-u-export.txt names no checkpoint_txg")
+            raise SystemExit(f"{d}: volumes hashed at a checkpoint, and zdb-u-export.txt has no checkpointed uberblock")
         self.destroyed = {}
         gone = os.path.join(d, "zfs-get-destroyed.txt")
         if os.path.exists(gone):
@@ -565,6 +565,15 @@ class Oracle:
                     text = open(os.path.join(bt, name), errors="replace").read()
                     self.by_txg[int(name[:-4])] = zdb_datasets(text)
                     self.refcounts_by_txg[int(name[:-4])] = zdb_refcounts(text)
+        # At the checkpoint's TXG, the pool as the checkpoint keeps it:
+        # `zdb -k -d`, its datasets under the pool's name with a suffix
+        # zdb gives them. `zdb -t` of that TXG reads the newest uberblock
+        # of the rings at or before it, which is not the checkpoint's.
+        ck = os.path.join(d, "datasets-checkpoint.txt")
+        if self.checkpoint_txg and os.path.exists(ck):
+            text = open(ck, errors="replace").read().replace(self.pool + "_CHECKPOINTED_UNIVERSE", self.pool)
+            self.by_txg[self.checkpoint_txg] = zdb_datasets(text)
+            self.refcounts_by_txg[self.checkpoint_txg] = zdb_refcounts(text)
         # What `zpool get` said of every feature the pool has enabled,
         # at the end of the build: active or enabled, by short name.
         self.feature_states = {}
@@ -613,6 +622,11 @@ class Oracle:
                     self.pool_facts[k] = int(v)
                 elif k == "ashift" and v.isdigit():
                     self.pool_facts.setdefault("ashift", []).append(int(v))
+        # `multihost=on` (sat-mmp): the rings have a heartbeat's slot.
+        self.multihost = False
+        zp = os.path.join(d, "zpool-get-all.txt")
+        if os.path.exists(zp):
+            self.multihost = any(line.rstrip("\n") == "multihost\ton" for line in open(zp))
         zs = os.path.join(d, "zpool-status.txt")
         self.status_tops = zpool_status_tops(open(zs, errors="replace").read(), self.layout) if os.path.exists(zs) else {}
         self.zdb = ""
@@ -1643,7 +1657,7 @@ def judge_dump(args, oracle, manifest, members, work, assume=(), extra=(), key_m
             return UNVERIFIED
         return "hash mismatch"
 
-    def dump(vol, key_name, sha, txg=None, log_evidence=True):
+    def dump(vol, key_name, sha, txg=None, log_evidence=True, counts=True):
         nonlocal redundancy
         out = os.path.join(work, key_name.replace("/", "_") + ".img")
         log = out + ".debug"
@@ -1660,7 +1674,7 @@ def judge_dump(args, oracle, manifest, members, work, assume=(), extra=(), key_m
             cmd += ["--key", key]
         proc = subprocess.run(cmd, capture_output=True, text=True)
         trace = open(log, errors="replace").read() if os.path.exists(log) else ""
-        redundancy |= bool(REDUNDANCY.search(trace))
+        redundancy |= counts and bool(REDUNDANCY.search(trace))
         passed = passed_over(proc.returncode, proc.stdout)
         if passed is not None and os.path.exists(out):
             # Read whole at an older TXG than one that did not read:
@@ -1695,11 +1709,16 @@ def judge_dump(args, oracle, manifest, members, work, assume=(), extra=(), key_m
     # the pool holds until the checkpoint is discarded, read without
     # being told where — the checkpoint is the last place `dump` looks
     # for a dataset (SPEC F-10). Not in the evidence log: the report is
-    # judged by the volumes as the pool is now.
+    # judged by the volumes as the pool is now. And not counted as the
+    # case's redundancy at work: looking for the destroyed one, `dump`
+    # tries the newer TXGs first, whose blocks of it were freed and
+    # written over, and their failed reconstructions say nothing of the
+    # damage.
     if want == "all":
         for vol, sha in sorted(oracle.at_checkpoint.items()):
             dump(vol, f"{vol}@checkpoint", sha,
-                 txg=oracle.checkpoint_txg if vol in oracle.volumes else None, log_evidence=False)
+                 txg=oracle.checkpoint_txg if vol in oracle.volumes else None, log_evidence=False,
+                 counts=False)
     return outcomes, redundancy
 
 
@@ -2147,7 +2166,7 @@ def zdb_refcounts(text):
     return {m.group(1): int(m.group(2)) for m in map(ZDB_REFCOUNT.match, text.splitlines()) if m}
 
 
-def compare_features(states, refcounts, doc):
+def compare_features(states, refcounts, doc, end=True):
     """The features `list` read from the MOS against `zpool get feature@`
     (`states`: the short name of every feature the pool has enabled,
     active or enabled) and the refcounts `zdb -d` verified at the same
@@ -2162,6 +2181,12 @@ def compare_features(states, refcounts, doc):
     ('mismatch', ['a: refcount 3 != 2', 'b: state active != enabled'])
     >>> compare_features({"a": "active"}, {}, {"features": [], "features_error": "unread"})
     ('refused', [])
+
+    At an older TXG than the end (`end=False`) `zpool get` says nothing
+    of a feature's state, and only zdb's count there does:
+
+    >>> compare_features({"a": "active", "b": "active"}, {"a": 2}, doc, end=False)
+    ('ok', [])
     """
     if doc.get("features_error"):
         return "refused", []
@@ -2169,10 +2194,16 @@ def compare_features(states, refcounts, doc):
     diffs = [f"{n}: enabled, and not listed" for n in sorted(states) if n not in got]
     diffs += [f"{n}: listed, and not enabled" for n in sorted(got) if n not in states]
     for n in sorted(set(states) & set(got)):
-        if n in refcounts and refcounts[n] != got[n].get("refcount"):
-            diffs.append(f"{n}: refcount {refcounts[n]} != {got[n].get('refcount')}")
-        if states[n] != got[n].get("state"):
-            diffs.append(f"{n}: state {states[n]} != {got[n].get('state')}")
+        # `zpool get` says what a feature is at the end; at an older TXG
+        # (a checkpoint's, taken before the checkpoint's own feature was
+        # counted) zdb's count of it there is what says.
+        want = states[n] if end else None
+        if n in refcounts:
+            if refcounts[n] != got[n].get("refcount"):
+                diffs.append(f"{n}: refcount {refcounts[n]} != {got[n].get('refcount')}")
+            want = "active" if refcounts[n] else "enabled"
+        if want is not None and want != got[n].get("state"):
+            diffs.append(f"{n}: state {want} != {got[n].get('state')}")
     return ("mismatch", diffs) if diffs else ("ok", [])
 
 
@@ -2294,7 +2325,8 @@ def judge_list(args, oracle, members, work, assume=(), extra=(), control=False):
         if oracle.feature_states:
             key = f"{label} features"
             outcomes[key], fdiffs = compare_features(oracle.feature_states,
-                                                     oracle.refcounts_by_txg.get(txg, {}), doc)
+                                                     oracle.refcounts_by_txg.get(txg, {}), doc,
+                                                     end=txg == newest)
             if fdiffs:
                 details[key] = fdiffs[:10]
         return doc
@@ -2305,7 +2337,10 @@ def judge_list(args, oracle, members, work, assume=(), extra=(), control=False):
         for t in have:
             if t in oracle.by_txg and t != doc.get("txg"):
                 one(f"txg {t}", base + ["--txg", str(t)])
-        unlisted = [t for t in changes(oracle.by_txg) if t not in have]
+        # The TXGs of the rings: the checkpoint's listing is of another
+        # line of the pool's life, and no change of the one they make.
+        ring = {t: v for t, v in oracle.by_txg.items() if t != oracle.checkpoint_txg}
+        unlisted = [t for t in changes(ring) if t not in have]
         if unlisted:
             outcomes["txgs"] = "mismatch"
             details["txgs"] = [f"zdb's listing changes at txg {t}, which list does not name" for t in unlisted]
@@ -2392,7 +2427,16 @@ def zdb_uberblock(text):
     ... \\tcheckpoint_txg = 0
     ... ''')
     {'version': 5000, 'txg': 4994, 'guid_sum': 3365034843304634015, 'timestamp': 1791627863, 'rootbp_birth': 4994, 'checkpoint_txg': 0}
+
+    Of a pool with a checkpoint zdb prints, after the pool's own, the
+    uberblock the checkpoint keeps (`Checkpointed uberblock found:`):
+    that one is zdb_checkpoint's, not this.
+
+    >>> both = "Uberblock:\\n\\ttxg = 288\\n\\tcheckpoint_txg = 0\\n\\nCheckpointed uberblock found:\\n\\ttxg = 167\\n\\tcheckpoint_txg = 167\\n"
+    >>> zdb_uberblock(both), zdb_checkpoint(both)["txg"]
+    ({'txg': 288, 'checkpoint_txg': 0}, 167)
     """
+    text = text.split("Checkpointed uberblock found:", 1)[0]
     out = {}
     for line in text.splitlines():
         m = re.match(r"^\s*(version|txg|guid_sum|timestamp|checkpoint_txg) = (\d+)", line)
@@ -2402,6 +2446,14 @@ def zdb_uberblock(text):
         if m and line.strip().startswith("bp ="):
             out["rootbp_birth"] = int(m.group(1))
     return out if "txg" in out else {}
+
+
+def zdb_checkpoint(text):
+    """The uberblock a pool checkpoint keeps, as `zdb -u` printed it
+    after the pool's own (zdb_uberblock), or {} without a checkpoint."""
+    if "Checkpointed uberblock found:" not in text:
+        return {}
+    return zdb_uberblock(text.split("Checkpointed uberblock found:", 1)[1])
 
 
 def zdb_rings(text):
@@ -2555,6 +2607,16 @@ def compare_scan(oracle, doc, roles, control):
     assembled against `zpool status` and the labels' GUIDs.
     """
     outcomes, details = {}, {}
+    # With `multihost=on` the last slot of every ring is the heartbeat's
+    # (MMP_BLOCKS_PER_LABEL): a sync puts its uberblock in slot
+    # txg % (slots - 1), the heartbeat rewrites the newest one into the
+    # last slot of a label at a time with the time of the beat — copies of
+    # one TXG that differ in their timestamp alone — and `zdb -lu` does not
+    # print that slot (zdb's dump_label_uberblocks, short of -uuuu).
+    mmp = 1 if getattr(oracle, "multihost", False) else 0
+
+    def heartbeat(lab, u):
+        return mmp and u.get("slot") == (lab.get("slots") or 0) - 1
     for dev in doc.get("devices", []):
         role = roles.get(dev.get("path"))
         want = oracle.labels.get(role)
@@ -2587,7 +2649,8 @@ def compare_scan(oracle, doc, roles, control):
                 for u in lab.get("uberblocks", []):
                     if u.get("checksum") != "ok":
                         continue
-                    if control and u.get("slot") != u.get("txg", 0) % max(lab.get("slots") or 1, 1):
+                    if (control and not heartbeat(lab, u)
+                            and u.get("slot") != u.get("txg", 0) % max((lab.get("slots") or 1) - mmp, 1)):
                         diffs.append(f"{os.path.basename(dev['path'])} L{lab.get('index')}: txg {u.get('txg')} in slot {u.get('slot')}")
                     if u.get("txg") != ub["txg"]:
                         continue
@@ -2597,7 +2660,7 @@ def compare_scan(oracle, doc, roles, control):
                            "timestamp": u.get("timestamp"), "rootbp_birth": u.get("rootbp_birth"),
                            "checkpoint_txg": u.get("checkpoint_txg")}
                     diffs += [f"{os.path.basename(dev['path'])} L{lab.get('index')}: {k} {ub[k]} != {got.get(k)}"
-                              for k in ub if ub[k] != got.get(k)]
+                              for k in ub if ub[k] != got.get(k) and not (mmp and k == "timestamp")]
         if diffs:
             outcomes[key], details[key] = "mismatch", sorted(set(diffs))[:10]
         elif copies:
@@ -2619,7 +2682,8 @@ def compare_scan(oracle, doc, roles, control):
         for lab in dev.get("labels", []):
             idx = lab.get("index")
             wslots = want.get(idx, {})
-            got = {u.get("slot"): u for u in lab.get("uberblocks", []) if u.get("checksum") == "ok"}
+            got = {u.get("slot"): u for u in lab.get("uberblocks", [])
+                   if u.get("checksum") == "ok" and not (heartbeat(lab, u) and u.get("slot") not in wslots)}
             if control and sorted(got) != sorted(wslots):
                 diffs.append(f"L{idx}: slots {sorted(set(wslots) ^ set(got))} not as zdb read them")
             for slot, u in got.items():
@@ -2894,6 +2958,17 @@ def judge_carve(args, oracle, members, work, extra=(), control=False):
                 os.remove(img)
         return key
 
+    # A candidate born after the newest TXG an uberblock reached is of a
+    # TXG that never committed — written to the members, never named by
+    # an uberblock: a pool frozen or cut off mid-sync (sat-slog). The
+    # oracle says what the pool held at its uberblock, and nothing of
+    # those, so they are set aside.
+    reached = max((u["txg"] for u in oracle.uberblocks), default=None)
+    if reached is not None:
+        late = [c for c in cands if (c.get("birth") or 0) > reached]
+        cands = [c for c in cands if (c.get("birth") or 0) <= reached]
+    else:
+        late = []
     for vol, (sha, size, vbs) in sorted(vols.items()):
         group = sorted((c for c in cands if c.get("volblocksize") == vbs),
                        key=lambda c: -(c.get("birth") or 0))
@@ -2917,6 +2992,10 @@ def judge_carve(args, oracle, members, work, extra=(), control=False):
             details[vol] = [f"{len(tried)} candidate(s) of {vbs} bytes carved at the newest births, "
                             "none the volume as the oracle has it at the export"] + \
                 [f"{n} {why}" for why, n in said.most_common(4)]
+        later = sum(1 for c in late if c.get("volblocksize") == vbs)
+        if later:
+            details.setdefault(vol, []).append(
+                f"{later} candidate(s) of {vbs} bytes born after txg {reached}, the newest an uberblock reached, set aside")
     # A volume destroyed while the pool was built, on the control: what
     # the pool still holds of it. Its blocks were freed and may have been
     # written over since, so nothing is expected; a candidate that carves
