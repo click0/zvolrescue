@@ -256,7 +256,11 @@ tagged. `v0.7.1` is the release that carries those six.
   the case's redundancy at work. A carve's candidates born after the
   newest TXG an uberblock reached — blocks of a pool frozen mid-sync,
   written and never committed — are set aside: the oracle says nothing
-  of them. A satellite's members are 256 MiB and its
+  of them. The eight are published (the releases `sat-<name>-v1` of
+  zvolrescue-testdata, 0.59 GB in all, 26 of 26 at their build), pinned
+  in `tests/golden/sat-<name>-v1.SHA256SUMS`, and judged every week by
+  `golden-published` beside the golden images, a job each; a satellite's
+  undamaged reading is its control manifest's. A satellite's members are 256 MiB and its
   volumes sparse: OpenZFS holds back up to 128 MiB of a pool as slop,
   and the first builds of 128 MiB members ran out of space.
 

@@ -30,7 +30,8 @@ name: Real-world (kernel ZFS)
 #    tests/golden/build-satellite.sh the same way, the manifests that
 #    name it run over it, uploaded for publication the same way;
 #  * the published golden images: each release of zvolrescue-testdata
-#    that a tests/golden/<tag>.SHA256SUMS pins (image-v1, golden-v2), the
+#    that a tests/golden/<tag>.SHA256SUMS pins (image-v1, golden-v2, and
+#    the eight satellites sat-<name>-v1), the
 #    matrix over it with its oracle from that repository — what SPEC
 #    §9.1 calls the CI job that fetches the image; also weekly, since an
 #    image that does not change makes a changed verdict the tool's.
@@ -621,13 +622,22 @@ jobs:
     if: ${{ github.event_name == 'schedule' || !github.event.inputs.only || contains(github.event.inputs.only, 'published') }}
     runs-on: ubuntu-24.04
     # Every published image this repository pins, each with its oracle's
-    # directory in zvolrescue-testdata: image-v1's is oracle/golden.
+    # directory in zvolrescue-testdata: image-v1's is oracle/golden, a
+    # satellite's its pool's name.
     strategy:
       fail-fast: false
       matrix:
         include:
           - { tag: image-v1, oracle: golden }
           - { tag: golden-v2, oracle: golden-v2 }
+          - { tag: sat-removal-v1, oracle: sat-removal }
+          - { tag: sat-checkpoint-v1, oracle: sat-checkpoint }
+          - { tag: sat-spare-v1, oracle: sat-spare }
+          - { tag: sat-expand-v1, oracle: sat-expand }
+          - { tag: sat-special-v1, oracle: sat-special }
+          - { tag: sat-ashift-v1, oracle: sat-ashift }
+          - { tag: sat-slog-v1, oracle: sat-slog }
+          - { tag: sat-mmp-v1, oracle: sat-mmp }
     env:
       TAG: ${{ matrix.tag }}
       ORACLE: testdata/oracle/${{ matrix.oracle }}
