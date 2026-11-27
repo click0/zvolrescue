@@ -1604,12 +1604,20 @@ def silent_damage(oracle, manifest):
 
 
 def unverified_blocks(stdout):
-    """What a `dump -f json` said it read and nothing verified."""
+    """What a `dump -f json` said it read and nothing verified, over the
+    volumes it wrote.
+
+    >>> unverified_blocks('{"volumes": [{"blocks_unverified": 3}, {"blocks_unverified": 0}]}')
+    3
+    >>> unverified_blocks("not json"), unverified_blocks('{"volumes": []}')
+    (0, 0)
+    """
     try:
         doc = json.loads(stdout)
     except ValueError:
         return 0
-    return int(doc.get("blocks_unverified") or 0) if isinstance(doc, dict) else 0
+    vols = doc.get("volumes", []) if isinstance(doc, dict) else []
+    return sum(int(v.get("blocks_unverified") or 0) for v in vols if isinstance(v, dict))
 
 
 def judge_dump(args, oracle, manifest, members, work, assume=(), extra=(), key_mode=None, evidence=None):
@@ -1827,7 +1835,9 @@ def history_objects(text):
     TXG it came into being at and how (created, clone, snapshot), and the
     TXG it was destroyed at; with the renames of datasets and the
     promotions, each with its TXG. A snapshot takes its dataset's new
-    name with it, and so does a child.
+    name with it, and so does a child; a promoted clone takes the
+    snapshots of its origin up to the one it was cloned from, which are
+    its own from then on (dsl_dataset_promote).
 
     >>> h = '''History for 'p':
     ... t [txg:10] create p/a (5)   [on h]
@@ -1847,6 +1857,23 @@ def history_objects(text):
     [(22, 'p/gone')] 22 created 30
     >>> renames
     [(20, 'p/a', 'p/c')]
+    >>> h = '''History for 'p':
+    ... t [txg:10] create p/a (5)   [on h]
+    ... t [txg:12] snapshot p/a@s0 (6)   [on h]
+    ... t [txg:14] snapshot p/a@s1 (7)   [on h]
+    ... t [txg:15] clone p/b (8) origin=p/a@s1 (7) [on h]
+    ... t [txg:16] snapshot p/a@s2 (9)   [on h]
+    ... t [txg:20] promote p/b (8)   [on h]
+    ... '''
+    >>> objects, renames, promotions = history_objects(h)
+    >>> for o in objects.values(): print(o["names"])
+    [(10, 'p/a')]
+    [(12, 'p/a@s0'), (20, 'p/b@s0')]
+    [(14, 'p/a@s1'), (20, 'p/b@s1')]
+    [(15, 'p/b')]
+    [(16, 'p/a@s2')]
+    >>> promotions
+    [(20, 'p/b')]
     """
     objects, renames, promotions = {}, [], []
     how = {"create": "created", "clone": "clone", "snapshot": "snapshot"}
@@ -1857,6 +1884,9 @@ def history_objects(text):
         txg, op, name, oid, rest = int(m.group(1)), m.group(2), m.group(3), m.group(4), m.group(5)
         if op in how:
             objects[oid] = {"names": [(txg, name)], "born": txg, "how": how[op], "destroyed": None}
+            origin = re.search(r"origin=\S+ \((\d+)\)", rest) if op == "clone" else None
+            if origin:
+                objects[oid]["origin"] = origin.group(1)
         elif op == "destroy" and oid in objects:
             objects[oid]["destroyed"] = txg
         elif op == "rename":
@@ -1869,6 +1899,16 @@ def history_objects(text):
                     o["names"].append((txg, new + cur[len(old):]))
         elif op == "promote":
             promotions.append((txg, objects[oid]["names"][-1][1] if oid in objects else name))
+            # The origin's snapshots up to the one the clone came of
+            # move to the clone, under its name.
+            snap = objects.get(objects.get(oid, {}).get("origin"))
+            if snap:
+                origin_ds, clone = snap["names"][-1][1].split("@")[0], objects[oid]["names"][-1][1]
+                for o in objects.values():
+                    cur = o["names"][-1][1]
+                    if (o["destroyed"] is None and o["how"] == "snapshot" and cur.startswith(origin_ds + "@")
+                            and o["born"] <= snap["born"]):
+                        o["names"].append((txg, clone + cur[len(origin_ds):]))
     return objects, renames, promotions
 
 
@@ -1904,12 +1944,28 @@ def compare_timeline(history_text, guids, pool, doc, returncode):
     >>> compare_timeline(h, {"p/c": 16}, "p", {"txgs": [45, 50], "events": [
     ...     {"event": "created", "object": "p/c", "txg": 10, "guid": "0x10"}]}, 0)
     ('ok', [])
+
+    A TXG read in part counts for what it reports there:
+
+    >>> doc = {"txgs": [45, 50], "partial_txgs": [45], "events": [
+    ...     {"event": "created", "object": "p/a", "txg": 10, "guid": "0x10"},
+    ...     {"event": "unreadable", "txg": 45},
+    ...     {"event": "renamed", "object": "p/c", "txg": 45, "details": "was p/a"}]}
+    >>> compare_timeline(h, {"p/c": 16}, "p", doc, 0)
+    ('ok', [])
     """
     objects, renames, promotions = history_objects(history_text)
     unread = {e.get("txg") for e in doc.get("events", []) if e.get("event") == "unreadable"}
     unread |= set(doc.get("unreadable_txgs") or [])
+    # A TXG where part of the tree did not read (`partial_txgs`) is read
+    # for what did: a change reported there is one the tool saw, at the
+    # first TXG it read after it. What it must report is held to the
+    # TXGs read whole.
+    partial = set(doc.get("partial_txgs") or [])
     read = sorted(t for t in (doc.get("txgs") or []) if t not in unread)
+    looked = sorted(t for t in (doc.get("txgs") or []) if t not in unread - partial)
     first_after = lambda h: next((t for t in read if t >= h), None)
+    firsts = lambda h: {next((t for t in ts if t >= h), None) for ts in (read, looked)} - {None}
     exists_at = lambda o, t: o["born"] <= t and (o["destroyed"] is None or t < o["destroyed"])
     named = lambda o, name: any(n == name for _, n in o["names"])
     final = lambda o: o["names"][-1][1]
@@ -1933,7 +1989,7 @@ def compare_timeline(history_text, guids, pool, doc, returncode):
             if g is not None and e.get("guid") and int(e["guid"], 16) != g:
                 diffs.append(f"{name}: guid {e['guid']}, the record says {g:#x}")
         elif kind in ("destroyed", "snapshot-destroyed"):
-            if not any(o["destroyed"] is not None and first_after(o["destroyed"]) == txg and named(o, name)
+            if not any(o["destroyed"] is not None and txg in firsts(o["destroyed"]) and named(o, name)
                        for o in objects.values()):
                 diffs.append(f"{name}: {kind} at txg {txg}, which the record has no destroy for")
             reported.add((kind, name, txg))
@@ -1942,12 +1998,12 @@ def compare_timeline(history_text, guids, pool, doc, returncode):
             was = was.group(1) if was else ""
             # A dataset's rename takes its snapshots and children with it,
             # and each may be reported as renamed in its own right.
-            if not any(first_after(h) == txg and name.startswith(new) and name[len(new):][:1] in ("", "@", "/")
+            if not any(txg in firsts(h) and name.startswith(new) and name[len(new):][:1] in ("", "@", "/")
                        and was == old + name[len(new):] for h, old, new in renames):
                 diffs.append(f"{name}: renamed at txg {txg} from {was}, which the record has no rename for")
             reported.add((kind, name, txg))
         elif kind == "promoted":
-            if not any(first_after(h) == txg and n == name for h, n in promotions):
+            if not any(txg in firsts(h) and n == name for h, n in promotions):
                 diffs.append(f"{name}: promoted at txg {txg}, which the record has no promotion for")
             reported.add((kind, name, txg))
     # What it must have said: every dataset and snapshot the pool still
@@ -1960,18 +2016,18 @@ def compare_timeline(history_text, guids, pool, doc, returncode):
     for h, old, new in renames:
         at = first_after(h)
         held = any(named(o, old) and exists_at(o, t) for o in objects.values() for t in read if t < h)
-        if at is not None and held and ("renamed", new, at) not in reported:
+        if at is not None and held and not any(("renamed", new, a) in reported for a in firsts(h)):
             unreported.append(f"renamed {old} -> {new} at txg {h}: not reported")
     for o in objects.values():
         h = o["destroyed"]
         if h is None or first_after(h) is None or not any(exists_at(o, t) for t in read if t < h):
             continue
         kind = "snapshot-destroyed" if "@" in final(o) else "destroyed"
-        if (kind, final(o), first_after(h)) not in reported:
+        if not any((kind, final(o), a) in reported for a in firsts(h)):
             unreported.append(f"{kind} {final(o)} at txg {h}: not reported")
     for h, name in promotions:
         at = first_after(h)
-        if read and read[0] < h and at is not None and ("promoted", name, at) not in reported:
+        if read and read[0] < h and at is not None and not any(("promoted", name, a) in reported for a in firsts(h)):
             unreported.append(f"promoted {name} at txg {h}: not reported")
     if diffs:
         return "mismatch", missing + diffs + unreported

@@ -205,7 +205,11 @@ tagged. `v0.7.1` is the release that carries those six.
   On the control it has to come out bit-exact like any other. And on the
   control the carve looks for a volume the build destroyed, and records
   whether a candidate carves to what it held just before or at one of
-  its snapshots: its blocks were freed, so nothing is expected.
+  its snapshots: its blocks were freed, so nothing is expected. The
+  history is judged through a promotion — the promoted clone takes its
+  origin's snapshots up to the one it came of, under its own name — and
+  a TXG `zvoltimeline` read in part counts for what it reports there:
+  the first build of `golden-v2` had both read as the tool's defects.
 
 ## v0.9.18 — 2026-11-25
 
