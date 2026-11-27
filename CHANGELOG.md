@@ -263,6 +263,13 @@ tagged. `v0.7.1` is the release that carries those six.
   undamaged reading is its control manifest's. A satellite's members are 256 MiB and its
   volumes sparse: OpenZFS holds back up to 128 MiB of a pool as slop,
   and the first builds of 128 MiB members ran out of space.
+* **Pools of the feature sets of older OpenZFS are built too.**
+  `build-satellite.sh` makes, with the current OpenZFS, what an older
+  pool carries: `compat20` (`compatibility=openzfs-2.0-linux`, a raidz1),
+  `nofeatures` (`zpool create -d`, version 5000 with every feature
+  disabled, a mirror) and `v28` (version 28, before feature flags, a
+  raidz2), the last two compressing with lzjb; the `satellites` jobs
+  build them beside the eight.
 
 ## v0.9.18 — 2026-11-25
 

@@ -502,7 +502,7 @@ jobs:
         env:
           ONLY: ${{ github.event.inputs.only }}
         run: |
-          all="removal checkpoint spare expand special ashift slog mmp"
+          all="removal checkpoint spare expand special ashift slog mmp compat20 nofeatures v28"
           picked=""
           for s in $all; do case " $ONLY " in *" sat-$s "*) picked="$picked $s" ;; esac; done
           [ -n "$picked" ] || picked=$all

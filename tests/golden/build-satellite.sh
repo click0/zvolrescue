@@ -22,6 +22,9 @@
 #   ashift      raidz1 at ashift 9 beside raidz1 at ashift 13
 #   slog        a separate intent log, with records the pool never applied
 #   mmp         multihost=on: the uberblocks of its heartbeat
+#   compat20    the feature set of OpenZFS 2.0 (compatibility=openzfs-2.0-linux)
+#   nofeatures  a pool of version 5000 with every feature disabled (-d)
+#   v28         a pool of version 28, before feature flags
 #
 # Every satellite holds the same few datasets — a volume of 8K blocks
 # with content lz4 shrinks, one of 16K blocks of the keystream, a
@@ -37,6 +40,9 @@ POOL=sat-$NAME
 SEED=zvolrescue-$POOL-2026
 ASHIFT=12
 CREATE_OPTS=""
+# lz4 is a feature (org.illumos:lz4_compress): a pool without features
+# compresses with lzjb.
+COMPRESSION=lz4
 HISTORY_NOTE=""
 # shellcheck source=tests/golden/lib-build.sh
 . "$HERE/lib-build.sh"
@@ -50,13 +56,13 @@ make_members() { # make_members SIZE NAME...
 }
 create() { # create VDEV-SPEC...: the pool, every satellite alike
     # shellcheck disable=SC2086
-    zpool create -f -o ashift=$ASHIFT -o autotrim=off $CREATE_OPTS -O compression=lz4 -O snapdev=visible \
+    zpool create -f -o ashift=$ASHIFT -o autotrim=off $CREATE_OPTS -O compression=$COMPRESSION -O snapdev=visible \
         "$POOL" "$@"
 }
 
 common_datasets() {
     zfs create "$POOL/vm"
-    zfs create -s -V 24M -b 8K  -o checksum=fletcher4 -o compression=lz4 "$POOL/vm/disk-8k"
+    zfs create -s -V 24M -b 8K  -o checksum=fletcher4 -o compression=$COMPRESSION "$POOL/vm/disk-8k"
     zfs create -s -V 24M -b 16K -o checksum=sha256    -o compression=off "$POOL/vm/disk-16k"
     zfs create "$POOL/fs"
     VOLS="vm/disk-8k vm/disk-16k"
@@ -289,10 +295,46 @@ recipe_mmp() {
     sleep 5
 }
 
+# The feature sets of older pools, made by this OpenZFS (stage 3): what a
+# pool created by an older one, or made to be imported by one, carries.
+recipe_compat20() {
+    DESCRIPTION="One raidz1 of three disks created with \`compatibility=openzfs-2.0-linux\`: the features OpenZFS 2.0 on Linux knows and no later one — no block cloning, no RAIDZ expansion, no \`zilsaxattr\`, \`head_errlog\` or \`vdev_zaps_v2\` — as a pool made to be imported by 2.0, or made by it, has."
+    ALL="raidz1-0 raidz1-1 raidz1-2"
+    make_members 256M $ALL
+    CREATE_OPTS="-o compatibility=openzfs-2.0-linux"
+    create raidz1 $(paths $ALL)
+    [ "$(zpool get -H -o value feature@block_cloning "$POOL")" = disabled ] || die "block_cloning is not disabled"
+    common_datasets; initial_fill
+    rounds 0 3
+}
+recipe_nofeatures() {
+    DESCRIPTION="One mirror created with \`zpool create -d\`: pool version 5000 with every feature disabled — no hole birth, no embedded data, no lz4 (its volume compressed with lzjb), no large dnodes, no spacemap histogram — what a pool upgraded from a legacy version and never given a feature looks like."
+    ALL="mirror-0a mirror-0b"
+    make_members 256M $ALL
+    CREATE_OPTS="-d"
+    COMPRESSION=lzjb
+    create mirror $(paths $ALL)
+    zpool get -H -o property,value all "$POOL" | awk -F'\t' '$1 ~ /^feature@/ && $2 != "disabled" { bad = 1 } END { exit bad }' ||
+        die "a feature is enabled"
+    common_datasets; initial_fill
+    rounds 0 3
+}
+recipe_v28() {
+    DESCRIPTION="One raidz2 of four disks created with \`-o version=28\`: the last pool version before feature flags, with the ZPL of version 5 — its labels say version 28 and list no features, its MOS has no feature objects, and its volume is compressed with lzjb."
+    ALL="raidz2-0 raidz2-1 raidz2-2 raidz2-3"
+    make_members 256M $ALL
+    CREATE_OPTS="-o version=28"
+    COMPRESSION=lzjb
+    create raidz2 $(paths $ALL)
+    [ "$(zpool get -H -o value version "$POOL")" = 28 ] || die "the pool is not of version 28"
+    common_datasets; initial_fill
+    rounds 0 3
+}
+
 # ---------------------------------------------------------------- build
 case $NAME in
-    removal|checkpoint|spare|expand|special|ashift|slog|mmp) ;;
-    *) die "no satellite $NAME (removal checkpoint spare expand special ashift slog mmp)" ;;
+    removal|checkpoint|spare|expand|special|ashift|slog|mmp|compat20|nofeatures|v28) ;;
+    *) die "no satellite $NAME (removal checkpoint spare expand special ashift slog mmp compat20 nofeatures v28)" ;;
 esac
 say "$POOL ($TAG)"
 EXPORT_HASHED=""
@@ -330,7 +372,7 @@ release_sums
     echo
     echo "## History"
     echo
-    echo "\`vm/disk-8k\` (8K blocks, lz4, written with content it shrinks) and \`vm/disk-16k\` (16K blocks, sha256, the keystream), 16 MiB of each, and \`fs\`, twenty text files, twenty of the keystream in a directory, a symbolic and a hard link. Then rounds of four TXGs with 256 KiB written to every volume and a file to \`fs\` in each, a recursive snapshot \`s<round>\` after each round. ${HISTORY_NOTE} Deterministic content from seed \`$SEED\`."
+    echo "\`vm/disk-8k\` (8K blocks, $COMPRESSION, written with content it shrinks) and \`vm/disk-16k\` (16K blocks, sha256, the keystream), 16 MiB of each, and \`fs\`, twenty text files, twenty of the keystream in a directory, a symbolic and a hard link. Then rounds of four TXGs with 256 KiB written to every volume and a file to \`fs\` in each, a recursive snapshot \`s<round>\` after each round. ${HISTORY_NOTE} Deterministic content from seed \`$SEED\`."
     echo
     echo "## Oracle"
     echo
