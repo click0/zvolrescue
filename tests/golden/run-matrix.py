@@ -542,13 +542,24 @@ class Oracle:
         # `zfs get -r all` names every dataset's keyformat; the `zfs list`
         # capture is the fallback (the first image's was written without
         # `-r` and named the pool alone).
-        self.keyformat = {}
+        # And every dataset's and snapshot's `createtxg` and `origin`: when
+        # each came into being and how, which a history that has wrapped
+        # no longer says of the oldest.
+        self.keyformat, self.created, origins = {}, {}, {}
         zg = os.path.join(d, "zfs-get-all.txt")
         if os.path.exists(zg):
             for line in open(zg):
                 f = line.rstrip("\n").split("\t")
-                if len(f) >= 3 and f[1] == "keyformat":
+                if len(f) < 3:
+                    continue
+                if f[1] == "keyformat":
                     self.keyformat[f[0]] = f[2]
+                elif f[1] == "createtxg" and f[2].isdigit():
+                    self.created[f[0]] = int(f[2])
+                elif f[1] == "origin":
+                    origins[f[0]] = f[2]
+        self.created = {n: (t, "snapshot" if "@" in n else "clone" if origins.get(n, "-") != "-" else "created")
+                        for n, t in self.created.items()}
         zl = os.path.join(d, "zfs-list.txt")
         if os.path.exists(zl):
             for line in open(zl):
@@ -1957,7 +1968,31 @@ def history_objects(text):
     return objects, renames, promotions
 
 
-def compare_timeline(history_text, guids, pool, doc, returncode):
+def history_horizon(text):
+    """The TXG of the oldest record a pool's history kept past what its
+    creation logged. The history is a ring (spa_history.c): every record
+    up to the first command's — `zpool create`'s — is kept for good, and
+    past them the oldest give way to the newest once it fills, at a
+    thousandth of the pool's space. Whether it has wrapped it does not
+    say; where it has, this is the first TXG it still has records of
+    (and not all of them, perhaps).
+
+    >>> history_horizon("History for 'p':\\nt [txg:4] create pool version 5000 [on h]\\n"
+    ...                 "t zpool create p /a [user 0 (root) on h:linux]\\nt zfs snapshot p@s [user 0]\\n"
+    ...                 "t [txg:431] snapshot p/a@s3 (9)   [on h]\\n")
+    431
+    """
+    after = False
+    for line in text.splitlines()[1:]:
+        m = re.search(r"\[txg:(\d+)\]", line)
+        if not after:
+            after = bool(line.strip()) and m is None
+        elif m:
+            return int(m.group(1))
+    return None
+
+
+def compare_timeline(history_text, guids, pool, doc, returncode, created=None):
     """zvoltimeline's history of a pool (its JSON, its exit code) against
     `zpool history -il` and the GUIDs the builder recorded.
 
@@ -1969,6 +2004,14 @@ def compare_timeline(history_text, guids, pool, doc, returncode):
     a dataset it read before then must be reported. Only the TXGs it
     read count: one it says did not read shows nothing. The pool's root
     is left out: its dataset comes before the history does.
+
+    A history that has wrapped (`history_horizon`) has lost the records
+    of its oldest changes, and a dataset the pool holds then may have
+    none: `created`, every dataset and snapshot by its name with the
+    TXG it came into being at and how, as `zfs get createtxg,origin`
+    says, holds its coming into being to the pool's word all the same.
+    A change the tool dates where the record no longer reaches is left
+    unjudged; so is one of a dataset gone from the pool and the record.
 
     >>> h = "History for 'p':\\nt [txg:10] create p/a (5)   [on h]\\nt [txg:40] rename p/a (5) -> p/c [on h]\\n"
     >>> doc = {"txgs": [30, 50], "events": [
@@ -1998,8 +2041,31 @@ def compare_timeline(history_text, guids, pool, doc, returncode):
     ...     {"event": "renamed", "object": "p/c", "txg": 45, "details": "was p/a"}]}
     >>> compare_timeline(h, {"p/c": 16}, "p", doc, 0)
     ('ok', [])
+
+    Past a wrap, by `zfs get`:
+
+    >>> h = ("History for 'p':\\nt [txg:4] create pool version 5000 [on h]\\nt zpool create p /a [user]\\n"
+    ...      "t [txg:40] snapshot p/a@s1 (6)   [on h]\\nt [txg:50] destroy p/b (7) (bptree, mintxg=1) [on h]\\n")
+    >>> created = {"p": (1, "created"), "p/a": (10, "created"), "p/a@s1": (40, "snapshot")}
+    >>> doc = {"txgs": [30, 60], "events": [
+    ...     {"event": "created", "object": "p/a", "txg": 10},
+    ...     {"event": "created", "object": "p/old", "txg": 12},
+    ...     {"event": "destroyed", "object": "p/old", "txg": 30},
+    ...     {"event": "snapshot", "object": "p/a@s1", "txg": 40}]}
+    >>> compare_timeline(h, {}, "p", doc, 0, created)
+    ('ok', [])
+    >>> doc["events"][0]["txg"] = 11
+    >>> compare_timeline(h, {}, "p", doc, 0, created)
+    ('mismatch', ['p/a: created at txg 11, `zfs get createtxg` says 10'])
+    >>> compare_timeline(h, {}, "p", {"txgs": [30, 60], "events": doc["events"][3:]}, 0, created)
+    ('mismatch', ['p/a: not said to have come into being'])
     """
     objects, renames, promotions = history_objects(history_text)
+    created = created or {}
+    final = lambda o: o["names"][-1][1]
+    live = {final(o) for o in objects.values() if o["destroyed"] is None}
+    wrapped = any(n != pool and n not in live for n in created)
+    horizon = history_horizon(history_text) if wrapped else None
     unread = {e.get("txg") for e in doc.get("events", []) if e.get("event") == "unreadable"}
     unread |= set(doc.get("unreadable_txgs") or [])
     # A TXG where part of the tree did not read (`partial_txgs`) is read
@@ -2013,16 +2079,31 @@ def compare_timeline(history_text, guids, pool, doc, returncode):
     firsts = lambda h: {next((t for t in ts if t >= h), None) for ts in (read, looked)} - {None}
     exists_at = lambda o, t: o["born"] <= t and (o["destroyed"] is None or t < o["destroyed"])
     named = lambda o, name: any(n == name for _, n in o["names"])
-    final = lambda o: o["names"][-1][1]
-    diffs, seen, reported = [], set(), set()
+    # Whether a change the tool dates at `txg` may have come before the
+    # oldest record a wrapped history kept: the TXG it read before that
+    # one does.
+    beyond = lambda txg: horizon is not None and max((t for t in read if t < txg), default=0) < horizon
+    diffs, seen, reported, seen_names = [], set(), set(), set()
     for e in doc.get("events", []):
         kind, name, txg = e.get("event"), e.get("object"), e.get("txg")
         if kind in ("created", "clone", "snapshot"):
             if name == pool:
                 continue
             had = [(k, o) for k, o in objects.items() if named(o, name)]
+            if not had and name in created:
+                born, how = created[name]
+                seen_names.add(name)
+                if txg != born:
+                    diffs.append(f"{name}: {kind} at txg {txg}, `zfs get createtxg` says {born}")
+                if kind != how:
+                    diffs.append(f"{name}: {kind}, `zfs get` says {how}")
+                g = guids.get(name)
+                if g is not None and e.get("guid") and int(e["guid"], 16) != g:
+                    diffs.append(f"{name}: guid {e['guid']}, the record says {g:#x}")
+                continue
             if not had:
-                diffs.append(f"{name}: {kind} at txg {txg}, and the record has no such dataset")
+                if horizon is None or txg >= horizon:
+                    diffs.append(f"{name}: {kind} at txg {txg}, and the record has no such dataset")
                 continue
             k, o = next(((k, o) for k, o in had if o["born"] == txg), had[-1])
             seen.add(k)
@@ -2034,8 +2115,8 @@ def compare_timeline(history_text, guids, pool, doc, returncode):
             if g is not None and e.get("guid") and int(e["guid"], 16) != g:
                 diffs.append(f"{name}: guid {e['guid']}, the record says {g:#x}")
         elif kind in ("destroyed", "snapshot-destroyed"):
-            if not any(o["destroyed"] is not None and txg in firsts(o["destroyed"]) and named(o, name)
-                       for o in objects.values()):
+            if not beyond(txg) and not any(o["destroyed"] is not None and txg in firsts(o["destroyed"])
+                                           and named(o, name) for o in objects.values()):
                 diffs.append(f"{name}: {kind} at txg {txg}, which the record has no destroy for")
             reported.add((kind, name, txg))
         elif kind == "renamed":
@@ -2043,12 +2124,13 @@ def compare_timeline(history_text, guids, pool, doc, returncode):
             was = was.group(1) if was else ""
             # A dataset's rename takes its snapshots and children with it,
             # and each may be reported as renamed in its own right.
-            if not any(txg in firsts(h) and name.startswith(new) and name[len(new):][:1] in ("", "@", "/")
-                       and was == old + name[len(new):] for h, old, new in renames):
+            if not beyond(txg) and not any(txg in firsts(h) and name.startswith(new)
+                                           and name[len(new):][:1] in ("", "@", "/")
+                                           and was == old + name[len(new):] for h, old, new in renames):
                 diffs.append(f"{name}: renamed at txg {txg} from {was}, which the record has no rename for")
             reported.add((kind, name, txg))
         elif kind == "promoted":
-            if not any(txg in firsts(h) and n == name for h, n in promotions):
+            if not beyond(txg) and not any(txg in firsts(h) and n == name for h, n in promotions):
                 diffs.append(f"{name}: promoted at txg {txg}, which the record has no promotion for")
             reported.add((kind, name, txg))
     # What it must have said: every dataset and snapshot the pool still
@@ -2057,6 +2139,8 @@ def compare_timeline(history_text, guids, pool, doc, returncode):
     missing = [f"{final(o)}: not said to have come into being"
                for k, o in sorted(objects.items(), key=lambda kv: final(kv[1]))
                if o["destroyed"] is None and k not in seen]
+    missing += [f"{n}: not said to have come into being" for n in sorted(created)
+                if n != pool and n not in live and n not in seen_names]
     unreported = []
     for h, old, new in renames:
         at = first_after(h)
@@ -2101,7 +2185,8 @@ def judge_timeline(args, oracle, members, work, assume=(), extra=()):
         doc = json.loads(proc.stdout)
     except ValueError:
         return f"exit {proc.returncode}, no JSON on stdout", [], redundancy
-    outcome, diffs = compare_timeline(oracle.history, oracle.guids, oracle.pool, doc, proc.returncode)
+    outcome, diffs = compare_timeline(oracle.history, oracle.guids, oracle.pool, doc, proc.returncode,
+                                      oracle.created)
     return outcome, diffs[:10] + ([f"... {len(diffs) - 10} more"] if len(diffs) > 10 else []), redundancy
 
 

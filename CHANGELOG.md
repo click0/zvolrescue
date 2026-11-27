@@ -296,11 +296,17 @@ tagged. `v0.7.1` is the release that carries those six.
 * **A satellite at scale.** `build-satellite.sh scale` makes a mirror
   with 200 filesystems under `fs`, every one snapshotted with the rest
   at each of ten rounds — over 2,000 datasets — whose manifests are held
-  out of the regular runs. Its oracle leaves `zdb -dddddd` out and keeps
-  the datasets of the newest 16 TXGs (`DEEP=0`, `BY_TXG=16` of
-  `lib-build.sh`), a file a dataset and a listing of them all being
-  what thousands make of each. An image the published job marks `held`
-  is skipped by every run but a held-out one.
+  out of the regular runs. Its oracle leaves `zdb -dddddd` out, keeps of
+  `zdb -dddd` each dataset's own line and the datasets of the newest 16
+  TXGs (`DEEP=0`, `BY_TXG=16` of `lib-build.sh`), a file a dataset and
+  a listing of them all being what thousands make of each. An image the
+  published job marks `held` is skipped by every run but a held-out one.
+  So many records wrap the pool's history — a ring of a thousandth of
+  the pool's space that keeps what the creation logged and, of the rest,
+  the newest — and the harness judges the timeline of a wrapped one by
+  `zfs get createtxg,origin` where the record of a dataset's coming
+  into being is gone, and leaves a change the tool dates before the
+  oldest record kept unjudged.
 
 ## v0.9.18 — 2026-11-25
 

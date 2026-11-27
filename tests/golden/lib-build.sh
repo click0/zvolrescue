@@ -188,8 +188,13 @@ oracle_exported() {
     zdbe -dddd "$POOL" > "$OUT/oracle/zdb-dddd.txt" 2>&1 || true
     test -s "$OUT/oracle/zdb-dddd.txt" || die "zdb -e -dddd wrote nothing"
     # A builder of a pool of thousands of datasets, whose manifests aim at
-    # no block, leaves it out (DEEP=0): a file a dataset is thousands.
-    if [ "${DEEP:-1}" != 0 ]; then
+    # no block, leaves the second out (DEEP=0) — a file a dataset is
+    # thousands — and of the first keeps each dataset's own line, its
+    # type, ID and root block pointer: its objects are tens of megabytes.
+    if [ "${DEEP:-1}" = 0 ]; then
+        grep '^Dataset ' "$OUT/oracle/zdb-dddd.txt" > "$OUT/zdb-dddd.datasets" || die "zdb -e -dddd named no dataset"
+        mv "$OUT/zdb-dddd.datasets" "$OUT/oracle/zdb-dddd.txt"
+    else
         zdbe -dddddd "$POOL" > "$OUT/zdb-dddddd.txt" 2> "$OUT/zdb-dddddd.err" || die "zdb -e -dddddd: $(tail -n 3 "$OUT/zdb-dddddd.err")"
         python3 "$HERE/split-capture.py" "$OUT/zdb-dddddd.txt" "$OUT/oracle/zdb-dddddd"
         rm -f "$OUT/zdb-dddddd.txt"

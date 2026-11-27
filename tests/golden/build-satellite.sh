@@ -363,7 +363,7 @@ recipe_freebsd() {
 }
 # At scale (stage 3): thousands of datasets, for what reading them takes.
 recipe_scale() {
-    DESCRIPTION="A pool at scale: one mirror with 200 filesystems under \`fs\`, every one of them snapshotted with the rest at each of ten rounds — over 2,000 datasets, 200 filesystems written to a few at a time between the snapshots — for what listing, reading and dating thousands of datasets takes. Its manifests are held out of the regular runs, and its oracle has no \`zdb -dddddd\` (a file a dataset would be thousands) and the datasets of the newest 16 TXGs alone."
+    DESCRIPTION="A pool at scale: one mirror with 200 filesystems under \`fs\`, every one of them snapshotted with the rest at each of ten rounds — over 2,000 datasets, 200 filesystems written to a few at a time between the snapshots — for what listing, reading and dating thousands of datasets takes. So many records fill the pool's history, a ring of a thousandth of its space, and it wraps: \`zpool history\` keeps what the creation logged and, of the rest, the newest alone, and the oldest datasets' coming into being is \`zfs get createtxg\`'s to say. Its manifests are held out of the regular runs, and its oracle has no \`zdb -dddddd\` (a file a dataset would be thousands), of \`zdb -dddd\` each dataset's own line alone, and the datasets of the newest 16 TXGs alone."
     ALL="mirror-0a mirror-0b"
     make_members 512M $ALL
     create mirror $(paths $ALL)
