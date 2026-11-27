@@ -216,7 +216,8 @@ jobs:
 
   freebsd:
     name: FreeBSD ${{ matrix.release }}, OpenZFS from base (md devices)
-    if: ${{ github.event_name != 'schedule' && (!github.event.inputs.only || contains(github.event.inputs.only, 'freebsd')) }}
+    # A word of `only`, not a part of one: `sat-freebsd` is the satellite's.
+    if: ${{ github.event_name != 'schedule' && (!github.event.inputs.only || contains(format(' {0} ', github.event.inputs.only), ' freebsd ')) }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -505,12 +506,15 @@ jobs:
           all="removal checkpoint spare expand special ashift slog mmp compat20 nofeatures v28"
           picked=""
           for s in $all; do case " $ONLY " in *" sat-$s "*) picked="$picked $s" ;; esac; done
-          [ -n "$picked" ] || picked=$all
-          echo "sats=$(printf '%s\n' $picked | jq -R . | jq -sc .)" | tee -a "$GITHUB_OUTPUT"
+          # All of them for `satellites` or an empty `only`; none when
+          # `only` names the FreeBSD one alone, which has a job of its own.
+          case " $ONLY " in *" satellites "*|"  ") picked=$all ;; esac
+          echo "sats=$(printf '%s\n' $picked | jq -R . | jq -sc 'map(select(length > 0))')" | tee -a "$GITHUB_OUTPUT"
 
   satellites:
     name: Satellite ${{ matrix.sat }} on the runner kernel, and its manifests
     needs: satellite-list
+    if: ${{ needs.satellite-list.outputs.sats != '[]' }}
     runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
@@ -594,6 +598,115 @@ jobs:
           rm -f /var/tmp/sat/publish/SHA256SUMS
           cp -al /var/tmp/sat/release /var/tmp/sat/publish/ 2>/dev/null || true
           du -sh /var/tmp/sat/text /var/tmp/sat/publish || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: golden-${{ env.TAG }}-text
+          path: /var/tmp/sat/text
+          retention-days: 30
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: golden-${{ env.TAG }}
+          path: /var/tmp/sat/publish
+          retention-days: 14
+          compression-level: 0
+          if-no-files-found: warn
+
+  # The satellite made on another system (stage 3): FreeBSD 15 in a VM
+  # makes the pool with the OpenZFS of its base system, on GPT partitions
+  # as its installer lays them out, and captures the oracle; the members
+  # and the oracle come back to the runner, where the manifests that name
+  # it are run as for any satellite. `only: sat-freebsd`, or satellites.
+  satellite-freebsd:
+    name: Satellite freebsd, made on FreeBSD 15 with its base OpenZFS, and its manifests
+    if: ${{ github.event_name != 'schedule' && (!github.event.inputs.only || contains(github.event.inputs.only, 'sat-freebsd') || contains(github.event.inputs.only, 'satellites')) }}
+    runs-on: ubuntu-latest
+    env:
+      TAG: sat-freebsd-v1
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          repository: click0/zvolrescue-testdata
+          path: testdata
+          sparse-checkout: manifests
+      # The VM always succeeds; the builder's exit status comes back with
+      # its log and decides the next step.
+      - uses: vmactions/freebsd-vm@v1
+        with:
+          release: "15"
+          mem: 8192
+          usesh: true
+          prepare: pkg install -y python3 zstd
+          run: |
+            set +e
+            freebsd-version -ku
+            zfs version
+            sh tests/golden/build-satellite.sh /var/tmp/sat freebsd sat-freebsd-v1 > sat-build.log 2>&1
+            echo $? > sat-exit.txt
+            rm -rf satout && mkdir -p satout
+            cp -r /var/tmp/sat/oracle /var/tmp/sat/release /var/tmp/sat/IMAGE.md satout/ 2>/dev/null
+            cp sat-build.log sat-exit.txt satout/
+            true
+      - name: The satellite, and its oracle from FreeBSD's OpenZFS
+        run: |
+          tail -n 40 satout/sat-build.log
+          test "$(cat satout/sat-exit.txt)" = 0
+          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends zstd
+          sudo mkdir -p /var/tmp/sat && sudo chown -R "$USER" /var/tmp/sat
+          cp -r satout/oracle satout/release satout/IMAGE.md /var/tmp/sat/
+          cp satout/sat-build.log /var/tmp/sat-build.log
+          mkdir -p /var/tmp/sat/members
+          for f in /var/tmp/sat/release/*.zst; do zstd -d -q -f --sparse "$f" -o "/var/tmp/sat/members/$(basename "$f" .zst)"; done
+          (cd /var/tmp/sat/members && sha256sum -c ../oracle/members.sha256)
+          cat /var/tmp/sat/release/SHA256SUMS
+          python3 -c 'import json; l = json.load(open("/var/tmp/sat/oracle/layout.json")); print(l["pool"], l["members"])'
+          sed -n '/^config:/,/^errors:/p' /var/tmp/sat/oracle/zpool-status.txt
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release -p zvolrescue -p zvolcarve -p zvolfiles -p zvoltimeline -p zvolreport && cargo build --release -p zfs-read --examples
+      - name: Every volume of the undamaged satellite, for the record
+        run: |
+          cd /var/tmp/sat
+          members=$(ls members/*.img)
+          while read -r sha name; do
+            vol=${name%@export}
+            set +e
+            "$GITHUB_WORKSPACE/target/release/zvolrescue" -q dump "$vol" $members -o /var/tmp/baseline.img 2>/var/tmp/baseline.err; code=$?
+            set -e
+            got=$(sha256sum /var/tmp/baseline.img 2>/dev/null | cut -d' ' -f1)
+            if [ "$code" = 0 ] && [ "$got" = "$sha" ]; then echo "ok        $vol"
+            else echo "FAIL ($code) $vol: $(tail -n 3 /var/tmp/baseline.err | tr '\n' ' ')"; fi
+            rm -f /var/tmp/baseline.img
+          done < <(grep '@export$' oracle/volumes.sha256)
+          "$GITHUB_WORKSPACE/target/release/zvolrescue" scan $members | tail -n 25 || true
+      - name: The manifests that name it
+        run: |
+          set -o pipefail
+          set +e
+          python3 tests/golden/run-matrix.py \
+            --image /var/tmp/sat/members --oracle /var/tmp/sat/oracle \
+            --manifests testdata/manifests --out /var/tmp/sat/report --label "$TAG" \
+            --tmp /var/tmp --held-out 2>&1 | tee /var/tmp/sat-matrix.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "run-matrix.py exit $rc"
+          python3 tests/golden/summarize-report.py "/var/tmp/sat/report/report-$TAG.json" \
+            "Satellite $TAG: its manifests" | tee -a "$GITHUB_STEP_SUMMARY"
+          test "$rc" = 0 || { echo "::error::run-matrix.py exited $rc"; exit 1; }
+      - name: The satellite and its oracle, for zvolrescue-testdata
+        if: always()
+        run: |
+          mkdir -p /var/tmp/sat/text /var/tmp/sat/publish
+          cp -r /var/tmp/sat/oracle /var/tmp/sat/IMAGE.md /var/tmp/sat/text/ 2>/dev/null || true
+          cp /var/tmp/sat/release/SHA256SUMS /var/tmp/sat/text/ 2>/dev/null || true
+          cp /var/tmp/sat-build.log /var/tmp/sat/text/golden-build.log 2>/dev/null || cp satout/sat-build.log /var/tmp/sat/text/golden-build.log 2>/dev/null || true
+          cp -r /var/tmp/sat/report /var/tmp/sat/text/ 2>/dev/null || true
+          cp /var/tmp/sat-matrix.log /var/tmp/sat/text/report/golden-matrix.log 2>/dev/null || true
+          cp -r /var/tmp/sat/text/. /var/tmp/sat/publish/ 2>/dev/null || true
+          rm -f /var/tmp/sat/publish/SHA256SUMS
+          cp -al /var/tmp/sat/release /var/tmp/sat/publish/ 2>/dev/null || true
       - uses: actions/upload-artifact@v4
         if: always()
         with:

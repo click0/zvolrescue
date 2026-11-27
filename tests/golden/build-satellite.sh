@@ -25,6 +25,8 @@
 #   compat20    the feature set of OpenZFS 2.0 (compatibility=openzfs-2.0-linux)
 #   nofeatures  a pool of version 5000 with every feature disabled (-d)
 #   v28         a pool of version 28, before feature flags
+#   freebsd     made on FreeBSD with its base OpenZFS, on GPT partitions
+#               as its installer lays them out (run on FreeBSD)
 #
 # Every satellite holds the same few datasets — a volume of 8K blocks
 # with content lz4 shrinks, one of 16K blocks of the keystream, a
@@ -331,11 +333,43 @@ recipe_v28() {
     rounds 0 3
 }
 
+# Made on another system (stage 3): FreeBSD, its base OpenZFS, its disks
+# laid out as its installer lays them out.
+recipe_freebsd() {
+    [ "$os" = FreeBSD ] || die "the freebsd satellite is made on FreeBSD (md devices, gpart, its base OpenZFS)"
+    DESCRIPTION="One raidz1 of three disks made on FreeBSD $(freebsd-version) with the OpenZFS of its base system ($(zfs version 2>/dev/null | head -1)), each disk laid out as FreeBSD's installer lays one out — a GPT with a freebsd-boot partition of 512 KiB and a freebsd-zfs one aligned to 1 MiB, labelled \`gpt/<disk>\` — and the pool made on the labels. The members are the whole disks, partition table and all, and \`layout.json\` gives each the offset of its vdev."
+    ALL="fbsd0 fbsd1 fbsd2"
+    make_members 320M $ALL
+    : > "$OUT/members.map"
+    : > "$OUT/mds.txt"
+    for m in $ALL; do
+        md=$(mdconfig -a -t vnode -f "$OUT/members/$m.img")
+        echo "$m $md" >> "$OUT/mds.txt"
+        gpart create -s gpt "$md" >/dev/null
+        gpart add -t freebsd-boot -s 512k "$md" >/dev/null
+        gpart add -a 1m -t freebsd-zfs -l "$m" "$md" >/dev/null
+        start=$(gpart show "$md" | awk '$4 == "freebsd-zfs" { print $1 }')
+        sector=$(diskinfo "$md" | awk '{ print $2 }')
+        echo "$m $m.img $((start * sector))" >> "$OUT/members.map"
+    done
+    cat "$OUT/members.map"
+    SEARCH=/dev/gpt
+    member_dev() { echo "/dev/gpt/$1"; }
+    MAP=$OUT/members.map
+    create raidz1 gpt/fbsd0 gpt/fbsd1 gpt/fbsd2
+    common_datasets; initial_fill
+    rounds 0 3
+}
+freebsd_detach() {
+    while read -r m md; do mdconfig -d -u "$md"; done < "$OUT/mds.txt"
+}
+
 # ---------------------------------------------------------------- build
 case $NAME in
-    removal|checkpoint|spare|expand|special|ashift|slog|mmp|compat20|nofeatures|v28) ;;
-    *) die "no satellite $NAME (removal checkpoint spare expand special ashift slog mmp compat20 nofeatures v28)" ;;
+    removal|checkpoint|spare|expand|special|ashift|slog|mmp|compat20|nofeatures|v28|freebsd) ;;
+    *) die "no satellite $NAME (removal checkpoint spare expand special ashift slog mmp compat20 nofeatures v28 freebsd)" ;;
 esac
+MAP=""
 say "$POOL ($TAG)"
 EXPORT_HASHED=""
 "recipe_$NAME"
@@ -346,9 +380,10 @@ oracle_imported
 oracle_exported
 [ "$NAME" != slog ] || slog_replayed
 [ "$NAME" != spare ] || tunable zfs_scan_suspend_progress 0 scan_suspend_progress
+[ "$NAME" != freebsd ] || freebsd_detach
 
 python3 "$HERE/zdb-layout.py" --pool "$POOL" --tag "$TAG" --source kernel --volumes --satellite \
-    < "$OUT/oracle/zdb-C.txt" > "$OUT/oracle/layout.json"
+    ${MAP:+--map "$MAP"} < "$OUT/oracle/zdb-C.txt" > "$OUT/oracle/layout.json"
 
 say "release files"
 release_members

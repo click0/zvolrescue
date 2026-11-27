@@ -62,7 +62,9 @@ def record(top, rel, dev):
         out["rdev"] = st.st_rdev
     xattrs = {}
     try:
-        names = os.listxattr(full, follow_symlinks=False)
+        # FreeBSD's Python has no listxattr (its attributes are extattr's):
+        # there none are read, and the builder writes none.
+        names = os.listxattr(full, follow_symlinks=False) if hasattr(os, "listxattr") else []
     except OSError as e:
         out["xattr_error"] = e.strerror
         names = []

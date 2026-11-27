@@ -150,7 +150,12 @@ oracle_imported() {
     zdb -C "$POOL" | grep -E "^\s*(txg|version|pool_guid|ashift):" | head -20 > "$OUT/oracle/pool-facts.txt" || true
 }
 
-zdbe() { zdb -e -p "$OUT/members" "$@"; }
+# Where zdb and an import find the members, and the device of a member:
+# its file, unless a builder's pool is made on something in it (the
+# FreeBSD satellite: a partition of each, under /dev/gpt).
+SEARCH=${SEARCH:-$OUT/members}
+member_dev() { echo "$OUT/members/$1.img"; }
+zdbe() { zdb -e -p "$SEARCH" "$@"; }
 
 # The pool exported, and everything read of the exported members: their
 # sums before anything reads them, zdb offline over them, the kernel's
@@ -170,8 +175,8 @@ oracle_exported() {
     # Every member's labels (`-l`), and with every uberblock of their rings
     # (`-lu`); the uberblock zdb reads the exported pool at.
     for m in $ALL; do
-        zdb -l "$OUT/members/$m.img" > "$OUT/oracle/labels/$m.txt" 2>&1 || true
-        zdb -lu "$OUT/members/$m.img" > "$OUT/oracle/labels-uberblocks/$m.txt" 2>&1 || die "zdb -lu $m"
+        zdb -l "$(member_dev "$m")" > "$OUT/oracle/labels/$m.txt" 2>&1 || true
+        zdb -lu "$(member_dev "$m")" > "$OUT/oracle/labels-uberblocks/$m.txt" 2>&1 || die "zdb -lu $m"
     done
     zdbe -u "$POOL" > "$OUT/oracle/zdb-u-export.txt" 2>&1 || die "zdb -e -u"
     zdbe -d "$POOL" > "$OUT/oracle/datasets-exported.txt" 2>&1 || true
@@ -201,12 +206,12 @@ oracle_exported() {
     # inside its parent would hide what the parent holds there), each of its
     # snapshots under its .zfs/snapshot; and the pool's own history. What
     # zvolfiles and zvoltimeline are judged against.
-    if [ "$os" = Linux ]; then
+    if [ "$os" = Linux ] || [ "$os" = FreeBSD ]; then
         say "files and history, the pool imported read-only"
         ALT=$OUT/altroot; MNT=$OUT/mnt
         forced=""
-        zpool import -d "$OUT/members" -o readonly=on -o cachefile=none -R "$ALT" -N "$POOL" ||
-            { forced=" -f"; zpool import -f -d "$OUT/members" -o readonly=on -o cachefile=none -R "$ALT" -N "$POOL"; }
+        zpool import -d "$SEARCH" -o readonly=on -o cachefile=none -R "$ALT" -N "$POOL" ||
+            { forced=" -f"; zpool import -f -d "$SEARCH" -o readonly=on -o cachefile=none -R "$ALT" -N "$POOL"; }
         zfs list -H -t filesystem,volume -r -o name,encryptionroot,keyformat "$POOL" |
             awk -F'\t' '$1 == $2 && $3 != "none" { print $1, $3 }' > "$OUT/roots.txt"
         while read -r root format; do
@@ -218,13 +223,21 @@ oracle_exported() {
         while read -r name; do
             n=$((n + 1)); dir=$MNT/$n
             mkdir -p "$dir"
-            mount -t zfs -o ro,zfsutil "$name" "$dir" || die "$name did not mount"
+            case $os in
+                Linux) mount -t zfs -o ro,zfsutil "$name" "$dir" ;;
+                *) mount -t zfs -o ro "$name" "$dir" ;;
+            esac || die "$name did not mount"
             set -- "$name=$dir"
             for snap in $(zfs list -H -o name -t snapshot -d 1 "$name"); do
                 set -- "$@" "$snap=$dir/.zfs/snapshot/${snap#*@}"
             done
             python3 -I "$HERE/capture-files.py" --add "$OUT/oracle/files.json" "$POOL" "$@"
-            umount -R "$dir"
+            case $os in
+                Linux) umount -R "$dir" ;;
+                # its snapshots' mounts under .zfs first, newest mount first
+                *) mount -p | awk -v d="$dir" '$2 == d || index($2, d "/") == 1 { print $2 }' | sort -r |
+                       while read -r mp; do umount -f "$mp"; done ;;
+            esac
         done < "$OUT/filesystems.txt"
         python3 - "$OUT/oracle/files.json" "${BUILDER%.sh}" <<'EOF'
 import json, sys
@@ -242,9 +255,10 @@ EOF
             echo "builder: tests/golden/$BUILDER of zvolrescue (tests/golden/capture-files.py), right after the export"
             echo "host:    $(uname -srm)"
             echo "openzfs: $(zfs version 2>/dev/null | tr '\n' ' ')"
-            echo "import:  zpool import -d MEMBERS -o readonly=on -o cachefile=none -R ALTROOT -N$forced $POOL"
+            echo "import:  zpool import -d ${SEARCH#$OUT/} -o readonly=on -o cachefile=none -R ALTROOT -N$forced $POOL"
             echo "keys:    zfs load-key -L file://oracle/keys/... for each encryption root"
-            echo "mounts:  each filesystem alone, mount -t zfs -o ro,zfsutil, its snapshots under .zfs/snapshot"
+            echo "mounts:  each filesystem alone, mount -t zfs -o ro$([ "$os" = Linux ] && echo ,zfsutil), its snapshots under .zfs/snapshot"
+            [ "$os" = Linux ] || echo "xattrs:  not read (no listxattr here)"
             echo
             zpool status -v "$POOL"
             echo

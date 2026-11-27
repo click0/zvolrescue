@@ -128,6 +128,21 @@ def groups(node):
     return out
 
 
+def placed(member, where):
+    """A member as the layout records it, its file and the offset of the
+    vdev in it where a map gives them (a whole disk, the pool on one of
+    its partitions).
+
+    >>> placed({"file": "disk0", "guid": "1"}, {"disk0": ("disk0.img", 1572864)})
+    {'file': 'disk0.img', 'guid': '1', 'offset': 1572864}
+    >>> placed({"file": "a.img"}, {})
+    {'file': 'a.img'}
+    """
+    if member["file"] in where:
+        member = dict(member, file=where[member["file"]][0], offset=where[member["file"]][1])
+    return member
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--pool", required=True)
@@ -136,7 +151,16 @@ def main():
     ap.add_argument("--volumes", action="store_true", help="the image has zvols (kernel-built)")
     ap.add_argument("--satellite", action="store_true",
                     help="a satellite pool: log devices and every device of a slot are members")
+    ap.add_argument("--map", metavar="FILE",
+                    help="lines `<device> <member file> <offset>`: a pool made on a partition of each "
+                         "member (the FreeBSD satellite), the member the whole disk and the vdev at offset")
     args = ap.parse_args()
+    where = {}
+    if args.map:
+        for line in open(args.map):
+            f = line.split()
+            if len(f) == 3:
+                where[f[0]] = (f[1], int(f[2]))
     root = parse(sys.stdin.read())
     ashift = None
     tops, members = [], {}
@@ -206,6 +230,7 @@ def main():
         if top.get("alloc_bias"):
             top_entry["alloc_bias"] = top["alloc_bias"]
         tops.append(top_entry)
+    members = {role: placed(m, where) for role, m in members.items()}
     json.dump({
         "pool": args.pool,
         "image_tag": args.tag,

@@ -2743,7 +2743,11 @@ def compare_scan(oracle, doc, roles, control):
             else:
                 checks.append(("children", len(w["paths"]), len(t.get("members", []))))
             if control:
-                checks.append(("paths", w["paths"], [m.get("path") for m in t.get("members", [])]))
+                # FreeBSD's `zpool status` prints a device under /dev
+                # without it (`gpt/fbsd0`), where the label has the path.
+                bare = lambda p: (p or "").removeprefix("/dev/")  # noqa: E731
+                checks.append(("paths", [bare(p) for p in w["paths"]],
+                               [bare(m.get("path")) for m in t.get("members", [])]))
             diffs += [f"top {t.get('id')}: {k} {a} != {b}" for k, a, b in checks if a != b]
         if control:
             if sorted(t.get("id") for t in p.get("tops", [])) != sorted(oracle.status_tops):

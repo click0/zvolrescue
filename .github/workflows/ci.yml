@@ -172,6 +172,7 @@ jobs:
           # What the golden image's builder cuts its zdb capture with:
           # the pieces put together have to be the capture again.
           python3 -m doctest tests/golden/split-capture.py
+          python3 -m doctest tests/golden/zdb-layout.py
       - name: End-to-end on fixture members (scan, list, dump)
         run: |
           cargo run -p zfs-read --example mkfixture -- /tmp/fx mirror 12

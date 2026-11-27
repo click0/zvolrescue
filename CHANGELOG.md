@@ -274,6 +274,20 @@ tagged. `v0.7.1` is the release that carries those six.
   7 manifests of 7; they are published (`sat-compat20-v1`,
   `sat-nofeatures-v1`, `sat-v28-v1`, 0.19 GB), pinned and judged every
   week like the others.
+* **A satellite made on FreeBSD.** `build-satellite.sh freebsd`, on
+  FreeBSD with the OpenZFS of its base system, makes a raidz1 of three
+  disks each laid out as the installer lays one out — a GPT, a
+  freebsd-boot partition, a freebsd-zfs one labelled `gpt/<disk>` — on
+  md devices, the pool on the labels, and captures the same oracle
+  there (`lib-build.sh` finds the members where the builder says,
+  mounts read-only as FreeBSD does, and `capture-files.py` reads no
+  extended attributes where Python has no `listxattr`). The members
+  are the whole disks; `zdb-layout.py --map` gives each the offset of
+  its vdev. The `satellite-freebsd` job of `realworld.yml` builds it
+  in a FreeBSD 15 VM and runs its manifests on the runner (`only:
+  sat-freebsd`), and `only` takes its environments as words now, so
+  that `sat-freebsd` starts neither the FreeBSD kernel matrix nor the
+  other satellites.
 
 ## v0.9.18 — 2026-11-25
 
