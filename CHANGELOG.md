@@ -314,11 +314,20 @@ tagged. `v0.7.1` is the release that carries those six.
   header and a trailer each, which ZFS keeps in the block pointer itself
   (`embedded_data`), every 64th a page of rows — over 1.3 million blocks
   under four levels of indirect blocks, with offsets past 4 GiB in the
-  volume and in its 12 GiB members (the builder checks the second). Its
+  volume and in its 12 GiB members. A fresh pool fills its metaslabs one
+  after another, whole (OpenZFS 2.4's allocator, whatever
+  `zfs_metaslab_switch_threshold` says), so 4.5 GiB of zeros stored as
+  they are take the first metaslabs, `vm/big` is written after them and
+  they are destroyed after it, as an old pool's blocks sit where space
+  was free; the builder checks that each member holds something past
+  4 GiB, and digs the zeros back into holes after the export. Its
   manifests are held out. The harness zeroes a member's range by
   punching a hole in its copy where the file system can, rather than
-  writing gigabytes of zeros out of memory, and the satellites job makes
-  room on the runner's disk for it.
+  writing gigabytes of zeros out of memory; the carve judge passes over
+  a candidate whose `implied_size` is past the volume's size (another
+  volume's: of the newest 8K candidates, all were `vm/big`'s); and the
+  satellites job makes room on the runner's disk for it. Published as
+  `sat-large-v1` (850 MB), pinned, and `held` in the published job.
 
 ## v0.9.18 — 2026-11-25
 

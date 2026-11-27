@@ -765,6 +765,7 @@ jobs:
           - { tag: sat-v28-v1, oracle: sat-v28 }
           - { tag: sat-freebsd-v1, oracle: sat-freebsd }
           - { tag: sat-scale-v1, oracle: sat-scale, held: true }
+          - { tag: sat-large-v1, oracle: sat-large, held: true, room: true }
     env:
       TAG: ${{ matrix.tag }}
       ORACLE: testdata/oracle/${{ matrix.oracle }}
@@ -773,6 +774,14 @@ jobs:
       # scale): every step after the checkout is skipped in the others.
       SKIP: ${{ matrix.held && !contains(github.event.inputs.only, 'held-out') && '1' || '0' }}
     steps:
+      - name: Room on the runner's disk
+        if: env.SKIP != '1' && matrix.room
+        run: |
+          # sat-large's members are 12 GiB each (sparse) and its volume,
+          # read whole, 10 GiB.
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
       - uses: actions/checkout@v5
       - uses: actions/checkout@v5
         with:
