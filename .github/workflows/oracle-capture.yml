@@ -2,7 +2,7 @@ name: Capture the oracle again
 
 # OpenZFS over the published members of a golden image, on a runner whose
 # OpenZFS is at least the image's — the ubuntu-26.04 runner's 2.4.1 for
-# image-v1 — to add to the oracle what its builder did not keep. Two
+# image-v1 — to add to the oracle what its builder did not keep. Three
 # captures, chosen by `what`:
 #
 #  * zdb-dddddd: zdb offline (`zdb -e -p`), every object's block pointers
@@ -14,7 +14,13 @@ name: Capture the oracle again
 #    file's content and of each extended attribute's value;
 #    tests/golden/capture-files.py), and `zpool history -il` — what
 #    zvolfiles and zvoltimeline are judged against. The members are
-#    checked against their sums again after the export.
+#    checked against their sums again after the export;
+#  * labels-uberblocks: zdb offline, every member's four labels with
+#    every uberblock of their rings (`zdb -lu`), and the uberblock zdb
+#    reads the exported pool at (`zdb -e -u`) — what the uberblocks
+#    `zvolrescue scan` reads are judged against, ring by ring. The
+#    builder kept `zdb -l` (no rings) and `zdb -u` while the pool was
+#    still imported, TXGs before the export.
 #
 # Either is OpenZFS's own reading of the bytes the release holds, checked
 # against the pinned sums first; the tool under test is not involved.
@@ -36,12 +42,13 @@ on:
         required: true
         default: golden
       what:
-        description: "zdb-dddddd (zdb offline: every object's block pointers) or files-history (the kernel, read-only: every file of every filesystem and snapshot, and zpool history -il)"
+        description: "zdb-dddddd (zdb offline: every object's block pointers), files-history (the kernel, read-only: every file of every filesystem and snapshot, and zpool history -il) or labels-uberblocks (zdb offline: every label with its uberblock ring, and the uberblock of the exported pool)"
         required: true
         type: choice
         options:
           - zdb-dddddd
           - files-history
+          - labels-uberblocks
         default: zdb-dddddd
 
 permissions:
@@ -109,6 +116,39 @@ jobs:
           what the builder of $TAG did not keep, and what lets a manifest aim at
           a dnode block, an indirect block or one data block of a named object.
           From $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID.
+          MSG
+      - name: zdb, offline, over every label and its uberblock ring
+        if: ${{ inputs.what == 'labels-uberblocks' }}
+        run: |
+          mkdir -p capture/oracle/labels-uberblocks
+          # -l: the four labels of one member, -u: with every uberblock of
+          # their rings; labels alike are printed once with their numbers.
+          for f in /var/tmp/image/members/*.img; do
+            m=$(basename "$f" .img)
+            sudo zdb -lu "$f" > "capture/oracle/labels-uberblocks/$m.txt" 2> "capture/$m.err" || {
+              echo "::error::zdb -lu $m exited $?"; tail -n 20 "capture/$m.err"; exit 1; }
+            printf '%s: %s uberblocks, labels %s\n' "$m" "$(grep -c 'Uberblock\[' "capture/oracle/labels-uberblocks/$m.txt")" \
+              "$(grep -E '^\s*labels = ' "capture/oracle/labels-uberblocks/$m.txt" | sort | uniq -c | tr -s ' \n' ' ')"
+          done
+          # The uberblock zdb reads the exported pool at: the export's own
+          # last TXG, where the builder's zdb -u was taken before it.
+          sudo zdb -e -p /var/tmp/image/members -u "$POOL" > capture/oracle/zdb-u-export.txt 2> capture/zdb-u.err || {
+            echo "::error::zdb -e -u exited $?"; tail -n 20 capture/zdb-u.err; exit 1; }
+          cat capture/oracle/zdb-u-export.txt
+          sudo zdb -e -p /var/tmp/image/members -C "$POOL" > capture/zdb-C.txt 2>/dev/null || true
+          cmp <(grep -E '^\s*pool_guid' capture/zdb-C.txt) <(grep -E '^\s*pool_guid' "testdata/oracle/$POOL/zdb-C.txt")
+          ( cd /var/tmp/image/members && sha256sum *.img ) | sort -k2 > capture/after.sha256
+          cmp <(sort -k2 "testdata/oracle/$POOL/members.sha256") capture/after.sha256
+          cat > capture/message.txt <<MSG
+          oracle: every label's uberblock ring of $TAG, and the uberblock of the export
+
+          zdb offline over the published members (checked against the pinned
+          sums before and after): labels-uberblocks/<member>.txt is zdb -lu of
+          each, its four labels with every uberblock of their rings, and
+          zdb-u-export.txt the uberblock zdb reads the exported pool at. The
+          builder kept zdb -l without the rings, and zdb -u while the pool was
+          still imported. What the uberblocks zvolrescue scan reads are judged
+          against. From $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID.
           MSG
       - name: The kernel, read-only, over the members
         if: ${{ inputs.what == 'files-history' }}
@@ -211,7 +251,7 @@ jobs:
           ls -l capture/oracle
           if [ -n "$TESTDATA_TOKEN" ]; then
             git clone -q --depth 1 "https://x-access-token:${TESTDATA_TOKEN}@github.com/$TESTDATA" td
-            cp capture/oracle/* "td/oracle/$POOL/"
+            cp -r capture/oracle/* "td/oracle/$POOL/"
             cd td
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -223,7 +263,7 @@ jobs:
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git checkout -q -b "oracle-capture/$TAG"
-            mkdir -p "oracle-capture/$POOL" && cp capture/oracle/* "oracle-capture/$POOL/"
+            mkdir -p "oracle-capture/$POOL" && cp -r capture/oracle/* "oracle-capture/$POOL/"
             git add oracle-capture && git commit -q -m "oracle capture of $TAG ($WHAT), to be moved to zvolrescue-testdata"
             git push -q -f origin "oracle-capture/$TAG"
             echo "no TESTDATA_TOKEN: pushed to branch oracle-capture/$TAG of $GITHUB_REPOSITORY" | tee -a "$GITHUB_STEP_SUMMARY"
