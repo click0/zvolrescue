@@ -445,6 +445,24 @@ def sha256_file(path):
     return h.hexdigest()
 
 
+def write_zeros(f, path, off, length):
+    """Zeros over `length` bytes at `off` of the member copy open as `f`:
+    a hole punched where the file system punches one, so that a range of
+    gigabytes (sat-large's members are 12 GiB) takes neither memory nor
+    room, and otherwise written a mebibyte at a time."""
+    f.flush()
+    if sys.platform.startswith("linux") and length and subprocess.run(
+            ["fallocate", "--punch-hole", "--offset", str(off), "--length", str(length), path],
+            capture_output=True).returncode == 0:
+        return
+    f.seek(off)
+    left = length
+    while left:
+        n = min(left, 1 << 20)
+        f.write(bytes(n))
+        left -= n
+
+
 def sparse_copy(src, dst):
     if sys.platform.startswith("linux"):
         subprocess.run(["cp", "--sparse=always", "--reflink=auto", src, dst], check=True)
@@ -1293,13 +1311,11 @@ def apply_damage(oracle, manifest, work, rng):
         for off, length, pat in plan:
             with open(dst, "r+b") as f:
                 if pat == "zeros":
-                    f.seek(off)
-                    f.write(b"\0" * length)
+                    write_zeros(f, dst, off, length)
                 elif pat == "unreadable":
                     # What an imager leaves where it could not read: zeros
                     # in the image, and the range marked in its map.
-                    f.seek(off)
-                    f.write(b"\0" * length)
+                    write_zeros(f, dst, off, length)
                     unread.setdefault(role, []).append((off, length))
                 elif pat == "random":
                     f.seek(off)

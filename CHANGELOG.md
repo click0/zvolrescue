@@ -308,6 +308,17 @@ tagged. `v0.7.1` is the release that carries those six.
   into being is gone, and leaves a change the tool dates before the
   oldest record kept unjudged. Published as `sat-scale-v1` (90 MB),
   pinned, and `held` in the published job.
+* **A satellite with a large volume.** `build-satellite.sh large`
+  writes `vm/big`, 10 GiB of 8K blocks with zstd: the disk of a
+  database's machine — text, the keystream, and preallocated pages of a
+  header and a trailer each, which ZFS keeps in the block pointer itself
+  (`embedded_data`), every 64th a page of rows — over 1.3 million blocks
+  under four levels of indirect blocks, with offsets past 4 GiB in the
+  volume and in its 12 GiB members (the builder checks the second). Its
+  manifests are held out. The harness zeroes a member's range by
+  punching a hole in its copy where the file system can, rather than
+  writing gigabytes of zeros out of memory, and the satellites job makes
+  room on the runner's disk for it.
 
 ## v0.9.18 — 2026-11-25
 

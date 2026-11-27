@@ -28,6 +28,7 @@
 #   freebsd     made on FreeBSD with its base OpenZFS, on GPT partitions
 #               as its installer lays them out (run on FreeBSD)
 #   scale       a pool of thousands of datasets, held out of regular runs
+#   large       a volume of 10 GiB of content ZFS compresses, held out
 #
 # Every satellite holds the same few datasets — a volume of 8K blocks
 # with content lz4 shrinks, one of 16K blocks of the keystream, a
@@ -385,14 +386,93 @@ recipe_scale() {
     [ "$(zfs list -H -t all -r -o name "$POOL" | wc -l)" -ge 2000 ] || die "fewer than 2,000 datasets"
 }
 
+# A database's preallocated pages, 8 KiB each as a volume of 8K blocks
+# holds them: a header and a trailer as InnoDB writes them (a checksum,
+# the page's number and its neighbours', an LSN) with nothing between,
+# which every codec shrinks to tens of bytes and ZFS keeps in the block
+# pointer itself (embedded_data); every 64th a page of rows, text from
+# POOL_FILE.
+pages() { # pages LABEL BYTES POOL_FILE > data
+    python3 -c '
+import struct, sys, zlib
+label, n, pool = sys.argv[1], int(sys.argv[2]), open(sys.argv[3], "rb").read()
+P, out, batch = 8192, sys.stdout.buffer, []
+empty = bytes(P - 46)
+for i in range(n // P):
+    crc = zlib.crc32(f"{label}:{i}".encode())
+    lsn = 1000000 + i * 512
+    rows = i % 64 == 63
+    head = struct.pack(">IIIIQHQI", crc, i, max(i - 1, 0), i + 1, lsn, 0x45BF if rows else 0, lsn, 7)
+    if rows:
+        at = (i * 7 * P) % (len(pool) - P)
+        body = pool[at:at + P - 46]
+    else:
+        body = empty
+    batch.append(head + body + struct.pack(">II", crc, lsn & 0xFFFFFFFF))
+    if len(batch) == 256:
+        out.write(b"".join(batch)); batch = []
+out.write(b"".join(batch))' "$1" "$2" "$3"
+}
+# Whether FILE holds something past its first 4 GiB, its rear labels
+# aside: a block whose offset in its member is no 32-bit number.
+past_4gib() { # past_4gib FILE
+    python3 -c '
+import os, sys
+fd = os.open(sys.argv[1], os.O_RDONLY)
+end, pos = os.fstat(fd).st_size - (512 << 10), 4 << 30
+while pos < end:
+    try:
+        pos = os.lseek(fd, pos, os.SEEK_DATA)
+    except OSError:
+        break
+    if pos >= end:
+        break
+    chunk = os.pread(fd, min(1 << 20, end - pos), pos)
+    if chunk.strip(b"\0"):
+        sys.exit(0)
+    pos += len(chunk)
+sys.exit(1)' "$1"
+}
+recipe_large() {
+    DESCRIPTION="A large volume of content ZFS compresses: \`vm/big\`, 10 GiB of 8K blocks with zstd — the disk of a database's machine, 256 MiB of its system (text), 128 MiB of media (the keystream) and the rest the database's preallocated pages, each a header and a trailer with nothing between, which ZFS keeps in the block pointer itself (\`embedded_data\`), every 64th a page of rows; then three runs of 4 MiB written over it, one across the volume's 4 GiB. Over 1.3 million blocks under four levels of indirect blocks (8K blocks: a level-2 block spans 8 GiB), offsets past 4 GiB in the volume and in its members, on a mirror of two 12 GiB members of which the pool fills a twentieth. Its manifests are held out of the regular runs, and its oracle has no \`zdb -dddddd\` (a line a block would be over a million) and of \`zdb -dddd\` each dataset's own line alone."
+    ALL="mirror-0a mirror-0b"
+    make_members 12G $ALL
+    create mirror $(paths $ALL)
+    common_datasets
+    initial_fill
+    DEEP=0
+    rounds 0 1
+    say "vm/big"
+    zfs create -s -V 10G -b 8K -o compression=zstd "$POOL/vm/big"
+    dev=$(zvol_dev "$POOL/vm/big"); wait_dev "$dev"
+    text big-system 268435456 | dd of="$dev" bs=1M conv=notrunc status=none
+    txg_sync
+    stream big-media 134217728 | dd of="$dev" bs=1M seek=256 conv=notrunc status=none
+    txg_sync
+    text big-rows 33554432 > "$OUT/rows.txt"
+    pages big-pages $(( (10240 - 384) * 1048576 )) "$OUT/rows.txt" | dd of="$dev" bs=1M seek=384 conv=notrunc status=none
+    rm -f "$OUT/rows.txt"
+    txg_sync
+    for at in 4094 6144 10236; do
+        stream "big-late@$at" 4194304 | dd of="$dev" bs=1M seek=$at conv=notrunc status=none
+        txg_sync
+    done
+    VOLS="$VOLS vm/big"
+    feature_active zstd_compress
+    feature_active embedded_data
+    [ "$(zfs get -Hp -o value logicalused "$POOL/vm/big")" -gt $((9 << 30)) ] || die "vm/big holds less than 9 GiB"
+    for m in $ALL; do past_4gib "$OUT/members/$m.img" || die "$m: nothing written past its first 4 GiB"; done
+    HISTORY_NOTE="After the rounds, \`vm/big\` created and written whole, then three runs of 4 MiB of the keystream over it at 4094 MiB, 6 GiB and its last 4 MiB, a TXG each; it has no snapshot."
+}
+
 freebsd_detach() {
     while read -r m md; do mdconfig -d -u "$md"; done < "$OUT/mds.txt"
 }
 
 # ---------------------------------------------------------------- build
 case $NAME in
-    removal|checkpoint|spare|expand|special|ashift|slog|mmp|compat20|nofeatures|v28|freebsd|scale) ;;
-    *) die "no satellite $NAME (removal checkpoint spare expand special ashift slog mmp compat20 nofeatures v28 freebsd scale)" ;;
+    removal|checkpoint|spare|expand|special|ashift|slog|mmp|compat20|nofeatures|v28|freebsd|scale|large) ;;
+    *) die "no satellite $NAME (removal checkpoint spare expand special ashift slog mmp compat20 nofeatures v28 freebsd scale large)" ;;
 esac
 MAP=""
 say "$POOL ($TAG)"

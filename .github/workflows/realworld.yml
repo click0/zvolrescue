@@ -503,7 +503,7 @@ jobs:
         env:
           ONLY: ${{ github.event.inputs.only }}
         run: |
-          all="removal checkpoint spare expand special ashift slog mmp compat20 nofeatures v28 scale"
+          all="removal checkpoint spare expand special ashift slog mmp compat20 nofeatures v28 scale large"
           picked=""
           for s in $all; do case " $ONLY " in *" sat-$s "*) picked="$picked $s" ;; esac; done
           # All of them for `satellites` or an empty `only`; none when
@@ -524,6 +524,15 @@ jobs:
       SAT: ${{ matrix.sat }}
       TAG: sat-${{ matrix.sat }}-v1
     steps:
+      - name: Room on the runner's disk
+        if: matrix.sat == 'large'
+        run: |
+          # sat-large's members are 12 GiB each (sparse) and its volume,
+          # read whole, 10 GiB: room the runner's image gives to toolchains
+          # this job does not use.
+          df -h / /var/tmp
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
       - uses: actions/checkout@v5
       - uses: actions/checkout@v5
         with:
