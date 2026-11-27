@@ -755,6 +755,7 @@ jobs:
           - { tag: sat-nofeatures-v1, oracle: sat-nofeatures }
           - { tag: sat-v28-v1, oracle: sat-v28 }
           - { tag: sat-freebsd-v1, oracle: sat-freebsd }
+          - { tag: sat-scale-v1, oracle: sat-scale, held: true }
     env:
       TAG: ${{ matrix.tag }}
       ORACLE: testdata/oracle/${{ matrix.oracle }}

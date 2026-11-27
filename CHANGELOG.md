@@ -306,7 +306,8 @@ tagged. `v0.7.1` is the release that carries those six.
   the newest — and the harness judges the timeline of a wrapped one by
   `zfs get createtxg,origin` where the record of a dataset's coming
   into being is gone, and leaves a change the tool dates before the
-  oldest record kept unjudged.
+  oldest record kept unjudged. Published as `sat-scale-v1` (90 MB),
+  pinned, and `held` in the published job.
 
 ## v0.9.18 — 2026-11-25
 
