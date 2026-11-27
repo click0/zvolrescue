@@ -167,6 +167,45 @@ tagged. `v0.7.1` is the release that carries those six.
   every published member and `zdb -e -u` of the exported pool, offline,
   the members' sums checked before and after: the image's builder kept
   `zdb -l` without the rings, and `zdb -u` 21 TXGs before the export.
+* **The golden image's builder makes `golden-v2`.**
+  `tests/golden/build-image.sh` builds, on the same three top-level
+  vdevs, what `image-v1` lacks: a filesystem of every kind of entry —
+  nine levels of directories, a fat-ZAP directory, names apart in case
+  alone under `casesensitivity=mixed`, one written composed and
+  decomposed under `normalization=formD`, hard links, short and long
+  symbolic links, a sparse file of 1100 MiB, a file of 4 KiB records
+  with two indirect levels, attributes that spill out of legacy dnodes
+  and one in a directory of attributes, a FIFO and device nodes — and
+  cloned blocks, a clone promoted, rollbacks of a volume and of a
+  filesystem, a snapshot and a filesystem destroyed, volumes of
+  volblocksize 128K, of `copies=2`, of `checksum=off` and of
+  `zstd-fast`, and the hash of `vm/doomed` taken just before it is
+  destroyed. Where a volume's compression is on it is written with
+  content compression shrinks: `image-v1`'s were filled with a
+  keystream, which ZFS keeps uncompressed, so no codec ever read a data
+  block of it. The whole oracle is captured by the build itself, offline
+  over the exported members and through a read-only import — the
+  labels' uberblock rings, the files, the history — and `zdb -dddddd`,
+  past what one file in git should be, is kept one file a dataset
+  (`tests/golden/split-capture.py`). Given the manifests, the release
+  carries only the older copies they name. The `golden` job of
+  `realworld.yml` builds it, and uploads the oracle, `IMAGE.md` and the
+  report apart from the members; `publish-golden.yml` takes the
+  oracle's directory (`golden-v2`; `image-v1`'s stays `golden`).
+* **The damage matrix reads `golden-v2`.** `zdb -dddddd` from the
+  directory the builder splits it into; `older-self:round6`, the copies
+  the image's release holds, which a manifest on either image names
+  (`image-v1-round6` still names `image-v1`'s), held to the sums the
+  builder records of them where the oracle has those; `image` naming an
+  image's tag as well as a pool, for a case aimed at what one image
+  alone holds. A volume of `checksum=off` whose bytes come out
+  otherwise under damage that overwrote them without a word, where the
+  tool says nothing verified its blocks, is `unverified`, not a defect:
+  ZFS would hand the same bytes over, having nothing to tell them by.
+  On the control it has to come out bit-exact like any other. And on the
+  control the carve looks for a volume the build destroyed, and records
+  whether a candidate carves to what it held just before or at one of
+  its snapshots: its blocks were freed, so nothing is expected.
 
 ## v0.9.18 — 2026-11-25
 

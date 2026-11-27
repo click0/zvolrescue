@@ -29,11 +29,11 @@ on:
       tag:
         description: "The image's tag in zvolrescue-testdata: its release and its reports/<tag> directory; the artifact is golden-<tag>"
         required: true
-        default: image-v1
-      pool:
-        description: "The pool's name, which is the oracle's directory there (oracle/<pool>)"
+        default: golden-v2
+      oracle:
+        description: "The oracle's directory there (oracle/<dir>): golden-v2 for golden-v2; image-v1's is golden"
         required: true
-        default: golden
+        default: golden-v2
 
 permissions:
   actions: read
@@ -45,7 +45,7 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       TAG: ${{ inputs.tag }}
-      POOL: ${{ inputs.pool }}
+      ORACLE: ${{ inputs.oracle }}
       RUN_ID: ${{ inputs.run_id }}
       TESTDATA: ${{ github.repository }}-testdata
     steps:
@@ -94,13 +94,13 @@ jobs:
           sha=$(jq -r .headSha run.json); url=$(jq -r .url run.json); when=$(jq -r .createdAt run.json)
           built=$(sed -n '3p' art/IMAGE.md)
           {
-            echo "The golden image \`$TAG\` of zvolrescue's [SPEC §9.1](https://github.com/$GITHUB_REPOSITORY/blob/main/docs/SPEC.md): one pool with mirror, RAIDZ2 and dRAID1 top-level vdevs, volumes over every checksum and compression, snapshots, a clone, a rename, a destroy, encrypted datasets, gang blocks, hundreds of TXGs."
+            echo "The golden image \`$TAG\` of zvolrescue's [SPEC §9.1](https://github.com/$GITHUB_REPOSITORY/blob/main/docs/SPEC.md): one pool with mirror, RAIDZ2 and dRAID1 top-level vdevs, volumes over every checksum and compression, snapshots, clones, renames, destroys, encrypted datasets, gang blocks, hundreds of TXGs — what IMAGE.md there lists."
             echo
             echo "$built"
             echo
-            echo "Built and judged by [run $RUN_ID]($url) of \`realworld.yml\` ($when, zvolrescue \`${sha:0:7}\`): $(cat counts.txt), no run outside its expected category. The oracle is \`oracle/$POOL/\` in this repository, the description \`IMAGE.md\`, the report \`reports/$TAG/\`."
+            echo "Built and judged by [run $RUN_ID]($url) of \`realworld.yml\` ($when, zvolrescue \`${sha:0:7}\`): $(cat counts.txt), no run outside its expected category. The oracle is \`oracle/$ORACLE/\` in this repository, the description \`IMAGE.md\`, the report \`reports/$TAG/\`."
             echo
-            echo "The \`round6-*\` files are a consistent copy of every member taken after round 6 of the fill, for the manifests' older-self pattern. \`SHA256SUMS\` covers every file here; \`oracle/$POOL/members.sha256\` has the sums of the uncompressed members."
+            echo "The \`round6-*\` files are a consistent copy of members taken after round 6 of the fill, for the manifests' older-self pattern: of those the manifests name. \`SHA256SUMS\` covers every file here; \`oracle/$ORACLE/members.sha256\` and \`members-round6.sha256\` have the sums of the uncompressed ones."
             echo
             echo '```'; cat art/release/SHA256SUMS; echo '```'
           } > notes.md
@@ -136,17 +136,17 @@ jobs:
             old=$(sed -n '1s/^# .*(\(.*\))$/\1/p' IMAGE.md)
             if [ -n "$old" ]; then mkdir -p "reports/$old"; git mv -f IMAGE.md "reports/$old/IMAGE.md"; fi
           fi
-          rm -rf "oracle/$POOL" "reports/$TAG"
-          mkdir -p "oracle/$POOL" "reports/$TAG"
-          cp -r ../art/oracle/. "oracle/$POOL/"
-          cp ../art/release/SHA256SUMS "oracle/$POOL/SHA256SUMS-release.txt"
+          rm -rf "oracle/$ORACLE" "reports/$TAG"
+          mkdir -p "oracle/$ORACLE" "reports/$TAG"
+          cp -r ../art/oracle/. "oracle/$ORACLE/"
+          cp ../art/release/SHA256SUMS "oracle/$ORACLE/SHA256SUMS-release.txt"
           cp ../art/IMAGE.md IMAGE.md
           cp ../art/report/* "reports/$TAG/"
           cp ../art/golden-build.log "reports/$TAG/" 2>/dev/null || true
           {
             echo "# Damage matrix run: $TAG"
             echo
-            echo "The damage matrix against the kernel-built golden image \`$TAG\` (see [IMAGE.md](../../IMAGE.md)), judged against the oracle in \`oracle/$POOL/\`: every volume of every damaged copy against the kernel's hash, every expectation enforced."
+            echo "The damage matrix against the kernel-built golden image \`$TAG\` (see [IMAGE.md](../../IMAGE.md)), judged against the oracle in \`oracle/$ORACLE/\`: every volume of every damaged copy against the kernel's hash, every expectation enforced."
             echo
             echo "Run [$RUN_ID]($url) of \`realworld.yml\` in zvolrescue, $when, zvolrescue \`${sha:0:7}\`: **$(cat ../counts.txt)**, no run outside its expected category, inputs unchanged."
             echo
@@ -162,7 +162,7 @@ jobs:
           # `*.key` for anything else, and the keys of an image's test
           # datasets protect nothing.
           git add -A
-          git add -f "oracle/$POOL"
+          git add -f "oracle/$ORACLE"
           git status --short | head -20
           git commit -q -F - <<EOF
           $TAG: the kernel-built golden image — oracle, IMAGE.md, the matrix report
@@ -170,7 +170,7 @@ jobs:
           From run $RUN_ID of realworld.yml in $GITHUB_REPOSITORY ($sha): the
           image built on the runner's kernel ZFS, published as the release
           $TAG here, and what goes with it in git — the oracle under
-          oracle/$POOL, IMAGE.md, and the report of the damage matrix that
+          oracle/$ORACLE, IMAGE.md, and the report of the damage matrix that
           judged it under reports/$TAG ($(cat ../counts.txt)).
           EOF
           git push -q origin HEAD:main

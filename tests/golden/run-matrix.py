@@ -495,12 +495,27 @@ class Oracle:
                 if len(f) >= 2:
                     self.inventory[f[0]] = {"creation_txg": int(f[1]), "objects": int(f[2]) if len(f) > 2 and f[2].isdigit() else None}
         self.volumes = {}
+        # Every hash of every volume: at the export (the volumes judged),
+        # at each snapshot, and — from golden-v2 on — just before it was
+        # destroyed (`@destroyed`), with what it was then
+        # (`zfs-get-destroyed.txt`).
+        self.hashes = {}
         vs = os.path.join(d, "volumes.sha256")
         if os.path.exists(vs):
             for line in open(vs):
                 f = line.split()
-                if len(f) == 2 and f[1].endswith("@export"):
-                    self.volumes[f[1][: -len("@export")]] = f[0]
+                if len(f) == 2 and "@" in f[1]:
+                    vol, at = f[1].split("@", 1)
+                    self.hashes.setdefault(vol, {})[at] = f[0]
+                    if at == "export":
+                        self.volumes[vol] = f[0]
+        self.destroyed = {}
+        gone = os.path.join(d, "zfs-get-destroyed.txt")
+        if os.path.exists(gone):
+            for line in open(gone, errors="replace"):
+                f = line.rstrip("\n").split("\t")
+                if len(f) >= 3 and f[1] in ("volsize", "volblocksize") and "destroyed" in self.hashes.get(f[0], {}):
+                    self.destroyed.setdefault(f[0], {})[f[1]] = f[2]
         # Keys: the raw key (every ztest dataset; `secret-raw` of the
         # kernel-built image) and, where the image has one, the passphrase
         # of the others. Which one a volume takes comes from the oracle's
@@ -601,18 +616,36 @@ class Oracle:
     def older_path(self, role, source):
         """The earlier copy of a member that `older-self:<source>` names.
 
-        `source` is `<image tag>-round6`: the tag ties the manifest to the
-        image whose history it means, so a copy from another image's life
-        is never written over this one's members by mistake."""
+        `source` is `round6`: the copy the builder took of every member
+        right after round 6 of the fill, which the image's release
+        carries as its `round6-*` files and `fetch-image.sh` puts beside
+        its members. Where the oracle has their sums
+        (`members-round6.sha256`, from golden-v2 on) the copy is held to
+        them, so that a copy from another image's life is never written
+        over this one's members by mistake; image-v1's oracle has none,
+        and there the release's pinned sums are what binds the copies to
+        it. `<tag>-round6`, the form image-v1's manifests were written
+        in, names the same copy when the tag is this image's."""
         tag = self.layout.get("image_tag") or ""
-        want = f"{tag}-round6"
-        if source != want:
-            raise Unresolved(f"older-self source {source!r} is not of this image ({want!r})")
-        p = os.path.join(self.older, self.layout["members"][role]["file"])
+        if source not in ("round6", f"{tag}-round6"):
+            raise Unresolved(f"older-self source {source!r} is not of this image (round6, or {tag}-round6)")
+        name = self.layout["members"][role]["file"]
+        p = os.path.join(self.older, name)
         if not os.path.exists(p):
             raise Unresolved(f"this image has no older-self material: {p} not found")
         if os.path.getsize(p) != os.path.getsize(self.path(role)):
             raise Unresolved(f"older-self copy {p} is not the member's size")
+        sums = os.path.join(self.dir, "members-round6.sha256")
+        if os.path.exists(sums):
+            want = dict(reversed(line.split()) for line in open(sums) if len(line.split()) == 2).get(name)
+            if want is None:
+                raise Unresolved(f"members-round6.sha256 has no sum of {name}")
+            if not hasattr(self, "_older_sums"):
+                self._older_sums = {}
+            if p not in self._older_sums:
+                self._older_sums[p] = sha256_file(p)
+            if self._older_sums[p] != want:
+                raise Unresolved(f"older-self copy {p} is not this image's: its SHA-256 is not the one members-round6.sha256 gives")
         return p
 
     def slack(self, role, length):
@@ -711,15 +744,30 @@ class Oracle:
                 pass
         return kinds or {m["group_kind"] for m in self.layout["members"].values()}
 
+    def deep(self):
+        """The oracle's `zdb -dddddd` capture, read once: one file, or —
+        from golden-v2 on, where it is past what a file in git should
+        be — the directory split-capture.py cut it into, one file a
+        dataset, which in the order of their names are the capture
+        again. None without either."""
+        if not hasattr(self, "_deep"):
+            path = os.path.join(self.dir, "zdb-dddddd.txt")
+            parts = os.path.join(self.dir, "zdb-dddddd")
+            if os.path.exists(path):
+                self._deep = open(path).read()
+            elif os.path.isdir(parts):
+                self._deep = "".join(open(os.path.join(parts, n)).read()
+                                     for n in sorted(os.listdir(parts)) if n.endswith(".txt"))
+            else:
+                self._deep = None
+        return self._deep
+
     def blocks_of(self, dataset, obj):
         """The block pointers of one object of one dataset from the oracle's
         `zdb -dddddd` capture: {level: [(logical offset, raw pointer text)]}
         in the order zdb printed them. `dataset` is the full name
         (`golden/vm/disk-8k`) or `mos`; `obj` the object number."""
-        if not hasattr(self, "_deep"):
-            path = os.path.join(self.dir, "zdb-dddddd.txt")
-            self._deep = open(path).read() if os.path.exists(path) else None
-        if self._deep is None:
+        if self.deep() is None:
             raise Unresolved("the oracle has no zdb -dddddd capture, which is what places a block of an object")
         # A dataset may appear more than once: the pool-wide capture shows
         # an encrypted dataset without its objects, and a capture made
@@ -929,10 +977,7 @@ class Oracle:
 
     def mos_object(self, num):
         """One object's dump from the MOS section of the -dddddd capture."""
-        if not hasattr(self, "_deep"):
-            path = os.path.join(self.dir, "zdb-dddddd.txt")
-            self._deep = open(path).read() if os.path.exists(path) else None
-        if self._deep is None:
+        if self.deep() is None:
             raise Unresolved("the oracle has no zdb -dddddd capture")
         head = re.search(r"^Dataset mos \[", self._deep, re.M)
         end = re.search(r"^Dataset ", self._deep[head.end():], re.M)
@@ -1495,10 +1540,90 @@ def passed_over(returncode, stdout):
     return "; ".join(said) if whole else None
 
 
+# A volume of `checksum=off` whose bytes came out otherwise than the
+# oracle's, where the damage overwrote what such a volume may hold and
+# the tool said its blocks were checked by nothing: ZFS itself would have
+# handed the same bytes over, so it says nothing of the tool, and is not
+# a defect. On the control, where nothing was damaged, the same volume
+# has to come out bit-exact like any other.
+UNVERIFIED = "unverified (checksum=off, under damage nothing can see)"
+# The patterns that put other bytes where the data was, unannounced.
+SILENT = ("zeros", "random", "flip-bits:", "older-self:", "shift:")
+
+
+def silent_damage(oracle, manifest):
+    """Whether the damage overwrites, without a word, bytes a volume of
+    `checksum=off` may hold, where nothing — not ZFS, not a reader — can
+    tell them from its data: a pattern that writes other bytes over a
+    range past the front labels and the boot area, other than the rear
+    labels and the slack, or over a data block of such a volume. A member
+    missing, a range marked unreadable or cut off is known to a reader,
+    which reconstructs past it; labels and metadata carry checksums.
+
+    >>> o = type("O", (), {"pool": "p", "checksum_of": lambda self, d: "off" if d == "p/n" else "sha256",
+    ...                     "a_dataset": lambda self: "p/c"})()
+    >>> [silent_damage(o, {"damage": [d]}) for d in (
+    ...     {"member": "x", "pattern": "zeros", "range": "data:10%..20%"},
+    ...     {"member": "x", "pattern": "flip-bits:9", "range": "0.."},
+    ...     {"member": "x", "pattern": "zeros", "range": "0..1MiB"},
+    ...     {"member": "x", "pattern": "random", "range": "512KiB..4MiB"},
+    ...     {"member": "x", "pattern": "random", "range": "label:all"},
+    ...     {"member": "x", "pattern": "zeros", "range": "slack"},
+    ...     {"member": "x", "pattern": "missing"},
+    ...     {"member": "x", "pattern": "unreadable", "range": "data:10%..20%"},
+    ...     {"member": "x", "pattern": "truncate", "range": "-8MiB.."},
+    ...     {"target": {"object": "n:data"}, "pattern": "random"},
+    ...     {"target": {"object": "any:data"}, "pattern": "random"},
+    ...     {"target": {"object": "n:dnode-block"}, "pattern": "random"})]
+    [True, True, False, False, False, False, False, False, False, True, False, False]
+    """
+    for d in manifest.get("damage", []):
+        pat = d.get("pattern", "")
+        if not any(pat == p or (p.endswith(":") and pat.startswith(p)) for p in SILENT):
+            continue
+        if "target" in d:
+            ds, _, shape = d["target"].get("object", "").rpartition(":")
+            if shape != "data":
+                continue
+            name = oracle.a_dataset() if ds == "any" else ds if ds.startswith(oracle.pool + "/") else f"{oracle.pool}/{ds}"
+            if oracle.checksum_of(name) == "off":
+                return True
+            continue
+        spec = d.get("range", "0..")
+        if spec.startswith("label:") or spec == "slack":
+            continue
+        if not spec.startswith(("data:", "span:")):
+            a, _, b = spec.partition("..")
+            start, end = size(a) if a else 0, size(b) if b else None
+            if start >= 0 and end is not None and end <= LABEL_START:
+                continue                      # front labels and the boot area
+            if start < 0 and -start <= 2 * LABEL_SIZE:
+                continue                      # the rear labels
+        return True
+    return False
+
+
+def unverified_blocks(stdout):
+    """What a `dump -f json` said it read and nothing verified."""
+    try:
+        doc = json.loads(stdout)
+    except ValueError:
+        return 0
+    return int(doc.get("blocks_unverified") or 0) if isinstance(doc, dict) else 0
+
+
 def judge_dump(args, oracle, manifest, members, work, assume=(), extra=(), key_mode=None, evidence=None):
     want = manifest["expect"].get("volumes", "all")
     volumes = list(oracle.volumes) if want == "all" else list(want)
     outcomes, redundancy = {}, False
+    silent = silent_damage(oracle, manifest)
+
+    def bytes_outcome(vol, out, stdout):
+        if sha256_file(out) == oracle.volumes[vol]:
+            return "ok"
+        if silent and oracle.checksum_of(vol) == "off" and unverified_blocks(stdout):
+            return UNVERIFIED
+        return "hash mismatch"
     for vol in volumes:
         out = os.path.join(work, vol.replace("/", "_") + ".img")
         log = out + ".debug"
@@ -1520,10 +1645,10 @@ def judge_dump(args, oracle, manifest, members, work, assume=(), extra=(), key_m
             # Read whole at an older TXG than one that did not read:
             # exit 4 for that alone (SPEC F-10, F-20), and the bytes are
             # judged as an exit 0's are.
-            outcomes[vol] = "ok" if sha256_file(out) == oracle.volumes[vol] else "hash mismatch"
+            outcomes[vol] = bytes_outcome(vol, out, proc.stdout)
             outcomes.setdefault("passed_over", {})[vol] = passed
         elif proc.returncode == 0 and os.path.exists(out):
-            outcomes[vol] = "ok" if sha256_file(out) == oracle.volumes[vol] else "hash mismatch"
+            outcomes[vol] = bytes_outcome(vol, out, proc.stdout)
             if said_passed_over(proc.stdout):
                 outcomes[vol] = "exit 0, a newer txg passed over"
         elif refusal(proc.returncode, proc.stderr):
@@ -2604,7 +2729,7 @@ def judge_carve(args, oracle, members, work, extra=(), control=False):
             continue
         vols[vol] = (sha, parse_size(p["volsize"]), parse_size(p["volblocksize"]))
     if not vols:
-        return {}, {}
+        return {}, {}, {}
     out_dir = os.path.join(work, "carve")
     scan = [args.carver, "-q", "-f", "json", "scan", *members, "--dnode-type", "zvol",
             "--strict-profile", "-o", out_dir, *extra_for_carver(extra)]
@@ -2613,9 +2738,31 @@ def judge_carve(args, oracle, members, work, extra=(), control=False):
     if proc.returncode not in (0, 4) or not os.path.exists(index):
         why = proc.stderr.strip().splitlines()
         verdict = f"scan exit {proc.returncode}: {why[-1][:160] if why else ''}"
-        return {vol: verdict if control else "refused" for vol in vols}, {}
+        return {vol: verdict if control else "refused" for vol in vols}, {}, {}
     cands = json.load(open(index)).get("candidates", [])
     outcomes, details, carved, reasons = {}, {}, {}, {}
+    matched = set()
+
+    def carve(c, size):
+        key = (c["id"], size)
+        if key not in carved:
+            img = os.path.join(out_dir, f"{c['id']}-{size}.img")
+            p = subprocess.run([args.carver, "-q", "-f", "json", "dump", out_dir, c["id"], *members,
+                                "--size", str(size), "-o", img, *extra_for_carver(extra)],
+                               capture_output=True, text=True)
+            try:
+                rec = json.loads(p.stdout)
+            except ValueError:
+                rec = {}
+            carved[key] = rec.get("sha256")
+            why = [b.get("reason") for b in rec.get("bad") or [] if b.get("reason")]
+            reasons[key] = ("whole" if rec and not rec.get("blocks_zeroed") else
+                            f"blocks zeroed: {why[0] if why else 'no reason given'}" if rec else
+                            f"dump exit {p.returncode}")
+            if os.path.exists(img):
+                os.remove(img)
+        return key
+
     for vol, (sha, size, vbs) in sorted(vols.items()):
         group = sorted((c for c in cands if c.get("volblocksize") == vbs),
                        key=lambda c: -(c.get("birth") or 0))
@@ -2625,26 +2772,11 @@ def judge_carve(args, oracle, members, work, extra=(), control=False):
         same = sum(1 for v in vols.values() if v[2] == vbs) + sum(
             1 for v in oracle.volumes if oracle.key_for(v) and parse_size(props.get(v, {}).get("volblocksize", "0")) == vbs)
         for c in group[:3 * max(same, 1)]:
-            key = (c["id"], size)
-            if key not in carved:
-                img = os.path.join(out_dir, f"{c['id']}-{size}.img")
-                p = subprocess.run([args.carver, "-q", "-f", "json", "dump", out_dir, c["id"], *members,
-                                    "--size", str(size), "-o", img, *extra_for_carver(extra)],
-                                   capture_output=True, text=True)
-                try:
-                    rec = json.loads(p.stdout)
-                except ValueError:
-                    rec = {}
-                carved[key] = rec.get("sha256")
-                why = [b.get("reason") for b in rec.get("bad") or [] if b.get("reason")]
-                reasons[key] = ("whole" if rec and not rec.get("blocks_zeroed") else
-                                f"blocks zeroed: {why[0] if why else 'no reason given'}" if rec else
-                                f"dump exit {p.returncode}")
-                if os.path.exists(img):
-                    os.remove(img)
+            key = carve(c, size)
             tried.append(key)
             if carved[key] == sha:
                 found = True
+                matched.add(c["id"])
                 outcomes[vol] = "ok"
                 details[vol] = [f"{c['id']}, born at txg {c.get('birth')}"]
                 break
@@ -2654,7 +2786,28 @@ def judge_carve(args, oracle, members, work, extra=(), control=False):
             details[vol] = [f"{len(tried)} candidate(s) of {vbs} bytes carved at the newest births, "
                             "none the volume as the oracle has it at the export"] + \
                 [f"{n} {why}" for why, n in said.most_common(4)]
-    return outcomes, details
+    # A volume destroyed while the pool was built, on the control: what
+    # the pool still holds of it. Its blocks were freed and may have been
+    # written over since, so nothing is expected; a candidate that carves
+    # to what it held just before it was destroyed, or at one of its
+    # snapshots, is what the carve got back of it, and is recorded.
+    destroyed = {}
+    for vol, p in sorted(oracle.destroyed.items()) if control else ():
+        if "volsize" not in p or "volblocksize" not in p:
+            continue
+        size, vbs = parse_size(p["volsize"]), parse_size(p["volblocksize"])
+        known = {sha: at for at, sha in oracle.hashes.get(vol, {}).items()}
+        group = sorted((c for c in cands if c.get("volblocksize") == vbs and c["id"] not in matched),
+                       key=lambda c: -(c.get("birth") or 0))
+        destroyed[vol] = "not found among the newest candidates"
+        for c in group[:12]:
+            at = known.get(carved[carve(c, size)])
+            if at:
+                destroyed[vol] = (f"as it was just before it was destroyed ({c['id']}, born at txg {c.get('birth')})"
+                                  if at == "destroyed" else f"as at {at} ({c['id']}, born at txg {c.get('birth')})")
+                if at == "destroyed":
+                    break
+    return outcomes, details, destroyed
 
 
 def parse_size(text):
@@ -2881,9 +3034,16 @@ def extra_for_carver(extra):
 
 
 def for_this_image(oracle, manifest):
-    """Whether a manifest is written for the pool the oracle describes:
-    one naming no pool is written for any."""
-    return manifest.get("image", oracle.pool) == oracle.pool
+    """Whether a manifest is written for the image the oracle describes:
+    one naming no pool is written for any, one naming a pool for every
+    image of it, one naming an image's tag (`golden-v2`) for that image
+    alone — a case aimed at something only that image holds.
+
+    >>> o = type("O", (), {"pool": "golden", "layout": {"image_tag": "golden-v2"}})()
+    >>> [for_this_image(o, m) for m in ({}, {"image": "golden"}, {"image": "golden-v2"}, {"image": "image-v1"})]
+    [True, True, True, False]
+    """
+    return manifest.get("image", oracle.pool) in (oracle.pool, oracle.layout.get("image_tag"))
 
 
 def needs(oracle, manifests):
@@ -3005,7 +3165,7 @@ def run_case(args, oracle, manifest, rng):
         if oracle.has_volumes:
             outcomes, redundancy = judge_dump(args, oracle, manifest, members, work, assume,
                                               extra, recovery.get("key"), evidence)
-            good = {"ok"}
+            good = {"ok", UNVERIFIED}
         else:
             outcomes, redundancy = judge_walk(args, oracle, members, work, assume)
             good = {"ok"}
@@ -3071,14 +3231,15 @@ def run_case(args, oracle, manifest, rng):
         if oracle.has_volumes and os.path.exists(args.carver) and (
                 (not manifest.get("damage") and not recovery) or refused_all):
             control = not manifest.get("damage") and not recovery
-            c_out, c_detail = judge_carve(args, oracle, members, work, extra, control)
+            c_out, c_detail, c_destroyed = judge_carve(args, oracle, members, work, extra, control)
             if c_out:
                 c_actual = ("bit-exact" if set(c_out.values()) == {"ok"}
                             else "partial" if "ok" in c_out.values() else "refused")
                 carve_verdict = "unexpected" if "missed" in c_out.values() else "pass"
                 result["carve"] = {"expected": "every volume" if control else "not defect",
                                    "actual": c_actual, "verdict": carve_verdict,
-                                   "outcomes": c_out, **({"detail": c_detail} if c_detail else {})}
+                                   "outcomes": c_out, **({"detail": c_detail} if c_detail else {}),
+                                   **({"destroyed": c_destroyed} if c_destroyed else {})}
         # What `scan` read of the labels, the uberblock and the pool's
         # shape, where the oracle has `zdb -l`, `zdb -u` and `zpool
         # status`: a label or an uberblock that verifies and says other

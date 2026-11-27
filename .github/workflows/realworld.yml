@@ -350,16 +350,21 @@ jobs:
 
   # The golden image (SPEC §9.1): one pool with mirror, raidz2 and dRAID
   # tops, every checksum and compression, encrypted datasets, snapshots,
-  # a clone, a rename, a destroy, hundreds of TXGs, built by the runner's
+  # clones, a promotion, rollbacks, renames, destroys, a tree of every
+  # kind of file, cloned blocks, hundreds of TXGs, built by the runner's
   # own kernel ZFS and recorded against OpenZFS alone — then the whole
   # damage matrix over it, every expectation enforced, since this
   # layout is known. The image and its oracle are uploaded as an
   # artifact for publication in zvolrescue-testdata (a release there,
-  # `image-v1`), which this workflow cannot do itself.
+  # `golden-v2`, by publish-golden.yml), which this workflow cannot do
+  # itself; the oracle, the description and the report alone, a few
+  # MB, as a second artifact, to be moved there by hand.
   golden:
     name: Golden image (G1) on the runner kernel, and the damage matrix over it (G2, G3)
     if: ${{ github.event_name != 'schedule' && (!github.event.inputs.only || contains(github.event.inputs.only, 'golden')) }}
     runs-on: ubuntu-26.04
+    env:
+      TAG: golden-v2
     steps:
       - uses: actions/checkout@v5
       # The manifests are all this job reads of the test data: the image
@@ -378,15 +383,19 @@ jobs:
           sudo modprobe zfs || { sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)" && sudo modprobe zfs; }
           zfs version
           uname -r
-      - name: G1, the image, and its oracle from zdb
+      - name: G1, the image, and its oracle from OpenZFS
         run: |
-          sudo sh tests/golden/build-image.sh /var/tmp/golden image-v1 2>&1 | tee /var/tmp/golden-build.log
+          # The manifests say which older copies the release carries.
+          sudo sh tests/golden/build-image.sh /var/tmp/golden "$TAG" testdata/manifests 2>&1 | tee /var/tmp/golden-build.log
           test "${PIPESTATUS[0]}" = 0
           sudo chown -R "$USER" /var/tmp/golden
-          du -sh /var/tmp/golden/release /var/tmp/golden/oracle
+          du -sh /var/tmp/golden/members /var/tmp/golden/release /var/tmp/golden/oracle
+          du -sh /var/tmp/golden/oracle/* | sort -h | tail -n 8
           cat /var/tmp/golden/release/SHA256SUMS
           python3 -c 'import json; l = json.load(open("/var/tmp/golden/oracle/layout.json")); print(l["pool"], l["volumes"], [(t["index"], t["kind"], len(t["members"])) for t in l["tops"]])'
           wc -l /var/tmp/golden/oracle/volumes.sha256
+          grep -E '^(feature@block_cloning|capacity|allocated)' /var/tmp/golden/oracle/zpool-get-all.txt
+          df -h /var/tmp
       - name: The undamaged image first, every volume, the tool's own words on stderr
         run: |
           # What the matrix cannot say: when every manifest comes back
@@ -424,7 +433,7 @@ jobs:
           set +e
           python3 tests/golden/run-matrix.py \
             --image /var/tmp/golden/members --oracle /var/tmp/golden/oracle \
-            --manifests testdata/manifests --out /var/tmp/golden/report --label image-v1 \
+            --manifests testdata/manifests --out /var/tmp/golden/report --label "$TAG" \
             --tmp /var/tmp $held 2>&1 | tee /var/tmp/golden-matrix.log
           rc=${PIPESTATUS[0]}
           set -e
@@ -432,23 +441,39 @@ jobs:
           # Against this image every expectation holds: the layout is the
           # one the manifests were written for, so a run that lands
           # outside its expected category is a finding, not noise.
-          python3 tests/golden/summarize-report.py /var/tmp/golden/report/report-image-v1.json \
-            "Golden image: the damage matrix (G2, G3)" | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 tests/golden/summarize-report.py "/var/tmp/golden/report/report-$TAG.json" \
+            "Golden image $TAG: the damage matrix (G2, G3)" | tee -a "$GITHUB_STEP_SUMMARY"
           test "$rc" = 0 || { echo "::error::run-matrix.py exited $rc"; exit 1; }
       - name: The image and its oracle, for zvolrescue-testdata
         if: always()
         run: |
-          mkdir -p /var/tmp/golden/publish
-          cp -r /var/tmp/golden/release /var/tmp/golden/oracle /var/tmp/golden/IMAGE.md /var/tmp/golden/publish/ 2>/dev/null || true
-          cp /var/tmp/golden-build.log /var/tmp/golden/publish/ 2>/dev/null || true
-          cp -r /var/tmp/golden/report /var/tmp/golden/publish/ 2>/dev/null || true
-          cp /var/tmp/golden-matrix.log /var/tmp/golden/publish/report/ 2>/dev/null || true
+          # The text apart, and the release beside it by hard links: the
+          # runner's disk holds the members, their older copies and the
+          # release already.
+          mkdir -p /var/tmp/golden/text /var/tmp/golden/publish
+          cp -r /var/tmp/golden/oracle /var/tmp/golden/IMAGE.md /var/tmp/golden/text/ 2>/dev/null || true
+          cp /var/tmp/golden/release/SHA256SUMS /var/tmp/golden/text/ 2>/dev/null || true
+          cp /var/tmp/golden-build.log /var/tmp/golden/text/ 2>/dev/null || true
+          cp -r /var/tmp/golden/report /var/tmp/golden/text/ 2>/dev/null || true
+          cp /var/tmp/golden-matrix.log /var/tmp/golden/text/report/ 2>/dev/null || true
+          cp -r /var/tmp/golden/text/. /var/tmp/golden/publish/ 2>/dev/null || true
+          rm -f /var/tmp/golden/publish/SHA256SUMS
+          cp -al /var/tmp/golden/release /var/tmp/golden/publish/ 2>/dev/null || true
+          du -sh /var/tmp/golden/text /var/tmp/golden/publish || true
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: golden-image-v1
+          name: golden-${{ env.TAG }}-text
+          path: /var/tmp/golden/text
+          retention-days: 30
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: golden-${{ env.TAG }}
           path: /var/tmp/golden/publish
           retention-days: 14
+          compression-level: 0
           if-no-files-found: warn
 
 
