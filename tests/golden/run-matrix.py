@@ -3074,8 +3074,13 @@ def judge_carve(args, oracle, members, work, extra=(), control=False):
         cands = [c for c in cands if (c.get("birth") or 0) <= reached]
     else:
         late = []
+    # A dnode's size is one block past the highest it wrote, and no
+    # volume's is less than that: a candidate of a larger size is another
+    # volume's (sat-large's 10 GiB beside 24 MiB ones of its block size,
+    # whose copies of its dnode are all of the newest).
+    fits = lambda c, size: (c.get("implied_size") or 0) <= size
     for vol, (sha, size, vbs) in sorted(vols.items()):
-        group = sorted((c for c in cands if c.get("volblocksize") == vbs),
+        group = sorted((c for c in cands if c.get("volblocksize") == vbs and fits(c, size)),
                        key=lambda c: -(c.get("birth") or 0))
         found, tried = False, []
         # Three of each volume of that block size: every volume's last
@@ -3112,7 +3117,8 @@ def judge_carve(args, oracle, members, work, extra=(), control=False):
             continue
         size, vbs = parse_size(p["volsize"]), parse_size(p["volblocksize"])
         known = {sha: at for at, sha in oracle.hashes.get(vol, {}).items()}
-        group = sorted((c for c in cands if c.get("volblocksize") == vbs and c["id"] not in matched),
+        group = sorted((c for c in cands if c.get("volblocksize") == vbs and c["id"] not in matched
+                        and fits(c, size)),
                        key=lambda c: -(c.get("birth") or 0))
         destroyed[vol] = "not found among the newest candidates"
         for c in group[:12]:
