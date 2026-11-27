@@ -86,9 +86,8 @@ text() { # text LABEL BYTES > data
 holey() { # holey LABEL BYTES > data
     stream "$1" $(( $2 / 2 + 2048 )) | python3 -c '
 import sys
-r, o = sys.stdin.buffer.read(), sys.stdout.buffer
-for i in range(0, len(r), 2048):
-    o.write(r[i:i + 2048] + bytes(2048))' | head -c "$2"
+r, o, n = sys.stdin.buffer.read(), sys.stdout.buffer, int(sys.argv[1])
+o.write(b"".join(r[i:i + 2048] + bytes(2048) for i in range(0, len(r), 2048))[:n])' "$2"
 }
 
 zvol_dev() { echo "/dev/zvol/$1"; }
@@ -103,6 +102,16 @@ tunable() { # tunable NAME VALUE (Linux module parameter or FreeBSD sysctl)
     esac
 }
 txg_sync() { zpool sync "$POOL"; }
+# A zvol is opened by udev for a moment after it is written to, and a
+# rollback of it is refused while it is open: a few tries.
+retry() { # retry CMD...
+    n=0
+    until "$@"; do
+        n=$((n + 1)); [ $n -lt 10 ] || die "$* kept failing"
+        command -v udevadm >/dev/null && udevadm settle || true
+        sleep 1
+    done
+}
 xattr_set() { # xattr_set FILE NAME < value: the user namespace's NAME
     case $os in
         Linux) python3 -c 'import os, sys; os.setxattr(sys.argv[1], "user." + sys.argv[2], sys.stdin.buffer.read())' "$1" "$2" ;;
@@ -114,6 +123,27 @@ clone_file() { # clone_file SRC DST: the same blocks, cloned
         Linux) cp --reflink=always "$1" "$2" ;;
         *) cp "$1" "$2" ;;   # copy_file_range(2), which clones where it can
     esac || die "cloning $1 to $2 failed"
+}
+# Into another dataset: the VFS refuses FICLONE across two filesystems
+# (EXDEV), and copy_file_range(2) is the way, which ZFS answers with
+# cloned blocks where it can and with a copy where it cannot. What the
+# pool says it saved tells which it was.
+clone_across() { # clone_across SRC DST
+    txg_sync
+    before=$(zpool get -Hp -o value bclonesaved "$POOL")
+    python3 -c '
+import os, sys
+with open(sys.argv[1], "rb") as s, open(sys.argv[2], "wb") as d:
+    n, off = os.fstat(s.fileno()).st_size, 0
+    while off < n:
+        k = os.copy_file_range(s.fileno(), d.fileno(), n - off, off, off)
+        if k == 0:
+            break
+        off += k' "$1" "$2" || die "copy_file_range $1 to $2 failed"
+    txg_sync
+    after=$(zpool get -Hp -o value bclonesaved "$POOL")
+    [ $((after - before)) -ge $(( $(wc -c < "$1") / 2 )) ] ||
+        die "copy_file_range $1 to $2 copied rather than cloned (bclonesaved $before -> $after)"
 }
 
 # ---------------------------------------------------------------- members
@@ -285,7 +315,7 @@ i=0; while [ $i -lt 20 ]; do text "doomed-file$i" $((500 + i * 3001)) > "/$POOL/
 txg_sync
 clone_file "$T/big/blob" "$T/big/blob.clone"
 clone_file "$T/big/records-4k" "$T/big/records-4k.clone"
-clone_file "$T/big/blob" "/$POOL/fs-base/blob.clone"
+clone_across "$T/big/blob" "/$POOL/fs-base/blob.clone"
 txg_sync
 [ "$(zpool get -H -o value feature@block_cloning "$POOL")" = active ] || die "feature@block_cloning is not active after cloning"
 
@@ -378,8 +408,8 @@ while [ $round -lt 12 ]; do
            fill vm/disk-8k 1048576 40
            text rolled-back 20000 > "$T/rolled-back.txt"
            txg_sync
-           zfs rollback "$POOL/vm/disk-8k@s8"
-           zfs rollback "$POOL/fs-tree@s8"
+           retry zfs rollback "$POOL/vm/disk-8k@s8"
+           retry zfs rollback "$POOL/fs-tree@s8"
            wait_dev "$(zvol_dev "$POOL/vm/disk-8k")" ;;
         9) before_destroy vm/doomed
            zfs destroy "$POOL/vm/doomed@s2"; zfs destroy -r "$POOL/vm/doomed"; VOLS=$(echo "$VOLS" | sed 's#vm/doomed##') ;;

@@ -449,7 +449,8 @@ jobs:
         run: |
           # The text apart, and the release beside it by hard links: the
           # runner's disk holds the members, their older copies and the
-          # release already.
+          # release already. A build that failed left all of it root's.
+          sudo chown -R "$USER" /var/tmp/golden 2>/dev/null || true
           mkdir -p /var/tmp/golden/text /var/tmp/golden/publish
           cp -r /var/tmp/golden/oracle /var/tmp/golden/IMAGE.md /var/tmp/golden/text/ 2>/dev/null || true
           cp /var/tmp/golden/release/SHA256SUMS /var/tmp/golden/text/ 2>/dev/null || true
