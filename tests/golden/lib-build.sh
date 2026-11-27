@@ -187,14 +187,20 @@ oracle_exported() {
     # (split-capture.py; the harness reads the directory as the one capture).
     zdbe -dddd "$POOL" > "$OUT/oracle/zdb-dddd.txt" 2>&1 || true
     test -s "$OUT/oracle/zdb-dddd.txt" || die "zdb -e -dddd wrote nothing"
-    zdbe -dddddd "$POOL" > "$OUT/zdb-dddddd.txt" 2> "$OUT/zdb-dddddd.err" || die "zdb -e -dddddd: $(tail -n 3 "$OUT/zdb-dddddd.err")"
-    python3 "$HERE/split-capture.py" "$OUT/zdb-dddddd.txt" "$OUT/oracle/zdb-dddddd"
-    rm -f "$OUT/zdb-dddddd.txt"
-    # every uberblock TXG still readable: try the newest 128 (the ring depth)
+    # A builder of a pool of thousands of datasets, whose manifests aim at
+    # no block, leaves it out (DEEP=0): a file a dataset is thousands.
+    if [ "${DEEP:-1}" != 0 ]; then
+        zdbe -dddddd "$POOL" > "$OUT/zdb-dddddd.txt" 2> "$OUT/zdb-dddddd.err" || die "zdb -e -dddddd: $(tail -n 3 "$OUT/zdb-dddddd.err")"
+        python3 "$HERE/split-capture.py" "$OUT/zdb-dddddd.txt" "$OUT/oracle/zdb-dddddd"
+        rm -f "$OUT/zdb-dddddd.txt"
+    fi
+    # every uberblock TXG still readable: try the newest 128 (the ring
+    # depth), or as many as the builder says (BY_TXG: of thousands of
+    # datasets, each listing is large)
     newest=$(zdbe -u "$POOL" 2>/dev/null | awk '/txg = /{print $3}' | sort -n | tail -1)
     if [ -n "$newest" ]; then
         t=$newest; n=0
-        while [ $n -lt 128 ] && [ "$t" -gt 0 ]; do
+        while [ $n -lt "${BY_TXG:-128}" ] && [ "$t" -gt 0 ]; do
             if zdbe -t "$t" -d "$POOL" > "$OUT/oracle/datasets-by-txg/$t.txt" 2>/dev/null; then :; else rm -f "$OUT/oracle/datasets-by-txg/$t.txt"; fi
             t=$((t-1)); n=$((n+1))
         done

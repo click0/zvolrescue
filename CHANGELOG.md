@@ -293,6 +293,14 @@ tagged. `v0.7.1` is the release that carries those six.
   them — and is published (`sat-freebsd-v1`, 45 MB), pinned and judged
   every week. `publish-golden.yml` makes the test data's
   `COVERAGE.md` again with the oracle it adds.
+* **A satellite at scale.** `build-satellite.sh scale` makes a mirror
+  with 200 filesystems under `fs`, every one snapshotted with the rest
+  at each of ten rounds — over 2,000 datasets — whose manifests are held
+  out of the regular runs. Its oracle leaves `zdb -dddddd` out and keeps
+  the datasets of the newest 16 TXGs (`DEEP=0`, `BY_TXG=16` of
+  `lib-build.sh`), a file a dataset and a listing of them all being
+  what thousands make of each. An image the published job marks `held`
+  is skipped by every run but a held-out one.
 
 ## v0.9.18 — 2026-11-25
 

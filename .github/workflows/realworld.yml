@@ -503,7 +503,7 @@ jobs:
         env:
           ONLY: ${{ github.event.inputs.only }}
         run: |
-          all="removal checkpoint spare expand special ashift slog mmp compat20 nofeatures v28"
+          all="removal checkpoint spare expand special ashift slog mmp compat20 nofeatures v28 scale"
           picked=""
           for s in $all; do case " $ONLY " in *" sat-$s "*) picked="$picked $s" ;; esac; done
           # All of them for `satellites` or an empty `only`; none when
@@ -759,6 +759,9 @@ jobs:
       TAG: ${{ matrix.tag }}
       ORACLE: testdata/oracle/${{ matrix.oracle }}
       TESTDATA: click0/zvolrescue-testdata
+      # An image of the held-out runs alone (`held: true`, a pool at
+      # scale): every step after the checkout is skipped in the others.
+      SKIP: ${{ matrix.held && !contains(github.event.inputs.only, 'held-out') && '1' || '0' }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/checkout@v5
@@ -766,13 +769,17 @@ jobs:
           repository: click0/zvolrescue-testdata
           path: testdata
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release -p zvolrescue -p zvolcarve -p zvolfiles -p zvoltimeline -p zvolreport && cargo build --release -p zfs-read --examples
+        if: env.SKIP != '1'
+      - if: env.SKIP != '1'
+        run: cargo build --release -p zvolrescue -p zvolcarve -p zvolfiles -p zvoltimeline -p zvolreport && cargo build --release -p zfs-read --examples
       - name: The release files, kept between runs
+        if: env.SKIP != '1'
         uses: actions/cache@v4
         with:
           path: /var/tmp/image/dl
           key: golden-${{ env.TAG }}-${{ hashFiles(format('tests/golden/{0}.SHA256SUMS', matrix.tag)) }}
       - name: The release files, checked against the pinned sums, and the members out of them
+        if: env.SKIP != '1'
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends zstd
           # The pin and the oracle's own record of the release agree.
@@ -788,6 +795,7 @@ jobs:
           NEEDS=/var/tmp/image/needs.txt sh tests/golden/fetch-image.sh "$TAG" "tests/golden/$TAG.SHA256SUMS" /var/tmp/image "$ORACLE/members.sha256"
           df -h /var/tmp | tail -n 1
       - name: The undamaged image first, every volume
+        if: env.SKIP != '1'
         run: |
           # A satellite's control manifest says what its volumes come to:
           # an expanded raidz's are refused, and rightly.
@@ -814,6 +822,7 @@ jobs:
           done < <(grep '@export$' "$GITHUB_WORKSPACE/$ORACLE/volumes.sha256")
           test "$rc" = 0
       - name: The damage matrix over it (G2, G3; G4 with held-out)
+        if: env.SKIP != '1'
         run: |
           set -o pipefail
           held=""
@@ -832,12 +841,12 @@ jobs:
             "The published golden image $TAG: the damage matrix (G2, G3${held:+, G4})" | tee -a "$GITHUB_STEP_SUMMARY"
           test "$rc" = 0 || { echo "::error::run-matrix.py exited $rc"; exit 1; }
       - name: The report
-        if: always()
+        if: always() && env.SKIP != '1'
         run: |
           mkdir -p /var/tmp/image/report
           cp /var/tmp/image/matrix.log /var/tmp/image/report/ 2>/dev/null || true
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && env.SKIP != '1'
         with:
           name: golden-published-${{ env.TAG }}-report
           path: /var/tmp/image/report
@@ -853,7 +862,7 @@ jobs:
       # there for publish-golden.yml, and a commit to the test data every
       # week is a choice of its own. The step says which.
       - name: The report, kept in zvolrescue-testdata
-        if: always()
+        if: always() && env.SKIP != '1'
         env:
           TESTDATA_TOKEN: ${{ secrets.TESTDATA_TOKEN }}
           KEEP_REPORTS: ${{ vars.KEEP_REPORTS }}

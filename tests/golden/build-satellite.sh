@@ -27,6 +27,7 @@
 #   v28         a pool of version 28, before feature flags
 #   freebsd     made on FreeBSD with its base OpenZFS, on GPT partitions
 #               as its installer lays them out (run on FreeBSD)
+#   scale       a pool of thousands of datasets, held out of regular runs
 #
 # Every satellite holds the same few datasets — a volume of 8K blocks
 # with content lz4 shrinks, one of 16K blocks of the keystream, a
@@ -360,14 +361,38 @@ recipe_freebsd() {
     common_datasets; initial_fill
     rounds 0 3
 }
+# At scale (stage 3): thousands of datasets, for what reading them takes.
+recipe_scale() {
+    DESCRIPTION="A pool at scale: one mirror with 200 filesystems under \`fs\`, every one of them snapshotted with the rest at each of ten rounds — over 2,000 datasets, 200 filesystems written to a few at a time between the snapshots — for what listing, reading and dating thousands of datasets takes. Its manifests are held out of the regular runs, and its oracle has no \`zdb -dddddd\` (a file a dataset would be thousands) and the datasets of the newest 16 TXGs alone."
+    ALL="mirror-0a mirror-0b"
+    make_members 512M $ALL
+    create mirror $(paths $ALL)
+    common_datasets
+    i=0; while [ $i -lt 200 ]; do zfs create "$POOL/fs/c$(printf %03d $i)"; i=$((i+1)); done
+    initial_fill
+    at_round() {
+        # a file in twenty of the children, a different twenty each round
+        j=0; while [ $j -lt 20 ]; do
+            c=$(printf %03d $(( ($1 * 20 + j) % 200 )))
+            text "scale$1-$j" $((500 + j * 97)) > "/$POOL/fs/c$c/r$1.txt"
+            j=$((j+1))
+        done
+    }
+    HISTORY_NOTE="200 filesystems created under \`fs\` before the fill; after every round, a file written to twenty of them."
+    DEEP=0
+    BY_TXG=16
+    rounds 0 9
+    [ "$(zfs list -H -t all -r -o name "$POOL" | wc -l)" -ge 2000 ] || die "fewer than 2,000 datasets"
+}
+
 freebsd_detach() {
     while read -r m md; do mdconfig -d -u "$md"; done < "$OUT/mds.txt"
 }
 
 # ---------------------------------------------------------------- build
 case $NAME in
-    removal|checkpoint|spare|expand|special|ashift|slog|mmp|compat20|nofeatures|v28|freebsd) ;;
-    *) die "no satellite $NAME (removal checkpoint spare expand special ashift slog mmp compat20 nofeatures v28 freebsd)" ;;
+    removal|checkpoint|spare|expand|special|ashift|slog|mmp|compat20|nofeatures|v28|freebsd|scale) ;;
+    *) die "no satellite $NAME (removal checkpoint spare expand special ashift slog mmp compat20 nofeatures v28 freebsd scale)" ;;
 esac
 MAP=""
 say "$POOL ($TAG)"
