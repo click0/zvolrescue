@@ -1,0 +1,475 @@
+------------------------------------
+LABEL 0 
+------------------------------------
+    version: 5000
+    name: 'golden'
+    state: 1
+    txg: 5015
+    pool_guid: 17525736147274679218
+    errata: 0
+    min_alloc: 4096
+    max_alloc: 8192
+    hostid: 602912690
+    hostname: 'runnervmb40mh'
+    top_guid: 1838293850315783766
+    guid: 3829765199287251692
+    vdev_children: 3
+    vdev_tree:
+        type: 'raidz'
+        id: 1
+        guid: 1838293850315783766
+        nparity: 2
+        metaslab_array: 261
+        metaslab_shift: 27
+        ashift: 12
+        asize: 2128609280
+        min_alloc: 4096
+        is_log: 0
+        create_txg: 4
+        children[0]:
+            type: 'file'
+            id: 0
+            guid: 889159150767636529
+            path: '/var/tmp/golden/members/raidz2-0.img'
+            create_txg: 4
+        children[1]:
+            type: 'file'
+            id: 1
+            guid: 5911554075792337998
+            path: '/var/tmp/golden/members/raidz2-1.img'
+            create_txg: 4
+        children[2]:
+            type: 'file'
+            id: 2
+            guid: 15709803176228564277
+            path: '/var/tmp/golden/members/raidz2-2.img'
+            create_txg: 4
+        children[3]:
+            type: 'file'
+            id: 3
+            guid: 3829765199287251692
+            path: '/var/tmp/golden/members/raidz2-3.img'
+            create_txg: 4
+    features_for_read:
+        com.delphix:hole_birth
+        com.delphix:embedded_data
+        org.openzfs:draid
+        com.klarasystems:vdev_zaps_v2
+        com.klarasystems:dynamic_gang_header
+    labels = 0 1 2 3 
+    Uberblock[0]
+	magic = 0000000000bab10c
+	version = 5000
+	txg = 4832
+	guid_sum = 3365034843304634015
+	timestamp = 1791627862 UTC = Sat Oct 10 10:24:22 2026
+	bp = DVA[0]=<0:165e2000:1000> DVA[1]=<1:69263000:3000> DVA[2]=<2:2c712000:3000> [L0 DMU objset] fletcher4 uncompressed unencrypted LE contiguous unique triple size=1000L/1000P birth=4832L/4832P fill=761 cksum=000000036bb14271:00000d210b68dc06:001938f40afdad65:205678dcf3d1b641
+	mmp_magic = 00000000a11cea11
+	mmp_delay = 0
+	mmp_valid = 0
+	checkpoint_txg = 0
+	raidz_reflow state=0 off=0
+        labels = 0 1 2 3 
+    Uberblock[1]
+	magic = 0000000000bab10c
+	version = 5000
+	txg = 4993
+	guid_sum = 3365034843304634015
+	timestamp = 1791627863 UTC = Sat Oct 10 10:24:23 2026
+	bp = DVA[0]=<2:2d1bf000:3000> DVA[1]=<0:16b0d000:1000> DVA[2]=<1:6ab44000:3000> [L0 DMU objset] fletcher4 uncompressed unencrypted LE contiguous unique triple size=1000L/1000P birth=4993L/4993P fill=793 cksum=00000002bbbcf2b2:00000a7c737aa08f:001422ca9e2ee570:19ce0906a480ed40
+	mmp_magic = 00000000a11cea11
+	mmp_delay = 0
+	mmp_valid = 0
+	checkpoint_txg = 0
+	raidz_reflow state=0 off=0
+        labels = 0 1 2 3 
+    Uberblock[2]
+	magic = 0000000000bab10c
+	version = 5000
+	txg = 4994
+	guid_sum = 3365034843304634015
+	timestamp = 1791627863 UTC = Sat Oct 10 10:24:23 2026
+	bp = DVA[0]=<2:2d1ef000:3000> DVA[1]=<0:16b1e000:1000> DVA[2]=<1:6ab77000:3000> [L0 DMU objset] fletcher4 uncompressed unencrypted LE contiguous unique triple size=1000L/1000P birth=4994L/4994P fill=793 cksum=000000031d0392a5:00000bf78ab1e302:001705fd1df4ae43:1d8fa5a5a0ac967a
+	mmp_magic = 00000000a11cea11
+	mmp_delay = 0
+	mmp_valid = 0
+	checkpoint_txg = 0
+	raidz_reflow state=0 off=0
+        labels = 0 1 2 3 
+    Uberblock[3]
+	magic = 0000000000bab10c
+	version = 5000
+	txg = 4803
+	guid_sum = 3365034843304634015
+	timestamp = 1791627862 UTC = Sat Oct 10 10:24:22 2026
+	bp = DVA[0]=<2:2c4e4000:3000> DVA[1]=<0:1647a000:1000> DVA[2]=<1:690a7000:3000> [L0 DMU objset] fletcher4 uncompressed unencrypted LE contiguous unique triple size=1000L/1000P birth=4803L/4803P fill=763 cksum=00000003399dd6e3:00000c5ecca5b273:0017bfe2bbb136ee:1e6e128dacbe44b6
+	mmp_magic = 00000000a11cea11
+	mmp_delay = 0
+	mmp_valid = 0
+	checkpoint_txg = 0
+	raidz_reflow state=0 off=0
+        labels = 0 1 2 3 
+    Uberblock[4]
+	magic = 0000000000bab10c
+	version = 5000
+	txg = 4836
+	guid_sum = 3365034843304634015
+	timestamp = 1791627862 UTC = Sat Oct 10 10:24:22 2026
+	bp = DVA[0]=<0:16607000:1000> DVA[1]=<1:692ae000:3000> DVA[2]=<2:2c73c000:3000> [L0 DMU objset] fletcher4 uncompressed unencrypted LE contiguous unique triple size=1000L/1000P birth=4836L/4836P fill=762 cksum=00000003ddeb2632:00000ed654587c7e:001c7ed210460965:2485d55e94922442
+	mmp_magic = 00000000a11cea11
+	mmp_delay = 0
+	mmp_valid = 0
+	checkpoint_txg = 0
+	raidz_reflow state=0 off=0
+        labels = 0 1 2 3 
+    Uberblock[5]
+	magic = 0000000000bab10c
+	version = 5000
+	txg = 4837
+	guid_sum = 3365034843304634015
+	timestamp = 1791627862 UTC = Sat Oct 10 10:24:22 2026
+	bp = DVA[0]=<0:1662c000:1000> DVA[1]=<1:692d8000:3000> DVA[2]=<2:2c760000:3000> [L0 DMU objset] fletcher4 uncompressed unencrypted LE contiguous unique triple size=1000L/1000P birth=4837L/4837P fill=761 cksum=000000027d5eced6:0000098e1b3bf3b1:00125ae3e57c87c3:178812ef49ac8c09
+	mmp_magic = 00000000a11cea11
+	mmp_delay = 0
+	mmp_valid = 0
+	checkpoint_txg = 0
+	raidz_reflow state=0 off=0
+        labels = 0 1 2 3 
+    Uberblock[6]
+	magic = 0000000000bab10c
+	version = 5000
+	txg = 4966
+	guid_sum = 3365034843304634015
+	timestamp = 1791627862 UTC = Sat Oct 10 10:24:22 2026
+	bp = DVA[0]=<1:6a382000:3000> DVA[1]=<2:2cf5e000:3000> DVA[2]=<0:16a44000:1000> [L0 DMU objset] fletcher4 uncompressed unencrypted LE contiguous unique triple size=1000L/1000P birth=4966L/4966P fill=761 cksum=00000002d33879c4:00000ad9f08de6af:0014dccf48c5bd38:1ac4b50347f3eee7
+	mmp_magic = 00000000a11cea11
+	mmp_delay = 0
+	mmp_valid = 0
+	checkpoint_txg = 0
+	raidz_reflow state=0 off=0
+        labels = 0 1 2 3 
+    Uberblock[7]
+	magic = 0000000000bab10c
+	version = 5000
+	txg = 4807
+	guid_sum = 3365034843304634015
+	timestamp = 1791627862 UTC = Sat Oct 10 10:24:22 2026
+	bp = DVA[0]=<2:2c523000:3000> DVA[1]=<0:16496000:1000> DVA[2]=<1:690d4000:3000> [L0 DMU objset] fletcher4 uncompressed unencrypted LE contiguous unique triple size=1000L/1000P birth=4807L/4807P fill=763 cksum=000000031319a02b:00000bcd0a80acc1:0016abda3b43573d:1d1147e0115db15f
+	mmp_magic = 00000000a11cea11
+	mmp_delay = 0
+	mmp_valid = 0
+	checkpoint_txg = 0
+	raidz_reflow state=0 off=0
+        labels = 0 1 2 3 
+    Uberblock[8]
+	magic = 0000000000bab10c
+	version = 5000
+	txg = 4680
+	guid_sum = 3365034843304634015
+	timestamp = 1791627861 UTC = Sat Oct 10 10:24:21 2026
+	bp = DVA[0]=<1:68036000:3000> DVA[1]=<2:2bc26000:3000> DVA[2]=<0:160db000:1000> [L0 DMU objset] fletcher4 uncompressed unencrypted LE contiguous unique triple size=1000L/1000P birth=4680L/4680P fill=762 cksum=00000002aa057c3e:00000a3b9910f8d9:0013ac39a6a4e7b4:193db7f1882ddbcc
+	mmp_magic = 00000000a11cea11
+	mmp_delay = 0
+	mmp_valid = 0
+	checkpoint_txg = 0
+	raidz_reflow state=0 off=0
+        labels = 0 1 2 3 
+    Uberblock[9]
+	magic = 0000000000bab10c
+	version = 5000
+	txg = 4905
+	guid_sum = 3365034843304634015
+	timestamp = 1791627862 UTC = Sat Oct 10 10:24:22 2026
+	bp = DVA[0]=<2:2cb92000:3000> DVA[1]=<0:167ba000:1000> DVA[2]=<1:69d79000:3000> [L0 DMU objset] fletcher4 uncompressed unencrypted LE contiguous unique triple size=1000L/1000P birth=4905L/4905P fill=761 cksum=0000000183233f94:000005d202d321bd:000b367c6a34bad5:0e6aa424cd087e16
+	mmp_magic = 00000000a11cea11
+	mmp_delay = 0
+	mmp_valid = 0
+	checkpoint_txg = 0
+	raidz_reflow state=0 off=0
+        labels = 0 1 2 3 
+    Uberblock[10]
+	magic = 0000000000bab10c
+	version = 5000
+	txg = 4970
+	guid_sum = 3365034843304634015
+	timestamp = 1791627863 UTC = Sat Oct 10 10:24:23 2026
+	bp = DVA[0]=<1:6a4f9000:3000> DVA[1]=<2:2cfa0000:3000> DVA[2]=<0:16a55000:1000> [L0 DMU objset] fletcher4 uncompressed unencrypted LE contiguous unique triple size=1000L/1000P birth=4970L/4970P fill=761 cksum=00000002bca129bc:00000a81f6752a46:0014315d04255d5d:19e5c8a9256addf6
+	mmp_magic = 00000000a11cea11
+	mmp_delay = 0
+	mmp_valid = 0
+	checkpoint_txg = 0
+	raidz_reflow state=0 off=0
+        labels = 0 1 2 3 
+    Uberblock[11]
+	magic = 0000000000bab10c
+	version = 5000
+	txg = 4811
+	guid_sum = 3365034843304634015
+	timestamp = 1791627862 UTC = Sat Oct 10 10:24:22 2026
+	bp = DVA[0]=<2:2c562000:3000> DVA[1]=<0:164b8000:1000> DVA[2]=<1:69104000:3000> [L0 DMU objset] fletcher4 uncompressed unencrypted LE contiguous unique triple size=1000L/1000P birth=4811L/4811P fill=763 cksum=00000003b6ae8438:00000e4289cc7d94:001b684684fb539a:2327974101ceccb9
+	mmp_magic = 00000000a11cea11
+	mmp_delay = 0
+	mmp_valid = 0
+	checkpoint_txg = 0
+	raidz_reflow state=0 off=0
+        labels = 0 1 2 3 
+    Uberblock[12]
+	magic = 0000000000bab10c
+	version = 5000
+	txg = 4652
+	guid_sum = 3365034843304634015
+	timestamp = 1791627861 UTC = Sat Oct 10 10:24:21 2026
+	bp = DVA[0]=<1:63a80000:3000> DVA[1]=<2:2ba40000:3000> DVA[2]=<0:16065000:1000> [L0 DMU objset] fletcher4 uncompressed unencrypted LE contiguous unique triple size=1000L/1000P birth=4652L/4652P fill=760 cksum=0000000392ff3216:00000db7a5d72e8a:001a59c261c9f3c4:21c80a932be912c4
+	mmp_magic = 00000000a11cea11
+	mmp_delay = 0
+	mmp_valid = 0
+	checkpoint_txg = 0
+	raidz_reflow state=0 off=0
+        labels = 0 1 2 3 
+    Uberblock[13]
+	magic = 0000000000bab10c
+	version = 5000
+	txg = 4621
+	guid_sum = 3365034843304634015
+	timestamp = 1791627860 UTC = Sat Oct 10 10:24:20 2026
+	bp = DVA[0]=<2:2b827000:3000> DVA[1]=<0:14e82000:1000> DVA[2]=<1:6385e000:3000> [L0 DMU objset] fletcher4 uncompressed unencrypted LE contiguous unique triple size=1000L/1000P birth=4621L/4621P fill=750 cksum=00000003ad4c84fb:00000e1d65c01427:001b1ec4d976a001:22c69a0f29c3b00a
+	mmp_magic = 00000000a11cea11
+	mmp_delay = 0
+	mmp_valid = 0
+	checkpoint_txg = 0
+	raidz_reflow state=0 off=0
+        labels = 0 1 2 3 
+    Uberblock[14]
+	magic = 0000000000bab10c
+	version = 5000
+	txg = 5006
+	guid_sum = 3365034843304634015
+	timestamp = 1791627872 UTC = Sat Oct 10 10:24:32 2026
+	bp = DVA[0]=<2:2d219000:3000> DVA[1]=<0:16b2d000:1000> DVA[2]=<1:6aba4000:3000> [L0 DMU objset] fletcher4 uncompressed unencrypted LE contiguous unique triple size=1000L/1000P birth=5006L/5006P fill=793 cksum=00000003391aa855:00000c60bb2dbbc0:0017cb0b910de627:1e85e0406de93356
+	mmp_magic = 00000000a11cea11
+	mmp_delay = 0
+	mmp_valid = 0
+	checkpoint_txg = 0
+	raidz_reflow state=0 off=0
+        labels = 0 1 2 3 
+    Uberblock[15]
+	magic = 0000000000bab10c
+	version = 5000
+	txg = 4815
+	guid_sum = 3365034843304634015
+	timestamp = 1791627862 UTC = Sat Oct 10 10:24:22 2026
+	bp = DVA[0]=<2:2c5a4000:3000> DVA[1]=<0:164da000:1000> DVA[2]=<1:69134000:3000> [L0 DMU objset] fletcher4 uncompressed unencrypted LE contiguous unique triple size=1000L/1000P birth=4815L/4815P fill=763 cksum=00000002ac5535c7:00000a43db04181d:0013baec57422798:194f15f7045c69c7
+	mmp_magic = 00000000a11cea11
+	mmp_delay = 0
+	mmp_valid = 0
+	checkpoint_txg = 0
+	raidz_reflow state=0 off=0
+        labels = 0 1 2 3 
+    Uberblock[16]
+	magic = 0000000000bab10c
+	version = 5000
+	txg = 4848
+	guid_sum = 3365034843304634015
+	timestamp = 1791627862 UTC = Sat Oct 10 10:24:22 2026
+	bp = DVA[0]=<1:69431000:3000> DVA[1]=<2:2c7d2000:3000> DVA[2]=<0:166a7000:1000> [L0 DMU objset] fletcher4 uncompressed unencrypted LE contiguous unique triple size=1000L/1000P birth=4848L/4848P fill=761 cksum=00000003c97361ed:00000e8919b5a1e7:001bed01c931baff:23ce279f550cfc20
+	mmp_magic = 00000000a11cea11
+	mmp_delay = 0
+	mmp_valid = 0
+	checkpoint_txg = 0
+	raidz_reflow state=0 off=0
+        labels = 0 1 2 3 
+    Uberblock[17]
+	magic = 0000000000bab10c
+	version = 5000
+	txg = 4945
+	guid_sum = 3365034843304634015
+	timestamp = 1791627862 UTC = Sat Oct 10 10:24:22 2026
+	bp = DVA[0]=<1:6a0d6000:3000> DVA[1]=<2:2cdf0000:3000> DVA[2]=<0:169e6000:1000> [L0 DMU objset] fletcher4 uncompressed unencrypted LE contiguous unique triple size=1000L/1000P birth=4945L/4945P fill=761 cksum=000000041144b1b4:00000f9af7c0558b:001df7b7b180aedb:2667eff247922432
+	mmp_magic = 00000000a11cea11
+	mmp_delay = 0
+	mmp_valid = 0
+	checkpoint_txg = 0
+	raidz_reflow state=0 off=0
+        labels = 0 1 2 3 
+    Uberblock[18]
+	magic = 0000000000bab10c
+	version = 5000
+	txg = 4978
+	guid_sum = 3365034843304634015
+	timestamp = 1791627863 UTC = Sat Oct 10 10:24:23 2026
+	bp = DVA[0]=<1:6a847000:3000> DVA[1]=<2:2d021000:3000> DVA[2]=<0:16a76000:1000> [L0 DMU objset] fletcher4 uncompressed unencrypted LE contiguous unique triple size=1000L/1000P birth=4978L/4978P fill=761 cksum=0000000333b79fec:00000c47fbe5340c:001793b9747b722c:1e350877c4f3c464
+	mmp_magic = 00000000a11cea11
+	mmp_delay = 0
+	mmp_valid = 0
+	checkpoint_txg = 0
+	raidz_reflow state=0 off=0
+        labels = 0 1 2 3 
+    Uberblock[19]
+	magic = 0000000000bab10c
+	version = 5000
+	txg = 4755
+	guid_sum = 3365034843304634015
+	timestamp = 1791627861 UTC = Sat Oct 10 10:24:21 2026
+	bp = DVA[0]=<1:68885000:3000> DVA[1]=<2:2c184000:3000> DVA[2]=<0:1638c000:1000> [L0 DMU objset] fletcher4 uncompressed unencrypted LE contiguous unique triple size=1000L/1000P birth=4755L/4755P fill=762 cksum=00000002ada7b6b0:00000a4a86453809:0013cac2b29b41c5:196739149a34e9a5
+	mmp_magic = 00000000a11cea11
+	mmp_delay = 0
+	mmp_valid = 0
+	checkpoint_txg = 0
+	raidz_reflow state=0 off=0
+        labels = 0 1 2 3 
+    Uberblock[20]
+	magic = 0000000000bab10c
+	version = 5000
+	txg = 4852
+	guid_sum = 3365034843304634015
+	timestamp = 1791627862 UTC = Sat Oct 10 10:24:22 2026
+	bp = DVA[0]=<1:6946a000:3000> DVA[1]=<2:2c808000:3000> DVA[2]=<0:166b3000:1000> [L0 DMU objset] fletcher4 uncompressed unencrypted LE contiguous unique triple size=1000L/1000P birth=4852L/4852P fill=761 cksum=0000000298b5c20d:000009f9df53307e:00132f511180a88a:189f49101b5ee89e
+	mmp_magic = 00000000a11cea11
+	mmp_delay = 0
+	mmp_valid = 0
+	checkpoint_txg = 0
+	raidz_reflow state=0 off=0
+        labels = 0 1 2 3 
+    Uberblock[21]
+	magic = 0000000000bab10c
+	version = 5000
+	txg = 4949
+	guid_sum = 3365034843304634015
+	timestamp = 1791627862 UTC = Sat Oct 10 10:24:22 2026
+	bp = DVA[0]=<1:6a11e000:3000> DVA[1]=<2:2ce29000:3000> DVA[2]=<0:169f6000:1000> [L0 DMU objset] fletcher4 uncompressed unencrypted LE contiguous unique triple size=1000L/1000P birth=4949L/4949P fill=761 cksum=00000003b33b060f:00000e344fa161df:001b4b11399b7024:22ffbfd93e73233f
+	mmp_magic = 00000000a11cea11
+	mmp_delay = 0
+	mmp_valid = 0
+	checkpoint_txg = 0
+	raidz_reflow state=0 off=0
+        labels = 0 1 2 3 
+    Uberblock[22]
+	magic = 0000000000bab10c
+	version = 5000
+	txg = 4982
+	guid_sum = 3365034843304634015
+	timestamp = 1791627863 UTC = Sat Oct 10 10:24:23 2026
+	bp = DVA[0]=<1:6a9b5000:3000> DVA[1]=<2:2d063000:3000> DVA[2]=<0:16a89000:1000> [L0 DMU objset] fletcher4 uncompressed unencrypted LE contiguous unique triple size=1000L/1000P birth=4982L/4982P fill=761 cksum=000000037f8272d6:00000d6e084a089e:0019ce9df096eef7:2118970e86d14713
+	mmp_magic = 00000000a11cea11
+	mmp_delay = 0
+	mmp_valid = 0
+	checkpoint_txg = 0
+	raidz_reflow state=0 off=0
+        labels = 0 1 2 3 
+    Uberblock[23]
+	magic = 0000000000bab10c
+	version = 5000
+	txg = 5015
+	guid_sum = 3365034843304634015
+	timestamp = 1791627872 UTC = Sat Oct 10 10:24:32 2026
+	bp = DVA[0]=<2:2d237000:3000> DVA[1]=<0:16b38000:1000> DVA[2]=<1:6abc5000:3000> [L0 DMU objset] fletcher4 uncompressed unencrypted LE contiguous unique triple size=1000L/1000P birth=5015L/5015P fill=791 cksum=00000002a14cb1ef:00000a1992029bb0:001369ce00a1a096:18e73a784ade9036
+	mmp_magic = 00000000a11cea11
+	mmp_delay = 0
+	mmp_valid = 0
+	checkpoint_txg = 0
+	raidz_reflow state=0 off=0
+        labels = 0 1 2 3 
+    Uberblock[24]
+	magic = 0000000000bab10c
+	version = 5000
+	txg = 4856
+	guid_sum = 3365034843304634015
+	timestamp = 1791627862 UTC = Sat Oct 10 10:24:22 2026
+	bp = DVA[0]=<1:694a9000:3000> DVA[1]=<2:2c84d000:3000> DVA[2]=<0:166c1000:1000> [L0 DMU objset] fletcher4 uncompressed unencrypted LE contiguous unique triple size=1000L/1000P birth=4856L/4856P fill=761 cksum=0000000321c0d94c:00000c06c3b95826:00171d8d076f2fc4:1da698613f01497b
+	mmp_magic = 00000000a11cea11
+	mmp_delay = 0
+	mmp_valid = 0
+	checkpoint_txg = 0
+	raidz_reflow state=0 off=0
+        labels = 0 1 2 3 
+    Uberblock[25]
+	magic = 0000000000bab10c
+	version = 5000
+	txg = 4697
+	guid_sum = 3365034843304634015
+	timestamp = 1791627861 UTC = Sat Oct 10 10:24:21 2026
+	bp = DVA[0]=<2:2bd5e000:3000> DVA[1]=<0:16127000:1000> DVA[2]=<1:683d8000:3000> [L0 DMU objset] fletcher4 uncompressed unencrypted LE contiguous unique triple size=1000L/1000P birth=4697L/4697P fill=762 cksum=00000003634f893e:00000d01ab17d07e:0018fe2e74abfb08:200d0670c5a0c656
+	mmp_magic = 00000000a11cea11
+	mmp_delay = 0
+	mmp_valid = 0
+	checkpoint_txg = 0
+	raidz_reflow state=0 off=0
+        labels = 0 1 2 3 
+    Uberblock[26]
+	magic = 0000000000bab10c
+	version = 5000
+	txg = 4986
+	guid_sum = 3365034843304634015
+	timestamp = 1791627863 UTC = Sat Oct 10 10:24:23 2026
+	bp = DVA[0]=<2:2d0a5000:3000> DVA[1]=<0:16aab000:1000> DVA[2]=<1:6aa15000:3000> [L0 DMU objset] fletcher4 uncompressed unencrypted LE contiguous unique triple size=1000L/1000P birth=4986L/4986P fill=761 cksum=000000022b3e3494:000008551ed210a3:001005e75274374e:1490319dcc8382c5
+	mmp_magic = 00000000a11cea11
+	mmp_delay = 0
+	mmp_valid = 0
+	checkpoint_txg = 0
+	raidz_reflow state=0 off=0
+        labels = 0 1 2 3 
+    Uberblock[27]
+	magic = 0000000000bab10c
+	version = 5000
+	txg = 4731
+	guid_sum = 3365034843304634015
+	timestamp = 1791627861 UTC = Sat Oct 10 10:24:21 2026
+	bp = DVA[0]=<0:16247000:1000> DVA[1]=<1:685b2000:3000> DVA[2]=<2:2c022000:3000> [L0 DMU objset] fletcher4 uncompressed unencrypted LE contiguous unique triple size=1000L/1000P birth=4731L/4731P fill=762 cksum=000000024f47e2c5:000008debe0e1ff7:00110cf22e362011:15dfb52537eaec9a
+	mmp_magic = 00000000a11cea11
+	mmp_delay = 0
+	mmp_valid = 0
+	checkpoint_txg = 0
+	raidz_reflow state=0 off=0
+        labels = 0 1 2 3 
+    Uberblock[28]
+	magic = 0000000000bab10c
+	version = 5000
+	txg = 4828
+	guid_sum = 3365034843304634015
+	timestamp = 1791627862 UTC = Sat Oct 10 10:24:22 2026
+	bp = DVA[0]=<2:2c6e5000:3000> DVA[1]=<0:1654e000:1000> DVA[2]=<1:691f4000:3000> [L0 DMU objset] fletcher4 uncompressed unencrypted LE contiguous unique triple size=1000L/1000P birth=4828L/4828P fill=761 cksum=000000034ee3b226:00000cb4b63eec43:00186d108d6ed353:1f5673d8401bf61c
+	mmp_magic = 00000000a11cea11
+	mmp_delay = 0
+	mmp_valid = 0
+	checkpoint_txg = 0
+	raidz_reflow state=0 off=0
+        labels = 0 1 2 3 
+    Uberblock[29]
+	magic = 0000000000bab10c
+	version = 5000
+	txg = 4701
+	guid_sum = 3365034843304634015
+	timestamp = 1791627861 UTC = Sat Oct 10 10:24:21 2026
+	bp = DVA[0]=<2:2bd9d000:3000> DVA[1]=<0:16148000:1000> DVA[2]=<1:68405000:3000> [L0 DMU objset] fletcher4 uncompressed unencrypted LE contiguous unique triple size=1000L/1000P birth=4701L/4701P fill=763 cksum=000000042a659ad5:00000ffb3567f212:001eb02fc3b9077c:2753e0199cc0c8fa
+	mmp_magic = 00000000a11cea11
+	mmp_delay = 0
+	mmp_valid = 0
+	checkpoint_txg = 0
+	raidz_reflow state=0 off=0
+        labels = 0 1 2 3 
+    Uberblock[30]
+	magic = 0000000000bab10c
+	version = 5000
+	txg = 4958
+	guid_sum = 3365034843304634015
+	timestamp = 1791627862 UTC = Sat Oct 10 10:24:22 2026
+	bp = DVA[0]=<1:6a1d5000:3000> DVA[1]=<2:2ced7000:3000> DVA[2]=<0:16a24000:1000> [L0 DMU objset] fletcher4 uncompressed unencrypted LE contiguous unique triple size=1000L/1000P birth=4958L/4958P fill=761 cksum=00000003556a11bd:00000ccb27af481e:0018933755fadf34:1f810aee7c22f155
+	mmp_magic = 00000000a11cea11
+	mmp_delay = 0
+	mmp_valid = 0
+	checkpoint_txg = 0
+	raidz_reflow state=0 off=0
+        labels = 0 1 2 3 
+    Uberblock[31]
+	magic = 0000000000bab10c
+	version = 5000
+	txg = 4799
+	guid_sum = 3365034843304634015
+	timestamp = 1791627862 UTC = Sat Oct 10 10:24:22 2026
+	bp = DVA[0]=<2:2c4a8000:3000> DVA[1]=<0:1645a000:1000> DVA[2]=<1:6907d000:3000> [L0 DMU objset] fletcher4 uncompressed unencrypted LE contiguous unique triple size=1000L/1000P birth=4799L/4799P fill=763 cksum=00000002dbbb81d6:00000afb49fa7919:00151e2b150f9db4:1b1a23a8908a5ba5
+	mmp_magic = 00000000a11cea11
+	mmp_delay = 0
+	mmp_valid = 0
+	checkpoint_txg = 0
+	raidz_reflow state=0 off=0
+        labels = 0 1 2 3 
