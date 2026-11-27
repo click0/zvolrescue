@@ -434,7 +434,7 @@ while pos < end:
 sys.exit(1)' "$1"
 }
 recipe_large() {
-    DESCRIPTION="A large volume of content ZFS compresses: \`vm/big\`, 10 GiB of 8K blocks with zstd — the disk of a database's machine, 256 MiB of its system (text), 128 MiB of media (the keystream) and the rest the database's preallocated pages, each a header and a trailer with nothing between, which ZFS keeps in the block pointer itself (\`embedded_data\`), every 64th a page of rows; then three runs of 4 MiB written over it, one across the volume's 4 GiB. Over 1.3 million blocks under four levels of indirect blocks (8K blocks: a level-2 block spans 8 GiB), offsets past 4 GiB in the volume and in its members, on a mirror of two 12 GiB members of which the pool fills a twentieth. Its manifests are held out of the regular runs, and its oracle has no \`zdb -dddddd\` (a line a block would be over a million) and of \`zdb -dddd\` each dataset's own line alone."
+    DESCRIPTION="A large volume of content ZFS compresses: \`vm/big\`, 10 GiB of 8K blocks with zstd — the disk of a database's machine, 256 MiB of its system (text), 128 MiB of media (the keystream) and the rest the database's preallocated pages, each a header and a trailer with nothing between, which ZFS keeps in the block pointer itself (\`embedded_data\`), every 64th a page of rows; then three runs of 4 MiB written over it, one across the volume's 4 GiB. Over 1.3 million blocks under four levels of indirect blocks (8K blocks: a level-2 block spans 8 GiB), offsets past 4 GiB in the volume and in its members, on a mirror of two 12 GiB members of which the pool fills a twentieth, its blocks spread over every metaslab as an old pool's are (\`zfs_metaslab_switch_threshold=0\` while it is written). Its manifests are held out of the regular runs, and its oracle has no \`zdb -dddddd\` (a line a block would be over a million) and of \`zdb -dddd\` each dataset's own line alone."
     ALL="mirror-0a mirror-0b"
     make_members 12G $ALL
     create mirror $(paths $ALL)
@@ -443,6 +443,11 @@ recipe_large() {
     DEEP=0
     rounds 0 1
     say "vm/big"
+    # A fresh pool fills its metaslabs one after another, and a twentieth
+    # of the space would sit in the first 4 GiB of each member; an old
+    # pool's blocks are everywhere. A metaslab given up after every
+    # allocation spreads them over all of them.
+    tunable zfs_metaslab_switch_threshold 0 metaslab.switch_threshold
     zfs create -s -V 10G -b 8K -o compression=zstd "$POOL/vm/big"
     dev=$(zvol_dev "$POOL/vm/big"); wait_dev "$dev"
     text big-system 268435456 | dd of="$dev" bs=1M conv=notrunc status=none
@@ -457,6 +462,7 @@ recipe_large() {
         stream "big-late@$at" 4194304 | dd of="$dev" bs=1M seek=$at conv=notrunc status=none
         txg_sync
     done
+    tunable zfs_metaslab_switch_threshold 2 metaslab.switch_threshold
     VOLS="$VOLS vm/big"
     feature_active zstd_compress
     feature_active embedded_data
