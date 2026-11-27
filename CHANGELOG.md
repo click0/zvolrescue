@@ -236,7 +236,16 @@ tagged. `v0.7.1` is the release that carries those six.
   the log device, and each device of a slot under replacement beside
   the one that stands for it — and the matrix reads every volume of a
   pool with a checkpoint again at the checkpoint's TXG, and the volume
-  destroyed after it without being told where.
+  destroyed after it without being told where. What their first builds
+  showed the matrix misjudging is judged right: the devices of a slot
+  under replacement where `zpool status` prints the slot, the vdevs of
+  the special, dedup and log classes under their sections and a
+  top-level vdev of one device by the layout, an array of one integer
+  as `zdb -l` prints it (`raidz_expand_txgs`), and a dataset `list`
+  says it could not read the kind of (`snapshot(unreadable)`) as said,
+  not as a wrong kind. A satellite's members are 256 MiB and its
+  volumes sparse: OpenZFS holds back up to 128 MiB of a pool as slop,
+  and the first builds of 128 MiB members ran out of space.
 
 ## v0.9.18 — 2026-11-25
 

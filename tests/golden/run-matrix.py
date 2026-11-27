@@ -614,7 +614,7 @@ class Oracle:
                 elif k == "ashift" and v.isdigit():
                     self.pool_facts.setdefault("ashift", []).append(int(v))
         zs = os.path.join(d, "zpool-status.txt")
-        self.status_tops = zpool_status_tops(open(zs, errors="replace").read()) if os.path.exists(zs) else {}
+        self.status_tops = zpool_status_tops(open(zs, errors="replace").read(), self.layout) if os.path.exists(zs) else {}
         self.zdb = ""
         zd = os.path.join(d, "zdb-dddd.txt")
         if os.path.exists(zd):
@@ -2201,6 +2201,14 @@ def compare_listing(want, doc, returncode):
     ('mismatch', ['p/v: missing, and nothing said of it'])
     >>> compare_listing({}, {"datasets": got["datasets"][:1]}, 0)
     ('mismatch', ['p: not at that txg'])
+
+    A dataset whose object set did not read is listed with its kind
+    `unreadable` (`snapshot(unreadable)`): what the tool says it could not
+    tell is not a kind it got wrong, and the listing is not all there is.
+
+    >>> got["datasets"][1].update(type="snapshot(unreadable)", creation_txg=9)
+    >>> compare_listing(want, got, 4)
+    ('incomplete (parts of the tree said unread)', [])
     """
     got = {d.get("name"): d for d in doc.get("datasets", [])}
     said = returncode == 4 and bool(doc.get("errors"))
@@ -2213,7 +2221,9 @@ def compare_listing(want, doc, returncode):
             else:
                 diffs.append(f"{name}: missing, and nothing said of it")
             continue
-        checks = [("kind", kind, ZDB_KIND.get(g.get("type"), g.get("type"))),
+        unread = g.get("type") in ("unreadable", "snapshot(unreadable)")
+        admitted |= unread
+        checks = [("kind", kind, kind if unread else ZDB_KIND.get(g.get("type"), g.get("type"))),
                   ("object", obj, g.get("object")),
                   ("creation txg", created, g.get("creation_txg")),
                   ("referenced", size, nicenum(g["referenced_bytes"])
@@ -2427,10 +2437,14 @@ def zdb_rings(text):
     return rings
 
 
-def zpool_status_tops(text):
+def zpool_status_tops(text, layout=None):
     """The top-level vdevs `zpool status` printed, by id: kind, parity,
     for a dRAID its data disks, children and spares, and the paths of
-    its leaves in order.
+    its leaves in order — a slot under replacement (`spare-2`,
+    `replacing-4`) its devices in its place. Those of the special, dedup
+    and log classes too, under their sections. A top-level vdev that is
+    one device is printed as its path alone, with no id: with the
+    layout, it is the top-level vdev the layout has that device in.
 
     >>> s = ("config:\\n\\n\\tNAME  STATE\\n\\tp  ONLINE\\n\\t  mirror-0  ONLINE\\n\\t    /a  ONLINE\\n"
     ...      "\\t    /b  ONLINE\\n\\t  draid1:2d:4c:1s-1  ONLINE\\n\\t    /c  ONLINE\\n\\tspares\\n\\t  draid1-1-0  AVAIL\\n")
@@ -2438,7 +2452,20 @@ def zpool_status_tops(text):
     {'kind': 'mirror', 'nparity': None, 'paths': ['/a', '/b']}
     >>> zpool_status_tops(s)[1]
     {'kind': 'draid', 'nparity': 1, 'draid_ndata': 2, 'children': 4, 'draid_nspares': 1, 'paths': ['/c']}
+    >>> s = ("config:\\n\\n\\tNAME  STATE\\n\\tp  DEGRADED\\n\\t  raidz2-0  DEGRADED\\n\\t    /a  ONLINE\\n"
+    ...      "\\t    spare-1  DEGRADED\\n\\t      /b  OFFLINE\\n\\t      /s  ONLINE\\n\\t    /c  ONLINE\\n"
+    ...      "\\tspecial\\n\\t  mirror-2  ONLINE\\n\\t    /d  ONLINE\\n\\t    /e  ONLINE\\n"
+    ...      "\\tlogs\\n\\t  /m/log.img  ONLINE\\n\\tspares\\n\\t  /s  INUSE\\n")
+    >>> lay = {"tops": [{"index": 3, "kind": "file", "members": ["t3-file-0"]}],
+    ...        "members": {"t3-file-0": {"file": "log.img"}}}
+    >>> t = zpool_status_tops(s, lay)
+    >>> sorted(t), t[0]["paths"], t[2]["kind"], t[3]
+    ([0, 2, 3], ['/a', '/b', '/s', '/c'], 'mirror', {'kind': 'file', 'nparity': None, 'paths': ['/m/log.img']})
     """
+    single = {}
+    for top in (layout or {}).get("tops", []):
+        if len(top.get("members", [])) == 1 and not top["kind"].startswith(("mirror", "raidz", "draid")):
+            single[layout["members"][top["members"][0]]["file"]] = top
     tops, cur, inside = {}, None, False
     for raw in text.splitlines():
         if raw.startswith("config:"):
@@ -2452,13 +2479,19 @@ def zpool_status_tops(text):
         depth = (len(body) - len(body.lstrip(" "))) // 2
         name = body.strip().split()[0] if body.strip() else ""
         if depth == 0:
-            # The pool's own line, the header, or a section (spares, logs):
-            # only what is under the pool's line is a top-level vdev.
+            # The pool's own line, the header, or a section: what is under
+            # the pool's line and under the classes' sections is a
+            # top-level vdev; a spare or a cache device is not.
             cur = None
-            inside = name not in ("spares", "logs", "cache", "special", "dedup")
+            inside = name not in ("spares", "cache")
             continue
         if depth == 1:
             m = re.match(r"^(mirror|raidz(\d)|draid(\d):(\d+)d:(\d+)c:(\d+)s)-(\d+)$", name)
+            top = single.get(os.path.basename(name))
+            if not m and top is not None:
+                tops[top["index"]] = {"kind": top["kind"], "nparity": None, "paths": [name]}
+                cur = None
+                continue
             if not m:
                 cur = None
                 continue
@@ -2472,6 +2505,10 @@ def zpool_status_tops(text):
             cur["paths"] = []
             tops[int(m.group(7))] = cur
         elif depth == 2 and cur is not None:
+            if re.fullmatch(r"(spare|replacing)-\d+", name):
+                continue          # a slot: its devices follow, a level down
+            cur["paths"].append(name)
+        elif depth == 3 and cur is not None and not re.fullmatch(r"draid\d+-\d+-\d+", name):
             cur["paths"].append(name)
     return tops
 
@@ -2481,7 +2518,17 @@ def nv_diff(want, got, at=""):
 
     >>> nv_diff({"a": 1, "t": {"c": [{"g": 7}, {"g": 8}]}}, {"a": 1, "t": {"c": [{"g": 7}, {"g": 9}]}, "x": 2})
     ['t.c[1].g: 8 != 9', 'x: null != 2']
+
+    `zdb -l` prints an array of integers as its values on one line, so
+    that an array of one is an integer to read and one of several a
+    string (`raidz_expand_txgs` of a raidz expanded once, and twice):
+
+    >>> nv_diff({"e": 181, "f": "181 250"}, {"e": [181], "f": [181, 250]}), nv_diff({"e": 182}, {"e": [181]})
+    ([], ['e: 182 != [181]'])
     """
+    if (isinstance(got, list) and not isinstance(want, (list, dict)) and want is not None
+            and all(isinstance(x, int) for x in got) and " ".join(map(str, got)) == str(want)):
+        return []
     if isinstance(want, dict) and isinstance(got, dict):
         out = []
         for k in sorted(set(want) | set(got)):

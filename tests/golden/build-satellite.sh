@@ -41,6 +41,9 @@ HISTORY_NOTE=""
 # shellcheck source=tests/golden/lib-build.sh
 . "$HERE/lib-build.sh"
 
+# Members of 256 MiB and sparse volumes: OpenZFS holds back up to 128 MiB
+# of a pool's space (its slop), which of a mirror of 128 MiB is half, and
+# a volume that is not sparse reserves the whole of its size besides.
 make_members() { # make_members SIZE NAME...
     size=$1; shift
     for m in "$@"; do truncate -s "$size" "$OUT/members/$m.img"; done
@@ -53,8 +56,8 @@ create() { # create VDEV-SPEC...: the pool, every satellite alike
 
 common_datasets() {
     zfs create "$POOL/vm"
-    zfs create -V 24M -b 8K  -o checksum=fletcher4 -o compression=lz4 "$POOL/vm/disk-8k"
-    zfs create -V 24M -b 16K -o checksum=sha256    -o compression=off "$POOL/vm/disk-16k"
+    zfs create -s -V 24M -b 8K  -o checksum=fletcher4 -o compression=lz4 "$POOL/vm/disk-8k"
+    zfs create -s -V 24M -b 16K -o checksum=sha256    -o compression=off "$POOL/vm/disk-16k"
     zfs create "$POOL/fs"
     VOLS="vm/disk-8k vm/disk-16k"
 }
@@ -117,7 +120,7 @@ feature_active() { # feature_active NAME: or the build is not the satellite it s
 recipe_removal() {
     DESCRIPTION="Three two-way mirrors, the middle one removed after round 1: what it held copied onto the other two and found through the mapping the removal leaves (\`com.delphix:device_removal\`, the indirect vdev \`indirect-1\`), the snapshots of rounds 0 and 1 read through it. The removed disks are no members of the pool any more, and not in the release."
     ALL="mirror-0a mirror-0b mirror-1a mirror-1b mirror-2a mirror-2b"
-    make_members 128M $ALL
+    make_members 256M $ALL
     create mirror $(paths mirror-0a mirror-0b) mirror $(paths mirror-1a mirror-1b) mirror $(paths mirror-2a mirror-2b)
     common_datasets; initial_fill
     at_round() {
@@ -137,10 +140,10 @@ recipe_removal() {
 recipe_checkpoint() {
     DESCRIPTION="One raidz1, checkpointed after round 1 (\`zpool checkpoint\`) and exported with the checkpoint in place: the volume \`vm/precious\` destroyed right after it, and rounds 2 and 3 written over the others. What the pool held at the checkpoint is every volume's \`@checkpoint\` hash in \`volumes.sha256\`, \`vm/precious\`'s among them; its TXG is \`checkpoint_txg\` in \`zdb-u-export.txt\`."
     ALL="raidz1-0 raidz1-1 raidz1-2"
-    make_members 128M $ALL
+    make_members 256M $ALL
     create raidz1 $(paths $ALL)
     common_datasets
-    zfs create -V 16M -b 16K -o checksum=sha256 -o compression=lz4 "$POOL/vm/precious"
+    zfs create -s -V 16M -b 16K -o checksum=sha256 -o compression=lz4 "$POOL/vm/precious"
     VOLS="$VOLS vm/precious"
     initial_fill
     at_round() {
@@ -164,7 +167,7 @@ recipe_checkpoint() {
 recipe_spare() {
     DESCRIPTION="One raidz2 of five disks with a hot spare: the third disk taken offline after round 0, written past for a round, and replaced by the spare after round 1 (\`spare-2\`, the spare resilvered whole, the disk left offline and stale); after round 2 the fifth disk replaced by a new one with the resilver held still (\`zfs_scan_suspend_progress\`), so that the pool is exported with \`replacing-4\` unfinished — the new disk holding only what was written after. Every device of both slots is a member (\`t0-raidz2-2.1\`, \`t0-raidz2-4.1\`)."
     ALL="raidz2-0 raidz2-1 raidz2-2 raidz2-3 raidz2-4 spare-0 new-0"
-    make_members 128M $ALL
+    make_members 256M $ALL
     create raidz2 $(paths raidz2-0 raidz2-1 raidz2-2 raidz2-3 raidz2-4) spare $(paths spare-0)
     common_datasets; initial_fill
     at_round() {
@@ -185,7 +188,7 @@ recipe_spare() {
 recipe_expand() {
     DESCRIPTION="One raidz1 of three disks expanded to four after round 1 (\`zpool attach\`, \`org.openzfs:raidz_expansion\`), the reflow waited for: the blocks born before it keep three disks' worth of columns laid over four, those after are four wide. zvolrescue does not read such a raidz and says so (SPEC F-70): the satellite is the case that holds it to that, and the pool a reader of it would be built against."
     ALL="raidz1-0 raidz1-1 raidz1-2 raidz1-3"
-    make_members 128M $ALL
+    make_members 256M $ALL
     create raidz1 $(paths raidz1-0 raidz1-1 raidz1-2)
     common_datasets; initial_fill
     at_round() {
@@ -201,22 +204,22 @@ recipe_expand() {
 
 recipe_special() {
     ALL="raidz1-0 raidz1-1 raidz1-2 special-0a special-0b dedup-0a dedup-0b"
-    make_members 128M raidz1-0 raidz1-1 raidz1-2
-    make_members 64M special-0a special-0b dedup-0a dedup-0b
+    make_members 256M raidz1-0 raidz1-1 raidz1-2
+    make_members 128M special-0a special-0b dedup-0a dedup-0b
     create raidz1 $(paths raidz1-0 raidz1-1 raidz1-2) special mirror $(paths special-0a special-0b) \
         dedup mirror $(paths dedup-0a dedup-0b)
     common_datasets
     zfs set special_small_blocks=16K "$POOL/fs"
     # A volume's blocks follow special_small_blocks where this OpenZFS
     # lets a volume have it.
-    if zfs create -V 16M -b 8K -o checksum=sha256 -o compression=lz4 -o special_small_blocks=8K "$POOL/vm/disk-small"; then
+    if zfs create -s -V 16M -b 8K -o checksum=sha256 -o compression=lz4 -o special_small_blocks=8K "$POOL/vm/disk-small"; then
         small="\`vm/disk-small\`, all of whose 8K blocks go there too"
     else
-        zfs create -V 16M -b 8K -o checksum=sha256 -o compression=lz4 "$POOL/vm/disk-small"
+        zfs create -s -V 16M -b 8K -o checksum=sha256 -o compression=lz4 "$POOL/vm/disk-small"
         small="\`vm/disk-small\`, of 8K blocks, which stay on the raidz: a volume takes no \`special_small_blocks\` on this OpenZFS"
     fi
     DESCRIPTION="One raidz1 with a special mirror and a dedup mirror beside it (\`org.zfsonlinux:allocation_classes\`): the metadata on the special vdev, and \`fs\`'s blocks up to 16K (\`special_small_blocks\`); $small; \`vm/disk-dedup\`, written the same 256 KiB at every offset with \`dedup=on\`, its table on the dedup vdev."
-    zfs create -V 24M -b 16K -o checksum=sha256 -o compression=off -o dedup=on "$POOL/vm/disk-dedup"
+    zfs create -s -V 24M -b 16K -o checksum=sha256 -o compression=off -o dedup=on "$POOL/vm/disk-dedup"
     VOLS="$VOLS vm/disk-small vm/disk-dedup"
     initial_fill
     feature_active allocation_classes
@@ -226,7 +229,7 @@ recipe_special() {
 recipe_ashift() {
     DESCRIPTION="Two raidz1 of three disks side by side, the first at ashift 9 and the second at 13 — the two sector sizes the golden image does not have, and two of them in one pool, where every top-level vdev has its own."
     ALL="raidz1a9-0 raidz1a9-1 raidz1a9-2 raidz1a13-0 raidz1a13-1 raidz1a13-2"
-    make_members 96M $ALL
+    make_members 192M $ALL
     ASHIFT=9
     create raidz1 $(paths raidz1a9-0 raidz1a9-1 raidz1a9-2)
     zpool add -f -o ashift=13 "$POOL" raidz1 $(paths raidz1a13-0 raidz1a13-1 raidz1a13-2)
@@ -239,11 +242,11 @@ recipe_ashift() {
 recipe_slog() {
     DESCRIPTION="A mirror with a separate intent log (\`log-0\`): after round 2 the pool frozen (\`zpool freeze\`, what the OpenZFS test suite does to the same end) and written to synchronously — 4 MiB of \`vm/disk-sync\` and files of \`fs\`, both \`sync=always\` — so that those writes are in the intent log alone, and exported so. What the members hold is the pool at the freeze: the volumes' \`@export\` hashes are taken right before it, and the oracle's readings of the exported pool are of it. \`vm/disk-sync@replayed\` is the same volume after an import that replays the log, on a copy of the members: what a reader that applies the log would give."
     ALL="mirror-0a mirror-0b log-0"
-    make_members 128M mirror-0a mirror-0b
-    make_members 64M log-0
+    make_members 256M mirror-0a mirror-0b
+    make_members 128M log-0
     create mirror $(paths mirror-0a mirror-0b) log $(paths log-0)
     common_datasets
-    zfs create -V 24M -b 8K -o checksum=fletcher4 -o compression=lz4 -o sync=always "$POOL/vm/disk-sync"
+    zfs create -s -V 24M -b 8K -o checksum=fletcher4 -o compression=lz4 -o sync=always "$POOL/vm/disk-sync"
     zfs set sync=always "$POOL/fs"
     VOLS="$VOLS vm/disk-sync"
     initial_fill
@@ -275,7 +278,7 @@ slog_replayed() {
 recipe_mmp() {
     DESCRIPTION="One mirror with \`multihost=on\`: between the rounds the pool left imported for seconds at a time, so that the heartbeat of multi-modifier protection writes its uberblocks — the TXG of the last sync, a newer timestamp, the MMP fields — into the rings."
     ALL="mirror-0a mirror-0b"
-    make_members 128M $ALL
+    make_members 256M $ALL
     [ -s /etc/hostid ] || zgenhostid
     CREATE_OPTS="-o multihost=on"
     create mirror $(paths $ALL)

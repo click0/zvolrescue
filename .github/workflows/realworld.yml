@@ -662,6 +662,11 @@ jobs:
           df -h /var/tmp | tail -n 1
       - name: The undamaged image first, every volume
         run: |
+          # A satellite's control manifest says what its volumes come to:
+          # an expanded raidz's are refused, and rightly.
+          if python3 -c 'import json, sys; sys.exit(0 if json.load(open(sys.argv[1])).get("satellite") else 1)' "$ORACLE/layout.json"; then
+            echo "a satellite: its control-sat-* manifest judges the undamaged image"; exit 0
+          fi
           cd /var/tmp/image
           members=$(ls members/*.img)
           rc=0
