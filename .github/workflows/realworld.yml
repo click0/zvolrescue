@@ -25,17 +25,18 @@ name: Real-world (kernel ZFS)
 #    tests/golden/build-image.sh on the runner's kernel ZFS, the whole
 #    damage matrix run over it, image and oracle uploaded for
 #    publication in zvolrescue-testdata (publish-golden.yml);
-#  * the published golden image: the release of zvolrescue-testdata that
-#    tests/golden/image-v1.SHA256SUMS pins, the matrix over it with the
-#    oracle from that repository — what SPEC §9.1 calls the CI job that
-#    fetches the image; also weekly, since an image that does not change
-#    makes a changed verdict the tool's.
+#  * the published golden images: each release of zvolrescue-testdata
+#    that a tests/golden/<tag>.SHA256SUMS pins (image-v1, golden-v2), the
+#    matrix over it with its oracle from that repository — what SPEC
+#    §9.1 calls the CI job that fetches the image; also weekly, since an
+#    image that does not change makes a changed verdict the tool's.
 #
 # Each job uploads the run's record (results, the row for the matrix,
 # the evidence log, every log of a failed scenario) whether it passed
 # or not; the job's own status is the script's exit code. The published
-# golden image's job keeps its report in zvolrescue-testdata as well,
-# as the next reports/<tag>-rN there, with publish-golden.yml's secret.
+# golden images' job keeps its report in zvolrescue-testdata as well,
+# as the next reports/<tag>-rN there, with publish-golden.yml's secret,
+# when the repository variable KEEP_REPORTS is `true`.
 
 on:
   workflow_dispatch:
@@ -478,19 +479,28 @@ jobs:
           if-no-files-found: warn
 
 
-  # The golden image as published (SPEC §9.1): the release of
-  # zvolrescue-testdata that tests/golden/image-v1.SHA256SUMS pins,
+  # The golden images as published (SPEC §9.1): each release of
+  # zvolrescue-testdata that a tests/golden/<tag>.SHA256SUMS pins,
   # fetched and checked against those sums, the oracle and the manifests
   # from that repository's checkout, the whole damage matrix over it with
   # every expectation enforced — the held-out manifests too when asked.
   # Runs weekly as well: the image never changes, so a verdict that
   # changes is the tool's doing.
   golden-published:
-    name: The published golden image (image-v1), the damage matrix over it (G2–G4)
+    name: The published golden image (${{ matrix.tag }}), the damage matrix over it (G2–G4)
     if: ${{ github.event_name == 'schedule' || !github.event.inputs.only || contains(github.event.inputs.only, 'published') }}
     runs-on: ubuntu-24.04
+    # Every published image this repository pins, each with its oracle's
+    # directory in zvolrescue-testdata: image-v1's is oracle/golden.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { tag: image-v1, oracle: golden }
+          - { tag: golden-v2, oracle: golden-v2 }
     env:
-      TAG: image-v1
+      TAG: ${{ matrix.tag }}
+      ORACLE: testdata/oracle/${{ matrix.oracle }}
       TESTDATA: click0/zvolrescue-testdata
     steps:
       - uses: actions/checkout@v5
@@ -504,21 +514,21 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /var/tmp/image/dl
-          key: golden-${{ env.TAG }}-${{ hashFiles('tests/golden/image-v1.SHA256SUMS') }}
+          key: golden-${{ env.TAG }}-${{ hashFiles(format('tests/golden/{0}.SHA256SUMS', matrix.tag)) }}
       - name: The release files, checked against the pinned sums, and the members out of them
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends zstd
           # The pin and the oracle's own record of the release agree.
-          cmp "tests/golden/$TAG.SHA256SUMS" "testdata/oracle/golden/SHA256SUMS-release.txt"
+          cmp "tests/golden/$TAG.SHA256SUMS" "$ORACLE/SHA256SUMS-release.txt"
           sudo mkdir -p /var/tmp/image && sudo chown -R "$USER" /var/tmp/image
           # What the manifests this run selects need, and no more: every
           # member, and the older copy of each member an older-self damage
-          # names (6 of the release's 10 for image-v1's manifests).
+          # names (6 of image-v1's 10; golden-v2's release holds those alone).
           held=""
           case "${{ github.event.inputs.only }}" in *held-out*) held=--held-out ;; esac
-          python3 tests/golden/run-matrix.py --print-needs --oracle testdata/oracle/golden \
+          python3 tests/golden/run-matrix.py --print-needs --oracle "$ORACLE" \
             --manifests testdata/manifests $held > /var/tmp/image/needs.txt
-          NEEDS=/var/tmp/image/needs.txt sh tests/golden/fetch-image.sh "$TAG" "tests/golden/$TAG.SHA256SUMS" /var/tmp/image testdata/oracle/golden/members.sha256
+          NEEDS=/var/tmp/image/needs.txt sh tests/golden/fetch-image.sh "$TAG" "tests/golden/$TAG.SHA256SUMS" /var/tmp/image "$ORACLE/members.sha256"
           df -h /var/tmp | tail -n 1
       - name: The undamaged image first, every volume
         run: |
@@ -527,9 +537,9 @@ jobs:
           rc=0
           while read -r sha name; do
             vol=${name%@export}
-            case $(awk -F'\t' -v v="$vol" '$1 == v && $2 == "keyformat" { print $3 }' "$GITHUB_WORKSPACE/testdata/oracle/golden/zfs-get-all.txt") in
-              raw) key="--key raw:$GITHUB_WORKSPACE/testdata/oracle/golden/keys/raw.key" ;;
-              passphrase) key="--key passphrase:$GITHUB_WORKSPACE/testdata/oracle/golden/keys/passphrase.txt" ;;
+            case $(awk -F'\t' -v v="$vol" '$1 == v && $2 == "keyformat" { print $3 }' "$GITHUB_WORKSPACE/$ORACLE/zfs-get-all.txt") in
+              raw) key="--key raw:$GITHUB_WORKSPACE/$ORACLE/keys/raw.key" ;;
+              passphrase) key="--key passphrase:$GITHUB_WORKSPACE/$ORACLE/keys/passphrase.txt" ;;
               *) key="" ;;
             esac
             set +e
@@ -539,7 +549,7 @@ jobs:
             if [ "$code" = 0 ] && [ "$got" = "$sha" ]; then echo "ok        $vol"
             else echo "FAIL ($code) $vol: $(tail -n 3 /var/tmp/baseline.err | tr '\n' ' ')"; rc=1; fi
             rm -f /var/tmp/baseline.img
-          done < <(grep '@export$' "$GITHUB_WORKSPACE/testdata/oracle/golden/volumes.sha256")
+          done < <(grep '@export$' "$GITHUB_WORKSPACE/$ORACLE/volumes.sha256")
           test "$rc" = 0
       - name: The damage matrix over it (G2, G3; G4 with held-out)
         run: |
@@ -549,7 +559,7 @@ jobs:
           set +e
           start=$(date +%s)
           python3 tests/golden/run-matrix.py \
-            --image /var/tmp/image/members --oracle testdata/oracle/golden \
+            --image /var/tmp/image/members --oracle "$ORACLE" \
             --manifests testdata/manifests --out /var/tmp/image/report --label "$TAG" \
             --tmp /var/tmp $held 2>&1 | tee /var/tmp/image/matrix.log
           rc=${PIPESTATUS[0]}

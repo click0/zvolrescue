@@ -213,6 +213,10 @@ tagged. `v0.7.1` is the release that carries those six.
   origin's snapshots up to the one it came of, under its own name — and
   a TXG `zvoltimeline` read in part counts for what it reports there:
   the first build of `golden-v2` had both read as the tool's defects.
+  `golden-v2` is published (the release of zvolrescue-testdata, 70 of
+  70 at its build), pinned in `tests/golden/golden-v2.SHA256SUMS`, and
+  `golden-published` runs the matrix over each published image, a job
+  each.
 
 ## v0.9.18 — 2026-11-25
 
