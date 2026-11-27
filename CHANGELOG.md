@@ -269,7 +269,11 @@ tagged. `v0.7.1` is the release that carries those six.
   `nofeatures` (`zpool create -d`, version 5000 with every feature
   disabled, a mirror) and `v28` (version 28, before feature flags, a
   raidz2), the last two compressing with lzjb; the `satellites` jobs
-  build them beside the eight.
+  build them beside the eight. The tool read all three whole at their
+  first build — the pool of version 28 too, at every TXG of its rings —
+  7 manifests of 7; they are published (`sat-compat20-v1`,
+  `sat-nofeatures-v1`, `sat-v28-v1`, 0.19 GB), pinned and judged every
+  week like the others.
 
 ## v0.9.18 — 2026-11-25
 

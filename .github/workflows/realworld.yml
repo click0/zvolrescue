@@ -31,7 +31,7 @@ name: Real-world (kernel ZFS)
 #    name it run over it, uploaded for publication the same way;
 #  * the published golden images: each release of zvolrescue-testdata
 #    that a tests/golden/<tag>.SHA256SUMS pins (image-v1, golden-v2, and
-#    the eight satellites sat-<name>-v1), the
+#    the satellites sat-<name>-v1), the
 #    matrix over it with its oracle from that repository — what SPEC
 #    §9.1 calls the CI job that fetches the image; also weekly, since an
 #    image that does not change makes a changed verdict the tool's.
@@ -638,6 +638,9 @@ jobs:
           - { tag: sat-ashift-v1, oracle: sat-ashift }
           - { tag: sat-slog-v1, oracle: sat-slog }
           - { tag: sat-mmp-v1, oracle: sat-mmp }
+          - { tag: sat-compat20-v1, oracle: sat-compat20 }
+          - { tag: sat-nofeatures-v1, oracle: sat-nofeatures }
+          - { tag: sat-v28-v1, oracle: sat-v28 }
     env:
       TAG: ${{ matrix.tag }}
       ORACLE: testdata/oracle/${{ matrix.oracle }}
