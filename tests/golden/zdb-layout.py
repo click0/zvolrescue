@@ -8,6 +8,14 @@ every top-level vdev `<kind>-<index>` (mirror-0a/0b for two-way mirrors,
 `raidz2-0`, `draid1-0`, …). Log, cache and spare devices are skipped: the
 damage matrix addresses pool members only. Nothing here consults
 zvolrescue — the layout is the oracle's own answer.
+
+With `--satellite` (build-satellite.sh), the layout is a satellite's — a
+small pool of one pool-level feature, which the manifests that name no
+pool are not run against — and every device the pool has is a member: a
+log device, and each device of a slot under replacement beside the one
+that stands for the slot (`<role>.<n>`, listed under the top-level
+vdev's `slot_devices`), since the hot spare or the replacing disk is
+where some of the slot's blocks are and where others are not.
 """
 import argparse
 import json
@@ -109,7 +117,9 @@ def groups(node):
     group, the raidz2; `mirror(f,f)` has one group, the mirror itself."""
     children = node.get("children", [])
     if not children:
-        return []
+        # A top-level vdev that is one device is a group of one; an
+        # indirect vdev (what a removal leaves) or a hole is none.
+        return [(node, [node])] if node.get("path") else []
     if all(is_leaf(c) for c in children):
         return [(node, children)]
     out = []
@@ -124,12 +134,15 @@ def main():
     ap.add_argument("--tag", required=True)
     ap.add_argument("--source", default="ztest")
     ap.add_argument("--volumes", action="store_true", help="the image has zvols (kernel-built)")
+    ap.add_argument("--satellite", action="store_true",
+                    help="a satellite pool: log devices and every device of a slot are members")
     args = ap.parse_args()
     root = parse(sys.stdin.read())
     ashift = None
     tops, members = [], {}
     for position, top in enumerate(root.get("children", [])):
-        if skip_reason(top):
+        reason = skip_reason(top)
+        if reason and not (args.satellite and reason == "log"):
             continue
         # A DVA names a top-level vdev by its `id`, which is what the
         # matrix matches against. Position in the list agrees with it
@@ -138,7 +151,7 @@ def main():
         top_index = int(top.get("id", position))
         ashift = ashift or top.get("ashift")
         gs = groups(top)
-        names = []
+        names, slots = [], {}
         for g_index, (group, leaf_nodes) in enumerate(gs):
             gk = kind_of(group)
             for i, leaf in enumerate(leaf_nodes):
@@ -153,6 +166,24 @@ def main():
                     "group_kind": gk,
                     "index": i,
                 }
+                if not args.satellite or leaf.get("type") not in SLOT_TYPES:
+                    continue
+                # The slot's other devices, in the order the pool lists
+                # them; a dRAID's distributed spare is no file.
+                others = [c for c in leaf.get("children", [])
+                          if c is not device and c.get("type") != "dspare" and c.get("path")]
+                for n, c in enumerate(others, 1):
+                    members[f"{role}.{n}"] = {
+                        "file": c["path"].rsplit("/", 1)[-1],
+                        "guid": c.get("guid", "0"),
+                        "top": top_index,
+                        "group": g_index,
+                        "group_kind": gk,
+                        "index": i,
+                        "slot": n,
+                        "slot_kind": leaf.get("type"),
+                    }
+                    slots.setdefault(role, []).append(f"{role}.{n}")
         top_entry = {
             "index": top_index,
             "kind": kind_of(top),
@@ -168,6 +199,12 @@ def main():
                 for g, lv in gs
             ],
         }
+        if slots:
+            top_entry["slot_devices"] = slots
+        if reason == "log":
+            top_entry["log"] = True
+        if top.get("alloc_bias"):
+            top_entry["alloc_bias"] = top["alloc_bias"]
         tops.append(top_entry)
     json.dump({
         "pool": args.pool,
@@ -175,6 +212,7 @@ def main():
         "source": args.source,
         "kernel": args.source != "ztest",
         "volumes": bool(args.volumes),
+        **({"satellite": True} if args.satellite else {}),
         "ashift": int(ashift) if ashift else 12,
         "tops": tops,
         "members": members,

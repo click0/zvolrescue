@@ -509,6 +509,16 @@ class Oracle:
                     self.hashes.setdefault(vol, {})[at] = f[0]
                     if at == "export":
                         self.volumes[vol] = f[0]
+        # A pool with a checkpoint (sat-checkpoint): its TXG, from the
+        # uberblock zdb read the exported pool at, and every volume's
+        # hash when it was taken.
+        self.at_checkpoint = {vol: at["checkpoint"] for vol, at in self.hashes.items() if "checkpoint" in at}
+        self.checkpoint_txg = None
+        ue = os.path.join(d, "zdb-u-export.txt")
+        if os.path.exists(ue):
+            self.checkpoint_txg = zdb_uberblock(open(ue, errors="replace").read()).get("checkpoint_txg") or None
+        if self.at_checkpoint and not self.checkpoint_txg:
+            raise SystemExit(f"{d}: volumes hashed at a checkpoint, and zdb-u-export.txt names no checkpoint_txg")
         self.destroyed = {}
         gone = os.path.join(d, "zfs-get-destroyed.txt")
         if os.path.exists(gone):
@@ -1626,17 +1636,20 @@ def judge_dump(args, oracle, manifest, members, work, assume=(), extra=(), key_m
     outcomes, redundancy = {}, False
     silent = silent_damage(oracle, manifest)
 
-    def bytes_outcome(vol, out, stdout):
-        if sha256_file(out) == oracle.volumes[vol]:
+    def bytes_outcome(vol, out, stdout, sha):
+        if sha256_file(out) == sha:
             return "ok"
         if silent and oracle.checksum_of(vol) == "off" and unverified_blocks(stdout):
             return UNVERIFIED
         return "hash mismatch"
-    for vol in volumes:
-        out = os.path.join(work, vol.replace("/", "_") + ".img")
+
+    def dump(vol, key_name, sha, txg=None, log_evidence=True):
+        nonlocal redundancy
+        out = os.path.join(work, key_name.replace("/", "_") + ".img")
         log = out + ".debug"
         cmd = [args.tool, "-q", "-f", "json", "--debug-log", log,
-               *(["--evidence-log", evidence] if evidence else []), "dump", vol, *members, "-o", out]
+               *(["--evidence-log", evidence] if evidence and log_evidence else []),
+               "dump", vol, *members, "-o", out, *(["--txg", str(txg)] if txg else [])]
         for path in assume:
             cmd += ["--assume-member", path]
         cmd += list(extra)
@@ -1653,27 +1666,40 @@ def judge_dump(args, oracle, manifest, members, work, assume=(), extra=(), key_m
             # Read whole at an older TXG than one that did not read:
             # exit 4 for that alone (SPEC F-10, F-20), and the bytes are
             # judged as an exit 0's are.
-            outcomes[vol] = bytes_outcome(vol, out, proc.stdout)
-            outcomes.setdefault("passed_over", {})[vol] = passed
+            outcomes[key_name] = bytes_outcome(vol, out, proc.stdout, sha)
+            outcomes.setdefault("passed_over", {})[key_name] = passed
         elif proc.returncode == 0 and os.path.exists(out):
-            outcomes[vol] = bytes_outcome(vol, out, proc.stdout)
+            outcomes[key_name] = bytes_outcome(vol, out, proc.stdout, sha)
             if said_passed_over(proc.stdout):
-                outcomes[vol] = "exit 0, a newer txg passed over"
+                outcomes[key_name] = "exit 0, a newer txg passed over"
         elif refusal(proc.returncode, proc.stderr):
-            outcomes[vol] = "refused"
+            outcomes[key_name] = "refused"
             # The reason, in the tool's words: a refusal where recovery
             # was expected is only diagnosable from it, and the debug
             # log is gone with the work directory.
             why = proc.stderr.strip().splitlines()
-            outcomes.setdefault("refused_detail", {})[vol] = (
+            outcomes.setdefault("refused_detail", {})[key_name] = (
                 f"exit {proc.returncode}: " + (why[-1][:200] if why else ""))
         elif proc.returncode == 4:
             # The tool says the image is not the whole volume. That is
             # neither a clean refusal nor an answer, so it is named
             # rather than folded into either.
-            outcomes[vol] = INCOMPLETE
+            outcomes[key_name] = INCOMPLETE
         else:
-            outcomes[vol] = f"exit {proc.returncode}: {proc.stderr.strip()[:160]}"
+            outcomes[key_name] = f"exit {proc.returncode}: {proc.stderr.strip()[:160]}"
+    for vol in volumes:
+        dump(vol, vol, oracle.volumes[vol])
+    # The pool checkpoint (`zpool checkpoint`, sat-checkpoint): every
+    # volume as it was when the checkpoint was taken (`@checkpoint` in
+    # volumes.sha256), read at its TXG; and one destroyed since, which
+    # the pool holds until the checkpoint is discarded, read without
+    # being told where — the checkpoint is the last place `dump` looks
+    # for a dataset (SPEC F-10). Not in the evidence log: the report is
+    # judged by the volumes as the pool is now.
+    if want == "all":
+        for vol, sha in sorted(oracle.at_checkpoint.items()):
+            dump(vol, f"{vol}@checkpoint", sha,
+                 txg=oracle.checkpoint_txg if vol in oracle.volumes else None, log_evidence=False)
     return outcomes, redundancy
 
 
@@ -2716,6 +2742,8 @@ def judge_report(args, oracle, outcomes, work, log, tamper=False):
         why = proc.stderr.strip().splitlines()
         return {"build": f"exit {proc.returncode}: {why[-1][:160] if why else ''}"}, {}
     rep = json.load(open(report))
+    # What was read at the pool checkpoint is not in the log (judge_dump).
+    outcomes = {k: v for k, v in outcomes.items() if not k.endswith("@checkpoint")}
     files = {}
     for vol in outcomes:
         out = os.path.join(work, vol.replace("/", "_") + ".img")
@@ -3091,14 +3119,23 @@ def extra_for_carver(extra):
 
 def for_this_image(oracle, manifest):
     """Whether a manifest is written for the image the oracle describes:
-    one naming no pool is written for any, one naming a pool for every
-    image of it, one naming an image's tag (`golden-v2`) for that image
-    alone — a case aimed at something only that image holds.
+    one naming no pool is written for any but a satellite, one naming a
+    pool for every image of it, one naming an image's tag (`golden-v2`)
+    for that image alone — a case aimed at something only that image
+    holds. A satellite (build-satellite.sh: a small pool of one
+    pool-level feature) runs only the manifests that name it: the rest
+    are written for pools of several top-level vdevs and every kind of
+    dataset, and say nothing of one that has a mirror and two volumes.
 
     >>> o = type("O", (), {"pool": "golden", "layout": {"image_tag": "golden-v2"}})()
     >>> [for_this_image(o, m) for m in ({}, {"image": "golden"}, {"image": "golden-v2"}, {"image": "image-v1"})]
     [True, True, True, False]
+    >>> s = type("O", (), {"pool": "sat-spare", "layout": {"image_tag": "sat-spare-v1", "satellite": True}})()
+    >>> [for_this_image(s, m) for m in ({}, {"image": "golden"}, {"image": "sat-spare"}, {"image": "sat-spare-v1"})]
+    [False, False, True, True]
     """
+    if "image" not in manifest and oracle.layout.get("satellite"):
+        return False
     return manifest.get("image", oracle.pool) in (oracle.pool, oracle.layout.get("image_tag"))
 
 
@@ -3410,7 +3447,8 @@ def main():
             continue
         r = {"id": manifest["id"], "description": manifest.get("description", ""),
              "expected": "—", "actual": "n/a", "verdict": "n/a", "inputs_unchanged": True,
-             "notes": [f"written for the pool {manifest['image']!r}, and this is {oracle.pool!r}"],
+             "notes": [f"written for the pool {manifest['image']!r}, and this is {oracle.pool!r}" if "image" in manifest
+                       else f"written for no pool in particular, and {oracle.pool!r} is a satellite"],
              "image": label}
         results.append(r)
         print(f"{label:<8} {r['verdict']:<10} {r['id']:<32} {r['notes'][0]}")

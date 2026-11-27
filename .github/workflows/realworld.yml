@@ -25,6 +25,10 @@ name: Real-world (kernel ZFS)
 #    tests/golden/build-image.sh on the runner's kernel ZFS, the whole
 #    damage matrix run over it, image and oracle uploaded for
 #    publication in zvolrescue-testdata (publish-golden.yml);
+#  * the satellites (zvolrescue-testdata ROADMAP, stage 2): a small pool
+#    for each pool-level feature the golden pool does not have, built by
+#    tests/golden/build-satellite.sh the same way, the manifests that
+#    name it run over it, uploaded for publication the same way;
 #  * the published golden images: each release of zvolrescue-testdata
 #    that a tests/golden/<tag>.SHA256SUMS pins (image-v1, golden-v2), the
 #    matrix over it with its oracle from that repository — what SPEC
@@ -42,7 +46,7 @@ on:
   workflow_dispatch:
     inputs:
       only:
-        description: "Which environments to run, any of: ubuntu debian freebsd mfsbsd golden published (empty: all); held-out in the value runs the held-out manifests too (golden-held-out, published-held-out)"
+        description: "Which environments to run, any of: ubuntu debian freebsd mfsbsd golden satellites (or sat-<name> for one) published (empty: all); held-out in the value runs the held-out manifests too (golden-held-out, published-held-out)"
         required: false
         default: ""
   schedule:
@@ -478,6 +482,132 @@ jobs:
           compression-level: 0
           if-no-files-found: warn
 
+
+  # The satellites of the golden image (zvolrescue-testdata ROADMAP,
+  # stage 2): a small pool for each pool-level feature the golden pool
+  # does not have, built by tests/golden/build-satellite.sh on the
+  # runner's kernel ZFS, the manifests that name it run over it, image
+  # and oracle uploaded for publication (publish-golden.yml, the tag
+  # sat-<name>-v1). `only: satellites` builds every one; `only: sat-spare
+  # sat-slog` those named.
+  satellite-list:
+    name: The satellites to build
+    if: ${{ github.event_name != 'schedule' && (!github.event.inputs.only || contains(github.event.inputs.only, 'sat')) }}
+    runs-on: ubuntu-24.04
+    outputs:
+      sats: ${{ steps.list.outputs.sats }}
+    steps:
+      - id: list
+        env:
+          ONLY: ${{ github.event.inputs.only }}
+        run: |
+          all="removal checkpoint spare expand special ashift slog mmp"
+          picked=""
+          for s in $all; do case " $ONLY " in *" sat-$s "*) picked="$picked $s" ;; esac; done
+          [ -n "$picked" ] || picked=$all
+          echo "sats=$(printf '%s\n' $picked | jq -R . | jq -sc .)" | tee -a "$GITHUB_OUTPUT"
+
+  satellites:
+    name: Satellite ${{ matrix.sat }} on the runner kernel, and its manifests
+    needs: satellite-list
+    runs-on: ubuntu-26.04
+    strategy:
+      fail-fast: false
+      matrix:
+        sat: ${{ fromJSON(needs.satellite-list.outputs.sats) }}
+    env:
+      SAT: ${{ matrix.sat }}
+      TAG: sat-${{ matrix.sat }}-v1
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          repository: click0/zvolrescue-testdata
+          path: testdata
+          sparse-checkout: manifests
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release -p zvolrescue -p zvolcarve -p zvolfiles -p zvoltimeline -p zvolreport && cargo build --release -p zfs-read --examples
+      - name: Kernel ZFS on the runner
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends zfsutils-linux zstd attr python3 openssl
+          sudo modprobe zfs || { sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)" && sudo modprobe zfs; }
+          zfs version
+          uname -r
+      - name: The satellite, and its oracle from OpenZFS
+        run: |
+          sudo sh tests/golden/build-satellite.sh /var/tmp/sat "$SAT" "$TAG" 2>&1 | tee /var/tmp/sat-build.log
+          test "${PIPESTATUS[0]}" = 0
+          sudo chown -R "$USER" /var/tmp/sat
+          du -sh /var/tmp/sat/members /var/tmp/sat/release /var/tmp/sat/oracle
+          cat /var/tmp/sat/release/SHA256SUMS
+          python3 -c 'import json; l = json.load(open("/var/tmp/sat/oracle/layout.json")); print(l["pool"], [(t["index"], t["kind"], t["members"], t.get("slot_devices"), t.get("log"), t.get("alloc_bias")) for t in l["tops"]])'
+          sed -n '/^config:/,/^errors:/p' /var/tmp/sat/oracle/zpool-status.txt
+          cat /var/tmp/sat/oracle/volumes.sha256
+          grep -E '^(feature@|capacity|allocated)' /var/tmp/sat/oracle/zpool-get-all.txt | grep -v disabled
+      - name: Every volume of the undamaged satellite, for the record
+        run: |
+          # The control manifest judges this; here are the tool's own
+          # words on stderr, which the matrix keeps only for a refusal.
+          cd /var/tmp/sat
+          members=$(ls members/*.img)
+          while read -r sha name; do
+            vol=${name%@export}
+            set +e
+            "$GITHUB_WORKSPACE/target/release/zvolrescue" -q dump "$vol" $members -o /var/tmp/baseline.img 2>/var/tmp/baseline.err; code=$?
+            set -e
+            got=$(sha256sum /var/tmp/baseline.img 2>/dev/null | cut -d' ' -f1)
+            if [ "$code" = 0 ] && [ "$got" = "$sha" ]; then echo "ok        $vol"
+            else echo "FAIL ($code) $vol: $(tail -n 3 /var/tmp/baseline.err | tr '\n' ' ')"; fi
+            rm -f /var/tmp/baseline.img
+          done < <(grep '@export$' oracle/volumes.sha256)
+          "$GITHUB_WORKSPACE/target/release/zvolrescue" scan $members | tail -n 25 || true
+          "$GITHUB_WORKSPACE/target/release/zvolrescue" list -r $members 2>&1 | tail -n 30 || true
+      - name: The manifests that name it
+        run: |
+          set -o pipefail
+          set +e
+          python3 tests/golden/run-matrix.py \
+            --image /var/tmp/sat/members --oracle /var/tmp/sat/oracle \
+            --manifests testdata/manifests --out /var/tmp/sat/report --label "$TAG" \
+            --tmp /var/tmp --held-out 2>&1 | tee /var/tmp/sat-matrix.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "run-matrix.py exit $rc"
+          python3 tests/golden/summarize-report.py "/var/tmp/sat/report/report-$TAG.json" \
+            "Satellite $TAG: its manifests" | tee -a "$GITHUB_STEP_SUMMARY"
+          test -s /var/tmp/sat/report/report-$TAG.json && python3 -c 'import json, sys; sys.exit(0 if json.load(open(sys.argv[1])) else 1)' "/var/tmp/sat/report/report-$TAG.json" ||
+            { echo "::error::no manifest names $TAG's pool"; exit 1; }
+          test "$rc" = 0 || { echo "::error::run-matrix.py exited $rc"; exit 1; }
+      - name: The satellite and its oracle, for zvolrescue-testdata
+        if: always()
+        run: |
+          sudo chown -R "$USER" /var/tmp/sat 2>/dev/null || true
+          mkdir -p /var/tmp/sat/text /var/tmp/sat/publish
+          cp -r /var/tmp/sat/oracle /var/tmp/sat/IMAGE.md /var/tmp/sat/text/ 2>/dev/null || true
+          cp /var/tmp/sat/release/SHA256SUMS /var/tmp/sat/text/ 2>/dev/null || true
+          cp /var/tmp/sat-build.log /var/tmp/sat/text/golden-build.log 2>/dev/null || true
+          cp -r /var/tmp/sat/report /var/tmp/sat/text/ 2>/dev/null || true
+          cp /var/tmp/sat-matrix.log /var/tmp/sat/text/report/golden-matrix.log 2>/dev/null || true
+          cp -r /var/tmp/sat/text/. /var/tmp/sat/publish/ 2>/dev/null || true
+          rm -f /var/tmp/sat/publish/SHA256SUMS
+          cp -al /var/tmp/sat/release /var/tmp/sat/publish/ 2>/dev/null || true
+          du -sh /var/tmp/sat/text /var/tmp/sat/publish || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: golden-${{ env.TAG }}-text
+          path: /var/tmp/sat/text
+          retention-days: 30
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: golden-${{ env.TAG }}
+          path: /var/tmp/sat/publish
+          retention-days: 14
+          compression-level: 0
+          if-no-files-found: warn
 
   # The golden images as published (SPEC §9.1): each release of
   # zvolrescue-testdata that a tests/golden/<tag>.SHA256SUMS pins,

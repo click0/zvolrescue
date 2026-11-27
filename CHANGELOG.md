@@ -217,6 +217,26 @@ tagged. `v0.7.1` is the release that carries those six.
   70 at its build), pinned in `tests/golden/golden-v2.SHA256SUMS`, and
   `golden-published` runs the matrix over each published image, a job
   each.
+* **The satellites of the golden image are built.**
+  `tests/golden/build-satellite.sh` builds a small pool for each
+  pool-level feature the golden pool does not have: three mirrors with
+  the middle one removed (the indirect vdev); a raidz1 exported with a
+  pool checkpoint, a volume destroyed after it; a raidz2 with a hot
+  spare standing in for a stale disk and a replacing left unfinished; a
+  raidz1 expanded from three disks to four; special and dedup vdevs; a
+  raidz1 at ashift 9 beside one at 13; a separate intent log holding
+  writes the pool never applied (`zpool freeze`), with the volume's hash
+  after a replay on a copy beside it; and `multihost=on`. Each with the
+  golden image's oracle, captured by the same code, now shared
+  (`tests/golden/lib-build.sh`; `build-image.sh` builds `golden-v2` as
+  before). The `satellites` jobs of `realworld.yml` build them
+  (`only: satellites`, or `sat-<name>` for one) and run the manifests
+  that name each; the manifests naming no pool are not run against a
+  satellite. `zdb-layout.py --satellite` makes every device a member —
+  the log device, and each device of a slot under replacement beside
+  the one that stands for it — and the matrix reads every volume of a
+  pool with a checkpoint again at the checkpoint's TXG, and the volume
+  destroyed after it without being told where.
 
 ## v0.9.18 — 2026-11-25
 
