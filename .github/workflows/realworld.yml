@@ -575,17 +575,24 @@ jobs:
       # with the secret publish-golden.yml uses (its header says how to
       # make it). A pass and a failure alike: a failing run's report is
       # the one most worth keeping. Nothing is kept from a branch other
-      # than main, from a run that wrote no report, or without the secret,
-      # and the step says which.
+      # than main, from a run that wrote no report, without the secret,
+      # or unless the repository variable KEEP_REPORTS is `true` (Settings
+      # → Secrets and variables → Actions → Variables): the secret is
+      # there for publish-golden.yml, and a commit to the test data every
+      # week is a choice of its own. The step says which.
       - name: The report, kept in zvolrescue-testdata
         if: always()
         env:
           TESTDATA_TOKEN: ${{ secrets.TESTDATA_TOKEN }}
+          KEEP_REPORTS: ${{ vars.KEEP_REPORTS }}
           ONLY: ${{ github.event.inputs.only }}
         run: |
           report=/var/tmp/image/report
           if [ "$GITHUB_REF" != refs/heads/main ]; then
             echo "a run of $GITHUB_REF: its report stays an artifact of the run"; exit 0
+          fi
+          if [ "$KEEP_REPORTS" != true ]; then
+            echo "::notice::the repository variable KEEP_REPORTS is not true: the report stays an artifact of this run, to be kept in zvolrescue-testdata by hand (tools/add-report.py there)"; exit 0
           fi
           if [ ! -f "$report/report-$TAG.json" ]; then
             echo "::notice::no report-$TAG.json: the matrix wrote no report, so none is kept"; exit 0

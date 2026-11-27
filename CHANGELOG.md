@@ -93,8 +93,11 @@ tagged. `v0.7.1` is the release that carries those six.
   zvolrescue-testdata as the next `reports/<tag>-rN` — laid out by that
   repository's `tools/add-report.py`, with a README naming the run, the
   commits and every case that was not a plain pass — and pushes it with
-  the token `publish-golden.yml` already uses; until then a report was
-  only an artifact of its run, gone when the run's artifacts expire.
+  the token `publish-golden.yml` already uses, when the repository
+  variable `KEEP_REPORTS` is `true`; until then a report was only an
+  artifact of its run, gone when the run's artifacts expire. The token is
+  there for publishing, so a commit to the test data every week is a
+  choice of its own.
 * **The oracle can say what the files of a published image hold, and
   what its pool's history is.** `oracle-capture.yml` takes `what =
   files-history`: on the ubuntu-26.04 runner the release's members,

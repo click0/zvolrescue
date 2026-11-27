@@ -14,7 +14,8 @@ name: Publish the golden image
 # alone, with repository permission Contents: read and write. GITHUB_TOKEN
 # cannot write to another repository, which is the whole reason for it.
 # realworld.yml's golden-published job keeps every run's report there
-# with the same secret.
+# with the same secret, when the repository variable KEEP_REPORTS is
+# `true`; without it the reports stay the runs' artifacts.
 # The testdata release may exist already (its tag made from the web with
 # nothing attached) or not: it is created as a draft, filled, checked and
 # published. A release that is already published and frozen by release
