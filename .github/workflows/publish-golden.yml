@@ -176,6 +176,10 @@ jobs:
             echo "| \`golden-matrix.log\` | the matrix's own log |"
             echo "| \`golden-build.log\` | the image builder's log |"
           } > "reports/$TAG/README.md"
+          # The coverage of the manifests counts those of every pool with
+          # an oracle here: with this one's, it is made again, or the
+          # repository's own check finds it stale.
+          if [ -f tools/coverage.py ]; then python3 tools/coverage.py .; fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           # The oracle whole, its keys included: the repository ignores

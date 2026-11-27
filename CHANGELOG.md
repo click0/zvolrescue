@@ -287,7 +287,12 @@ tagged. `v0.7.1` is the release that carries those six.
   in a FreeBSD 15 VM and runs its manifests on the runner (`only:
   sat-freebsd`), and `only` takes its environments as words now, so
   that `sat-freebsd` starts neither the FreeBSD kernel matrix nor the
-  other satellites.
+  other satellites. Made on FreeBSD 15.1 with OpenZFS 2.4.2, it passed
+  its 4 manifests at the first build — the tool given the whole disks
+  and finding the pool on them, the primary GPT of one zeroed among
+  them — and is published (`sat-freebsd-v1`, 45 MB), pinned and judged
+  every week. `publish-golden.yml` makes the test data's
+  `COVERAGE.md` again with the oracle it adds.
 
 ## v0.9.18 — 2026-11-25
 
