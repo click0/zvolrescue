@@ -7,7 +7,8 @@ use serde::Serialize;
 use zfs_ondisk::dmu::ObjsetType;
 use zfs_read::dmu::DnodeArray;
 use zfs_read::dsl::{
-    open_mos_at, read_properties, walk, Dataset, DatasetTree, Property, PropertyValue,
+    open_mos_at, pool_features, read_properties, walk, Dataset, DatasetTree, PoolFeature, Property,
+    PropertyValue,
 };
 use zfs_read::pool::{select_uberblock, Candidate, TxgSelect};
 use zfs_read::zio::{PoolReader, ReadError};
@@ -91,6 +92,33 @@ struct DiffOut {
 /// set, or the dataset tree under it, matches no block. What a sync
 /// leaves behind when its uberblocks reached the members and its MOS did
 /// not — or a ring slot forged outright. Passed over for an older one.
+/// One feature of the pool, as `list` reports it.
+#[derive(Debug, Serialize)]
+struct FeatureOut {
+    /// `org:name`, as the MOS keys it.
+    guid: String,
+    /// `active` when something holds it, `enabled` otherwise.
+    state: &'static str,
+    /// What holds it.
+    refcount: u64,
+    /// A pool that has it active cannot be read without it.
+    for_read: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enabled_txg: Option<u64>,
+}
+
+impl From<PoolFeature> for FeatureOut {
+    fn from(f: PoolFeature) -> Self {
+        FeatureOut {
+            state: if f.refcount > 0 { "active" } else { "enabled" },
+            guid: f.guid,
+            refcount: f.refcount,
+            for_read: f.for_read,
+            enabled_txg: f.enabled_txg,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct UnreadableAt {
     txg: u64,
@@ -133,6 +161,15 @@ struct ListOut {
     /// the removal left, and from the removed device where it is given.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     removed_since: Vec<u64>,
+    /// The features the pool has enabled at `txg`, from its MOS — what
+    /// `zpool get feature@…` reports as `active` (something holds it)
+    /// or `enabled` — by GUID. One not here is disabled.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    features: Vec<FeatureOut>,
+    /// Why the features could not be read, where they could not: the
+    /// listing does not depend on them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    features_error: Option<String>,
     datasets: Vec<DatasetOut>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     errors: Vec<String>,
@@ -243,6 +280,16 @@ fn print_text(out: &ListOut) {
             "  pool checkpoint: txg {txg} ({time}), the pool as it was then, kept whole: --txg {txg}"
         ),
         _ => {}
+    }
+    if !out.features.is_empty() {
+        let active = out.features.iter().filter(|f| f.state == "active").count();
+        outln!(
+            "  features: {active} active, {} enabled",
+            out.features.len() - active
+        );
+    }
+    if let Some(e) = &out.features_error {
+        outln!("  features: unreadable ({e})");
     }
     let width = out
         .datasets
@@ -562,6 +609,8 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
             checkpoint_time,
             unreadable_at: unreadable,
             removed_since: Vec::new(),
+            features: Vec::new(),
+            features_error: None,
             datasets: Vec::new(),
             errors: Vec::new(),
             diff: None,
@@ -584,6 +633,10 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
     if let (false, Some(said)) = (g.quiet, members.carved_said(chosen)) {
         errln!("zvolrescue: {said}");
     }
+    let (features, features_error) = match pool_features(&mos) {
+        Ok(fs) => (fs.into_iter().map(FeatureOut::from).collect(), None),
+        Err(e) => (Vec::new(), Some(e.to_string())),
+    };
     let mut out = ListOut {
         pool: pool.name.clone(),
         pool_guid: format!("{:#018x}", pool.guid),
@@ -597,6 +650,8 @@ pub fn run(g: &Global, spec: &PoolSpec, opts: &Options) -> u8 {
         checkpoint_time,
         unreadable_at: unreadable,
         removed_since,
+        features,
+        features_error,
         datasets: tree
             .datasets
             .iter()

@@ -43,6 +43,24 @@ tagged. `v0.7.1` is the release that carries those six.
   the newest. Now both end 4, and say why (SPEC F-10, F-20). The damage
   matrix judges such a run by its bytes and records what it passed over;
   a run that passes a TXG over and ends 0 is a defect.
+* **`zvolrescue scan --hints` reports the pool the layout gives.** The
+  layout was taken by `scan` for `--emit-label` alone: on members whose
+  label configurations are gone it reported no pool at all, while `list`
+  and `dump` read the pool whole through the same file. It now reports
+  the pool as read through the layout (`layout: "hints"`), in place of
+  what the labels assembled of it, its vdevs with the GUIDs of the
+  pool's own configuration in the MOS where that reads rather than the
+  layout's synthetic ones (SPEC F-65).
+* **A salted checksum with no salt is said to be that.** A block whose
+  checksum is `blake3`, `skein` or `edonr` is keyed with the pool's
+  salt, which is in the MOS object directory; where no MOS was read — a
+  carve with no uberblock left and no `--roots` — such a block could not
+  be verified and was refused as "checksum algorithm not supported
+  yet", of algorithms this build reads. It now says which algorithm,
+  that its salt is in a MOS that was not read, and that `--roots` gives
+  one a carve found. The damage matrix met it carving the golden image
+  with every uberblock ring gone: three volumes of eight, those with
+  salted checksums.
 
 ### Added
 
@@ -114,9 +132,41 @@ tagged. `v0.7.1` is the release that carries those six.
   uberblock zdb printed that verifies, and each top-level vdev it
   assembled, its kind, parity, dRAID geometry and GUID. The control
   case lists at every TXG of the ring zdb recorded, and each TXG at
-  which zdb's listing changes must be one `list` names. A listing, a
+  which zdb's listing changes must be one `list` names. The features
+  `list` reports are held against `zpool get feature@…` and the
+  refcounts zdb verified at the same TXG; every slot of every label's
+  uberblock ring against `zdb -lu`, and the uberblock of the exported
+  pool against `zdb -e -u`, both captured from the published members
+  (`oracle-capture.yml`, `what = labels-uberblocks`); the pool's version,
+  GUID and each vdev's ashift against `zdb -C`. A listing, a feature, a
   label, an uberblock or a vdev that says other than zdb read is a
   defect.
+* **The damage matrix judges `zvolreport` and `zvolcarve`.** Every
+  `dump` of a case writes to one evidence log, `zvolreport build` makes a
+  report of it and `zvolreport verify` checks it: what the report says
+  of each volume must be what the harness found — read whole with the
+  oracle's SHA-256, blocks zeroed and said so, refused and no
+  extraction, a TXG passed over in a warning — and all it records must
+  verify; on the control a byte of an output turned over must fail. On
+  the control, and on a case whose every volume `dump` refused,
+  `zvolcarve scan` looks for every volume dnode, and each live volume the
+  oracle hashes (the encrypted aside) must be among its newest
+  candidates of the same block size, carved at its size, by its bytes;
+  on the control a volume not found is unexpected.
+* **`zvolrescue list` reports the pool's features.** From the MOS at the
+  TXG listed, not from a label: `features` in the record names each by
+  its GUID, with the count of what holds it, whether a pool cannot be
+  read without it, and the TXG it was enabled in — `active` when
+  something holds it, `enabled` otherwise, what `zpool get feature@…`
+  reports — and the text says how many of each there are. A label's
+  `features_for_read` names only the active read-incompatible ones. On
+  the golden image all 47, 22 active, as `zpool get` gave them, each
+  refcount as zdb verified it (SPEC F-12).
+* **The oracle can be given every label's uberblock ring.**
+  `oracle-capture.yml` with `what = labels-uberblocks` takes `zdb -lu` of
+  every published member and `zdb -e -u` of the exported pool, offline,
+  the members' sums checked before and after: the image's builder kept
+  `zdb -l` without the rings, and `zdb -u` 21 TXGs before the export.
 
 ## v0.9.18 — 2026-11-25
 

@@ -36,7 +36,8 @@ def variants(source):
     if not body:
         raise SystemExit("zio.rs: no Display impl for ReadError")
     out = {}
-    for m in re.finditer(r"ReadError::(\w+)(?:\([^)]*\))?\s*=>\s*write!\(f,\s*\"([^\"]*)\"", body.group(0)):
+    # rustfmt breaks a long `write!` over lines: `write!(\n    f,\n    "…"`.
+    for m in re.finditer(r"ReadError::(\w+)(?:\([^)]*\))?\s*=>\s*write!\(\s*f,\s*\"([^\"]*)\"", body.group(0)):
         out[m.group(1)] = m.group(2)
     if not out:
         raise SystemExit("zio.rs: no variants found in the Display impl")

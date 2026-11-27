@@ -20,11 +20,11 @@ print()
 # The files, the history, the datasets listed and what scan read, where
 # the oracle had them to judge by.
 side = lambda r, k: r[k]["actual"] if k in r else "—"
-print("| Manifest | Expected | Actual | Files | Timeline | Datasets | Scan | Verdict |")
-print("|---|---|---|---|---|---|---|---|")
+print("| Manifest | Expected | Actual | Files | Timeline | Datasets | Scan | Report | Carve | Verdict |")
+print("|---|---|---|---|---|---|---|---|---|---|")
 for r in rs:
     cell = lambda t: str(t).replace("|", "\\|")
-    print(f"| `{r['id']}` | {cell(r['expected'])} | {r['actual']} | {side(r, 'files')} | {side(r, 'timeline')} | {side(r, 'datasets')} | {side(r, 'scan')} | {r['verdict']} |")
+    print(f"| `{r['id']}` | {cell(r['expected'])} | {r['actual']} | {side(r, 'files')} | {side(r, 'timeline')} | {side(r, 'datasets')} | {side(r, 'scan')} | {side(r, 'report')} | {side(r, 'carve')} | {r['verdict']} |")
 c = collections.Counter(r["verdict"] for r in rs)
 print()
 print(f"{len(rs)} manifests: " + ", ".join(f"{k} {v}" for k, v in sorted(c.items())))
@@ -50,7 +50,7 @@ for r in bad:
                 print(f"  - {vol}: {why}")
         elif v != "ok":
             print(f"  - {k}: {v}")
-    for k in ("files", "timeline", "datasets", "scan"):
+    for k in ("files", "timeline", "datasets", "scan", "report", "carve"):
         if r.get(k, {}).get("verdict", "pass") != "pass":
             print(f"  - {k}: expected {r[k]['expected']}, got {r[k]['actual']}")
             detail = r[k].get("detail") or {}

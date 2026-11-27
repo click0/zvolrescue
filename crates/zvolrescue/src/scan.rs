@@ -398,6 +398,11 @@ struct PoolOut {
     /// belonged, not evidence of it — nothing binds on this.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     name_hints: Vec<NameHintOut>,
+    /// `hints`: the pool as read through the layout `--hints` gave (SPEC
+    /// F-65), as `list` and `dump` read it with the same file, in place
+    /// of what the labels assembled of it; absent, the labels'.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    layout: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -662,6 +667,7 @@ fn pool_out(p: &PoolAssembly, paths: &[PathBuf], names: &[Vec<String>]) -> PoolO
         .collect();
     PoolOut {
         name_hints,
+        layout: None,
         name: p.name.clone(),
         guid: hex(p.guid),
         state: p.state.map(pool_state_name),
@@ -952,6 +958,9 @@ fn print_text(out: &ScanOut, verbose: u8) {
                 "NOT readable from scanned members"
             }
         );
+        if p.layout.is_some() {
+            outln!("  assembled through the layout in --hints, not from its labels (SPEC F-65)");
+        }
         for h in &p.hosts {
             outln!(
                 "  seen on host {:?} ({})",
@@ -1300,6 +1309,46 @@ fn geometry_path(label: &Path) -> PathBuf {
     PathBuf::from(p)
 }
 
+/// The GUIDs of a pool read through a layout, from its own configuration
+/// in the MOS: the layout names none, and the assembly made of it has
+/// synthetic ones in their place (`0x1117…`), which `scan` would report
+/// as the vdevs'. A top-level vdev or a leaf the configuration does not
+/// describe at the same place keeps its synthetic GUID.
+fn guids_from_config(pool: &mut zfs_read::pool::PoolAssembly, config: &zfs_ondisk::nvlist::NvList) {
+    let Some(tops) = config
+        .list("vdev_tree")
+        .and_then(|t| t.list_array("children"))
+    else {
+        return;
+    };
+    for top in &mut pool.tops {
+        let Some(c) = tops.iter().find(|c| c.u64("id") == Some(top.id)) else {
+            continue;
+        };
+        if let Some(g) = c.u64("guid") {
+            top.guid = g;
+            top.tree.guid = g;
+        }
+        // The leaves, where the configuration has them directly under the
+        // top-level vdev as the layout does: the tree and the members are
+        // matched by GUID, so both take the same one.
+        let leaves = c.list_array("children").unwrap_or(&[]);
+        if leaves.len() == top.members.len() && top.tree.children.len() == leaves.len() {
+            for ((m, node), l) in top
+                .members
+                .iter_mut()
+                .zip(top.tree.children.iter_mut())
+                .zip(leaves)
+            {
+                if let (Some(g), true) = (l.u64("guid"), node.guid == m.guid) {
+                    m.guid = g;
+                    node.guid = g;
+                }
+            }
+        }
+    }
+}
+
 /// Run `scan`.
 pub fn run(
     g: &Global,
@@ -1462,10 +1511,54 @@ pub fn run(
             pool.note_removed_tops(removed);
         }
     }
+    // A layout given by hand is how `list` and `dump` read the pool with
+    // the same file (SPEC F-65), and `scan --hints` reported only what
+    // the labels assembled — no pool at all on members whose label
+    // configurations are gone, where the others read it whole. The pool
+    // read through the layout takes the place of the labels' account of
+    // it, the members where the hints place them.
+    let mut hinted_at = None;
+    if let Some(Ok(hints)) = emit
+        .hints
+        .as_ref()
+        .map(|f| zvol_common::hints::load(f, devices))
+    {
+        let opened: Vec<Option<&dyn BlockSource>> = sources
+            .iter()
+            .map(|s| s.as_ref().map(|s| s as &dyn BlockSource))
+            .collect();
+        let mut at: Vec<u64> = scans
+            .iter()
+            .map(|s| s.as_ref().map_or(0, |s| s.base))
+            .collect();
+        zvol_common::members::place_hinted(&hints.bases, &mut scans, &opened, &mut at);
+        match zvol_common::members::identify_hinted(hints.layout, &scans, &opened, &at, &[]) {
+            Ok(h) => {
+                let mut pool = h.pool;
+                if let Some(config) = &h.config {
+                    guids_from_config(&mut pool, config);
+                }
+                let removed = removed_tops_of(&scans, opened.clone(), &at, &pool, &[]);
+                pool.note_removed_tops(removed);
+                assembled.retain(|p| p.guid != pool.guid && p.name != pool.name);
+                assembled.insert(0, pool);
+                hinted_at = Some(0);
+            }
+            Err(e) => errln!("zvolrescue: {e}"),
+        }
+    }
     let names: Vec<Vec<String>> = outs.iter().map(device_names).collect();
     let pools: Vec<PoolOut> = assembled
         .iter()
-        .map(|p| pool_out(p, devices, &names))
+        .enumerate()
+        .map(|(i, p)| {
+            let mut out = pool_out(p, devices, &names);
+            if hinted_at == Some(i) {
+                out.layout = Some("hints");
+                out.vdev_children = out.vdev_children.or(Some(p.tops.len() as u64));
+            }
+            out
+        })
         .collect();
     let out = ScanOut {
         devices: outs,

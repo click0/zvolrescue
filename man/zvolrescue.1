@@ -282,6 +282,15 @@ The front pair needs no hypothesis.
 Describe the layout by hand: the JSON template that
 .Fl -emit-label
 turns into a label.
+The pool is reported as read through it, as
+.Cm list
+and
+.Cm dump
+read it with the same file, in place of what the labels assembled of
+it, and the record says so
+.Pq Ql layout: \(dqhints\(dq ;
+its vdevs carry the GUIDs of the pool's own configuration in the MOS
+where that reads.
 A file that is no layout is refused with exit status 1 before anything
 is scanned, with or without
 .Fl -emit-label .
@@ -403,6 +412,19 @@ without
 .Fl -txg
 looks for the dataset there last, and says when that is where it found
 it.
+.Pp
+The pool's features at the TXG listed come from its MOS, not from a
+label:
+.Ql features
+in the record names each by its GUID, with the count of what holds it
+and the TXG it was enabled in, as
+.Ql active
+when something holds it and
+.Ql enabled
+otherwise \(em what
+.Ql zpool get feature@...
+reports.
+The text says how many there are of each.
 A checkpoint that was discarded is not looked for.
 With
 .Fl -roots

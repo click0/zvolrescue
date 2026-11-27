@@ -333,6 +333,11 @@ pub enum ReadError {
     /// Checksum algorithm not implemented; data returned unverified only
     /// when the caller asked for that.
     ChecksumUnsupported,
+    /// A salted checksum (`blake3`, `skein`, `edonr`, keyed with the
+    /// pool's salt) and no salt known: the salt is in the MOS object
+    /// directory, and no MOS was read — a carve with no uberblock and no
+    /// `--roots`. "Not supported" said of an algorithm this build reads.
+    ChecksumNoSalt(String),
     /// The copy verified but is ciphertext of an encrypted dataset and no
     /// key is installed.
     Encrypted,
@@ -357,6 +362,10 @@ impl fmt::Display for ReadError {
             ReadError::Hole => write!(f, "block pointer is a hole"),
             ReadError::Decompress(e) => write!(f, "{e}"),
             ReadError::ChecksumUnsupported => write!(f, "checksum algorithm not supported yet"),
+            ReadError::ChecksumNoSalt(k) => write!(
+                f,
+                "{k} checksum: keyed with the pool's salt, which is in its MOS, and no MOS was read (--roots gives one a carve found)"
+            ),
             ReadError::Encrypted => write!(f, "encrypted block: no key"),
             ReadError::Crypt(e) => write!(f, "decrypt: {e}"),
         }
@@ -656,6 +665,20 @@ impl<'a> PoolReader<'a> {
     /// The pool checksum salt, if known.
     pub fn salt(&self) -> Option<Salt> {
         self.salt.get()
+    }
+
+    /// What a block no copy of which could be verified is refused for:
+    /// an algorithm this build lacks, or a salted one whose salt is not
+    /// known.
+    fn unverifiable(&self, kind: zfs_ondisk::blkptr::Checksum) -> ReadError {
+        use zfs_ondisk::blkptr::Checksum;
+        if matches!(kind, Checksum::Blake3 | Checksum::Skein | Checksum::Edonr)
+            && self.salt.get().is_none()
+        {
+            ReadError::ChecksumNoSalt(kind.name())
+        } else {
+            ReadError::ChecksumUnsupported
+        }
     }
 
     /// Install (or clear) the dataset keys used to decrypt ciphertext
@@ -1619,7 +1642,7 @@ impl<'a> PoolReader<'a> {
             // Nothing tells a good column from a bad one: refused, as a
             // disk or a mirror refuses it. Taken as read it was written
             // and counted as verified, and no parity was tried.
-            Verify::Unsupported => return Err(ReadError::ChecksumUnsupported),
+            Verify::Unsupported => return Err(self.unverifiable(bp.checksum)),
             Verify::Mismatch => {}
         }
         // The block as its other sides have it, where a child has more
@@ -1807,7 +1830,7 @@ impl<'a> PoolReader<'a> {
                         });
                         match v {
                             Verify::Ok | Verify::NotChecked => Ok((raw, v)),
-                            Verify::Unsupported => Err(ReadError::ChecksumUnsupported),
+                            Verify::Unsupported => Err(self.unverifiable(bp.checksum)),
                             Verify::Mismatch => Err(ReadError::AllCopiesBad),
                         }
                     }
@@ -1889,7 +1912,7 @@ impl<'a> PoolReader<'a> {
                             });
                             return Ok((raw, v));
                         }
-                        Verify::Unsupported => last = ReadError::ChecksumUnsupported,
+                        Verify::Unsupported => last = self.unverifiable(bp.checksum),
                         Verify::Mismatch => last = ReadError::AllCopiesBad,
                     }
                     Ok(v)
@@ -2096,7 +2119,7 @@ impl<'a> PoolReader<'a> {
                         match v {
                             Verify::Ok | Verify::NotChecked => return Ok(raw),
                             Verify::Mismatch => last = ReadError::AllCopiesBad,
-                            Verify::Unsupported => last = ReadError::ChecksumUnsupported,
+                            Verify::Unsupported => last = self.unverifiable(bp.checksum),
                         }
                     }
                     Err(e) => {
@@ -2225,7 +2248,7 @@ impl<'a> PoolReader<'a> {
                     .iter()
                     .any(|a| matches!(a.result, Ok(Verify::Unsupported)))
                 {
-                    return Err(ReadError::ChecksumUnsupported);
+                    return Err(self.unverifiable(bp.checksum));
                 }
                 if attempts
                     .iter()
@@ -2665,10 +2688,12 @@ mod tests {
                 .map(|s| Some(s as &dyn BlockSource))
                 .collect();
             let reader = PoolReader::new(&a, devs);
+            // A salted checksum with no salt known: refused, and said so
+            // as that rather than as an algorithm this build lacks.
             assert!(
                 matches!(
                     reader.read_block(&bp, false),
-                    Err(ReadError::ChecksumUnsupported)
+                    Err(ReadError::ChecksumNoSalt(ref k)) if k == "blake3"
                 ),
                 "damaged column {damaged:?}"
             );

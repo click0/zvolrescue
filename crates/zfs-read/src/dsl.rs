@@ -37,6 +37,12 @@ pub const CONFIG: &str = "config";
 /// Object-directory entry naming the ZAP of read-incompatible features,
 /// each with the number of things that hold it active.
 pub const FEATURES_FOR_READ: &str = "features_for_read";
+/// Object-directory entry naming the ZAP of the features a pool can be
+/// read without, each with the number of things that hold it active.
+pub const FEATURES_FOR_WRITE: &str = "features_for_write";
+/// Object-directory entry naming the ZAP of the transaction group each
+/// feature was enabled in (`com.delphix:enabled_txg`).
+pub const FEATURE_ENABLED_TXG: &str = "feature_enabled_txg";
 /// Object-directory entry holding the uberblock a pool checkpoint put
 /// aside (`DMU_POOL_ZPOOL_CHECKPOINT`): `uberblock_t` as an array of
 /// 64-bit words.
@@ -535,6 +541,61 @@ fn learn_features(
             "features_for_read (object {obj}) unreadable: gang headers stay 512 bytes: {e}"
         ),
     }
+}
+
+/// One feature a pool has enabled, as its MOS records it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PoolFeature {
+    /// Its GUID, `org:name` (`com.delphix:async_destroy`).
+    pub guid: String,
+    /// What holds it active; 0 is enabled and not in use.
+    pub refcount: u64,
+    /// Whether a pool that has it active cannot be read without it
+    /// (`features_for_read`, against `features_for_write`).
+    pub for_read: bool,
+    /// The transaction group it was enabled in, where the pool keeps
+    /// that (`feature_enabled_txg`).
+    pub enabled_txg: Option<u64>,
+}
+
+/// Every feature the pool has enabled, from the MOS at the transaction
+/// group it was opened at: `features_for_read` and `features_for_write`,
+/// each a ZAP of a feature's GUID and the count of what holds it active
+/// — one that is not in either is disabled. This is what `zpool get
+/// feature@…` reports as `active` or `enabled`, read from the pool and
+/// not from a label. A pool from before feature flags (version < 5000)
+/// has neither, and none.
+pub fn pool_features(mos: &DnodeArray<'_, '_>) -> Result<Vec<PoolFeature>, ReadError> {
+    let dir = object_directory(mos)?;
+    let find = |name: &str| dir.iter().find(|(n, _)| n == name).map(|(_, o)| *o);
+    let enabled_txg: Vec<(String, u64)> = match find(FEATURE_ENABLED_TXG) {
+        Some(obj) => read_zap(&mos.object(obj)?)?
+            .into_iter()
+            .filter_map(|e| e.value.as_u64().map(|v| (e.name, v)))
+            .collect(),
+        None => Vec::new(),
+    };
+    let mut out = Vec::new();
+    for (name, for_read) in [(FEATURES_FOR_READ, true), (FEATURES_FOR_WRITE, false)] {
+        let Some(obj) = find(name) else { continue };
+        for e in read_zap(&mos.object(obj)?)? {
+            let Some(refcount) = e.value.as_u64() else {
+                return Err(ReadError::Io(format!("{name}: {} is not a count", e.name)));
+            };
+            let txg = enabled_txg
+                .iter()
+                .find(|(n, _)| *n == e.name)
+                .map(|(_, t)| *t);
+            out.push(PoolFeature {
+                guid: e.name,
+                refcount,
+                for_read,
+                enabled_txg: txg,
+            });
+        }
+    }
+    out.sort_by(|a, b| a.guid.cmp(&b.guid));
+    Ok(out)
 }
 
 /// The same, from an objset already in hand rather than one reached
@@ -1645,7 +1706,15 @@ mod tests {
         )
         .unwrap();
         assert!(r.aborted);
-        assert!(r.bad[0].reason.contains("checksum algorithm not supported"));
+        // And it says why: the algorithm is read here, the salt is what
+        // is missing. It said "not supported yet".
+        assert!(
+            r.bad[0]
+                .reason
+                .contains("blake3 checksum: keyed with the pool's salt"),
+            "{}",
+            r.bad[0].reason
+        );
     }
 }
 
@@ -2491,5 +2560,51 @@ mod mos_features_tests {
         let ub = uberblock_candidates(&scans, &pool).remove(0).ub;
         open_mos(&reader, &ub).expect("the MOS opens");
         assert!(!reader.dynamic_gang());
+    }
+
+    /// The features the MOS lists are what `pool_features` gives: each
+    /// with the count of what holds it, read-incompatible where it is in
+    /// `features_for_read`; a pool whose object directory names no such
+    /// ZAP has none.
+    #[test]
+    fn the_features_are_the_mos_features_with_their_counts() {
+        for count in [0, 3] {
+            let (sources, _) = pool_with(count);
+            let scans: Vec<_> = sources.iter().map(|s| scan_device(s).ok()).collect();
+            let pool = assemble(&scans).into_iter().next().expect("one pool");
+            let devices: Vec<Option<&dyn BlockSource>> = sources
+                .iter()
+                .map(|s| Some(s as &dyn BlockSource))
+                .collect();
+            let reader = PoolReader::new(&pool, devices);
+            let ub = uberblock_candidates(&scans, &pool).remove(0).ub;
+            let mos = open_mos(&reader, &ub).expect("the MOS opens");
+            assert_eq!(
+                pool_features(&mos).expect("the features read"),
+                vec![PoolFeature {
+                    guid: DGH.into(),
+                    refcount: count,
+                    for_read: true,
+                    enabled_txg: None,
+                }]
+            );
+        }
+        let mut pool = Pool::mirror("tank", 0x9a9a, 12).txgs(&[(100, 1)]);
+        let mut images: Vec<Vec<u8>> = (0..2).map(|_| vec![0u8; SIZE as usize]).collect();
+        build_sample_mos(&mut pool, &mut images, &mut Alloc::new(0x20_0000));
+        for (i, img) in images.iter_mut().enumerate() {
+            pool.write_labels(i, img);
+        }
+        let sources: Vec<MemSource> = images.into_iter().map(MemSource::new).collect();
+        let scans: Vec<_> = sources.iter().map(|s| scan_device(s).ok()).collect();
+        let pool = assemble(&scans).into_iter().next().expect("one pool");
+        let devices: Vec<Option<&dyn BlockSource>> = sources
+            .iter()
+            .map(|s| Some(s as &dyn BlockSource))
+            .collect();
+        let reader = PoolReader::new(&pool, devices);
+        let ub = uberblock_candidates(&scans, &pool).remove(0).ub;
+        let mos = open_mos(&reader, &ub).expect("the MOS opens");
+        assert_eq!(pool_features(&mos).expect("read"), vec![]);
     }
 }

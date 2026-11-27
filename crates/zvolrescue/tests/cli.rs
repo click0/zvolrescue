@@ -257,6 +257,76 @@ fn a_pool_no_label_names_is_named_by_its_mos() {
     assert_eq!(json(&out)["pool"], "tank", "{out}");
 }
 
+/// `scan --hints` reports the pool as `list` and `dump` read it through
+/// the same layout: on members whose label configurations are gone it
+/// reported no pool at all, where the others read it whole. (Where the
+/// pool's own configuration in the MOS describes its vdevs, they carry
+/// its GUIDs, not the layout's synthetic ones; this fixture's describes
+/// none, and the damage matrix holds the golden image's to `zdb -l`.)
+#[test]
+fn scan_reports_the_pool_the_hints_lay_out() {
+    let dir = scratch("scan-hints-pool");
+    let mut pool = Pool::mirror("tank", 0x4242, 12).txgs(&[(100, 1)]);
+    let mut members = removed_vdev_members(&mut pool, SIZE);
+    for m in &mut members {
+        wipe_configs(m);
+    }
+    let paths = write_members(&dir, &members);
+    let scan = |hints: Option<&std::path::Path>| {
+        let mut args = vec![
+            "-q".to_string(),
+            "-f".into(),
+            "json".into(),
+            "scan".into(),
+            paths[0].clone(),
+            paths[1].clone(),
+        ];
+        if let Some(h) = hints {
+            args.extend(["--hints".into(), h.to_string_lossy().into_owned()]);
+        }
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        run(&args)
+    };
+    let (code, out, err) = scan(None);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(json(&out)["pools"], serde_json::json!([]), "{out}");
+    let hints = dir.join("layout.hints");
+    std::fs::write(
+        &hints,
+        serde_json::json!({"ashift": 12,
+            "tops": [{"kind": "mirror", "members": [&paths[0], &paths[1]]}]})
+        .to_string(),
+    )
+    .unwrap();
+    let (code, out, err) = scan(Some(&hints));
+    assert_eq!(code, 0, "{err}");
+    let v = json(&out);
+    let pool = &v["pools"][0];
+    assert_eq!(pool["layout"], "hints", "{out}");
+    assert_eq!(pool["name"], "tank", "{out}");
+    assert_eq!(pool["readable"], true, "{out}");
+    assert_eq!(pool["vdev_children"], 1, "{out}");
+    assert_eq!(pool["tops"][0]["kind"], "mirror", "{out}");
+    assert_eq!(
+        pool["tops"][0]["members"].as_array().unwrap().len(),
+        2,
+        "{out}"
+    );
+    let (code, text, err) = run(&[
+        "-q",
+        "scan",
+        &paths[0],
+        &paths[1],
+        "--hints",
+        &hints.to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        text.contains("assembled through the layout in --hints, not from its labels"),
+        "{text}"
+    );
+}
+
 /// A member given twice — by its path and by a link to it — is read
 /// once, and said; and a member given two maps is refused, where the
 /// second was passed over for the first without a word.

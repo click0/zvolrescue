@@ -120,10 +120,15 @@ has a record for: the files `zvolfiles` extracts against the kernel's
 reading of each filesystem, the history `zvoltimeline` gives against
 `zpool history -il`, the datasets `list` names against `zdb -t T -d` at
 the TXG it listed at (on the control case at every TXG of the ring zdb
-recorded), and what `scan` read of each member's label, of the
-uberblock and of the pool's top-level vdevs against `zdb -l`, `zdb -u`
-and `zpool status`. A wrong answer in any of them makes the run a
-defect.
+recorded), the pool's features it reports against `zpool get` and the
+refcounts zdb verified, and what `scan` read of each member's label,
+of every slot of its uberblock rings and of the pool's top-level vdevs
+against `zdb -l`, `zdb -lu`, `zdb -u` and `zpool status`. The report
+`zvolreport` builds of a case's evidence log must say of each volume
+what the harness found and verify; where carving is what is left — the
+control, a case whose every volume `dump` refused — `zvolcarve` must
+find each live volume by its bytes. A wrong answer in any of them makes
+the run a defect.
 
 | ID | Scenario | Expected |
 |---|---|---|

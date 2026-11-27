@@ -57,19 +57,36 @@ number, creation TXG and referenced size as zdb prints it, and nothing
 zdb does not name. A listing zdb contradicts is a defect; one that ends
 4 naming the parts of the tree it could not read is partial. The
 control lists at every TXG it can read that zdb recorded (`--txg`), and
-each TXG at which zdb's listing changes must be one `list` names.
+each TXG at which zdb's listing changes must be one `list` names. The
+features it reports are held against `zpool get feature@`
+(`zpool-get-all.txt`) and the refcounts zdb verified at the same TXG.
 
 Where the oracle has `zdb -l` of each member (`labels/`), `zdb -u` and
 `zpool status`, every case also holds `scan -vv` against them: the
 nvlist of the label it read of each member, every key but the state and
 the TXG it was written at — an older copy of a member says otherwise of
 those — and on the control those too, with all four labels read; every
-copy of the uberblock `zdb -u` printed that verifies, its version, GUID
-sum, timestamp, root block's birth and checkpoint TXG; each top-level
+copy of the uberblocks `zdb -u` printed (`zdb-u.txt`, and of the
+exported pool `zdb-u-export.txt`) that verifies, its version, GUID sum,
+timestamp, root block's birth and checkpoint TXG; every slot of every
+label's ring that verifies against what `zdb -lu` printed of that slot
+(`labels-uberblocks/`), unless it holds another TXG — a slot forged, an
+older copy of a member — and on the control every slot; each top-level
 vdev it assembled, its kind, parity, dRAID geometry, GUID and number of
-leaves, and on the control their paths. A label or an uberblock that
+leaves, the pool's version, GUID and ashifts against `zdb -C`
+(`pool-facts.txt`), and on the control their paths. A label or an uberblock that
 verifies and says other than zdb read, or a top-level vdev assembled
 otherwise, is a defect; a member none of whose labels read, refused.
+
+Every `dump` of a case writes to one evidence log, and `zvolreport`
+builds a report of it and verifies it: what the report says of each
+volume must be what the harness found, and everything it records must
+verify — on the control, and fail where a byte of an output is turned
+over. On the control, and on a case whose every volume `dump` refused,
+`zvolcarve scan` looks for every volume dnode, and each live volume the
+oracle hashes, the encrypted ones aside, must be found by its bytes
+among the newest candidates of its block size carved at its size; on
+the control one not found is unexpected.
 
 A manifest that names its pool (`image = "<pool>"`, the name the
 oracle's `layout.json` gives) runs against that pool alone; one that
@@ -80,6 +97,7 @@ rest, and the older copy of each member an `older-self` damage names —
 for `fetch-image.sh` to fetch those and no others.
 """
 import argparse
+import collections
 import hashlib
 import json
 import os
@@ -514,12 +532,23 @@ class Oracle:
                     self.keyformat.setdefault(f[0], f[11])
         # What `zdb -t T -d` named at each of the newest TXGs, read at
         # the newest uberblock at or before T.
-        self.by_txg = {}
+        self.by_txg, self.refcounts_by_txg = {}, {}
         bt = os.path.join(d, "datasets-by-txg")
         if os.path.isdir(bt):
             for name in os.listdir(bt):
                 if name.endswith(".txt") and name[:-4].isdigit():
-                    self.by_txg[int(name[:-4])] = zdb_datasets(open(os.path.join(bt, name), errors="replace").read())
+                    text = open(os.path.join(bt, name), errors="replace").read()
+                    self.by_txg[int(name[:-4])] = zdb_datasets(text)
+                    self.refcounts_by_txg[int(name[:-4])] = zdb_refcounts(text)
+        # What `zpool get` said of every feature the pool has enabled,
+        # at the end of the build: active or enabled, by short name.
+        self.feature_states = {}
+        zp = os.path.join(d, "zpool-get-all.txt")
+        if os.path.exists(zp):
+            for line in open(zp):
+                k, _, v = line.rstrip("\n").partition("\t")
+                if k.startswith("feature@") and v in ("active", "enabled"):
+                    self.feature_states[k[len("feature@"):]] = v
         # What zdb read of each member's labels (`zdb -l`, the first
         # section: all four labels alike on the undamaged image), of the
         # uberblock in use when it was taken (`zdb -u`), and the
@@ -531,8 +560,34 @@ class Oracle:
                 secs = zdb_labels(open(lp, errors="replace").read())
                 if secs:
                     self.labels[role] = secs[0][1]
-        zu = os.path.join(d, "zdb-u.txt")
-        self.uberblock = zdb_uberblock(open(zu, errors="replace").read()) if os.path.exists(zu) else {}
+        # The uberblocks zdb printed: the one in use while the builder
+        # still had the pool imported (`zdb-u.txt`), and the one it reads
+        # the exported pool at (`zdb-u-export.txt`, oracle-capture.yml).
+        self.uberblocks = []
+        for name in ("zdb-u.txt", "zdb-u-export.txt"):
+            zu = os.path.join(d, name)
+            if os.path.exists(zu):
+                ub = zdb_uberblock(open(zu, errors="replace").read())
+                if ub and all(u["txg"] != ub["txg"] for u in self.uberblocks):
+                    self.uberblocks.append(ub)
+        # Every uberblock of every label's ring, member by member (`zdb
+        # -lu`, oracle-capture.yml what = labels-uberblocks).
+        self.rings = {}
+        for role in self.roles:
+            rp = os.path.join(d, "labels-uberblocks", self.layout["members"][role]["file"][:-4] + ".txt")
+            if os.path.exists(rp):
+                self.rings[role] = zdb_rings(open(rp, errors="replace").read())
+        # `zdb -C` of the imported pool, the lines the builder kept: its
+        # version, GUID, and each top-level vdev's ashift in order.
+        self.pool_facts = {}
+        pf = os.path.join(d, "pool-facts.txt")
+        if os.path.exists(pf):
+            for line in open(pf):
+                k, _, v = line.strip().partition(": ")
+                if k in ("version", "pool_guid") and v.isdigit():
+                    self.pool_facts[k] = int(v)
+                elif k == "ashift" and v.isdigit():
+                    self.pool_facts.setdefault("ashift", []).append(int(v))
         zs = os.path.join(d, "zpool-status.txt")
         self.status_tops = zpool_status_tops(open(zs, errors="replace").read()) if os.path.exists(zs) else {}
         self.zdb = ""
@@ -1236,6 +1291,7 @@ CLEAN_REASONS = (
     "DVA names unknown top-level vdev",   # UnknownVdev: no member for that top
     "no present member holds this copy",  # NoMember
     "not supported yet",                  # Unsupported, ChecksumUnsupported
+    "keyed with the pool's salt",         # ChecksumNoSalt: no MOS read, so no salt
     "gang block: header checksum",        # Gang: every copy of the header bad
     "gang block: nesting deeper than",    # Gang: the chain is malformed
     "not recoverable",                    # Unrecoverable
@@ -1439,14 +1495,15 @@ def passed_over(returncode, stdout):
     return "; ".join(said) if whole else None
 
 
-def judge_dump(args, oracle, manifest, members, work, assume=(), extra=(), key_mode=None):
+def judge_dump(args, oracle, manifest, members, work, assume=(), extra=(), key_mode=None, evidence=None):
     want = manifest["expect"].get("volumes", "all")
     volumes = list(oracle.volumes) if want == "all" else list(want)
     outcomes, redundancy = {}, False
     for vol in volumes:
         out = os.path.join(work, vol.replace("/", "_") + ".img")
         log = out + ".debug"
-        cmd = [args.tool, "-q", "-f", "json", "--debug-log", log, "dump", vol, *members, "-o", out]
+        cmd = [args.tool, "-q", "-f", "json", "--debug-log", log,
+               *(["--evidence-log", evidence] if evidence else []), "dump", vol, *members, "-o", out]
         for path in assume:
             cmd += ["--assume-member", path]
         cmd += list(extra)
@@ -1870,6 +1927,48 @@ def zdb_datasets(text):
     return out
 
 
+ZDB_REFCOUNT = re.compile(r"^Verified (\S+) feature refcount of (\d+) is correct")
+
+
+def zdb_refcounts(text):
+    """The feature refcounts `zdb -d` verified, by the feature's short name.
+
+    >>> zdb_refcounts("Verified large_blocks feature refcount of 0 is correct\\n"
+    ...               "Verified encryption feature refcount of 52 is correct\\n")
+    {'large_blocks': 0, 'encryption': 52}
+    """
+    return {m.group(1): int(m.group(2)) for m in map(ZDB_REFCOUNT.match, text.splitlines()) if m}
+
+
+def compare_features(states, refcounts, doc):
+    """The features `list` read from the MOS against `zpool get feature@`
+    (`states`: the short name of every feature the pool has enabled,
+    active or enabled) and the refcounts `zdb -d` verified at the same
+    TXG (`refcounts`). A name zdb verified that `zpool get` does not
+    know is zdb's own count (`indirect_refcount`), not a feature.
+
+    >>> doc = {"features": [{"guid": "com.delphix:a", "state": "active", "refcount": 2},
+    ...                     {"guid": "org.x:b", "state": "enabled", "refcount": 0}]}
+    >>> compare_features({"a": "active", "b": "enabled"}, {"a": 2, "b": 0, "c": 0}, doc)
+    ('ok', [])
+    >>> compare_features({"a": "active", "b": "active"}, {"a": 3}, doc)
+    ('mismatch', ['a: refcount 3 != 2', 'b: state active != enabled'])
+    >>> compare_features({"a": "active"}, {}, {"features": [], "features_error": "unread"})
+    ('refused', [])
+    """
+    if doc.get("features_error"):
+        return "refused", []
+    got = {f["guid"].split(":", 1)[-1]: f for f in doc.get("features", [])}
+    diffs = [f"{n}: enabled, and not listed" for n in sorted(states) if n not in got]
+    diffs += [f"{n}: listed, and not enabled" for n in sorted(got) if n not in states]
+    for n in sorted(set(states) & set(got)):
+        if n in refcounts and refcounts[n] != got[n].get("refcount"):
+            diffs.append(f"{n}: refcount {refcounts[n]} != {got[n].get('refcount')}")
+        if states[n] != got[n].get("state"):
+            diffs.append(f"{n}: state {states[n]} != {got[n].get('state')}")
+    return ("mismatch", diffs) if diffs else ("ok", [])
+
+
 def compare_listing(want, doc, returncode):
     """A `list -r` (its JSON, its exit code) against what `zdb -d` named
     at the same TXG. `ok` when every dataset is there with the same
@@ -1975,6 +2074,12 @@ def judge_list(args, oracle, members, work, assume=(), extra=(), control=False):
         at.append(txg)
         if diffs:
             details[label] = diffs[:10] + ([f"... {len(diffs) - 10} more"] if len(diffs) > 10 else [])
+        if oracle.feature_states:
+            key = f"{label} features"
+            outcomes[key], fdiffs = compare_features(oracle.feature_states,
+                                                     oracle.refcounts_by_txg.get(txg, {}), doc)
+            if fdiffs:
+                details[key] = fdiffs[:10]
         return doc
 
     doc = one("newest", base)
@@ -2082,6 +2187,39 @@ def zdb_uberblock(text):
     return out if "txg" in out else {}
 
 
+def zdb_rings(text):
+    r"""The uberblock rings `zdb -lu` printed of one member: for each
+    label number, its slots — slot number to the uberblock in it (as
+    zdb_uberblock gives one). Slots alike in several labels are printed
+    once with their label numbers; a slot not printed is empty.
+
+    >>> rings = zdb_rings("LABEL 0\n    name: 'p'\n    labels = 0 1 2 3\n"
+    ...     "    Uberblock[3]\n\tmagic = 0000000000bab10c\n\tversion = 5000\n\ttxg = 4803\n"
+    ...     "\tguid_sum = 9\n\ttimestamp = 1791627862 UTC = Sat Oct 10 10:24:22 2026\n"
+    ...     "\tbp = DVA[0]=<2:2c:3000> [L0 DMU objset] size=1000L/1000P birth=4803L/4803P\n"
+    ...     "\tcheckpoint_txg = 0\n        labels = 0 2\n")
+    >>> sorted(rings), rings[2][3]["txg"], rings[2][3]["rootbp_birth"], 3 in rings.get(1, {})
+    ([0, 2], 4803, 4803, False)
+    """
+    rings, lines, slot = {}, None, None
+    for line in text.splitlines():
+        m = re.match(r"^\s*Uberblock\[(\d+)\]", line)
+        if m:
+            lines, slot = [], int(m.group(1))
+            continue
+        if lines is None:
+            continue
+        m = re.match(r"^\s*labels = ([\d ]+)\s*$", line)
+        if m:
+            ub = zdb_uberblock("\n".join(lines))
+            for lab in (int(x) for x in m.group(1).split()):
+                rings.setdefault(lab, {})[slot] = ub
+            lines, slot = None, None
+            continue
+        lines.append(line)
+    return rings
+
+
 def zpool_status_tops(text):
     """The top-level vdevs `zpool status` printed, by id: kind, parity,
     for a dRAID its data disks, children and spares, and the paths of
@@ -2187,8 +2325,7 @@ def compare_scan(oracle, doc, roles, control):
         outcomes[f"label {role}"] = "mismatch" if diffs else "ok"
         if diffs:
             details[f"label {role}"] = diffs[:10]
-    ub = oracle.uberblock
-    if ub:
+    for ub in oracle.uberblocks:
         key = f"uberblock txg {ub['txg']}"
         copies, diffs = 0, []
         for dev in doc.get("devices", []):
@@ -2215,10 +2352,56 @@ def compare_scan(oracle, doc, roles, control):
             outcomes[key] = "mismatch" if control else "refused"
             if control:
                 details[key] = ["no copy of it on an undamaged pool"]
+    # Every slot of every label's ring: a copy that verifies holds what
+    # zdb printed of that slot, unless it is another TXG's — a slot the
+    # damage forged, or an older copy of the member — which zdb's record
+    # says nothing of. On the control every slot zdb printed is there.
+    for dev in doc.get("devices", []):
+        role = roles.get(dev.get("path"))
+        want = oracle.rings.get(role)
+        if role is None or not want:
+            continue
+        key, diffs, seen = f"rings {role}", [], 0
+        for lab in dev.get("labels", []):
+            idx = lab.get("index")
+            wslots = want.get(idx, {})
+            got = {u.get("slot"): u for u in lab.get("uberblocks", []) if u.get("checksum") == "ok"}
+            if control and sorted(got) != sorted(wslots):
+                diffs.append(f"L{idx}: slots {sorted(set(wslots) ^ set(got))} not as zdb read them")
+            for slot, u in got.items():
+                w = wslots.get(slot)
+                if w is None or w.get("txg") != u.get("txg"):
+                    if control:
+                        diffs.append(f"L{idx} slot {slot}: txg {u.get('txg')}, zdb read {w and w.get('txg')}")
+                    continue
+                seen += 1
+                g = {"version": u.get("version"), "txg": u.get("txg"),
+                     "guid_sum": int(u["guid_sum"], 16) if isinstance(u.get("guid_sum"), str) else u.get("guid_sum"),
+                     "timestamp": u.get("timestamp"), "rootbp_birth": u.get("rootbp_birth"),
+                     "checkpoint_txg": u.get("checkpoint_txg")}
+                diffs += [f"L{idx} slot {slot}: {k} {w[k]} != {g.get(k)}" for k in w if w[k] != g.get(k)]
+        outcomes[key] = "mismatch" if diffs else ("ok" if seen else "refused")
+        if diffs:
+            details[key] = diffs[:10]
     pools = [p for p in doc.get("pools", []) if p.get("name") == oracle.pool]
     if oracle.status_tops and pools:
         p, diffs = pools[0], []
         guid = next(iter(oracle.labels.values())).get("pool_guid") if oracle.labels else None
+        facts = oracle.pool_facts
+        # A GUID the tool says it does not know is no answer to judge: 0
+        # for the pool, and for a vdev one with the marker the layout's
+        # synthetic GUIDs carry (0x1117 in the top 16 bits), what a pool
+        # read through `--hints` has when no label and no MOS says more.
+        said_guid = int(p.get("guid", "0"), 16)
+        if not said_guid:
+            guid = None
+            facts = {k: v for k, v in facts.items() if k != "pool_guid"}
+        if facts.get("pool_guid") is not None and said_guid != facts["pool_guid"]:
+            diffs.append(f"pool guid {facts['pool_guid']} (zdb -C) != {p.get('guid')}")
+        for t in p.get("tops", []):
+            i = t.get("id")
+            if isinstance(i, int) and i < len(facts.get("ashift", [])) and t.get("ashift") != facts["ashift"][i]:
+                diffs.append(f"top {i}: ashift {facts['ashift'][i]} (zdb -C) != {t.get('ashift')}")
         if guid is not None and int(p.get("guid", "0"), 16) != guid:
             diffs.append(f"pool guid {guid} != {p.get('guid')}")
         top_guid = {}
@@ -2231,8 +2414,10 @@ def compare_scan(oracle, doc, roles, control):
                 diffs.append(f"top {t.get('id')}: not in the pool")
                 continue
             tree = t.get("tree") or {}
-            checks = [("kind", w["kind"], t.get("kind")), ("nparity", w["nparity"], t.get("nparity")),
-                      ("guid", top_guid.get(t.get("id")), int(t["guid"], 16) if t.get("guid") else None)]
+            tguid = int(t["guid"], 16) if t.get("guid") else None
+            checks = [("kind", w["kind"], t.get("kind")), ("nparity", w["nparity"], t.get("nparity"))]
+            if tguid is not None and tguid >> 48 != 0x1117:
+                checks.append(("guid", top_guid.get(t.get("id")), tguid))
             if w["kind"] == "draid":
                 checks += [("draid_ndata", w["draid_ndata"], tree.get("draid_ndata")),
                            ("draid_nspares", w["draid_nspares"], tree.get("draid_nspares")),
@@ -2273,6 +2458,216 @@ def judge_scan(args, oracle, paths, members, work, extra=(), control=False):
     except ValueError:
         return {"scan": "exit 0, no JSON on stdout"}, {}
     return compare_scan(oracle, doc, roles, control)
+
+
+def compare_report(report, outcomes, files, oracle_volumes):
+    """A report `zvolreport build` made of a case's evidence log, against
+    what the harness found of each volume: an image read whole and
+    right is an extraction with no error and the oracle's SHA-256; one
+    the tool said is not the whole volume (exit 4, blocks zeroed) is an
+    extraction that says so; one refused is no extraction; and every
+    extraction's SHA-256 is that of the file it names. A TXG the dump
+    passed over is a warning naming it.
+
+    >>> rep = {"extractions": [{"dataset": "p/a", "sha256": "aa", "errors": 0, "aborted": False, "txg": 9}]}
+    >>> compare_report(rep, {"p/a": "ok"}, {"p/a": "aa"}, {"p/a": "aa"})
+    ('ok', [])
+    >>> compare_report(rep, {"p/a": "ok"}, {"p/a": "aa"}, {"p/a": "bb"})
+    ('mismatch', ['p/a: the report has sha256 aa, the oracle bb'])
+    >>> compare_report(rep, {"p/a": "refused"}, {}, {"p/a": "aa"})
+    ('mismatch', ['p/a: refused, and the report has an extraction of it'])
+    >>> compare_report({"extractions": []}, {"p/a": "ok"}, {"p/a": "aa"}, {"p/a": "aa"})
+    ('mismatch', ['p/a: read, and not in the report'])
+    >>> rep["extractions"][0]["errors"] = 0
+    >>> compare_report(rep, {"p/a": INCOMPLETE}, {"p/a": "aa"}, {"p/a": "aa"})
+    ('mismatch', ['p/a: blocks written as zeros, and the report says none'])
+    >>> compare_report(rep, {"p/a": "ok", "passed_over": {"p/a": "txg 12 (pool): MOS"}}, {"p/a": "aa"}, {"p/a": "aa"})
+    ('mismatch', ['p/a: txg 12 passed over, and the report does not say so'])
+    >>> rep["warnings"] = ["p/a: txg 12 names it and does not read it (MOS); extracted at the older txg 9"]
+    >>> compare_report(rep, {"p/a": "ok", "passed_over": {"p/a": "txg 12 (pool): MOS"}}, {"p/a": "aa"}, {"p/a": "aa"})
+    ('ok', [])
+    """
+    by = {}
+    for e in report.get("extractions", []):
+        by.setdefault(e.get("dataset"), []).append(e)
+    warnings = report.get("warnings") or []
+    passed = (outcomes.get("passed_over") or {})
+    diffs = []
+    for vol, outcome in outcomes.items():
+        if vol in ("passed_over", "refused_detail"):
+            continue
+        got = by.pop(vol, [])
+        if outcome == "refused" or outcome.startswith("refused"):
+            if any(not e.get("aborted") and not e.get("output_failed") for e in got):
+                diffs.append(f"{vol}: refused, and the report has an extraction of it")
+            continue
+        if not got:
+            diffs.append(f"{vol}: read, and not in the report")
+            continue
+        e = got[-1]
+        if e.get("sha256") != files.get(vol):
+            diffs.append(f"{vol}: the report has sha256 {e.get('sha256')}, the file {files.get(vol)}")
+        if outcome == "ok":
+            if e.get("sha256") != oracle_volumes.get(vol) and e.get("sha256") == files.get(vol):
+                diffs.append(f"{vol}: the report has sha256 {e.get('sha256')}, the oracle {oracle_volumes.get(vol)}")
+            if e.get("errors") or e.get("aborted"):
+                diffs.append(f"{vol}: read whole, and the report says {e.get('errors')} error(s)")
+        elif outcome == INCOMPLETE and not e.get("errors") and not e.get("aborted"):
+            diffs.append(f"{vol}: blocks written as zeros, and the report says none")
+        for txg in re.findall(r"txg (\d+)", passed.get(vol, "")):
+            if not any(w.startswith(f"{vol}: txg {txg} ") for w in warnings):
+                diffs.append(f"{vol}: txg {txg} passed over, and the report does not say so")
+    diffs += [f"{vol}: in the report, and no run of this case extracted it" for vol in sorted(by)]
+    return ("mismatch", diffs) if diffs else ("ok", [])
+
+
+def judge_report(args, oracle, outcomes, work, log, tamper=False):
+    """`zvolreport build` of the case's evidence log and `verify` of what
+    it built, held against what the harness found (compare_report);
+    with `tamper`, a byte of one output turned over must make `verify`
+    fail that output, and is turned back."""
+    report, md = os.path.join(work, "report.json"), os.path.join(work, "report.md")
+    if not os.path.exists(log):
+        return {"report": "no evidence log written"}, {}
+    proc = subprocess.run([args.report_tool, "-q", "-f", "json", "build", log, "-o", report, "--md", md],
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        why = proc.stderr.strip().splitlines()
+        return {"build": f"exit {proc.returncode}: {why[-1][:160] if why else ''}"}, {}
+    rep = json.load(open(report))
+    files = {}
+    for vol in outcomes:
+        out = os.path.join(work, vol.replace("/", "_") + ".img")
+        if os.path.exists(out):
+            files[vol] = sha256_file(out)
+    result, details = {}, {}
+    result["report"], diffs = compare_report(rep, outcomes, files, oracle.volumes)
+    if diffs:
+        details["report"] = diffs[:10]
+    proc = subprocess.run([args.report_tool, "-q", "-f", "json", "verify", report],
+                          capture_output=True, text=True)
+    try:
+        doc = json.loads(proc.stdout)
+    except ValueError:
+        doc = {}
+    bad = [c for c in doc.get("checked", []) if c.get("status") not in ("pass", "unhashed")]
+    if proc.returncode != 0 or bad:
+        result["verify"] = f"exit {proc.returncode}"
+        details["verify"] = [f"{c.get('kind')} {os.path.basename(str(c.get('path')))}: {c.get('status')}" for c in bad][:10]
+    else:
+        result["verify"] = "ok"
+    if tamper and files:
+        vol = sorted(files)[0]
+        out = os.path.join(work, vol.replace("/", "_") + ".img")
+        with open(out, "r+b") as f:
+            f.seek(0)
+            byte = f.read(1)
+            f.seek(0)
+            f.write(bytes([byte[0] ^ 0xff]))
+        proc = subprocess.run([args.report_tool, "-q", "-f", "json", "verify", report],
+                              capture_output=True, text=True)
+        with open(out, "r+b") as f:
+            f.seek(0)
+            f.write(byte)
+        try:
+            doc = json.loads(proc.stdout)
+        except ValueError:
+            doc = {}
+        caught = [c for c in doc.get("checked", []) if c.get("path") == out and c.get("status") == "fail"]
+        result["verify tampered"] = "ok" if proc.returncode == 4 and caught else "mismatch"
+        if result["verify tampered"] != "ok":
+            details["verify tampered"] = [f"{vol}: a byte turned over, verify exit {proc.returncode}, "
+                                          f"{'the output failed' if caught else 'the output not failed'}"]
+    return result, details
+
+
+def judge_carve(args, oracle, members, work, extra=(), control=False):
+    """`zvolcarve` over the members of a case where carving is what is
+    left — the control, and a case whose every volume `dump` refused:
+    a scan for every volume dnode, and of each live volume the oracle
+    hashes (the encrypted ones aside, whose bytes come out as the
+    ciphertext they are), the newest candidates of its block size carved
+    at its size until one is the volume as the oracle has it at the
+    export. Names are no part of it — a carve finds dnodes, and what
+    they were called is in the MOS — so a volume is found by its bytes.
+    Returns (outcomes, details): per volume `ok`, or not found — on the
+    control `missed`, elsewhere `refused`."""
+    props = {}
+    for line in open(os.path.join(oracle.dir, "zfs-get-all.txt"), errors="replace"):
+        f = line.rstrip("\n").split("\t")
+        if len(f) >= 3 and f[1] in ("volsize", "volblocksize"):
+            props.setdefault(f[0], {})[f[1]] = f[2]
+    vols = {}
+    for vol, sha in oracle.volumes.items():
+        p = props.get(vol, {})
+        if oracle.key_for(vol) or "volsize" not in p or "volblocksize" not in p:
+            continue
+        vols[vol] = (sha, parse_size(p["volsize"]), parse_size(p["volblocksize"]))
+    if not vols:
+        return {}, {}
+    out_dir = os.path.join(work, "carve")
+    scan = [args.carver, "-q", "-f", "json", "scan", *members, "--dnode-type", "zvol",
+            "--strict-profile", "-o", out_dir, *extra_for_carver(extra)]
+    proc = subprocess.run(scan, capture_output=True, text=True)
+    index = os.path.join(out_dir, "candidates.json")
+    if proc.returncode not in (0, 4) or not os.path.exists(index):
+        why = proc.stderr.strip().splitlines()
+        verdict = f"scan exit {proc.returncode}: {why[-1][:160] if why else ''}"
+        return {vol: verdict if control else "refused" for vol in vols}, {}
+    cands = json.load(open(index)).get("candidates", [])
+    outcomes, details, carved, reasons = {}, {}, {}, {}
+    for vol, (sha, size, vbs) in sorted(vols.items()):
+        group = sorted((c for c in cands if c.get("volblocksize") == vbs),
+                       key=lambda c: -(c.get("birth") or 0))
+        found, tried = False, []
+        # Three of each volume of that block size: every volume's last
+        # dnode, and the copies of it a pool keeps, among the newest.
+        same = sum(1 for v in vols.values() if v[2] == vbs) + sum(
+            1 for v in oracle.volumes if oracle.key_for(v) and parse_size(props.get(v, {}).get("volblocksize", "0")) == vbs)
+        for c in group[:3 * max(same, 1)]:
+            key = (c["id"], size)
+            if key not in carved:
+                img = os.path.join(out_dir, f"{c['id']}-{size}.img")
+                p = subprocess.run([args.carver, "-q", "-f", "json", "dump", out_dir, c["id"], *members,
+                                    "--size", str(size), "-o", img, *extra_for_carver(extra)],
+                                   capture_output=True, text=True)
+                try:
+                    rec = json.loads(p.stdout)
+                except ValueError:
+                    rec = {}
+                carved[key] = rec.get("sha256")
+                why = [b.get("reason") for b in rec.get("bad") or [] if b.get("reason")]
+                reasons[key] = ("whole" if rec and not rec.get("blocks_zeroed") else
+                                f"blocks zeroed: {why[0] if why else 'no reason given'}" if rec else
+                                f"dump exit {p.returncode}")
+                if os.path.exists(img):
+                    os.remove(img)
+            tried.append(key)
+            if carved[key] == sha:
+                found = True
+                outcomes[vol] = "ok"
+                details[vol] = [f"{c['id']}, born at txg {c.get('birth')}"]
+                break
+        if not found:
+            outcomes[vol] = "missed" if control else "refused"
+            said = collections.Counter(reasons.get(k, "?") for k in tried)
+            details[vol] = [f"{len(tried)} candidate(s) of {vbs} bytes carved at the newest births, "
+                            "none the volume as the oracle has it at the export"] + \
+                [f"{n} {why}" for why, n in said.most_common(4)]
+    return outcomes, details
+
+
+def parse_size(text):
+    """`48M`, `16K`, `512` as `zfs get` prints them, in bytes.
+
+    >>> parse_size("48M"), parse_size("16K"), parse_size("512"), parse_size("1G")
+    (50331648, 16384, 512, 1073741824)
+    """
+    units = {"K": 1 << 10, "M": 1 << 20, "G": 1 << 30, "T": 1 << 40}
+    text = text.strip()
+    if text and text[-1] in units:
+        return int(float(text[:-1]) * units[text[-1]])
+    return int(text) if text.isdigit() else 0
 
 
 def accepted_outcomes(expected):
@@ -2606,9 +3001,10 @@ def run_case(args, oracle, manifest, rng):
                 why = proc.stderr.strip().splitlines()
                 result["notes"].append(f"zvolcarve roots exit {proc.returncode}: {why[-1][:160] if why else ''}")
         before = {p: sha256_file(p) for p in members}
+        evidence = os.path.join(work, "case.jsonl")
         if oracle.has_volumes:
             outcomes, redundancy = judge_dump(args, oracle, manifest, members, work, assume,
-                                              extra, recovery.get("key"))
+                                              extra, recovery.get("key"), evidence)
             good = {"ok"}
         else:
             outcomes, redundancy = judge_walk(args, oracle, members, work, assume)
@@ -2654,6 +3050,35 @@ def run_case(args, oracle, manifest, rng):
             else:
                 result["datasets"] = {"expected": "not defect", "actual": "n/a", "verdict": "pass",
                                       "outcomes": {}, "txgs": []}
+        # The report `zvolreport` builds of the case's evidence log: what
+        # it says of each volume must be what the harness found, and what
+        # it records must verify — on the control, and fail where a byte
+        # of an output is turned over.
+        report_verdict = None
+        if oracle.has_volumes and os.path.exists(args.report_tool):
+            control = not manifest.get("damage") and not recovery
+            r_out, r_detail = judge_report(args, oracle, outcomes, work, evidence, tamper=control)
+            r_actual = classify(set(r_out.values()), False)
+            report_verdict = "defect" if r_actual == "defect" else "pass"
+            result["report"] = {"expected": "not defect", "actual": r_actual, "verdict": report_verdict,
+                                "outcomes": r_out, **({"detail": r_detail} if r_detail else {})}
+        # What `zvolcarve` finds where carving is what is left: on the
+        # control, and on a case whose every volume `dump` refused, each
+        # live volume found by its bytes among the newest candidates.
+        carve_verdict = None
+        refused_all = oracle.has_volumes and all(
+            v == "refused" for k, v in outcomes.items() if k not in ("refused_detail", "passed_over"))
+        if oracle.has_volumes and os.path.exists(args.carver) and (
+                (not manifest.get("damage") and not recovery) or refused_all):
+            control = not manifest.get("damage") and not recovery
+            c_out, c_detail = judge_carve(args, oracle, members, work, extra, control)
+            if c_out:
+                c_actual = ("bit-exact" if set(c_out.values()) == {"ok"}
+                            else "partial" if "ok" in c_out.values() else "refused")
+                carve_verdict = "unexpected" if "missed" in c_out.values() else "pass"
+                result["carve"] = {"expected": "every volume" if control else "not defect",
+                                   "actual": c_actual, "verdict": carve_verdict,
+                                   "outcomes": c_out, **({"detail": c_detail} if c_detail else {})}
         # What `scan` read of the labels, the uberblock and the pool's
         # shape, where the oracle has `zdb -l`, `zdb -u` and `zpool
         # status`: a label or an uberblock that verifies and says other
@@ -2694,7 +3119,8 @@ def run_case(args, oracle, manifest, rng):
         # The case is as good as the worst of what was judged in it.
         rank = {"pass": 0, "unexpected": 1, "defect": 2}
         result["verdict"] = max([result["verdict"], files_verdict or "pass", timeline_verdict or "pass",
-                                 datasets_verdict or "pass", scan_verdict or "pass"], key=rank.__getitem__)
+                                 datasets_verdict or "pass", scan_verdict or "pass",
+                                 report_verdict or "pass", carve_verdict or "pass"], key=rank.__getitem__)
     finally:
         if not args.keep:
             shutil.rmtree(work, ignore_errors=True)
@@ -2714,6 +3140,8 @@ def main():
                     help="zvolfiles, judged against the oracle's files.json where it has one")
     ap.add_argument("--timeline-tool", default="./target/release/zvoltimeline",
                     help="zvoltimeline, judged against the oracle's zpool-history-il.txt where it has one")
+    ap.add_argument("--report-tool", default="./target/release/zvolreport",
+                    help="zvolreport, which builds and verifies a report of each case's evidence log")
     ap.add_argument("--out", default="golden-report")
     ap.add_argument("--label", default="", help="name of this image in the report")
     ap.add_argument("--tmp", default=None)
@@ -2754,7 +3182,9 @@ def main():
         files = (f"  files {r['files']['actual']}" if "files" in r else "") + \
             (f"  timeline {r['timeline']['actual']}" if "timeline" in r else "") + \
             (f"  datasets {r['datasets']['actual']}" if "datasets" in r else "") + \
-            (f"  scan {r['scan']['actual']}" if "scan" in r else "")
+            (f"  scan {r['scan']['actual']}" if "scan" in r else "") + \
+            (f"  report {r['report']['actual']}" if "report" in r else "") + \
+            (f"  carve {r['carve']['actual']}" if "carve" in r else "")
         print(f"{label:<8} {r['verdict']:<10} {r['id']:<32} expected {r['expected']:<14} actual {r['actual']}{files}")
     # One asked for by name and written for another pool is n/a here, and
     # shown; the rest of another pool's manifests are not this run's.
@@ -2773,7 +3203,7 @@ def main():
         json.dump(results, f, indent=1)
     with open(os.path.join(args.out, f"report-{label}.md"), "w") as f:
         f.write(f"# Damage matrix: {label}\n\n")
-        f.write("| Manifest | Expected | Actual | Files | Timeline | Datasets | Scan | Verdict | Inputs unchanged | Detail |\n|---|---|---|---|---|---|---|---|---|---|\n")
+        f.write("| Manifest | Expected | Actual | Files | Timeline | Datasets | Scan | Report | Carve | Verdict | Inputs unchanged | Detail |\n|---|---|---|---|---|---|---|---|---|---|---|---|\n")
         for r in results:
             detail = "; ".join(list(r.get("notes", [])) + [f"{k}: {v}" for k, v in r.get("outcomes", {}).items() if v != "ok"]
                                + [f"files {k}: {v}" for k, v in r.get("files", {}).get("outcomes", {}).items() if v != "ok"])
@@ -2781,12 +3211,14 @@ def main():
             timeline = r["timeline"]["actual"] if "timeline" in r else "—"
             datasets = r["datasets"]["actual"] if "datasets" in r else "—"
             scan = r["scan"]["actual"] if "scan" in r else "—"
+            report = r["report"]["actual"] if "report" in r else "—"
+            carve = r["carve"]["actual"] if "carve" in r else "—"
             if r.get("timeline", {}).get("outcome", "ok") != "ok":
                 detail += f"; timeline: {r['timeline']['outcome']}"
-            for side in ("datasets", "scan"):
+            for side in ("datasets", "scan", "report", "carve"):
                 detail += "".join(f"; {side} {k}: {v}" for k, v in r.get(side, {}).get("outcomes", {}).items()
                                   if v != "ok")
-            f.write(f"| `{r['id']}` | {r['expected'].replace('|', chr(92) + '|')} | {r['actual']} | {files} | {timeline} | {datasets} | {scan} | {r['verdict']} | "
+            f.write(f"| `{r['id']}` | {r['expected'].replace('|', chr(92) + '|')} | {r['actual']} | {files} | {timeline} | {datasets} | {scan} | {report} | {carve} | {r['verdict']} | "
                     f"{'yes' if r.get('inputs_unchanged') else ('—' if r['verdict'] == 'n/a' else 'NO')} | {detail} |\n")
     counts = {}
     for r in results:
