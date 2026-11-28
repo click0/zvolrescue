@@ -33,7 +33,18 @@ moment of tagging, and everything below follows from that:
    yet, and the release workflow writes them after the tag and pushes
    that one commit to `main` (step 7).
 2. Make sure CI is green on `main`, and that nothing has been pushed
-   since the run that went green.
+   since the run that went green. Then run the full check on that same
+   commit: **Actions → Real-world (kernel ZFS) → Run workflow** with
+   `only: published-held-out` — every published image, each with every
+   manifest that names it, the held-out ones (G4) too, and
+   `sat-scale-v1` and `sat-large-v1`, which have no others. It takes
+   about an hour, and this is the only time it runs: between releases
+   the published images are judged with `only: published`, by hand,
+   when the tool or the manifests change. A verdict outside its expected
+   category fails the job, and the release waits for the fix and a new
+   check. The run's row in [REALWORLD-TESTS.md](REALWORLD-TESTS.md)
+   goes in after the tag, since nothing lands on `main` between the
+   check and the tag.
 3. Tag. From the web: **Releases → Draft a new release → Choose a tag →**
    type `vX.Y.Z` **→ Create new tag on publish**, target `main`, then
    publish — the tag is created on `main`'s head and the release workflow

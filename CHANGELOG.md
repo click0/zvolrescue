@@ -337,7 +337,10 @@ tagged. `v0.7.1` is the release that carries those six.
   when it is started from Actions → Run workflow. The images are pinned
   and do not change, so a run with no change to the tool or the
   manifests judged the same thing again; the matrix is run when either
-  changes, and before a release.
+  changes, with `only: published`. The full check, `only:
+  published-held-out` — the held-out manifests and the two images that
+  have only those — is a step of the release procedure
+  (`docs/RELEASING.md`, step 2) and runs only then.
 
 ## v0.9.18 — 2026-11-25
 

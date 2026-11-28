@@ -48,7 +48,7 @@ on:
   workflow_dispatch:
     inputs:
       only:
-        description: "Which environments to run, any of: ubuntu debian freebsd mfsbsd golden satellites (or sat-<name> for one) published (empty: all); held-out in the value runs the held-out manifests too (golden-held-out, published-held-out)"
+        description: "Which environments to run, any of: ubuntu debian freebsd mfsbsd golden satellites (or sat-<name> for one) published (empty: all); held-out in the value runs the held-out manifests too (golden-held-out, published-held-out: the full check, before a release)"
         required: false
         default: ""
 
@@ -733,7 +733,8 @@ jobs:
   # zvolrescue-testdata that a tests/golden/<tag>.SHA256SUMS pins,
   # fetched and checked against those sums, the oracle and the manifests
   # from that repository's checkout, the whole damage matrix over it with
-  # every expectation enforced — the held-out manifests too when asked.
+  # every expectation enforced — the held-out manifests too when asked,
+  # which is before a release (docs/RELEASING.md, step 2).
   golden-published:
     name: The published golden image (${{ matrix.tag }}), the damage matrix over it (G2–G4)
     if: ${{ !github.event.inputs.only || contains(github.event.inputs.only, 'published') }}
