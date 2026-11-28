@@ -33,8 +33,9 @@ name: Real-world (kernel ZFS)
 #    that a tests/golden/<tag>.SHA256SUMS pins (image-v1, golden-v2, and
 #    the satellites sat-<name>-v1), the
 #    matrix over it with its oracle from that repository — what SPEC
-#    §9.1 calls the CI job that fetches the image; also weekly, since an
-#    image that does not change makes a changed verdict the tool's.
+#    §9.1 calls the CI job that fetches the image. Run by hand, like
+#    the rest: the image does not change, so a verdict that changes is
+#    the tool's.
 #
 # Each job uploads the run's record (results, the row for the matrix,
 # the evidence log, every log of a failed scenario) whether it passed
@@ -50,10 +51,6 @@ on:
         description: "Which environments to run, any of: ubuntu debian freebsd mfsbsd golden satellites (or sat-<name> for one) published (empty: all); held-out in the value runs the held-out manifests too (golden-held-out, published-held-out)"
         required: false
         default: ""
-  schedule:
-    # The published image, every Monday: the image is pinned, so a
-    # verdict that changes is the tool that changed.
-    - cron: "17 4 * * 1"
 
 env:
   CARGO_TERM_COLOR: always
@@ -61,7 +58,7 @@ env:
 jobs:
   ubuntu-kernel:
     name: Ubuntu LTS, in-tree OpenZFS (${{ matrix.runner }} runner kernel)
-    if: ${{ github.event_name != 'schedule' && (!github.event.inputs.only || contains(github.event.inputs.only, 'ubuntu')) }}
+    if: ${{ !github.event.inputs.only || contains(github.event.inputs.only, 'ubuntu') }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -109,7 +106,7 @@ jobs:
 
   debian-vm:
     name: Debian ${{ matrix.release }}, zfs-dkms (QEMU/KVM)
-    if: ${{ github.event_name != 'schedule' && (!github.event.inputs.only || contains(github.event.inputs.only, 'debian')) }}
+    if: ${{ !github.event.inputs.only || contains(github.event.inputs.only, 'debian') }}
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -217,7 +214,7 @@ jobs:
   freebsd:
     name: FreeBSD ${{ matrix.release }}, OpenZFS from base (md devices)
     # A word of `only`, not a part of one: `sat-freebsd` is the satellite's.
-    if: ${{ github.event_name != 'schedule' && (!github.event.inputs.only || contains(format(' {0} ', github.event.inputs.only), ' freebsd ')) }}
+    if: ${{ !github.event.inputs.only || contains(format(' {0} ', github.event.inputs.only), ' freebsd ') }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -271,7 +268,7 @@ jobs:
   # image mfsBSD publishes; there is no 15 yet.
   mfsbsd:
     name: mfsBSD 14.2 (FreeBSD in RAM, QEMU/KVM), the FreeBSD 15 static binary
-    if: ${{ github.event_name != 'schedule' && (!github.event.inputs.only || contains(github.event.inputs.only, 'mfsbsd')) }}
+    if: ${{ !github.event.inputs.only || contains(github.event.inputs.only, 'mfsbsd') }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
@@ -368,7 +365,7 @@ jobs:
   # MB, as a second artifact, to be moved there by hand.
   golden:
     name: Golden image (G1) on the runner kernel, and the damage matrix over it (G2, G3)
-    if: ${{ github.event_name != 'schedule' && (!github.event.inputs.only || contains(github.event.inputs.only, 'golden')) }}
+    if: ${{ !github.event.inputs.only || contains(github.event.inputs.only, 'golden') }}
     runs-on: ubuntu-26.04
     env:
       TAG: golden-v2
@@ -494,7 +491,7 @@ jobs:
   # sat-slog` those named.
   satellite-list:
     name: The satellites to build
-    if: ${{ github.event_name != 'schedule' && (!github.event.inputs.only || contains(github.event.inputs.only, 'sat')) }}
+    if: ${{ !github.event.inputs.only || contains(github.event.inputs.only, 'sat') }}
     runs-on: ubuntu-24.04
     outputs:
       sats: ${{ steps.list.outputs.sats }}
@@ -630,7 +627,7 @@ jobs:
   # it are run as for any satellite. `only: sat-freebsd`, or satellites.
   satellite-freebsd:
     name: Satellite freebsd, made on FreeBSD 15 with its base OpenZFS, and its manifests
-    if: ${{ github.event_name != 'schedule' && (!github.event.inputs.only || contains(github.event.inputs.only, 'sat-freebsd') || contains(github.event.inputs.only, 'satellites')) }}
+    if: ${{ !github.event.inputs.only || contains(github.event.inputs.only, 'sat-freebsd') || contains(github.event.inputs.only, 'satellites') }}
     runs-on: ubuntu-latest
     env:
       TAG: sat-freebsd-v1
@@ -737,11 +734,9 @@ jobs:
   # fetched and checked against those sums, the oracle and the manifests
   # from that repository's checkout, the whole damage matrix over it with
   # every expectation enforced — the held-out manifests too when asked.
-  # Runs weekly as well: the image never changes, so a verdict that
-  # changes is the tool's doing.
   golden-published:
     name: The published golden image (${{ matrix.tag }}), the damage matrix over it (G2–G4)
-    if: ${{ github.event_name == 'schedule' || !github.event.inputs.only || contains(github.event.inputs.only, 'published') }}
+    if: ${{ !github.event.inputs.only || contains(github.event.inputs.only, 'published') }}
     runs-on: ubuntu-24.04
     # Every published image this repository pins, each with its oracle's
     # directory in zvolrescue-testdata: image-v1's is oracle/golden, a
@@ -878,8 +873,8 @@ jobs:
       # than main, from a run that wrote no report, without the secret,
       # or unless the repository variable KEEP_REPORTS is `true` (Settings
       # → Secrets and variables → Actions → Variables): the secret is
-      # there for publish-golden.yml, and a commit to the test data every
-      # week is a choice of its own. The step says which.
+      # there for publish-golden.yml, and a commit to the test data on
+      # every run is a choice of its own. The step says which.
       - name: The report, kept in zvolrescue-testdata
         if: always() && env.SKIP != '1'
         env:
@@ -900,10 +895,7 @@ jobs:
           if [ -z "$TESTDATA_TOKEN" ]; then
             echo "::notice::no TESTDATA_TOKEN in this repository's Actions secrets: the report stays an artifact of this run (publish-golden.yml says how to make the token)"; exit 0
           fi
-          case "$GITHUB_EVENT_NAME" in
-            schedule) by='`realworld.yml` in zvolrescue, the weekly run' ;;
-            *) by="\`realworld.yml\` in zvolrescue, run by hand${ONLY:+ with only: $ONLY}" ;;
-          esac
+          by="\`realworld.yml\` in zvolrescue, run by hand${ONLY:+ with only: $ONLY}"
           held=""
           case "$ONLY" in *held-out*) held=--held-out ;; esac
           url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"

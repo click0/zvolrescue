@@ -88,15 +88,15 @@ tagged. `v0.7.1` is the release that carries those six.
   (`NEEDS`): the published image's matrix fetches 16 of its 20 files,
   the oracle capture the 10 members.
 * **Every run of the matrix against the published image keeps its
-  report beside the image.** The weekly run of `realworld.yml`, and any
-  made by hand on `main`, passes or not, writes its report into
+  report beside the image.** Every run of `realworld.yml` on `main`,
+  passes or not, writes its report into
   zvolrescue-testdata as the next `reports/<tag>-rN` — laid out by that
   repository's `tools/add-report.py`, with a README naming the run, the
   commits and every case that was not a plain pass — and pushes it with
   the token `publish-golden.yml` already uses, when the repository
   variable `KEEP_REPORTS` is `true`; until then a report was only an
   artifact of its run, gone when the run's artifacts expire. The token is
-  there for publishing, so a commit to the test data every week is a
+  there for publishing, so a commit to the test data on every run is a
   choice of its own.
 * **The oracle can say what the files of a published image hold, and
   what its pool's history is.** `oracle-capture.yml` takes `what =
@@ -258,7 +258,7 @@ tagged. `v0.7.1` is the release that carries those six.
   written and never committed — are set aside: the oracle says nothing
   of them. The eight are published (the releases `sat-<name>-v1` of
   zvolrescue-testdata, 0.59 GB in all, 26 of 26 at their build), pinned
-  in `tests/golden/sat-<name>-v1.SHA256SUMS`, and judged every week by
+  in `tests/golden/sat-<name>-v1.SHA256SUMS`, and judged by
   `golden-published` beside the golden images, a job each; a satellite's
   undamaged reading is its control manifest's. A satellite's members are 256 MiB and its
   volumes sparse: OpenZFS holds back up to 128 MiB of a pool as slop,
@@ -272,8 +272,8 @@ tagged. `v0.7.1` is the release that carries those six.
   build them beside the eight. The tool read all three whole at their
   first build — the pool of version 28 too, at every TXG of its rings —
   7 manifests of 7; they are published (`sat-compat20-v1`,
-  `sat-nofeatures-v1`, `sat-v28-v1`, 0.19 GB), pinned and judged every
-  week like the others.
+  `sat-nofeatures-v1`, `sat-v28-v1`, 0.19 GB), pinned and judged like
+  the others.
 * **A satellite made on FreeBSD.** `build-satellite.sh freebsd`, on
   FreeBSD with the OpenZFS of its base system, makes a raidz1 of three
   disks each laid out as the installer lays one out — a GPT, a
@@ -291,7 +291,7 @@ tagged. `v0.7.1` is the release that carries those six.
   its 4 manifests at the first build — the tool given the whole disks
   and finding the pool on them, the primary GPT of one zeroed among
   them — and is published (`sat-freebsd-v1`, 45 MB), pinned and judged
-  every week. `publish-golden.yml` makes the test data's
+  like the others. `publish-golden.yml` makes the test data's
   `COVERAGE.md` again with the oracle it adds.
 * **A satellite at scale.** `build-satellite.sh scale` makes a mirror
   with 200 filesystems under `fs`, every one snapshotted with the rest
@@ -328,6 +328,16 @@ tagged. `v0.7.1` is the release that carries those six.
   volume's: of the newest 8K candidates, all were `vm/big`'s); and the
   satellites job makes room on the runner's disk for it. Published as
   `sat-large-v1` (850 MB), pinned, and `held` in the published job.
+
+### Changed
+
+* **The real-world workflow runs only by hand.** `realworld.yml` had a
+  schedule, every Monday, that ran `golden-published` over the published
+  images; it is gone, and every job of the workflow, that one too, runs
+  when it is started from Actions → Run workflow. The images are pinned
+  and do not change, so a run with no change to the tool or the
+  manifests judged the same thing again; the matrix is run when either
+  changes, and before a release.
 
 ## v0.9.18 — 2026-11-25
 
